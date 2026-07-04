@@ -41,13 +41,18 @@ constexpr int kStripH = 24;
 constexpr int kTrackRowH = 46;
 constexpr double kMinPxPerBeat = 4.0;
 constexpr double kMaxPxPerBeat = 640.0;
+constexpr int kMinKeyHeight = 4;
+constexpr int kMaxKeyHeight = 32;
 constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
 constexpr int kVoiceAuditionVel = 112;
-// Velocity drag handle at the left end of a note: hit-zone width, and the
-// minimum note width that gets one (narrow notes stay all-Move; the
-// right-click menu remains the fallback).
+// Resize hit-zone half-width at a note's left/right edges.
+constexpr int kEdgeW = 3;
+// Velocity drag handle just inboard of a note's left resize zone: hit-zone
+// width, and the minimum note width that gets one (narrow notes stay
+// all-Move; the right-click menu remains the fallback). The minimum keeps
+// the zone clear of the right edge's resize zone.
 constexpr int kVelHandleW = 8;
-constexpr int kVelHandleMinNoteW = 14;
+constexpr int kVelHandleMinNoteW = 18;
 
 bool isBlackKey(int key)
 {
@@ -217,12 +222,16 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
-        const int dy = event->angleDelta().y();
-        if (event->modifiers() & Qt::ControlModifier)
-            m_sv->zoomAroundContentX(std::pow(1.0015, dy),
-                                     int(event->position().x()) - kGutterW);
+        // Same bindings as the roll's notes area: plain wheel zooms the
+        // timeline; Shift (or a trackpad's horizontal delta) scrolls it.
+        const QPoint delta = event->angleDelta();
+        if (event->modifiers() & Qt::ShiftModifier)
+            m_sv->scrollByPx(-(delta.y() ? delta.y() : delta.x()));
+        else if (delta.x() && !delta.y())
+            m_sv->scrollByPx(-delta.x());
         else
-            m_sv->scrollByPx(-dy);
+            m_sv->zoomAroundContentX(std::pow(1.0015, delta.y()),
+                                     int(event->position().x()) - kGutterW);
         event->accept();
     }
 
@@ -402,14 +411,23 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
-        const int dy = event->angleDelta().y();
+        // Reaper-style bindings: plain wheel over the notes area zooms the
+        // timeline, over the keyboard column it scrolls the note range.
+        // Ctrl+wheel zooms the key height (the track-height analog); Shift
+        // (or a trackpad's horizontal delta) scrolls horizontally.
+        const QPoint delta = event->angleDelta();
+        const int d = delta.y() ? delta.y() : delta.x();
         if (event->modifiers() & Qt::ControlModifier)
-            m_sv->zoomAroundContentX(std::pow(1.0015, dy),
-                                     int(event->position().x()) - kKeyboardW);
+            m_sv->zoomKeyHeight(d, int(event->position().y()));
         else if (event->modifiers() & Qt::ShiftModifier)
-            m_sv->scrollByPx(-dy);
+            m_sv->scrollByPx(-d);
+        else if (delta.x() && !delta.y())
+            m_sv->scrollByPx(-delta.x());
+        else if (event->position().x() < kKeyboardW)
+            m_sv->scrollRollBy(-delta.y() / 2);
         else
-            m_sv->scrollRollBy(-dy / 2);
+            m_sv->zoomAroundContentX(std::pow(1.0015, delta.y()),
+                                     int(event->position().x()) - kKeyboardW);
         event->accept();
     }
 
@@ -471,6 +489,8 @@ protected:
             m_sv->announceNote(*hit);
             if (nearRightEdge(*hit, event->pos())) {
                 m_drag = Drag::Resize;
+            } else if (nearLeftEdge(*hit, event->pos())) {
+                m_drag = Drag::ResizeLeft;
             } else if (nearVelocityHandle(*hit, event->pos())) {
                 m_drag = Drag::Velocity;
                 m_velAnchor = *hit;
@@ -528,7 +548,9 @@ protected:
             const ViewNote *hit =
                 m_sv->document() && event->pos().x() >= kKeyboardW ? hitNote(event->pos())
                                                                    : nullptr;
-            setCursor(hit && nearRightEdge(*hit, event->pos())
+            setCursor(hit
+                              && (nearRightEdge(*hit, event->pos())
+                                  || nearLeftEdge(*hit, event->pos()))
                           ? Qt::SizeHorCursor
                           : hit && nearVelocityHandle(*hit, event->pos())
                                 ? Qt::SizeVerCursor
@@ -574,6 +596,11 @@ protected:
         } else if (m_drag == Drag::Resize) {
             if (snappedD != m_dDur) {
                 m_dDur = snappedD;
+                update();
+            }
+        } else if (m_drag == Drag::ResizeLeft) {
+            if (snappedD != m_dTick) {
+                m_dTick = snappedD;
                 update();
             }
         } else if (m_drag == Drag::Velocity) {
@@ -667,6 +694,21 @@ protected:
             m_sv->setSelection(std::move(ids));
         } else if (doc && drag == Drag::Resize && m_dDur != 0) {
             doc->resizeNotes(resolveSelection(), m_dDur);
+        } else if (doc && drag == Drag::ResizeLeft && m_dTick != 0) {
+            const std::vector<DocNote> notes = resolveSelection();
+            doc->resizeNotesLeft(notes, m_dTick);
+            // Selection ids key on the start tick, which just moved; follow
+            // it (same clamp as the document: the note-off pins the drag).
+            std::vector<SongView::NoteId> ids;
+            for (const DocNote &note : notes) {
+                const int64_t maxTick = note.unterminated()
+                                            ? INT64_MAX
+                                            : int64_t(note.tick + note.duration) - 1;
+                ids.push_back({uint32_t(std::clamp<int64_t>(
+                                   int64_t(note.tick) + m_dTick, 0, maxTick)),
+                               note.key});
+            }
+            m_sv->setSelection(std::move(ids));
         } else if (doc && drag == Drag::Velocity && m_dVel != 0) {
             doc->nudgeNotesVelocity(resolveSelection(), m_dVel);
         }
@@ -732,7 +774,7 @@ protected:
     }
 
 private:
-    enum class Drag { None, Band, Move, Resize, Velocity, Draw };
+    enum class Drag { None, Band, Move, Resize, ResizeLeft, Velocity, Draw };
 
     int keyToY(int key) const
     {
@@ -752,7 +794,9 @@ private:
                      std::max(2, m_sv->keyHeight() - 1));
     }
 
-    // Topmost (last-drawn) note of the selected track under pos.
+    // Topmost (last-drawn) note of the selected track under pos. The rect is
+    // widened a little on both sides so the edge resize handles can be
+    // grabbed from just outside the note.
     const ViewNote *hitNote(QPoint pos) const
     {
         const int selected = m_sv->selectedTrack();
@@ -760,7 +804,7 @@ private:
         for (const ViewNote &note : m_sv->model().notes) {
             if (note.track != selected)
                 continue;
-            if (noteRect(note).adjusted(0, 0, 2, 0).contains(pos))
+            if (noteRect(note).adjusted(-2, 0, 2, 0).contains(pos))
                 hit = &note;
         }
         return hit;
@@ -769,19 +813,25 @@ private:
     bool nearRightEdge(const ViewNote &note, QPoint pos) const
     {
         const QRect r = noteRect(note);
-        return pos.x() >= r.right() - 3 && pos.x() <= r.right() + 3;
+        return pos.x() >= r.right() - kEdgeW && pos.x() <= r.right() + kEdgeW;
+    }
+
+    bool nearLeftEdge(const ViewNote &note, QPoint pos) const
+    {
+        const QRect r = noteRect(note);
+        return pos.x() >= r.left() - kEdgeW && pos.x() <= r.left() + kEdgeW;
     }
 
     bool nearVelocityHandle(const ViewNote &note, QPoint pos) const
     {
         const QRect r = noteRect(note);
-        return r.width() >= kVelHandleMinNoteW && pos.x() >= r.left()
-            && pos.x() < r.left() + kVelHandleW;
+        return r.width() >= kVelHandleMinNoteW && pos.x() > r.left() + kEdgeW
+            && pos.x() <= r.left() + kEdgeW + kVelHandleW;
     }
 
     QRect velHandleRect(const QRect &noteRect) const
     {
-        return QRect(noteRect.left() + 2, noteRect.top() + 1, 3,
+        return QRect(noteRect.left() + kEdgeW + 2, noteRect.top() + 1, 3,
                      std::max(2, noteRect.height() - 2));
     }
 
@@ -909,7 +959,7 @@ private:
             p.drawRect(r.adjusted(0, 0, -1, -1));
             return;
         }
-        if (m_drag != Drag::Move && m_drag != Drag::Resize)
+        if (m_drag != Drag::Move && m_drag != Drag::Resize && m_drag != Drag::ResizeLeft)
             return;
         if (m_dTick == 0 && m_dKey == 0 && m_dDur == 0)
             return;
@@ -917,9 +967,17 @@ private:
         for (const ViewNote &note : model.notes) {
             if (note.track != selected || !m_sv->isSelected(note))
                 continue;
-            const int64_t tick = std::max<int64_t>(0, int64_t(note.startTick) + m_dTick);
-            const int64_t endTick = std::max<int64_t>(
-                tick + 1, int64_t(note.endTick) + m_dTick + m_dDur);
+            int64_t tick, endTick;
+            if (m_drag == Drag::ResizeLeft) {
+                // The note-off pins the gesture; only the start moves.
+                endTick = int64_t(note.endTick);
+                tick = std::clamp<int64_t>(int64_t(note.startTick) + m_dTick, 0,
+                                           endTick - 1);
+            } else {
+                tick = std::max<int64_t>(0, int64_t(note.startTick) + m_dTick);
+                endTick = std::max<int64_t>(tick + 1,
+                                            int64_t(note.endTick) + m_dTick + m_dDur);
+            }
             const int key = std::clamp(int(note.key) + m_dKey, 0, 127);
             const int x0 = kKeyboardW + m_sv->contentX(double(tick));
             const int x1 = kKeyboardW + m_sv->contentX(double(endTick));
@@ -1113,9 +1171,14 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
+        const QPoint delta = event->angleDelta();
         if (event->modifiers() & Qt::ControlModifier) {
-            m_sv->zoomAroundContentX(std::pow(1.0015, event->angleDelta().y()),
+            m_sv->zoomAroundContentX(std::pow(1.0015, delta.y()),
                                      int(event->position().x()) - kGutterW);
+            event->accept();
+        } else if ((event->modifiers() & Qt::ShiftModifier)
+                   || (delta.x() && !delta.y())) {
+            m_sv->scrollByPx(-(delta.y() ? delta.y() : delta.x()));
             event->accept();
         } else {
             event->ignore(); // let the scroll area page vertically
@@ -2310,6 +2373,28 @@ void SongView::zoomAroundContentX(double factor, int anchorContentX)
     m_scrollPx = std::max(0, int(anchorTick * m_pxPerTick) - anchorContentX);
     updateScrollbars();
     refreshTimelineViews();
+}
+
+void SongView::zoomKeyHeight(int wheelDelta, int anchorY)
+{
+    if (!m_timeline)
+        return;
+    // One key-height pixel per wheel notch; the accumulator makes fine
+    // trackpad deltas add up instead of stepping on every event.
+    m_keyZoomAccum += wheelDelta;
+    const int steps = m_keyZoomAccum / 120;
+    if (steps == 0)
+        return;
+    m_keyZoomAccum -= steps * 120;
+    const int newH = std::clamp(m_keyHeight + steps, kMinKeyHeight, kMaxKeyHeight);
+    if (newH == m_keyHeight)
+        return;
+    // Pin the key under the cursor: same content row before and after.
+    const double row = double(anchorY + m_scrollY) / double(m_keyHeight);
+    m_keyHeight = newH;
+    m_scrollY = std::max(0, int(std::lround(row * newH)) - anchorY);
+    updateScrollbars();
+    m_roll->update();
 }
 
 void SongView::scrollByPx(int dx)

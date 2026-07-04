@@ -162,6 +162,9 @@ public:
 
     // Interaction from children.
     void zoomAroundContentX(double factor, int anchorContentX);
+    // Vertical roll zoom (key height) from Ctrl+wheel, pinning the key under
+    // anchorY (roll-local y). wheelDelta is the raw angleDelta value.
+    void zoomKeyHeight(int wheelDelta, int anchorY);
     void scrollByPx(int dx);
     void scrollRollBy(int dy);
     void refreshTimelineViews();
@@ -199,6 +202,7 @@ private:
     int m_scrollPx = 0;
     int m_scrollY = 0;
     int m_keyHeight = 9;
+    int m_keyZoomAccum = 0; // sub-notch wheel remainder for zoomKeyHeight
     int m_selectedTrack = 0;
     double m_playheadTick = 0.0;
     uint64_t m_editCursorTick = 0;

@@ -103,6 +103,9 @@ public:
     // Move by a tick/key delta (note lengths preserved).
     void moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey);
     void resizeNotes(const std::vector<DocNote> &notes, int64_t dDuration);
+    // Left-edge resize: move the note-on by dTick with the note-off pinned
+    // (tick and duration adjust together, at least 1 tick of note remains).
+    void resizeNotesLeft(const std::vector<DocNote> &notes, int64_t dTick);
     void setNotesVelocity(const std::vector<DocNote> &notes, uint8_t velocity);
     // Relative velocity change, clamped to 1-127 per note.
     void nudgeNotesVelocity(const std::vector<DocNote> &notes, int delta);

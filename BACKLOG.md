@@ -5,18 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Resize notes from the left edge too.** Only the right edge is a resize
-  handle (nearRightEdge, songview.cpp:423,457); a left-edge handle should
-  move the note-on while pinning the note-off (adjusting tick + duration
-  together).
-- **Overhaul mouse-wheel behavior.** Today on the roll: plain scroll =
-  vertical note-range scroll, Shift = horizontal scroll, Ctrl = horizontal
-  zoom (wheelEvent, songview.cpp). Wanted, Reaper-style: (A) plain scroll
-  over the notes area = horizontal zoom (ruler granularity); (B) Ctrl+scroll
-  over the notes area = vertical zoom — row/key height, the analog of
-  Reaper's track-height scaling; (C) plain scroll over the piano-key column
-  keeps today's note-range scrolling. Horizontal scroll stays on Shift (and
-  trackpad horizontal delta).
 - **Finer-grained automation editing + multi-point drag.** Lane edits are
   one point per click and snap to the clock grid; there's no way to sweep a
   curve. Add freehand drag across a lane writing a stream of points (thinned

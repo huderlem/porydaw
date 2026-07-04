@@ -110,22 +110,49 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
             if (ok) {
+                // Left resize: the note-on moves, the note-off stays pinned.
+                doc.resizeNotesLeft({note}, -int64_t(step) * 2);
+                mutateAndCheck("events unsorted after resizeNotesLeft");
+                if (!doc.findNote(track, base + step * 6, 63, &note)
+                    || note.duration != step * 8) {
+                    fail("left resize produced wrong start/duration");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                // Dragging the note-on past the note-off clamps to 1 tick left.
+                doc.resizeNotesLeft({note}, int64_t(step) * 100);
+                mutateAndCheck("events unsorted after clamped resizeNotesLeft");
+                if (!doc.findNote(track, base + step * 14 - 1, 63, &note)
+                    || note.duration != 1) {
+                    fail("left resize not clamped at the note-off");
+                    ok = false;
+                } else {
+                    doc.resizeNotesLeft({note}, -int64_t(step) * 8 + 1);
+                    if (!doc.findNote(track, base + step * 6, 63, &note)
+                        || note.duration != step * 8) {
+                        fail("left resize could not restore the note");
+                        ok = false;
+                    }
+                }
+            }
+            if (ok) {
                 doc.setNotesVelocity({note}, 88);
-                if (!doc.findNote(track, base + step * 8, 63, &note) || note.velocity != 88) {
+                if (!doc.findNote(track, base + step * 6, 63, &note) || note.velocity != 88) {
                     fail("velocity edit not applied");
                     ok = false;
                 }
             }
             if (ok) {
                 doc.nudgeNotesVelocity({note}, -30);
-                if (!doc.findNote(track, base + step * 8, 63, &note) || note.velocity != 58) {
+                if (!doc.findNote(track, base + step * 6, 63, &note) || note.velocity != 58) {
                     fail("velocity nudge not applied");
                     ok = false;
                 }
             }
             if (ok) {
                 doc.nudgeNotesVelocity({note}, 200); // must clamp to 127
-                if (!doc.findNote(track, base + step * 8, 63, &note) || note.velocity != 127) {
+                if (!doc.findNote(track, base + step * 6, 63, &note) || note.velocity != 127) {
                     fail("velocity nudge not clamped");
                     ok = false;
                 }

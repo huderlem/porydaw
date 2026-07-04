@@ -476,6 +476,35 @@ void SongDocument::resizeNotes(const std::vector<DocNote> &notes, int64_t dDurat
     pushEdit(tr("resize %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
+void SongDocument::resizeNotesLeft(const std::vector<DocNote> &notes, int64_t dTick)
+{
+    if (notes.empty() || dTick == 0)
+        return;
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        std::vector<size_t> indices;
+        for (const DocNote &note : notes) {
+            if (note.smfTrack == int(t))
+                indices.push_back(note.onIndex);
+        }
+        appendRemoveOps(ops, int(t), std::move(indices));
+    }
+    for (const DocNote &note : notes) {
+        // An unterminated note has no note-off to pin; its note-on just moves.
+        const int64_t maxTick = note.unterminated()
+                                    ? INT64_MAX
+                                    : int64_t(note.tick + note.duration) - 1;
+        const uint64_t newTick =
+            uint64_t(std::clamp<int64_t>(int64_t(note.tick) + dTick, 0, maxTick));
+        EditOp on;
+        on.type = EditOp::InsertEvent;
+        on.smfTrack = note.smfTrack;
+        on.event = makeChannelEvent(0x9, note.channel, newTick, note.key, note.velocity);
+        ops.push_back(on);
+    }
+    pushEdit(tr("resize %n note(s)", nullptr, int(notes.size())), std::move(ops));
+}
+
 void SongDocument::setNotesVelocity(const std::vector<DocNote> &notes, uint8_t velocity)
 {
     if (notes.empty())
