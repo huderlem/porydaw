@@ -37,6 +37,7 @@ qt_add_executable(porydaw
     src/roundtrip.cpp
     src/editcheck.cpp
     src/savecheck.cpp
+    src/onboardcheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
@@ -50,10 +51,20 @@ qt_add_executable(porydaw
     src/core/songdocument.h
     src/core/timelineplayer.cpp
     src/core/timelineplayer.h
+    src/core/midiimport.cpp
+    src/core/midiimport.h
     src/project/decompproject.cpp
     src/project/decompproject.h
+    src/project/songregistry.cpp
+    src/project/songregistry.h
     src/ui/m4asemantics.cpp
     src/ui/m4asemantics.h
+    src/ui/newsongwizard.cpp
+    src/ui/newsongwizard.h
+    src/ui/registrationdialog.cpp
+    src/ui/registrationdialog.h
+    src/ui/voicegroupbrowser.cpp
+    src/ui/voicegroupbrowser.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
     src/ui/songviewmodel.cpp

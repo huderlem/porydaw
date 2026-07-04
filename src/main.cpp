@@ -12,6 +12,8 @@ int runEditCheck(const QString &projectRoot);
 // savecheck.cpp; M2 edited-save check (writes into the project: use a copy).
 int runSaveCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &mid2agbPath = QString());
+// onboardcheck.cpp; M3 New Song + import check (writes into the project: use a copy).
+int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath = QString());
 
 int main(int argc, char *argv[])
 {
@@ -30,6 +32,12 @@ int main(int argc, char *argv[])
     if (saveCheck >= 0 && saveCheck + 2 < args.size()) {
         const QString mid2agb = saveCheck + 3 < args.size() ? args[saveCheck + 3] : QString();
         return runSaveCheck(args[saveCheck + 1], args[saveCheck + 2], mid2agb);
+    }
+    const int onboardCheck = args.indexOf(QStringLiteral("--onboardcheck"));
+    if (onboardCheck >= 0 && onboardCheck + 1 < args.size()) {
+        const QString mid2agb =
+            onboardCheck + 2 < args.size() ? args[onboardCheck + 2] : QString();
+        return runOnboardCheck(args[onboardCheck + 1], mid2agb);
     }
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())

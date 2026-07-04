@@ -52,21 +52,6 @@ QString keyName(int key)
     return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
 }
 
-QString voiceTypeName(uint8_t type)
-{
-    if (type == VOICE_KEYSPLIT)
-        return SongView::tr("Keysplit");
-    if (type == VOICE_KEYSPLIT_ALL)
-        return SongView::tr("Drumkit");
-    switch (type & VOICE_TYPE_CGB_MASK) {
-    case VOICE_SQUARE_1: return SongView::tr("Square 1");
-    case VOICE_SQUARE_2: return SongView::tr("Square 2");
-    case VOICE_PROGRAMMABLE_WAVE: return SongView::tr("Wave");
-    case VOICE_NOISE: return SongView::tr("Noise");
-    default: return SongView::tr("Sample");
-    }
-}
-
 QColor loopFill() { return QColor(255, 200, 60, 34); }
 QColor loopEdge() { return QColor(224, 168, 0); }
 QColor playheadColor() { return QColor(226, 66, 66); }
@@ -1622,7 +1607,7 @@ QString SongView::voiceShortName(uint8_t program) const
     QString type;
     if (m_voicegroup && program < VOICEGROUP_SIZE) {
         name = QString::fromUtf8(m_voicegroup->voiceNames[program]).trimmed();
-        type = voiceTypeName(m_voicegroup->voices[program].type);
+        type = m4aVoiceTypeName(m_voicegroup->voices[program].type);
     }
     if (name.isEmpty())
         return type.isEmpty() ? tr("Voice") : type;

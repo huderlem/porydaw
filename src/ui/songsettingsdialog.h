@@ -5,7 +5,7 @@
 #include "project/decompproject.h"
 
 class QCheckBox;
-class QLineEdit;
+class QComboBox;
 class QSpinBox;
 
 // Song Settings (SPEC.md §6.1): the song's mid2agb flags from its midi.cfg
@@ -16,8 +16,10 @@ class SongSettingsDialog : public QDialog
     Q_OBJECT
 
 public:
+    // voicegroupArgs: the project's -G choices (SongRegistry::voicegroupArgs);
+    // the combo stays editable so unknown/new symbols still work.
     SongSettingsDialog(const SongCfg &cfg, const QString &songLabel,
-                       QWidget *parent = nullptr);
+                       const QStringList &voicegroupArgs, QWidget *parent = nullptr);
 
     // The edited settings; rawFlags are carried over untouched (save
     // reconciles them with these values).
@@ -25,7 +27,7 @@ public:
 
 private:
     SongCfg m_original;
-    QLineEdit *m_voicegroup;
+    QComboBox *m_voicegroup;
     QSpinBox *m_volume;
     QCheckBox *m_reverbOn;
     QSpinBox *m_reverb;

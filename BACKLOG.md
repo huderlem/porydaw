@@ -10,9 +10,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   DAW-style velocity strip under the roll would be quicker for sweeps.
 - **Copy/paste of notes** (and paste at playhead), plus Ctrl+A select-all on
   the selected track.
-- **Voicegroup dropdown in Song Settings.** The -G field is a free-text line
-  edit; it should list the project's voicegroups (natural to do together with
-  the M3 voicegroup browser, which needs the same enumeration).
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
   visibility, last edit position. Specced but not implemented; cosmetic only.
 - **Playhead seek** by clicking/dragging in the ruler. Needs a UI→audio seek
@@ -21,6 +18,17 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   the next CC/program events replay.
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
+
+## M3 onboarding polish
+
+- **Voicegroup browser: expand keysplits/drumkits** into per-key sub-entries
+  (overlaps with the M4 drum lane; the browser currently auditions middle C).
+- **Import wizard: per-note voice-type polyphony estimate.** The peak-notes
+  warning counts all notes; CGB-voiced notes don't consume PCM channels, and
+  with the voicegroup + program map known the estimate could be exact.
+- **Import wizard: division rescale option.** Files whose division isn't a
+  multiple of 24 are imported as-is (mid2agb quantizes); an optional rescale
+  to 24/48 clocks would make the editor grid exact for them.
 
 ## Deferred infrastructure
 

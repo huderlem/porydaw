@@ -1,5 +1,11 @@
 #include "m4asemantics.h"
 
+#include <QObject>
+
+extern "C" {
+#include "m4a_engine.h"
+}
+
 M4aCcInfo m4aClassifyCc(uint8_t cc)
 {
     switch (cc) {
@@ -74,4 +80,19 @@ QString m4aAdvancedCcLabel(uint8_t cc, uint8_t value)
         return QStringLiteral("CC %1 = %2 (no m4a meaning)").arg(cc).arg(value);
     return QStringLiteral("%1 %2").arg(QLatin1String(info.name),
                                        m4aFormatCcValue(cc, value));
+}
+
+QString m4aVoiceTypeName(uint8_t type)
+{
+    if (type == VOICE_KEYSPLIT)
+        return QObject::tr("Keysplit");
+    if (type == VOICE_KEYSPLIT_ALL)
+        return QObject::tr("Drumkit");
+    switch (type & VOICE_TYPE_CGB_MASK) {
+    case VOICE_SQUARE_1: return QObject::tr("Square 1");
+    case VOICE_SQUARE_2: return QObject::tr("Square 2");
+    case VOICE_PROGRAMMABLE_WAVE: return QObject::tr("Wave");
+    case VOICE_NOISE: return QObject::tr("Noise");
+    default: return QObject::tr("Sample");
+    }
 }

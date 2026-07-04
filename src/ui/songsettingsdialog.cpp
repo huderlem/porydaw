@@ -1,6 +1,7 @@
 #include "songsettingsdialog.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QLabel>
@@ -9,15 +10,18 @@
 #include <QVBoxLayout>
 
 SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLabel,
-                                       QWidget *parent)
+                                       const QStringList &voicegroupArgs, QWidget *parent)
     : QDialog(parent), m_original(cfg)
 {
     setWindowTitle(tr("Song Settings — %1").arg(songLabel));
 
     auto *form = new QFormLayout;
 
-    m_voicegroup = new QLineEdit(cfg.voicegroupArg, this);
-    m_voicegroup->setPlaceholderText(QStringLiteral("_dummy"));
+    m_voicegroup = new QComboBox(this);
+    m_voicegroup->setEditable(true);
+    m_voicegroup->addItems(voicegroupArgs);
+    m_voicegroup->setCurrentText(cfg.voicegroupArg);
+    m_voicegroup->lineEdit()->setPlaceholderText(QStringLiteral("_dummy"));
     m_voicegroup->setToolTip(tr("mid2agb -G: appended to \"voicegroup\" to form the symbol, "
                                 "e.g. \"_abandoned_ship\" → voicegroup_abandoned_ship."));
     form->addRow(tr("&Voicegroup (-G):"), m_voicegroup);
@@ -84,7 +88,7 @@ SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLa
 SongCfg SongSettingsDialog::cfg() const
 {
     SongCfg cfg = m_original; // keeps rawFlags and unknown options
-    cfg.voicegroupArg = m_voicegroup->text().trimmed();
+    cfg.voicegroupArg = m_voicegroup->currentText().trimmed();
     cfg.masterVolume = m_volume->value();
     cfg.reverb = m_reverbOn->isChecked() ? m_reverb->value() : -1;
     cfg.priority = m_priority->value();

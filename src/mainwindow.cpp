@@ -1,10 +1,12 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenuBar>
@@ -18,8 +20,12 @@
 #include <QCloseEvent>
 
 #include "core/miditimeline.h"
+#include "project/songregistry.h"
+#include "ui/newsongwizard.h"
+#include "ui/registrationdialog.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
+#include "ui/voicegroupbrowser.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -59,9 +65,18 @@ void MainWindow::buildUi()
     QAction *openAction = fileMenu->addAction(tr("&Open Project..."), this,
                                               &MainWindow::openProject);
     openAction->setShortcut(QKeySequence::Open);
+    m_newSongAction = fileMenu->addAction(tr("&New Song..."), this, &MainWindow::newSong);
+    m_newSongAction->setShortcut(QKeySequence::New);
+    m_newSongAction->setEnabled(false);
+    m_importAction =
+        fileMenu->addAction(tr("&Import MIDI..."), this, &MainWindow::importMidi);
+    m_importAction->setEnabled(false);
     m_saveAction = fileMenu->addAction(tr("&Save Song"), this, &MainWindow::saveSong);
     m_saveAction->setShortcut(QKeySequence::Save);
     m_saveAction->setEnabled(false);
+    m_checklistAction = fileMenu->addAction(tr("Registration Chec&klist..."), this,
+                                            &MainWindow::openRegistrationChecklist);
+    m_checklistAction->setEnabled(false);
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(tr("&Quit"), this, &QWidget::close);
     quitAction->setShortcut(QKeySequence::Quit);
@@ -121,6 +136,19 @@ void MainWindow::buildUi()
     dock->setWidget(m_songList);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
 
+    // Voicegroup browser dock (SPEC §6.1): the current song's instruments,
+    // click-and-hold to audition through the preview engine instance.
+    auto *vgDock = new QDockWidget(tr("Voicegroup"), this);
+    vgDock->setFeatures(QDockWidget::DockWidgetMovable);
+    m_vgBrowser = new VoicegroupBrowser(vgDock);
+    connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
+            [this](int voice, int key, int velocity) {
+                if (m_audioOk)
+                    m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
+            });
+    vgDock->setWidget(m_vgBrowser);
+    addDockWidget(Qt::LeftDockWidgetArea, vgDock);
+
     // Song viewer: piano roll, automation lanes, other-events strip.
     m_songView = new SongView(this);
     connect(m_songView, &SongView::muteMaskChanged, this,
@@ -166,12 +194,16 @@ void MainWindow::openProject()
 
     m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
+    m_vgBrowser->setVoicegroup(nullptr);
     m_audio.unloadSong();
     m_doc.undoStack()->clear();
     m_loadedSongId = -1;
     m_songLabel->clear();
     m_saveAction->setEnabled(false);
     m_settingsAction->setEnabled(false);
+    m_checklistAction->setEnabled(false);
+    m_newSongAction->setEnabled(true);
+    m_importAction->setEnabled(true);
     updateWindowTitle();
     populateSongList();
 
@@ -195,10 +227,18 @@ void MainWindow::populateSongList()
         if (!song.isPlayable())
             continue;
         QString text = song.label;
-        if (!song.constant.isEmpty())
+        if (!song.registered)
+            text += tr("  ⚠ not registered");
+        else if (!song.constant.isEmpty())
             text += QStringLiteral("  (%1)").arg(song.constant);
         auto *item = new QListWidgetItem(text, m_songList);
         item->setData(Qt::UserRole, song.id);
+        if (!song.registered) {
+            item->setForeground(QColor(0xc0, 0x80, 0x30));
+            item->setToolTip(tr("This song's .mid exists but song_table.inc has no "
+                                "entry. Open it and use File → Registration "
+                                "Checklist to finish."));
+        }
     }
 }
 
@@ -257,9 +297,11 @@ void MainWindow::loadSong(const SongInfo &song)
     SongSettings settings;
     settings.songVolume = uint8_t(song.cfg.masterVolume);
     settings.reverb = uint8_t(song.cfg.reverb > 0 ? song.cfg.reverb : 0);
-    // The view must let go of the old timeline before loadSong frees it.
+    // The views must let go of the old timeline/voicegroup before loadSong
+    // frees them.
     m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
+    m_vgBrowser->setVoicegroup(nullptr);
     m_audio.loadSong(std::move(timeline), vg, settings);
     m_loadedSongId = song.id;
     m_appliedVoicegroupArg = song.cfg.voicegroupArg;
@@ -268,8 +310,10 @@ void MainWindow::loadSong(const SongInfo &song)
 
     m_songView->setSong(m_audio.timeline(), m_audio.voicegroup());
     m_songView->setDocument(&m_doc);
+    updateVoicegroupBrowser();
     m_saveAction->setEnabled(true);
     m_settingsAction->setEnabled(true);
+    m_checklistAction->setEnabled(!song.registered);
     updateWindowTitle();
     m_songLabel->setText(QStringLiteral("  %1").arg(song.label));
 
@@ -298,8 +342,10 @@ void MainWindow::onDocumentChanged()
         QString tried;
         if (LoadedVoiceGroup *vg = loadVoicegroupFor(cfg, &tried)) {
             m_songView->setVoicegroup(nullptr);
+            m_vgBrowser->setVoicegroup(nullptr);
             m_audio.updateVoicegroup(vg);
             m_songView->setVoicegroup(m_audio.voicegroup());
+            updateVoicegroupBrowser();
             m_appliedVoicegroupArg = cfg.voicegroupArg;
         } else {
             statusBar()->showMessage(
@@ -340,9 +386,123 @@ void MainWindow::openSongSettings()
 {
     if (m_loadedSongId < 0)
         return;
-    SongSettingsDialog dialog(m_doc.cfg(), m_doc.label(), this);
+    SongSettingsDialog dialog(m_doc.cfg(), m_doc.label(),
+                              SongRegistry::voicegroupArgs(m_project.root()), this);
     if (dialog.exec() == QDialog::Accepted)
         m_doc.setCfg(dialog.cfg());
+}
+
+void MainWindow::newSong()
+{
+    if (!m_project.isOpen())
+        return;
+    NewSongWizard wizard(&m_project, &m_audio, this);
+    if (wizard.exec() != QDialog::Accepted)
+        return;
+    finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
+                     wizard.player(), wizard.cfg());
+}
+
+void MainWindow::importMidi()
+{
+    if (!m_project.isOpen())
+        return;
+    QSettings settings;
+    const QString startDir =
+        settings.value(QStringLiteral("lastImportDir"), QDir::homePath()).toString();
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import MIDI"), startDir, tr("MIDI files (*.mid *.midi)"));
+    if (path.isEmpty())
+        return;
+    settings.setValue(QStringLiteral("lastImportDir"), QFileInfo(path).path());
+
+    SmfFile smf;
+    QString error;
+    if (!SmfFile::readFile(path, &smf, &error)) {
+        QMessageBox::warning(this, tr("Import MIDI"), error);
+        return;
+    }
+    NewSongWizard wizard(&m_project, &m_audio, std::move(smf), path, this);
+    if (wizard.exec() != QDialog::Accepted)
+        return;
+    finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
+                     wizard.player(), wizard.cfg());
+}
+
+void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
+                                  const QString &constant, const QString &player,
+                                  const SongCfg &cfg)
+{
+    if (!maybeSaveSong())
+        return;
+
+    const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
+    QString error;
+    if (!smf.writeFile(midiDir + QStringLiteral("/%1.mid").arg(label), &error)
+        || !SongRegistry::writeMidiCfgLine(midiDir, label,
+                                           SongRegistry::mergeCfgFlags(cfg), &error)) {
+        QMessageBox::warning(this, tr("New Song"), error);
+        return;
+    }
+    SongRegistry::saveRegistrationMeta(m_project.root(), label, constant, player);
+
+    reloadProject();
+    loadSongByLabel(label);
+    statusBar()->showMessage(tr("Created %1/%2.mid").arg(midiDir, label), 8000);
+
+    RegistrationDialog checklist(m_project.root(), label, constant, player, this);
+    checklist.exec();
+    if (checklist.registrationComplete()) {
+        reloadProject();
+        loadSongByLabel(label);
+    }
+}
+
+void MainWindow::openRegistrationChecklist()
+{
+    if (m_loadedSongId < 0 || m_loadedSongId >= m_project.songs().size())
+        return;
+    const SongInfo song = m_project.songs().at(m_loadedSongId);
+    RegistrationDialog checklist(m_project.root(), song.label, song.constant,
+                                 song.player, this);
+    checklist.exec();
+    if (checklist.registrationComplete()) {
+        reloadProject();
+        loadSongByLabel(song.label);
+    }
+}
+
+void MainWindow::reloadProject()
+{
+    QString error;
+    if (!m_project.reload(&error)) {
+        QMessageBox::warning(this, tr("Reload Project"), error);
+        return;
+    }
+    populateSongList();
+}
+
+void MainWindow::loadSongByLabel(const QString &label)
+{
+    for (const SongInfo &song : m_project.songs()) {
+        if (song.label == label && song.isPlayable()) {
+            loadSong(song);
+            return;
+        }
+    }
+}
+
+void MainWindow::updateVoicegroupBrowser()
+{
+    if (!m_audio.voicegroup()) {
+        m_vgBrowser->setVoicegroup(nullptr);
+        return;
+    }
+    const QString arg = m_doc.cfg().voicegroupArg.isEmpty()
+                            ? QStringLiteral("_dummy")
+                            : m_doc.cfg().voicegroupArg;
+    m_vgBrowser->setVoicegroup(m_audio.voicegroup(),
+                               QStringLiteral("voicegroup%1").arg(arg));
 }
 
 bool MainWindow::maybeSaveSong()
@@ -477,6 +637,24 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     }
     qInfo("selftest: edit + undo during playback OK (playhead %.2fs at edit)",
           double(posBeforeEdit) / m_audio.sampleRate());
+
+    // M3: audition a voicegroup entry mid-playback — exercises the preview
+    // engine instance (program change + note on a separate engine).
+    m_audio.previewVoice(0, 60, 112);
+    QTimer::singleShot(300, &loop, &QEventLoop::quit);
+    loop.exec();
+    m_audio.previewVoice(0, 60, 0);
+    qInfo("selftest: voice audition through the preview engine OK");
+
+    // M3: the onboarding UI must at least construct against a live project
+    // (wizard pages enumerate voicegroups/players; the checklist rechecks).
+    {
+        NewSongWizard wizard(&m_project, &m_audio, this);
+        RegistrationDialog checklist(m_project.root(), QStringLiteral("mus_selftest"),
+                                     QStringLiteral("MUS_SELFTEST"),
+                                     QStringLiteral("MUSIC_PLAYER_BGM"), this);
+        qInfo("selftest: New Song wizard + registration checklist constructed");
+    }
 
     const double playedSeconds = double(m_audio.playheadSamples()) / m_audio.sampleRate();
     qInfo("selftest: after 3s wall clock — playhead %.2fs, transport %d, PCM %d/%d active",

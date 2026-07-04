@@ -11,7 +11,9 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QTimer;
+class SmfFile;
 class SongView;
+class VoicegroupBrowser;
 
 class MainWindow : public QMainWindow
 {
@@ -34,6 +36,9 @@ private slots:
     void songActivated(QListWidgetItem *item);
     void saveSong();
     void openSongSettings();
+    void newSong();
+    void importMidi();
+    void openRegistrationChecklist();
     void onDocumentChanged();
     void uiTick();
 
@@ -41,6 +46,15 @@ private:
     void buildUi();
     void populateSongList();
     void loadSong(const SongInfo &song);
+    void loadSongByLabel(const QString &label);
+    // Shared New Song / Import finish: writes the .mid + midi.cfg line and
+    // the registration sidecar, reloads the project, loads the song, and
+    // opens the registration checklist.
+    void finishCreateSong(const SmfFile &smf, const QString &label,
+                          const QString &constant, const QString &player,
+                          const SongCfg &cfg);
+    void reloadProject();
+    void updateVoicegroupBrowser();
     // Prompts to save a dirty document; false = user cancelled the action.
     bool maybeSaveSong();
     LoadedVoiceGroup *loadVoicegroupFor(const SongCfg &cfg, QString *tried);
@@ -60,6 +74,10 @@ private:
 
     QListWidget *m_songList = nullptr;
     SongView *m_songView = nullptr;
+    VoicegroupBrowser *m_vgBrowser = nullptr;
+    QAction *m_newSongAction = nullptr;
+    QAction *m_importAction = nullptr;
+    QAction *m_checklistAction = nullptr;
     QAction *m_playAction = nullptr;
     QAction *m_pauseAction = nullptr;
     QAction *m_stopAction = nullptr;

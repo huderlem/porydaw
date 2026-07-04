@@ -51,3 +51,7 @@ QString m4aFormatBend(int bend14);
 // Human label for an advanced/no-op CC event in the other-events strip,
 // e.g. "MEMACC op 17 = 3" or "XCMD xIECV = 4".
 QString m4aAdvancedCcLabel(uint8_t cc, uint8_t value);
+
+// Voice-type label for a ToneData.type byte ("Sample", "Square 1", "Keysplit",
+// "Drumkit", ...).
+QString m4aVoiceTypeName(uint8_t type);

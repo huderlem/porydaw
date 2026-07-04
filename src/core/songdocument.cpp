@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "core/miditimeline.h"
+#include "project/songregistry.h"
 
 namespace {
 
@@ -26,29 +27,6 @@ bool cfgSemanticEqual(const SongCfg &a, const SongCfg &b)
     return a.voicegroupArg == b.voicegroupArg && a.masterVolume == b.masterVolume
         && a.reverb == b.reverb && a.priority == b.priority && a.exactGate == b.exactGate
         && a.extendedClocks == b.extendedClocks && a.noCompression == b.noCompression;
-}
-
-// Updates or inserts "-<letter><value>" in a midi.cfg flag list; a null value
-// removes the flag. Matching is case-insensitive as in mid2agb's parser.
-void setValueFlag(QStringList &flags, char letter, const QString &value)
-{
-    for (int i = 0; i < flags.size(); i++) {
-        if (flags[i].size() >= 2 && flags[i][0] == QLatin1Char('-')
-            && flags[i][1].toUpper() == QLatin1Char(letter)) {
-            if (value.isNull())
-                flags.removeAt(i);
-            else
-                flags[i] = QLatin1Char('-') + QString(QLatin1Char(letter)) + value;
-            return;
-        }
-    }
-    if (!value.isNull())
-        flags.append(QLatin1Char('-') + QString(QLatin1Char(letter)) + value);
-}
-
-void setBoolFlag(QStringList &flags, char letter, bool present)
-{
-    setValueFlag(flags, letter, present ? QStringLiteral("") : QString());
 }
 
 } // namespace
@@ -138,74 +116,11 @@ bool SongDocument::save(QString *error)
         return false;
 
     if (!cfgSemanticEqual(m_cfg, m_savedCfg) || !m_hadCfgLine) {
-        // Rebuild the song's flag list from its current properties, keeping
-        // unknown flags (e.g. -L) and the original flag order intact.
-        QStringList flags = m_cfg.rawFlags;
-        setBoolFlag(flags, 'E', m_cfg.exactGate);
-        setValueFlag(flags, 'R',
-                     m_cfg.reverb >= 0 ? QString::number(m_cfg.reverb) : QString());
-        setValueFlag(flags, 'G',
-                     m_cfg.voicegroupArg.isEmpty() ? QString() : m_cfg.voicegroupArg);
-        setValueFlag(flags, 'V',
-                     QStringLiteral("%1").arg(m_cfg.masterVolume, 3, 10, QLatin1Char('0')));
-        setValueFlag(flags, 'P',
-                     m_cfg.priority != 0 ? QString::number(m_cfg.priority) : QString());
-        setBoolFlag(flags, 'X', m_cfg.extendedClocks);
-        setBoolFlag(flags, 'N', m_cfg.noCompression);
+        const QStringList flags = SongRegistry::mergeCfgFlags(m_cfg);
         m_cfg.rawFlags = flags;
-
-        // Binary in/out: only the song's own line may change, byte for byte —
-        // including CRLF line endings (vanilla midi.cfg uses them).
-        const QString cfgPath =
-            QFileInfo(m_midPath).dir().filePath(QStringLiteral("midi.cfg"));
-        QByteArray content;
-        {
-            QFile in(cfgPath);
-            if (in.open(QIODevice::ReadOnly))
-                content = in.readAll();
-        }
-        const bool endsWithNewline = content.isEmpty() || content.endsWith('\n');
-        const bool crlf = content.contains("\r\n");
-        QList<QByteArray> lines = content.split('\n');
-        if (endsWithNewline && !lines.isEmpty())
-            lines.removeLast(); // the empty piece after the final newline
-
-        const QString fileName = m_label + QStringLiteral(".mid");
-        const QByteArray flagBytes = flags.join(QLatin1Char(' ')).toUtf8();
-        bool replaced = false;
-        for (QByteArray &line : lines) {
-            const bool hadCr = line.endsWith('\r');
-            const QString text = QString::fromUtf8(hadCr ? line.chopped(1) : line);
-            const int colon = text.indexOf(QLatin1Char(':'));
-            if (colon <= 0 || text.left(colon).trimmed() != fileName)
-                continue;
-            // Keep the original name-column padding.
-            int flagStart = colon + 1;
-            while (flagStart < text.size() && text[flagStart] == QLatin1Char(' '))
-                flagStart++;
-            line = text.left(flagStart).toUtf8() + flagBytes;
-            if (hadCr)
-                line += '\r';
-            replaced = true;
-            break;
-        }
-        if (!replaced) {
-            QByteArray line = fileName.toUtf8() + ": " + flagBytes;
-            if (crlf)
-                line += '\r';
-            lines.append(line);
-        }
-
-        QFile out(cfgPath);
-        if (!out.open(QIODevice::WriteOnly)) {
-            if (error)
-                *error = QStringLiteral("Cannot write %1").arg(cfgPath);
+        if (!SongRegistry::writeMidiCfgLine(QFileInfo(m_midPath).path(), m_label, flags,
+                                            error))
             return false;
-        }
-        QByteArray joined = lines.join('\n');
-        if (endsWithNewline)
-            joined += '\n';
-        out.write(joined);
         m_savedCfg = m_cfg;
         m_hadCfgLine = true;
     }

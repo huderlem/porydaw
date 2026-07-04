@@ -4,7 +4,10 @@
 #include <QFile>
 #include <QHash>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTextStream>
+
+#include "project/songregistry.h"
 
 bool DecompProject::open(const QString &rootDir, QString *error)
 {
@@ -23,8 +26,15 @@ bool DecompProject::open(const QString &rootDir, QString *error)
         return false;
     }
     parseSongConstants();
+    discoverUnregisteredSongs();
     parseMidiCfg();
     return true;
+}
+
+bool DecompProject::reload(QString *error)
+{
+    const QString root = m_root;
+    return open(root, error);
 }
 
 void DecompProject::close()
@@ -105,6 +115,42 @@ void DecompProject::parseSongConstants()
         const auto it = byId.constFind(song.id);
         if (it != byId.constEnd())
             song.constant = it.value();
+    }
+}
+
+void DecompProject::discoverUnregisteredSongs()
+{
+    // .mid files with no song_table.inc entry: songs mid-onboarding. Listing
+    // them keeps a half-registered song (and its checklist badge) visible
+    // across project reopens. Identity chosen in the wizard comes back from
+    // the sidecar; the constant falls back to the label-derived default.
+    QSet<QString> known;
+    for (const SongInfo &song : m_songs)
+        known.insert(song.label);
+
+    const QDir midiDir(m_root + QStringLiteral("/sound/songs/midi"));
+    const QStringList mids =
+        midiDir.entryList({QStringLiteral("*.mid")}, QDir::Files, QDir::Name);
+    for (const QString &fileName : mids) {
+        const QString label = fileName.chopped(4);
+        if (known.contains(label))
+            continue;
+        SongInfo song;
+        song.id = m_songs.size();
+        song.label = label;
+        song.registered = false;
+        song.midPath = midiDir.filePath(fileName);
+        song.hasMid = true;
+        song.constant = SongRegistry::constantForLabel(label);
+        song.player = QStringLiteral("MUSIC_PLAYER_BGM");
+        QString constant, player;
+        if (SongRegistry::loadRegistrationMeta(m_root, label, &constant, &player)) {
+            if (!constant.isEmpty())
+                song.constant = constant;
+            if (!player.isEmpty())
+                song.player = player;
+        }
+        m_songs.append(song);
     }
 }
 

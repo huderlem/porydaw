@@ -1,0 +1,182 @@
+#include "midiimport.h"
+
+#include <QMap>
+#include <QObject>
+#include <algorithm>
+
+#include "ui/m4asemantics.h"
+
+namespace {
+
+constexpr int kMaxEngineTracks = 16; // m4a MAX_TRACKS
+constexpr int kDefaultPcmBudget = 5; // pokeemerald m4aSoundInit maxChans
+
+// Mirrors SongDocument::rebuildTrackMap / MidiTimeline::build: format 0 maps
+// engine track == channel; format 1 maps the first 16 channel-bearing chunks,
+// each tagged with its first channel event's channel.
+std::vector<std::pair<int, uint8_t>> engineTrackMap(const SmfFile &smf, int *dropped)
+{
+    std::vector<std::pair<int, uint8_t>> map;
+    *dropped = 0;
+    if (smf.format == 0) {
+        if (!smf.tracks.empty()) {
+            for (const SmfEvent &ev : smf.tracks[0].events) {
+                if (!ev.isChannel())
+                    continue;
+                const auto entry = std::make_pair(0, ev.channel());
+                if (std::find(map.begin(), map.end(), entry) == map.end())
+                    map.push_back(entry);
+            }
+        }
+        return map;
+    }
+    for (size_t t = 0; t < smf.tracks.size(); t++) {
+        for (const SmfEvent &ev : smf.tracks[t].events) {
+            if (!ev.isChannel())
+                continue;
+            if (int(map.size()) < kMaxEngineTracks)
+                map.push_back({int(t), ev.channel()});
+            else
+                (*dropped)++;
+            break;
+        }
+    }
+    return map;
+}
+
+} // namespace
+
+ImportAnalysis analyzeForImport(const SmfFile &smf)
+{
+    ImportAnalysis a;
+    a.format = smf.format;
+    a.division = smf.division;
+    a.smfTrackCount = int(smf.tracks.size());
+
+    const auto map = engineTrackMap(smf, &a.droppedTracks);
+    a.mappedTracks = int(map.size());
+
+    QMap<uint8_t, int> ccCounts;
+    // (engineTrack << 8 | key) -> depth, so overlapping same-key notes count
+    // once per sounding instance.
+    QMap<int, int> sounding;
+    struct NoteEdge {
+        uint64_t tick;
+        bool on;
+        int track;
+        uint8_t key;
+    };
+    std::vector<NoteEdge> edges;
+
+    for (int et = 0; et < int(map.size()); et++) {
+        const auto [smfTrack, channel] = map[et];
+        ImportTrackInfo info;
+        info.smfTrack = smfTrack;
+        info.channel = channel;
+
+        const bool anyChannel = smf.format != 0;
+        for (const SmfEvent &ev : smf.tracks[smfTrack].events) {
+            if (ev.isMeta() && ev.metaType == 0x03 && info.name.isEmpty())
+                info.name = QString::fromLatin1(ev.blob).trimmed();
+            if (!ev.isChannel() || (!anyChannel && ev.channel() != channel))
+                continue;
+            switch (ev.typeNibble()) {
+            case 0x9:
+                if (ev.data1 != 0) {
+                    info.noteCount++;
+                    if (info.programs.empty())
+                        info.notesBeforeProgram = true;
+                    edges.push_back({ev.tick, true, et, ev.data0});
+                    break;
+                }
+                [[fallthrough]];
+            case 0x8:
+                edges.push_back({ev.tick, false, et, ev.data0});
+                break;
+            case 0xB:
+                ccCounts[ev.data0]++;
+                break;
+            case 0xC:
+                if (std::find(info.programs.begin(), info.programs.end(), ev.data0)
+                    == info.programs.end())
+                    info.programs.push_back(ev.data0);
+                break;
+            default:
+                break;
+            }
+        }
+        a.tracks.push_back(info);
+    }
+
+    // Peak polyphony: note-ends first at equal ticks, as a note retriggered on
+    // the same tick replaces rather than stacks.
+    std::stable_sort(edges.begin(), edges.end(), [](const NoteEdge &x, const NoteEdge &y) {
+        if (x.tick != y.tick)
+            return x.tick < y.tick;
+        return !x.on && y.on;
+    });
+    int active = 0;
+    for (const NoteEdge &e : edges) {
+        const int key = (e.track << 8) | e.key;
+        if (e.on) {
+            sounding[key]++;
+            active++;
+            a.peakConcurrentNotes = std::max(a.peakConcurrentNotes, active);
+        } else if (sounding.value(key, 0) > 0) {
+            sounding[key]--;
+            active--;
+        }
+    }
+
+    for (auto it = ccCounts.constBegin(); it != ccCounts.constEnd(); ++it) {
+        const M4aCcInfo info = m4aClassifyCc(it.key());
+        ImportCcUsage usage;
+        usage.cc = it.key();
+        usage.count = it.value();
+        usage.audible = info.eventClass == M4aEventClass::AudibleLane;
+        usage.label = QStringLiteral("%1 — %2").arg(QLatin1String(info.name),
+                                                    QLatin1String(info.display));
+        a.ccs.push_back(usage);
+    }
+
+    if (a.droppedTracks > 0)
+        a.warnings.append(QObject::tr("%1 track(s) beyond the m4a 16-track limit "
+                                      "will not play.")
+                              .arg(a.droppedTracks));
+    if (a.division % 24 != 0)
+        a.warnings.append(
+            QObject::tr("Division %1 is not a multiple of 24; mid2agb quantizes to "
+                        "24 clocks per beat, so timing will shift slightly.")
+                .arg(a.division));
+    if (a.peakConcurrentNotes > kDefaultPcmBudget)
+        a.warnings.append(
+            QObject::tr("Up to %1 notes sound at once; the GBA mixes %2 sample-based "
+                        "notes (CGB square/wave/noise voices don't count). Extra "
+                        "notes will be dropped or stolen.")
+                .arg(a.peakConcurrentNotes)
+                .arg(kDefaultPcmBudget));
+    for (const ImportTrackInfo &t : a.tracks) {
+        if (t.noteCount > 0 && t.notesBeforeProgram) {
+            a.warnings.append(
+                QObject::tr("Some tracks play notes before any program change; those "
+                            "notes use voice 0."));
+            break;
+        }
+    }
+    return a;
+}
+
+void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps)
+{
+    for (const ProgramRemap &r : remaps) {
+        if (r.fromProgram == r.toProgram || r.smfTrack < 0
+            || r.smfTrack >= int(smf->tracks.size()))
+            continue;
+        const bool anyChannel = smf->format != 0;
+        for (SmfEvent &ev : smf->tracks[r.smfTrack].events) {
+            if (ev.isChannel() && ev.typeNibble() == 0xC && ev.data0 == r.fromProgram
+                && (anyChannel || ev.channel() == r.channel))
+                ev.data0 = r.toProgram;
+        }
+    }
+}

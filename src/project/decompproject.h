@@ -17,13 +17,17 @@ struct SongCfg {
 };
 
 struct SongInfo {
-    int id = -1;             // index in song_table.inc == numeric song ID
+    int id = -1;             // index in the project's song vector; equals the
+                             // numeric song ID only when registered
     QString label;           // e.g. "mus_abandoned_ship"
     QString constant;        // e.g. "MUS_ABANDONED_SHIP" (from songs.h, if matched)
     QString player;          // e.g. "MUSIC_PLAYER_BGM"
     QString midPath;         // absolute path to the .mid source, if it exists
     bool hasMid = false;
     bool hasCfg = false;
+    // false: the .mid exists in sound/songs/midi/ but song_table.inc has no
+    // entry yet — a song mid-onboarding, pending its registration checklist.
+    bool registered = true;
     SongCfg cfg;
 
     bool isPlayable() const { return hasMid; }
@@ -52,10 +56,15 @@ public:
     // Refreshes a song's cached cfg after porydaw writes its midi.cfg line.
     void setSongCfg(int id, const SongCfg &cfg);
 
+    // Re-reads the project's music data (after the wizard creates a song or
+    // the user pastes registration snippets). Song ids are reassigned.
+    bool reload(QString *error);
+
 private:
     bool parseSongTable(QString *error);
     void parseSongConstants();
     void parseMidiCfg();
+    void discoverUnregisteredSongs();
 
     QString m_root;
     QVector<SongInfo> m_songs;

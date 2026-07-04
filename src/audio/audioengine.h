@@ -75,6 +75,16 @@ public:
     // previous one, so at most one preview note sounds at a time.
     void previewNote(uint8_t track, uint8_t key, uint8_t velocity);
 
+    // Hot: audition a voicegroup entry by program number (SPEC §6.1 voicegroup
+    // browser). Runs on a second engine instance (SPEC §3) so the program
+    // change never disturbs playback track state. velocity 0 releases.
+    void previewVoice(uint8_t voice, uint8_t key, uint8_t velocity);
+
+    // Cold: point voice previews at a different voicegroup (the import
+    // wizard's mapping page). NOT owned — the caller must call this again
+    // with nullptr (restoring the song's voicegroup) before freeing it.
+    void setPreviewVoicegroup(LoadedVoiceGroup *voicegroup);
+
     bool songLoaded() const { return m_timeline != nullptr; }
     const MidiTimeline *timeline() const { return m_timeline.get(); }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
@@ -103,6 +113,9 @@ private:
     void applyTransportTransition();
     void applyMuteTransition();
     void applyPreviewNote();
+    void applyPreviewVoice();
+    void resetPreviewEngine();
+    ToneData *previewVoices() const;
     uint32_t effectiveMuteMask() const;
 
     // Device / engine (audio thread reads; cold ops swap while stopped)
@@ -115,6 +128,9 @@ private:
     std::unique_ptr<MidiTimeline> m_timeline;
     LoadedVoiceGroup *m_voicegroup = nullptr;
     SongSettings m_settings;
+    // Audition instance: voice previews only, mixed on top of the main engine.
+    std::unique_ptr<M4AEngine> m_previewEngine;
+    LoadedVoiceGroup *m_previewOverrideVg = nullptr; // not owned
 
     // Hot control state (UI writes, audio thread reads)
     std::atomic<int> m_transport{static_cast<int>(Transport::Stopped)};
@@ -126,6 +142,9 @@ private:
     // are seen by the audio thread.
     std::atomic<uint32_t> m_previewCmd{0};
     uint8_t m_previewGen = 0; // UI thread only
+    // Voice-preview command: generation<<32 | voice<<16 | key<<8 | velocity.
+    std::atomic<uint64_t> m_previewVoiceCmd{0};
+    uint8_t m_previewVoiceGen = 0; // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -138,10 +157,14 @@ private:
     uint32_t m_appliedPreview = 0;
     int m_previewTrack = -1; // sounding preview note, -1 when none
     int m_previewKey = -1;
+    uint64_t m_appliedPreviewVoice = 0;
+    int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     TimelinePlayer m_player;
 
     // Scratch deinterleave buffers (allocated in init)
     std::unique_ptr<float[]> m_bufL;
     std::unique_ptr<float[]> m_bufR;
+    std::unique_ptr<float[]> m_pvL; // voice-preview engine mix
+    std::unique_ptr<float[]> m_pvR;
     uint32_t m_bufCapacity = 0;
 };
