@@ -38,6 +38,37 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   chase of CC/program state at seek would fix that).
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
+- **Right-click drag for rubber-band selection.** Multi-select is currently
+  left-drag on empty space (Drag::Band in songview.cpp); move it to
+  right-drag, freeing plain left-click for note drawing. (Right-click today
+  deletes/context-acts on notes — the two need reconciling, e.g. right-click
+  = context/delete, right-drag = band.)
+- **Left-click draws a note, hold-and-drag sizes it.** Drawing currently
+  requires a double-click (mouseDoubleClickEvent), and the new note's length
+  is fixed until a separate right-edge resize. Reaper/FL-style instead:
+  left-press on empty space creates the note at the snapped tick, and
+  dragging before release sets its duration (audition already previews
+  during draw).
+- **Resize notes from the left edge too.** Only the right edge is a resize
+  handle (nearRightEdge, songview.cpp:423,457); a left-edge handle should
+  move the note-on while pinning the note-off (adjusting tick + duration
+  together).
+- **Overhaul mouse-wheel behavior.** Today on the roll: plain scroll =
+  vertical note-range scroll, Shift = horizontal scroll, Ctrl = horizontal
+  zoom (wheelEvent, songview.cpp). Wanted, Reaper-style: (A) plain scroll
+  over the notes area = horizontal zoom (ruler granularity); (B) Ctrl+scroll
+  over the notes area = vertical zoom — row/key height, the analog of
+  Reaper's track-height scaling; (C) plain scroll over the piano-key column
+  keeps today's note-range scrolling. Horizontal scroll stays on Shift (and
+  trackpad horizontal delta).
+- **Finer-grained automation editing + multi-point drag.** Lane edits are
+  one point per click and snap to the clock grid; there's no way to sweep a
+  curve. Add freehand drag across a lane writing a stream of points (thinned
+  to the grid, replacing overwritten ones — one undo command for the whole
+  gesture), plus a line-segment drag for ramps. Also allow finer time
+  placement when the grid is coarse (the document supports any tick;
+  mid2agb quantizes to clocks on compile, so sub-clock points are mostly
+  useful with -X / higher divisions).
 - **Sub-beat ruler/grid subdivisions.** SongView::forEachGridLine enumerates
   beats only, so the ruler ticks and the roll's vertical grid bottom out at
   quarter notes at any zoom — even though editing snaps to the finer
