@@ -91,6 +91,14 @@ public:
     // Edits. Each call pushes one undoable command and emits documentChanged.
     void addNote(int engineTrack, uint64_t tick, uint8_t key, uint32_t duration,
                  uint8_t velocity);
+    // Batch insert (clipboard paste): all notes land in one undoable command.
+    struct NewNote {
+        uint64_t tick;
+        uint8_t key;
+        uint32_t duration;
+        uint8_t velocity;
+    };
+    void addNotes(int engineTrack, const std::vector<NewNote> &notes);
     void deleteNotes(const std::vector<DocNote> &notes);
     // Move by a tick/key delta (note lengths preserved).
     void moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey);

@@ -6,6 +6,7 @@
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenu>
@@ -592,6 +593,29 @@ protected:
     void keyPressEvent(QKeyEvent *event) override
     {
         SongDocument *doc = m_sv->document();
+        if (doc
+            && (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::Cut))) {
+            const std::vector<DocNote> notes = resolveSelection();
+            if (!notes.empty()) {
+                copyNotes(notes);
+                if (event->matches(QKeySequence::Cut)) {
+                    doc->deleteNotes(notes);
+                    m_sv->clearSelection();
+                }
+            }
+            event->accept();
+            return;
+        }
+        if (doc && event->matches(QKeySequence::Paste)) {
+            pasteAtPlayhead();
+            event->accept();
+            return;
+        }
+        if (doc && event->matches(QKeySequence::SelectAll)) {
+            selectAllNotes();
+            event->accept();
+            return;
+        }
         if (doc && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
             const std::vector<DocNote> notes = resolveSelection();
             if (!notes.empty()) {
@@ -688,6 +712,53 @@ private:
         return notes;
     }
 
+    // Fills the clipboard with the notes, ticks relative to the block start.
+    void copyNotes(const std::vector<DocNote> &notes)
+    {
+        uint64_t base = UINT64_MAX;
+        for (const DocNote &note : notes)
+            base = std::min(base, note.tick);
+        std::vector<SongView::ClipNote> &clip = m_sv->noteClipboard();
+        clip.clear();
+        for (const DocNote &note : notes)
+            clip.push_back({uint32_t(note.tick - base), note.key,
+                            note.duration ? note.duration
+                                          : uint32_t(m_sv->gridTicks()),
+                            note.velocity});
+        m_sv->announce(SongView::tr("Copied %n note(s)", nullptr, int(notes.size())));
+    }
+
+    // Pastes the clipboard onto the selected track, anchored at the playhead
+    // (snapped to the grid), and selects the pasted notes.
+    void pasteAtPlayhead()
+    {
+        SongDocument *doc = m_sv->document();
+        const std::vector<SongView::ClipNote> &clip = m_sv->noteClipboard();
+        if (!doc || clip.empty())
+            return;
+        const uint64_t base = m_sv->snapTick(m_sv->playheadTick());
+        std::vector<SongDocument::NewNote> notes;
+        std::vector<SongView::NoteId> ids;
+        for (const SongView::ClipNote &cn : clip) {
+            const uint64_t tick = base + cn.relTick;
+            notes.push_back({tick, cn.key, cn.duration, cn.velocity});
+            ids.push_back({uint32_t(tick), cn.key});
+        }
+        doc->addNotes(m_sv->selectedTrack(), notes);
+        m_sv->setSelection(std::move(ids));
+        m_sv->announce(SongView::tr("Pasted %n note(s)", nullptr, int(clip.size())));
+    }
+
+    void selectAllNotes()
+    {
+        std::vector<SongView::NoteId> ids;
+        for (const ViewNote &note : m_sv->model().notes) {
+            if (note.track == m_sv->selectedTrack())
+                ids.push_back({note.startTick, note.key});
+        }
+        m_sv->setSelection(std::move(ids));
+    }
+
     void drawNotes(QPainter &p, const SongViewModel &model, int selected, bool ghostPass)
     {
         const int keyH = m_sv->keyHeight();
@@ -766,9 +837,19 @@ private:
         QMenu menu(this);
         QAction *velocity = menu.addAction(
             SongView::tr("Set velocity… (%1)").arg(notes.front().velocity));
+        QAction *copy = menu.addAction(SongView::tr("Copy"));
+        copy->setShortcut(QKeySequence::Copy);
+        QAction *cut = menu.addAction(SongView::tr("Cut"));
+        cut->setShortcut(QKeySequence::Cut);
         QAction *del = menu.addAction(SongView::tr("Delete"));
         QAction *chosen = menu.exec(mapToGlobal(pos));
-        if (chosen == velocity) {
+        if (chosen == copy) {
+            copyNotes(notes);
+        } else if (chosen == cut) {
+            copyNotes(notes);
+            doc->deleteNotes(notes);
+            m_sv->clearSelection();
+        } else if (chosen == velocity) {
             bool ok = false;
             const int v = QInputDialog::getInt(
                 this, SongView::tr("Note velocity"),
@@ -1724,6 +1805,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
     m_emptyLanes.clear();
     m_selection.clear();
+    m_noteClipboard.clear();
     m_muteMask = 0;
     m_soloMask = 0;
     emit muteMaskChanged(0);

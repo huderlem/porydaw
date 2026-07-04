@@ -382,6 +382,19 @@ void SongDocument::addNote(int engineTrack, uint64_t tick, uint8_t key, uint32_t
     pushEdit(tr("add note"), std::move(ops));
 }
 
+void SongDocument::addNotes(int engineTrack, const std::vector<NewNote> &notes)
+{
+    const int smfTrack = smfTrackFor(engineTrack);
+    if (smfTrack < 0 || notes.empty())
+        return;
+    const uint8_t channel = channelFor(engineTrack);
+    std::vector<EditOp> ops;
+    for (const NewNote &note : notes)
+        appendNoteInsertOps(ops, smfTrack, channel, note.tick, note.key, note.duration,
+                            note.velocity);
+    pushEdit(tr("add %n note(s)", nullptr, int(notes.size())), std::move(ops));
+}
+
 void SongDocument::deleteNotes(const std::vector<DocNote> &notes)
 {
     if (notes.empty())

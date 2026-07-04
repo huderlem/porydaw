@@ -5,8 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Copy/paste of notes** (and paste at playhead), plus Ctrl+A select-all on
-  the selected track.
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
   visibility, last edit position. Specced but not implemented; cosmetic only.
 - **Reaper-style transport: edit cursor + spacebar play/pause toggle.**

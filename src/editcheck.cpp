@@ -133,6 +133,28 @@ int runEditCheck(const QString &projectRoot)
             if (ok)
                 doc.deleteNotes({note});
 
+            // Batch add (clipboard paste): both notes in one undoable command.
+            if (ok) {
+                doc.addNotes(track, {{base + step * 20, 64, step * 2, 96},
+                                     {base + step * 22, 67, step * 2, 96}});
+                mutateAndCheck("events unsorted after addNotes");
+                DocNote a, b;
+                if (!doc.findNote(track, base + step * 20, 64, &a)
+                    || !doc.findNote(track, base + step * 22, 67, &b)) {
+                    fail("batch-added notes not found");
+                    ok = false;
+                } else {
+                    doc.undoStack()->undo();
+                    if (doc.findNote(track, base + step * 20, 64, &a)
+                        || doc.findNote(track, base + step * 22, 67, &b)) {
+                        fail("addNotes was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
             // Voice ops: add, value-only modify (must not reorder within the
             // tick), move to a new tick, delete.
             if (ok) {

@@ -126,6 +126,18 @@ public:
     void setSelection(std::vector<NoteId> ids);
     void clearSelection();
 
+    // App-internal note clipboard (copy/paste in the roll). Ticks are offsets
+    // from the copied block's start so paste can re-anchor at the playhead.
+    // Survives track switches and document rebuilds; cleared on song swap
+    // (another song's ticks-per-beat may differ).
+    struct ClipNote {
+        uint32_t relTick;
+        uint8_t key;
+        uint32_t duration;
+        uint8_t velocity;
+    };
+    std::vector<ClipNote> &noteClipboard() { return m_noteClipboard; }
+
     // "velocity 93 → plays 96 · length 25 → 24 clocks" for the status bar.
     void announceNote(const ViewNote &note);
 
@@ -134,6 +146,9 @@ public:
     {
         emit auditionNote(track, key, velocity);
     }
+
+    // Child-widget entry point for the statusMessage signal.
+    void announce(const QString &text) { emit statusMessage(text); }
 
     // Interaction from children.
     void zoomAroundContentX(double factor, int anchorContentX);
@@ -177,6 +192,7 @@ private:
     uint32_t m_muteMask = 0;
     uint32_t m_soloMask = 0;
     std::vector<NoteId> m_selection;
+    std::vector<ClipNote> m_noteClipboard;
     std::vector<std::pair<int, uint8_t>> m_emptyLanes; // (track, cc), unsorted
 
     songview::TimeRuler *m_ruler = nullptr;
