@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <cstdint>
 #include <functional>
+#include <utility>
 #include <vector>
 
 #include "core/miditimeline.h"
@@ -60,6 +61,13 @@ public:
     // Voicegroup swap after a -G settings change (labels only; may be null
     // while the audio engine frees the old one).
     void setVoicegroup(const LoadedVoiceGroup *voicegroup);
+
+    // User-added automation lanes with no events yet (SPEC §6.1 "addable from
+    // the m4a parameter list"). They live in view state — the model derives
+    // lanes from events — and survive document rebuilds until the song is
+    // swapped; once the lane gets its first point the model carries it.
+    void addEmptyLane(int track, uint8_t cc);
+    void removeEmptyLane(int track, uint8_t cc);
 
     // --- shared state for the child widgets ---
     const MidiTimeline *timeline() const { return m_timeline; }
@@ -142,6 +150,7 @@ private:
     void setHScroll(int px);
     void updateScrollbars();
     void rebuildAfterSongChange();
+    void mergeEmptyLanes();
 
     const MidiTimeline *m_timeline = nullptr;
     const LoadedVoiceGroup *m_voicegroup = nullptr;
@@ -158,6 +167,7 @@ private:
     uint32_t m_muteMask = 0;
     uint32_t m_soloMask = 0;
     std::vector<NoteId> m_selection;
+    std::vector<std::pair<int, uint8_t>> m_emptyLanes; // (track, cc), unsorted
 
     songview::TimeRuler *m_ruler = nullptr;
     songview::TrackHeaderPanel *m_headers = nullptr;

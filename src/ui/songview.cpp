@@ -29,6 +29,7 @@ namespace {
 
 constexpr int kRulerH = 26;
 constexpr int kLaneH = 48;
+constexpr int kAddLaneH = 20;
 constexpr int kLanesAreaH = 150;
 constexpr int kStripH = 24;
 constexpr int kTrackRowH = 46;
@@ -780,7 +781,8 @@ public:
                 if (lane.track == selected)
                     m_rows.push_back({Row::Lane, &lane});
         }
-        setFixedHeight(std::max(kLaneH, int(m_rows.size()) * kLaneH));
+        const int addH = m_sv->timeline() && m_sv->document() ? kAddLaneH : 0;
+        setFixedHeight(std::max(kLaneH, int(m_rows.size()) * kLaneH + addH));
         update();
     }
 
@@ -794,6 +796,13 @@ protected:
 
         for (size_t i = 0; i < m_rows.size(); i++)
             paintRow(p, m_rows[i], QRect(0, int(i) * kLaneH, width(), kLaneH));
+
+        if (m_sv->document()) {
+            const QRect strip = addLaneRect();
+            p.setPen(palette().color(QPalette::Highlight));
+            p.drawText(strip.adjusted(8, 0, -8, 0), Qt::AlignLeft | Qt::AlignVCenter,
+                       SongView::tr("+ Add lane"));
+        }
 
         // Point-drag preview: marker plus the value it will commit to.
         if (m_dragRow >= 0 && m_dragRow < int(m_rows.size())) {
@@ -827,12 +836,29 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         SongDocument *doc = m_sv->document();
-        if (!doc || event->pos().x() < kGutterW)
+        if (!doc)
             return;
+        if (event->button() == Qt::LeftButton
+            && addLaneRect().contains(event->pos())) {
+            showAddLaneMenu(event->globalPosition().toPoint());
+            return;
+        }
         const int ri = event->pos().y() / kLaneH;
         if (ri < 0 || ri >= int(m_rows.size()))
             return;
         const Row &row = m_rows[ri];
+        if (event->pos().x() < kGutterW) {
+            // Gutter: a lane that has no points yet exists only as view
+            // state, so offer to take it back out.
+            if (event->button() == Qt::RightButton && row.kind == Row::Lane
+                && row.lane->points.empty()) {
+                QMenu menu;
+                QAction *remove = menu.addAction(SongView::tr("Remove empty lane"));
+                if (menu.exec(event->globalPosition().toPoint()) == remove)
+                    m_sv->removeEmptyLane(row.lane->track, row.lane->cc);
+            }
+            return;
+        }
         uint8_t cc;
         int track;
         if (!rowTarget(row, &cc, &track))
@@ -891,6 +917,39 @@ private:
         enum Kind { Tempo, Voice, Lane } kind;
         const AutoLane *lane;
     };
+
+    QRect addLaneRect() const
+    {
+        return QRect(0, int(m_rows.size()) * kLaneH, width(), kAddLaneH);
+    }
+
+    // Menu of §4.2 audible parameters without a lane on the selected track.
+    void showAddLaneMenu(const QPoint &globalPos)
+    {
+        const int track = m_sv->selectedTrack();
+        QMenu menu;
+        static constexpr uint8_t kAudibleCcs[] = {0x01, 0x07, 0x0A, 0x14, 0x15,
+                                                  LANE_CC_BEND};
+        for (uint8_t cc : kAudibleCcs) {
+            if (m_sv->model().findLane(track, cc))
+                continue;
+            QString label;
+            if (cc == LANE_CC_BEND) {
+                label = SongView::tr("Pitch bend (BEND)");
+            } else {
+                const M4aCcInfo info = m4aClassifyCc(cc);
+                label = QStringLiteral("%1 (%2)").arg(QLatin1String(info.display),
+                                                      QLatin1String(info.name));
+            }
+            menu.addAction(label)->setData(int(cc));
+        }
+        if (menu.isEmpty())
+            menu.addAction(SongView::tr("All parameters already have lanes"))
+                ->setEnabled(false);
+        QAction *chosen = menu.exec(globalPos);
+        if (chosen && chosen->data().isValid())
+            m_sv->addEmptyLane(track, uint8_t(chosen->data().toInt()));
+    }
 
     // Document target of an editable row; false for the voice row.
     bool rowTarget(const Row &row, uint8_t *cc, int *track) const
@@ -1015,6 +1074,10 @@ private:
                            .arg(points->size())
                            .arg(minV)
                            .arg(maxV));
+        } else if (points && row.kind == Row::Lane) {
+            p.setPen(palette().color(QPalette::PlaceholderText));
+            p.drawText(QRect(8, r.top() + 20, kGutterW - 16, 14), Qt::AlignLeft,
+                       SongView::tr("empty · click to add points"));
         }
 
         p.setClipRect(plot);
@@ -1383,6 +1446,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_timeline = timeline;
     m_voicegroup = voicegroup;
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
+    m_emptyLanes.clear();
     m_selection.clear();
     m_muteMask = 0;
     m_soloMask = 0;
@@ -1430,6 +1494,7 @@ void SongView::updateSong(const MidiTimeline *timeline)
 {
     m_timeline = timeline;
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
+    mergeEmptyLanes();
 
     if (timeline && !timeline->tracks[m_selectedTrack].used) {
         // The edited track disappeared (e.g. undo of its only events).
@@ -1465,6 +1530,63 @@ void SongView::setDocument(SongDocument *document)
 {
     m_document = document;
     m_selection.clear();
+    m_lanes->rebuildRows(); // the "+ Add lane" strip follows editability
+}
+
+void SongView::addEmptyLane(int track, uint8_t cc)
+{
+    if (track < 0 || track > 15 || !m_timeline)
+        return;
+    const std::pair<int, uint8_t> key(track, cc);
+    if (std::find(m_emptyLanes.begin(), m_emptyLanes.end(), key) == m_emptyLanes.end())
+        m_emptyLanes.push_back(key);
+    mergeEmptyLanes();
+    m_lanes->rebuildRows();
+}
+
+void SongView::removeEmptyLane(int track, uint8_t cc)
+{
+    m_emptyLanes.erase(std::remove(m_emptyLanes.begin(), m_emptyLanes.end(),
+                                   std::pair<int, uint8_t>(track, cc)),
+                       m_emptyLanes.end());
+    for (auto it = m_model.lanes.begin(); it != m_model.lanes.end(); ++it) {
+        if (it->track == track && it->cc == cc && it->points.empty()) {
+            m_model.lanes.erase(it);
+            break;
+        }
+    }
+    m_lanes->rebuildRows();
+}
+
+void SongView::mergeEmptyLanes()
+{
+    bool added = false;
+    for (const std::pair<int, uint8_t> &key : m_emptyLanes) {
+        if (m_model.findLane(key.first, key.second))
+            continue;
+        AutoLane lane;
+        lane.track = uint8_t(key.first);
+        lane.cc = key.second;
+        if (key.second == LANE_CC_BEND) {
+            lane.lane = M4aLane::PitchBend;
+            lane.name = m4aLaneName(M4aLane::PitchBend);
+        } else {
+            const M4aCcInfo info = m4aClassifyCc(key.second);
+            lane.lane = info.lane;
+            lane.name = QString::fromLatin1(info.display);
+        }
+        m_model.lanes.push_back(std::move(lane));
+        added = true;
+    }
+    if (added) {
+        // Same order buildSongViewModel establishes.
+        std::stable_sort(m_model.lanes.begin(), m_model.lanes.end(),
+                         [](const AutoLane &a, const AutoLane &b) {
+                             if (a.track != b.track)
+                                 return a.track < b.track;
+                             return a.cc < b.cc;
+                         });
+    }
 }
 
 void SongView::setVoicegroup(const LoadedVoiceGroup *voicegroup)
