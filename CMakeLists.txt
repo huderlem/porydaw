@@ -33,8 +33,25 @@ qt_add_executable(porydaw
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/audio/audioengine.cpp
+    src/audio/audioengine.h
+    src/audio/miniaudio_impl.c
+    src/core/miditimeline.cpp
+    src/core/miditimeline.h
+    src/core/timelineplayer.cpp
+    src/core/timelineplayer.h
+    src/project/decompproject.cpp
+    src/project/decompproject.h
+)
+target_include_directories(porydaw PRIVATE
+    src
+    ${PORYAAAA_DIR}/third_party
 )
 target_link_libraries(porydaw PRIVATE Qt6::Widgets poryaaaa_engine)
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(porydaw PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
 
 if(WIN32)
     set_target_properties(porydaw PROPERTIES WIN32_EXECUTABLE TRUE)
@@ -42,3 +59,12 @@ endif()
 if(APPLE)
     set_target_properties(porydaw PROPERTIES MACOSX_BUNDLE TRUE)
 endif()
+
+# ---- Offline render CLI (development/testing: parity vs poryaaaa_render) ----
+add_executable(porydaw_render_cli
+    tools/porydaw_render_cli.cpp
+    src/core/miditimeline.cpp
+    src/core/timelineplayer.cpp
+)
+target_include_directories(porydaw_render_cli PRIVATE src)
+target_link_libraries(porydaw_render_cli PRIVATE Qt6::Core poryaaaa_engine)
