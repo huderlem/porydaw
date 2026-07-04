@@ -38,6 +38,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   chase of CC/program state at seek would fix that).
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
+- **Sub-beat ruler/grid subdivisions.** SongView::forEachGridLine enumerates
+  beats only, so the ruler ticks and the roll's vertical grid bottom out at
+  quarter notes at any zoom — even though editing snaps to the finer
+  ticksPerClock grid. Add zoom-adaptive subdivisions (8th/16th… down to the
+  mid2agb clock grid, the real snap resolution) fading in the way beat lines
+  already gate on pxPerBeat >= 10, with lighter strokes per level.
 
 ## M3 onboarding polish
 
