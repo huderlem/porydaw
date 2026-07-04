@@ -57,6 +57,10 @@ private:
     void updateVoicegroupBrowser();
     // Prompts to save a dirty document; false = user cancelled the action.
     bool maybeSaveSong();
+    // Sidecar view state (SPEC §4.4): written whenever the loaded song is
+    // let go (song switch, project switch, app close). Cosmetic; silent on
+    // failure.
+    void saveViewState();
     LoadedVoiceGroup *loadVoicegroupFor(const SongCfg &cfg, QString *tried);
     // Starts (or resumes) playback; from Stopped, seeks to the edit cursor
     // first so playback begins there.

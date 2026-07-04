@@ -71,6 +71,8 @@ qt_add_executable(porydaw
     src/ui/songviewmodel.h
     src/ui/songview.cpp
     src/ui/songview.h
+    src/ui/viewsidecar.cpp
+    src/ui/viewsidecar.h
 )
 target_include_directories(porydaw PRIVATE
     src

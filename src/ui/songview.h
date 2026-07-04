@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QColor>
+#include <QHash>
+#include <QList>
 #include <QWidget>
 #include <cstdint>
 #include <functional>
@@ -62,6 +64,27 @@ public:
     // Voicegroup swap after a -G settings change (labels only; may be null
     // while the audio engine frees the old one).
     void setVoicegroup(const LoadedVoiceGroup *voicegroup);
+
+    // Per-song sidecar view state (SPEC §4.4): the cosmetic state worth
+    // restoring when the song is reopened. Everything is clamped/validated
+    // on apply, so a stale or hand-edited sidecar can't wedge the view.
+    struct ViewState {
+        bool valid = false;
+        double pxPerBeat = 32.0;  // horizontal zoom (ticks-per-beat neutral)
+        int keyHeight = 9;        // vertical roll zoom
+        int scrollPx = 0;
+        int scrollY = 0;
+        int selectedTrack = 0;
+        uint64_t editCursorTick = 0;
+        int laneHeight = 48;      // shared automation row height
+        QHash<QString, int> laneHeights; // per-row overrides (AutomationArea keys)
+        QList<int> splitterSizes; // roll pane, lanes pane
+        std::vector<std::pair<int, uint8_t>> emptyLanes; // (track, cc)
+    };
+    ViewState viewState() const;
+    // Call after setSong (and setDocument); a default-constructed (invalid)
+    // state is a no-op.
+    void applyViewState(const ViewState &state);
 
     // User-added automation lanes with no events yet (SPEC §6.1 "addable from
     // the m4a parameter list"). They live in view state — the model derives

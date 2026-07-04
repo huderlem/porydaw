@@ -488,6 +488,14 @@ protected:
         if (!m_sv->timeline())
             return;
 
+        if (event->button() == Qt::MiddleButton) {
+            // Reaper-style pan: drag scrolls the roll on both axes.
+            m_panning = true;
+            m_panPos = event->globalPosition().toPoint();
+            setCursor(Qt::ClosedHandCursor);
+            return;
+        }
+
         // Keyboard column: audition the clicked key on the selected track.
         if (event->pos().x() < kKeyboardW) {
             if (event->button() == Qt::LeftButton) {
@@ -587,6 +595,14 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
+        if (m_panning) {
+            const QPoint pos = event->globalPosition().toPoint();
+            const QPoint d = pos - m_panPos;
+            m_panPos = pos;
+            m_sv->scrollByPx(-d.x());
+            m_sv->scrollRollBy(-d.y());
+            return;
+        }
         m_curPos = event->pos();
         if (m_rightPress && m_drag == Drag::None
             && (event->pos() - m_pressPos).manhattanLength()
@@ -696,6 +712,11 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
+        if (event->button() == Qt::MiddleButton && m_panning) {
+            m_panning = false;
+            setCursor(Qt::ArrowCursor);
+            return;
+        }
         if (m_kbdKey >= 0) {
             m_sv->audition(m_sv->selectedTrack(), m_kbdKey, 0);
             m_kbdKey = -1;
@@ -1143,6 +1164,8 @@ private:
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
     bool m_auditioned = false; // a drag/draw preview note is sounding
     uint8_t m_lastVelocity = 100;
+    bool m_panning = false;    // middle-drag pan
+    QPoint m_panPos;           // last pan sample, global coords
 };
 
 // ----------------------------------------------------------- AutomationArea
@@ -1154,12 +1177,29 @@ public:
         : QWidget(nullptr), m_sv(sv), m_scroll(scroll) // parented by the scroll area
     {
         setMinimumHeight(kLaneH);
+        setMouseTracking(true); // divider hover cursor
+    }
+
+    // View-state plumbing for the .porydaw sidecar: the shared row height
+    // plus the individually-resized rows (keyed by rowKey). laneH <= 0
+    // resets to the default.
+    int laneHeight() const { return m_laneH; }
+    const QHash<QString, int> &rowHeightOverrides() const { return m_rowHeights; }
+    void setViewHeights(int laneH, const QHash<QString, int> &overrides)
+    {
+        m_laneH = laneH > 0 ? std::clamp(laneH, kMinLaneH, kMaxLaneH) : kLaneH;
+        m_rowHeights.clear();
+        for (auto it = overrides.begin(); it != overrides.end(); ++it)
+            m_rowHeights.insert(it.key(), std::clamp(it.value(), kMinLaneH, kMaxLaneH));
+        applyHeight();
+        update();
     }
 
     void rebuildRows()
     {
         m_rows.clear();
         m_dragRow = -1;
+        m_resizeRow = -1;
         m_gesture = Gesture::None;
         m_sweep.clear();
         if (m_sv->timeline()) {
@@ -1193,8 +1233,12 @@ protected:
         if (!m_sv->timeline())
             return;
 
-        for (size_t i = 0; i < m_rows.size(); i++)
-            paintRow(p, m_rows[i], QRect(0, int(i) * m_laneH, width(), m_laneH));
+        int rowY = 0;
+        for (size_t i = 0; i < m_rows.size(); i++) {
+            const int h = rowHeight(m_rows[i]);
+            paintRow(p, m_rows[i], QRect(0, rowY, width(), h));
+            rowY += h;
+        }
 
         if (m_sv->document()) {
             const QRect strip = addLaneRect();
@@ -1208,16 +1252,16 @@ protected:
         if (m_dragRow >= 0 && m_dragRow < int(m_rows.size())) {
             int minV, maxV;
             rowRange(m_rows[m_dragRow], &minV, &maxV);
-            const int top = m_dragRow * m_laneH + 5;
-            const int bottom = (m_dragRow + 1) * m_laneH - 1 - 4;
+            const int top = rowTop(m_dragRow) + 5;
+            const int bottom = rowBottom(m_dragRow) - 1 - 4;
             auto valueY = [&](int v) {
                 return bottom - (v - minV) * (bottom - top) / std::max(1, maxV - minV);
             };
             auto tickX = [&](uint64_t t) {
                 return kGutterW + m_sv->contentX(double(t));
             };
-            p.setClipRect(
-                QRect(kGutterW, m_dragRow * m_laneH, width() - kGutterW, m_laneH));
+            p.setClipRect(QRect(kGutterW, rowTop(m_dragRow), width() - kGutterW,
+                                rowHeight(m_rows[m_dragRow])));
             p.setPen(QPen(palette().color(QPalette::WindowText), 1));
             p.setBrush(Qt::NoBrush);
             if (m_gesture == Gesture::Sweep && m_sweep.size() > 1) {
@@ -1269,6 +1313,26 @@ protected:
 
     void mousePressEvent(QMouseEvent *event) override
     {
+        if (event->button() == Qt::MiddleButton) {
+            // Reaper-style pan: drag scrolls the timeline and the lane list.
+            // Tracked in global coords — the vertical scroll moves this
+            // widget under the cursor, so local deltas would double-count.
+            m_panning = true;
+            m_panPos = event->globalPosition().toPoint();
+            setCursor(Qt::ClosedHandCursor);
+            return;
+        }
+        const int boundary = event->button() == Qt::LeftButton
+                                 ? rowBoundaryAt(event->pos().y())
+                                 : -1;
+        if (boundary >= 0) {
+            // Dragging the divider under a row gives it an individual
+            // height, overriding the shared Ctrl+wheel height.
+            m_resizeRow = boundary;
+            m_resizeOrigH = rowHeight(m_rows[boundary]);
+            m_resizePressY = event->pos().y();
+            return;
+        }
         SongDocument *doc = m_sv->document();
         if (!doc)
             return;
@@ -1277,8 +1341,8 @@ protected:
             showAddLaneMenu(event->globalPosition().toPoint());
             return;
         }
-        const int ri = event->pos().y() / m_laneH;
-        if (ri < 0 || ri >= int(m_rows.size()))
+        const int ri = rowIndexAt(event->pos().y());
+        if (ri < 0)
             return;
         const Row &row = m_rows[ri];
         if (event->pos().x() < kGutterW) {
@@ -1339,8 +1403,33 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
-        if (m_dragRow < 0)
+        if (m_panning) {
+            const QPoint pos = event->globalPosition().toPoint();
+            const QPoint d = pos - m_panPos;
+            m_panPos = pos;
+            m_sv->scrollByPx(-d.x());
+            if (m_scroll) {
+                QScrollBar *vbar = m_scroll->verticalScrollBar();
+                vbar->setValue(vbar->value() - d.y());
+            }
             return;
+        }
+        if (m_resizeRow >= 0 && m_resizeRow < int(m_rows.size())) {
+            const int newH =
+                std::clamp(m_resizeOrigH + event->pos().y() - m_resizePressY,
+                           kMinLaneH, kMaxLaneH);
+            if (newH != rowHeight(m_rows[m_resizeRow])) {
+                m_rowHeights.insert(rowKey(m_rows[m_resizeRow]), newH);
+                applyHeight();
+                update();
+            }
+            return;
+        }
+        if (m_dragRow < 0) {
+            setCursor(rowBoundaryAt(event->pos().y()) >= 0 ? Qt::SplitVCursor
+                                                           : Qt::ArrowCursor);
+            return;
+        }
         const bool fine = event->modifiers() & Qt::AltModifier;
         updateDrag(event->pos(), fine);
         if (m_gesture == Gesture::Sweep)
@@ -1350,6 +1439,15 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
+        if (event->button() == Qt::MiddleButton && m_panning) {
+            m_panning = false;
+            setCursor(Qt::ArrowCursor);
+            return;
+        }
+        if (event->button() == Qt::LeftButton && m_resizeRow >= 0) {
+            m_resizeRow = -1;
+            return;
+        }
         if (event->button() != Qt::LeftButton || m_dragRow < 0
             || m_dragRow >= int(m_rows.size()))
             return;
@@ -1407,9 +1505,68 @@ private:
         const AutoLane *lane;
     };
 
+    // Per-row geometry: individually-resized rows (divider drag) override
+    // the shared m_laneH. Keys survive track switches, so each lane keeps
+    // its height when the user comes back to the track.
+    QString rowKey(const Row &row) const
+    {
+        switch (row.kind) {
+        case Row::Tempo:
+            return QStringLiteral("tempo");
+        case Row::Voice:
+            return QStringLiteral("voice:%1").arg(m_sv->selectedTrack());
+        case Row::Lane:
+            return QStringLiteral("cc:%1:%2").arg(row.lane->track).arg(row.lane->cc);
+        }
+        return QString();
+    }
+
+    int rowHeight(const Row &row) const
+    {
+        const auto it = m_rowHeights.constFind(rowKey(row));
+        return it != m_rowHeights.constEnd() ? it.value() : m_laneH;
+    }
+
+    // Top of row `index`; index == m_rows.size() gives the total height.
+    int rowTop(int index) const
+    {
+        int y = 0;
+        for (int i = 0; i < index && i < int(m_rows.size()); i++)
+            y += rowHeight(m_rows[i]);
+        return y;
+    }
+
+    int rowBottom(int index) const { return rowTop(index) + rowHeight(m_rows[index]); }
+
+    int rowIndexAt(int y) const
+    {
+        if (y < 0)
+            return -1;
+        int bottom = 0;
+        for (size_t i = 0; i < m_rows.size(); i++) {
+            bottom += rowHeight(m_rows[i]);
+            if (y < bottom)
+                return int(i);
+        }
+        return -1;
+    }
+
+    // Divider hit test: the bottom edge of row i (±3 px) starts an
+    // individual-height drag for that row.
+    int rowBoundaryAt(int y) const
+    {
+        int bottom = 0;
+        for (size_t i = 0; i < m_rows.size(); i++) {
+            bottom += rowHeight(m_rows[i]);
+            if (std::abs(y - bottom) <= 3)
+                return int(i);
+        }
+        return -1;
+    }
+
     QRect addLaneRect() const
     {
-        return QRect(0, int(m_rows.size()) * m_laneH, width(), kAddLaneH);
+        return QRect(0, rowTop(int(m_rows.size())), width(), kAddLaneH);
     }
 
     void applyHeight()
@@ -1417,12 +1574,13 @@ private:
         // Minimum, not fixed: the scroll area stretches the widget to fill
         // its viewport when the user drags the lanes area taller.
         const int addH = m_sv->timeline() && m_sv->document() ? kAddLaneH : 0;
-        setMinimumHeight(std::max(m_laneH, int(m_rows.size()) * m_laneH + addH));
+        setMinimumHeight(std::max(m_laneH, rowTop(int(m_rows.size())) + addH));
     }
 
     // Ctrl+wheel: rescale the lane rows (the roll's key-height analog),
     // keeping the row under the cursor pinned. anchorY is widget-local, so
-    // it already includes the scroll offset.
+    // it already includes the scroll offset. Individually-resized rows
+    // scale by the same factor, keeping their proportions.
     void zoomLaneHeight(int wheelDelta, int anchorY)
     {
         m_laneZoomAccum += wheelDelta;
@@ -1433,13 +1591,16 @@ private:
         const int newH = std::clamp(m_laneH + steps * 4, kMinLaneH, kMaxLaneH);
         if (newH == m_laneH)
             return;
-        const double row = double(anchorY) / double(m_laneH);
+        const double factor = double(newH) / double(m_laneH);
+        for (auto it = m_rowHeights.begin(); it != m_rowHeights.end(); ++it)
+            it.value() = std::clamp(int(std::lround(it.value() * factor)),
+                                    kMinLaneH, kMaxLaneH);
         m_laneH = newH;
         applyHeight();
         if (m_scroll) {
             QScrollBar *vbar = m_scroll->verticalScrollBar();
             const int viewportY = anchorY - vbar->value();
-            vbar->setValue(int(std::lround(row * newH)) - viewportY);
+            vbar->setValue(int(std::lround(anchorY * factor)) - viewportY);
         }
         update();
     }
@@ -1631,8 +1792,8 @@ private:
         int minV, maxV;
         rowRange(row, &minV, &maxV);
         // paintCurve's valueY mapping for this row.
-        const int top = ri * m_laneH + 5;
-        const int bottom = (ri + 1) * m_laneH - 1 - 4;
+        const int top = rowTop(ri) + 5;
+        const int bottom = rowBottom(ri) - 1 - 4;
         const LanePoint *best = nullptr;
         int bestDist = INT_MAX;
         for (const LanePoint &pt : *points) {
@@ -1664,8 +1825,8 @@ private:
         int minV, maxV;
         rowRange(row, &minV, &maxV);
         // Invert paintCurve's valueY mapping.
-        const int top = m_dragRow * m_laneH + 5;
-        const int bottom = (m_dragRow + 1) * m_laneH - 1 - 4;
+        const int top = rowTop(m_dragRow) + 5;
+        const int bottom = rowBottom(m_dragRow) - 1 - 4;
         const int y = std::clamp(pos.y(), top, bottom);
         m_dragValue = minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
         if (row.kind == Row::Tempo)
@@ -1866,8 +2027,14 @@ private:
     SongView *m_sv;
     QScrollArea *m_scroll;      // hosting scroll area, for lane-zoom pinning
     std::vector<Row> m_rows;
-    int m_laneH = kLaneH;       // row height; Ctrl+wheel rescales
+    int m_laneH = kLaneH;       // shared row height; Ctrl+wheel rescales
     int m_laneZoomAccum = 0;    // sub-notch wheel remainder, like zoomKeyHeight
+    QHash<QString, int> m_rowHeights; // individual row heights (rowKey → px)
+    int m_resizeRow = -1;       // row whose bottom divider is being dragged
+    int m_resizeOrigH = 0;
+    int m_resizePressY = 0;
+    bool m_panning = false;     // middle-drag pan
+    QPoint m_panPos;            // last pan sample, global coords
     Gesture m_gesture = Gesture::None;
     int m_dragRow = -1;
     int64_t m_dragOrigTick = -1; // existing point being moved, -1 = new point
@@ -2265,6 +2432,9 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_editCursorTick = 0;
     m_playing = false;
     m_scrollPx = 0;
+    // Lane heights are per-song view state; back to defaults until a
+    // sidecar (applyViewState) says otherwise.
+    m_lanes->setViewHeights(0, {});
 
     m_selectedTrack = 0;
     if (timeline) {
@@ -2397,6 +2567,56 @@ void SongView::mergeEmptyLanes()
                              return a.cc < b.cc;
                          });
     }
+}
+
+SongView::ViewState SongView::viewState() const
+{
+    ViewState state;
+    if (!m_timeline)
+        return state;
+    state.valid = true;
+    state.pxPerBeat = m_pxPerTick * double(m_timeline->ticksPerBeat);
+    state.keyHeight = m_keyHeight;
+    state.scrollPx = m_scrollPx;
+    state.scrollY = m_scrollY;
+    state.selectedTrack = m_selectedTrack;
+    state.editCursorTick = m_editCursorTick;
+    state.laneHeight = m_lanes->laneHeight();
+    state.laneHeights = m_lanes->rowHeightOverrides();
+    state.splitterSizes = m_splitter->sizes();
+    state.emptyLanes = m_emptyLanes;
+    return state;
+}
+
+void SongView::applyViewState(const ViewState &state)
+{
+    if (!state.valid || !m_timeline)
+        return;
+    const double tpb = double(m_timeline->ticksPerBeat);
+    m_pxPerTick = std::clamp(state.pxPerBeat, kMinPxPerBeat, kMaxPxPerBeat) / tpb;
+    m_keyHeight = std::clamp(state.keyHeight, kMinKeyHeight, kMaxKeyHeight);
+    m_editCursorTick = std::min<uint64_t>(state.editCursorTick, m_timeline->lengthTicks);
+    for (const std::pair<int, uint8_t> &lane : state.emptyLanes)
+        if (lane.first >= 0 && lane.first < 16
+            && std::find(m_emptyLanes.begin(), m_emptyLanes.end(), lane)
+                   == m_emptyLanes.end())
+            m_emptyLanes.push_back(lane);
+    mergeEmptyLanes();
+    m_lanes->setViewHeights(state.laneHeight, state.laneHeights);
+    if (state.selectedTrack >= 0 && state.selectedTrack < 16
+        && m_timeline->tracks[state.selectedTrack].used)
+        selectTrack(state.selectedTrack);
+    if (state.splitterSizes.size() == 2 && state.splitterSizes[0] > 0
+        && state.splitterSizes[1] > 0) {
+        // Real sizes exist; skip resizeEvent's default split.
+        m_splitInit = true;
+        m_splitter->setSizes(state.splitterSizes);
+    }
+    m_lanes->rebuildRows();
+    updateScrollbars();
+    setHScroll(std::max(0, state.scrollPx));
+    m_vbar->setValue(std::max(0, state.scrollY));
+    refreshTimelineViews();
 }
 
 void SongView::setVoicegroup(const LoadedVoiceGroup *voicegroup)

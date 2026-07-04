@@ -5,6 +5,7 @@
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
@@ -27,6 +28,7 @@
 #include "ui/registrationdialog.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
+#include "ui/viewsidecar.h"
 #include "ui/voicegroupbrowser.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -208,6 +210,7 @@ void MainWindow::openProject()
 
     if (!maybeSaveSong())
         return;
+    saveViewState(); // against the old project root, before open() swaps it
 
     QString error;
     if (!m_project.open(dir, &error)) {
@@ -295,6 +298,7 @@ void MainWindow::loadSong(const SongInfo &song)
         return;
     if (!maybeSaveSong())
         return;
+    saveViewState(); // the outgoing song's, while its view is still up
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
     QElapsedTimer timer;
@@ -334,6 +338,9 @@ void MainWindow::loadSong(const SongInfo &song)
 
     m_songView->setSong(m_audio.timeline(), m_audio.voicegroup());
     m_songView->setDocument(&m_doc);
+    SongView::ViewState viewState;
+    if (ViewSidecar::load(m_project.root(), song.label, &viewState))
+        m_songView->applyViewState(viewState);
     updateVoicegroupBrowser();
     m_saveAction->setEnabled(true);
     m_settingsAction->setEnabled(true);
@@ -550,6 +557,13 @@ bool MainWindow::maybeSaveSong()
     return true;
 }
 
+void MainWindow::saveViewState()
+{
+    if (m_loadedSongId < 0)
+        return;
+    ViewSidecar::save(m_project.root(), m_doc.label(), m_songView->viewState());
+}
+
 void MainWindow::updateWindowTitle()
 {
     if (m_loadedSongId >= 0) {
@@ -563,10 +577,12 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSaveSong())
+    if (maybeSaveSong()) {
+        saveViewState();
         event->accept();
-    else
+    } else {
         event->ignore();
+    }
 }
 
 void MainWindow::uiTick()
@@ -730,6 +746,38 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                      double(seekSample) / m_audio.sampleRate(),
                      double(afterSeek) / m_audio.sampleRate(),
                      double(afterRestart) / m_audio.sampleRate());
+    }
+    // M2 polish: sidecar view-state round trip (SPEC §4.4). Save the live
+    // view, mutate it, then confirm applying the loaded state restores it —
+    // and that SongRegistry's registration key coexists in the same file.
+    if (ok) {
+        SongRegistry::saveRegistrationMeta(m_project.root(), target->label,
+                                           QStringLiteral("MUS_SELFTEST"),
+                                           QStringLiteral("MUSIC_PLAYER_BGM"));
+        const SongView::ViewState saved = m_songView->viewState();
+        ok = ViewSidecar::save(m_project.root(), target->label, saved);
+        m_songView->zoomAroundContentX(2.0, 0); // knock the view off the state
+        SongView::ViewState loaded;
+        ok = ok && ViewSidecar::load(m_project.root(), target->label, &loaded);
+        if (ok) {
+            m_songView->applyViewState(loaded);
+            const SongView::ViewState restored = m_songView->viewState();
+            QString constant, player;
+            ok = std::abs(restored.pxPerBeat - saved.pxPerBeat) < 0.001
+                && restored.keyHeight == saved.keyHeight
+                && restored.scrollPx == saved.scrollPx
+                && restored.selectedTrack == saved.selectedTrack
+                && restored.editCursorTick == saved.editCursorTick
+                && restored.laneHeight == saved.laneHeight
+                && SongRegistry::loadRegistrationMeta(m_project.root(), target->label,
+                                                      &constant, &player)
+                && constant == QLatin1String("MUS_SELFTEST");
+        }
+        QFile::remove(ViewSidecar::pathFor(m_project.root(), target->label));
+        if (ok)
+            qInfo("selftest: sidecar view-state round trip OK");
+        else
+            qWarning("selftest: sidecar view-state round trip FAILED");
     }
     m_audio.stop();
     qInfo("selftest: %s", ok ? "PASS" : "FAIL");

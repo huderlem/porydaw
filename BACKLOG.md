@@ -5,13 +5,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
-  visibility, last edit position, roll/lanes splitter position, lane row
-  height. Specced but not implemented; cosmetic only.
-- **Per-lane (individual) heights.** Ctrl+wheel rescales all lane rows
-  uniformly (m_laneH, 28-128 px); letting one lane be taller than the
-  others (e.g. bend vs. volume) would need per-row heights persisted in
-  the `.porydaw` sidecar.
+- **full-width velocity handle**: like Reaper, the velocity handle on each
+  note should be full-width, not just only on the left side. It is only visible/active
+  when vertically zoomed in enough, like Reaper. When zoomed enough
+  a thin horizontal bar should be drawn inside the note to indicate the velocity
+  level (0 = bottom, 127 = top). It should also display the volume values inside
+  all current-track notes while the user is in the act of dragging the volume handle.
 
 ## M3 onboarding polish
 
