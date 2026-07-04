@@ -182,6 +182,10 @@ void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
     // playback don't hard-cut the audio.
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
+    // Re-latch controller state from the rebuilt timeline: the edit may have
+    // deleted or moved the events behind the engine's current bend/CC values
+    // (e.g. clearing a lane), which would otherwise stay latched until stop.
+    TimelinePlayer::chase(m_engine.get(), m_timeline.get(), pos);
 
     if (m_deviceStarted)
         ma_device_start(m_device);

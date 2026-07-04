@@ -30,6 +30,59 @@ void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev,
     }
 }
 
+void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos)
+{
+    // Most recent state-bearing event per slot at or before pos.
+    const TimelineEvent *cc[16][128] = {};
+    const TimelineEvent *bend[16] = {};
+    const TimelineEvent *program[16] = {};
+    const TimelineEvent *tempo = nullptr;
+
+    for (const TimelineEvent &ev : timeline->events) {
+        if (ev.samplePos > pos)
+            break;
+        switch (ev.type) {
+        case 0xB: cc[ev.track][ev.data0 & 0x7F] = &ev; break;
+        case 0xC: program[ev.track] = &ev; break;
+        case 0xE: bend[ev.track] = &ev; break;
+        case TIMELINE_EVT_TEMPO: tempo = &ev; break;
+        }
+    }
+
+    // Engine reset defaults for the stateful controllers (the track-init
+    // values in m4a_engine.c). The opt-in ones — portamento, PWM — are
+    // no-ops in the engine while their feature is disabled.
+    static constexpr struct { uint8_t cc; uint8_t value; } kCcDefaults[] = {
+        {0x01, 0},   // MOD
+        {0x05, 0},   // PORTAMENTO
+        {0x07, 127}, // VOL
+        {0x0A, 64},  // PAN (center)
+        {0x14, 2},   // BENDR
+        {0x15, 22},  // LFOS
+        {0x17, 0},   // PWMC
+        {0x19, 0},   // PWMS
+    };
+
+    for (int track = 0; track < 16; track++) {
+        if (program[track])
+            dispatchEvent(engine, *program[track], 0);
+        for (int n = 0; n < 128; n++)
+            if (cc[track][n])
+                dispatchEvent(engine, *cc[track][n], 0);
+        for (const auto &d : kCcDefaults)
+            if (!cc[track][d.cc])
+                m4a_engine_cc(engine, track, d.cc, d.value);
+        if (bend[track])
+            dispatchEvent(engine, *bend[track], 0);
+        else
+            m4a_engine_pitch_bend(engine, track, 0);
+    }
+    if (tempo)
+        dispatchEvent(engine, *tempo, 0);
+    else
+        m4a_engine_set_tempo_bpm(engine, 150); // engine reset default
+}
+
 void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
 {
     m_pos = pos;

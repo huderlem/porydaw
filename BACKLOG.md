@@ -26,9 +26,9 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   to the Play action only, and playing from Stopped always resets to 0).
   Needs a UI→audio seek/start-at command (TimelinePlayer::seek exists but
   is only used for edit-time timeline swaps), the edit-cursor rendering in
-  the ruler/roll, and the Space rebind; note the engine state after a jump
-  is approximate until the next CC/program events replay (Reaper-style
-  chase of CC/program state at seek would fix that).
+  the ruler/roll, and the Space rebind; pair the jump with
+  TimelinePlayer::chase (already used by edit-time swaps) so CC/program/
+  bend state is exact at the landing position.
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
 - **Right-click drag for rubber-band selection.** Multi-select is currently

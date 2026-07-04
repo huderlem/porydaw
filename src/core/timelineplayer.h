@@ -32,6 +32,14 @@ public:
     // Used when an edited document swaps in a rebuilt timeline mid-song.
     void seek(uint64_t pos, const MidiTimeline *timeline);
 
+    // Chases controller state to `pos`: dispatches each track's most recent
+    // program/CC/bend/tempo value at or before pos, and the engine's reset
+    // default for stateful parameters with no event there — leaving the
+    // engine as if this timeline had played linearly from the start. Pair
+    // with seek() when swapping in an edited timeline (or, later, jumping
+    // the playhead) so deleted or moved automation can't stay latched.
+    static void chase(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos);
+
     // Renders exactly `frames` samples into outL/outR, dispatching every due
     // event. Note-ons for tracks set in muteMask are skipped (note-offs and
     // controllers always pass so state stays consistent).
