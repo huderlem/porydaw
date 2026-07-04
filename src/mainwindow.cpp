@@ -16,9 +16,11 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1024, 640);
 
     QMenu *fileMenu = menuBar()->addMenu(tr("&File"));
-    fileMenu->addAction(tr("&Open Project..."), QKeySequence::Open, this, &MainWindow::openProject);
+    QAction *openAction = fileMenu->addAction(tr("&Open Project..."), this, &MainWindow::openProject);
+    openAction->setShortcut(QKeySequence::Open);
     fileMenu->addSeparator();
-    fileMenu->addAction(tr("&Quit"), QKeySequence::Quit, qApp, &QApplication::quit);
+    QAction *quitAction = fileMenu->addAction(tr("&Quit"), qApp, &QApplication::quit);
+    quitAction->setShortcut(QKeySequence::Quit);
 
     auto *placeholder = new QLabel(tr("Open a decomp project directory to get started."), this);
     placeholder->setAlignment(Qt::AlignCenter);
