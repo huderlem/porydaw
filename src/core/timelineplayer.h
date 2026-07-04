@@ -27,6 +27,11 @@ public:
 
     uint64_t position() const { return m_pos; }
 
+    // Repositions onto (a possibly different) timeline without disturbing the
+    // engine: keeps the sample position and finds the matching event cursor.
+    // Used when an edited document swaps in a rebuilt timeline mid-song.
+    void seek(uint64_t pos, const MidiTimeline *timeline);
+
     // Renders exactly `frames` samples into outL/outR, dispatching every due
     // event. Note-ons for tracks set in muteMask are skipped (note-offs and
     // controllers always pass so state stays consistent).

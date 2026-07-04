@@ -158,6 +158,61 @@ void AudioEngine::loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGr
         ma_device_start(m_device);
 }
 
+void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
+{
+    if (!m_timeline || !timeline)
+        return;
+    if (m_deviceStarted)
+        ma_device_stop(m_device);
+
+    const uint64_t pos = m_player.position();
+    m_timeline = std::move(timeline);
+    m_player.seek(pos, m_timeline.get());
+    // Release sounding notes: their note-offs may have moved or vanished in
+    // the rebuilt timeline. Envelopes fade naturally, so brief edits during
+    // playback don't hard-cut the audio.
+    for (int track = 0; track < MAX_TRACKS; track++)
+        m4a_engine_all_notes_off(m_engine.get(), track);
+
+    if (m_deviceStarted)
+        ma_device_start(m_device);
+}
+
+void AudioEngine::updateSettings(const SongSettings &settings)
+{
+    if (m_deviceStarted)
+        ma_device_stop(m_device);
+    const bool mixRateChanged = settings.pcmMixRate != m_settings.pcmMixRate;
+    m_settings = settings;
+    m4a_engine_set_song_volume(m_engine.get(), m_settings.songVolume);
+    m4a_reverb_set_amount(&m_engine->reverb, m_settings.reverb);
+    m_engine->maxPcmChannels = m_settings.maxPcmChannels;
+    if (mixRateChanged)
+        m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
+    if (m_deviceStarted)
+        ma_device_start(m_device);
+}
+
+void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
+{
+    if (m_deviceStarted)
+        ma_device_stop(m_device);
+    m4a_engine_all_sound_off(m_engine.get());
+    if (m_voicegroup)
+        voicegroup_free(m_voicegroup);
+    m_voicegroup = voicegroup;
+    m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
+    if (m_deviceStarted)
+        ma_device_start(m_device);
+}
+
+void AudioEngine::previewNote(uint8_t track, uint8_t key, uint8_t velocity)
+{
+    m_previewGen++;
+    m_previewCmd.store((uint32_t(m_previewGen) << 24) | (uint32_t(track & 0x0F) << 16)
+                       | (uint32_t(key & 0x7F) << 8) | velocity);
+}
+
 void AudioEngine::unloadSong()
 {
     if (m_deviceStarted)
@@ -259,10 +314,34 @@ void AudioEngine::applyMuteTransition()
     m_appliedMute = em;
 }
 
+void AudioEngine::applyPreviewNote()
+{
+    const uint32_t cmd = m_previewCmd.load();
+    if (cmd == m_appliedPreview)
+        return;
+    m_appliedPreview = cmd;
+
+    // A new preview releases the previous one so previews never stack.
+    if (m_previewKey >= 0) {
+        m4a_engine_note_off(m_engine.get(), m_previewTrack, uint8_t(m_previewKey));
+        m_previewTrack = -1;
+        m_previewKey = -1;
+    }
+    const uint8_t track = (cmd >> 16) & 0x0F;
+    const uint8_t key = (cmd >> 8) & 0x7F;
+    const uint8_t velocity = cmd & 0xFF;
+    if (velocity > 0) {
+        m4a_engine_note_on(m_engine.get(), track, key, velocity);
+        m_previewTrack = track;
+        m_previewKey = key;
+    }
+}
+
 void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 {
     applyTransportTransition();
     applyMuteTransition();
+    applyPreviewNote();
 
     M4AEngine *engine = m_engine.get();
     uint32_t done = 0;

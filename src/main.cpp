@@ -7,6 +7,8 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong = QSt
                  const QString &screenshotPath = QString());
 // roundtrip.cpp; M2 save-fidelity check through the project's real mid2agb.
 int runRoundTrip(const QString &projectRoot, const QString &mid2agbPath = QString());
+// editcheck.cpp; M2 undo-integrity check over every edit-operation type.
+int runEditCheck(const QString &projectRoot);
 
 int main(int argc, char *argv[])
 {
@@ -21,6 +23,9 @@ int main(int argc, char *argv[])
         MainWindow window;
         return window.runSelfTest(args[selfTest + 1], args[selfTest + 2]) ? 0 : 1;
     }
+    const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
+    if (editCheck >= 0 && editCheck + 1 < args.size())
+        return runEditCheck(args[editCheck + 1]);
     const int roundTrip = args.indexOf(QStringLiteral("--roundtrip"));
     if (roundTrip >= 0 && roundTrip + 1 < args.size()) {
         const QString mid2agb = roundTrip + 2 < args.size() ? args[roundTrip + 2] : QString();

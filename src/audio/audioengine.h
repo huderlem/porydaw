@@ -60,6 +60,21 @@ public:
     void loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGroup *voicegroup,
                   const SongSettings &settings);
     void unloadSong();
+
+    // Cold: swaps in a rebuilt timeline after a document edit, preserving
+    // transport state and the playhead position. Sounding notes are released
+    // (their note-offs may have moved or vanished in the new timeline).
+    void updateTimeline(std::unique_ptr<MidiTimeline> timeline);
+    // Cold: re-applies song settings (master volume, reverb) to the engine.
+    void updateSettings(const SongSettings &settings);
+    // Cold: swaps the voicegroup (takes ownership); cuts all sound.
+    void updateVoicegroup(LoadedVoiceGroup *voicegroup);
+
+    // Hot: audition a single note outside the timeline (piano-key click,
+    // note-draw preview). velocity 0 releases. A new preview releases the
+    // previous one, so at most one preview note sounds at a time.
+    void previewNote(uint8_t track, uint8_t key, uint8_t velocity);
+
     bool songLoaded() const { return m_timeline != nullptr; }
     const MidiTimeline *timeline() const { return m_timeline.get(); }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
@@ -87,6 +102,7 @@ private:
     void process(float *interleavedOut, uint32_t frameCount);
     void applyTransportTransition();
     void applyMuteTransition();
+    void applyPreviewNote();
     uint32_t effectiveMuteMask() const;
 
     // Device / engine (audio thread reads; cold ops swap while stopped)
@@ -105,6 +121,11 @@ private:
     std::atomic<bool> m_loopEnabled{true};
     std::atomic<uint32_t> m_muteMask{0};
     std::atomic<uint32_t> m_soloMask{0};
+    // Preview-note command: generation<<24 | track<<16 | key<<8 | velocity.
+    // The generation counter makes every request distinct so repeated notes
+    // are seen by the audio thread.
+    std::atomic<uint32_t> m_previewCmd{0};
+    uint8_t m_previewGen = 0; // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -114,6 +135,9 @@ private:
     // Audio-thread-only sequencer state
     int m_appliedTransport = static_cast<int>(Transport::Stopped);
     uint32_t m_appliedMute = 0;
+    uint32_t m_appliedPreview = 0;
+    int m_previewTrack = -1; // sounding preview note, -1 when none
+    int m_previewKey = -1;
     TimelinePlayer m_player;
 
     // Scratch deinterleave buffers (allocated in init)

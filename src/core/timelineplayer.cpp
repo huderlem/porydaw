@@ -30,6 +30,16 @@ void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev,
     }
 }
 
+void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
+{
+    m_pos = pos;
+    m_cursor = size_t(std::lower_bound(timeline->events.begin(), timeline->events.end(), pos,
+                                       [](const TimelineEvent &e, uint64_t p) {
+                                           return e.samplePos < p;
+                                       })
+                      - timeline->events.begin());
+}
+
 void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, float *outL,
                             float *outR, uint32_t frames, bool looping, uint32_t muteMask)
 {

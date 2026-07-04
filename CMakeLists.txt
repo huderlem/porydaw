@@ -35,6 +35,7 @@ qt_add_executable(porydaw
     src/mainwindow.h
     src/viewcheck.cpp
     src/roundtrip.cpp
+    src/editcheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
@@ -42,6 +43,8 @@ qt_add_executable(porydaw
     src/core/miditimeline.h
     src/core/smf.cpp
     src/core/smf.h
+    src/core/songdocument.cpp
+    src/core/songdocument.h
     src/core/timelineplayer.cpp
     src/core/timelineplayer.h
     src/project/decompproject.cpp
