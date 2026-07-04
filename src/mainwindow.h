@@ -9,8 +9,8 @@ class QAction;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
-class QTableWidget;
 class QTimer;
+class SongView;
 
 class MainWindow : public QMainWindow
 {
@@ -28,14 +28,12 @@ public:
 private slots:
     void openProject();
     void songActivated(QListWidgetItem *item);
-    void trackTableChanged(int row, int column);
     void uiTick();
 
 private:
     void buildUi();
     void populateSongList();
     void loadSong(const SongInfo &song);
-    void populateTrackTable();
     void updateTransportActions();
     QString formatTime(uint64_t samples) const;
 
@@ -45,7 +43,7 @@ private:
     int m_loadedSongId = -1;
 
     QListWidget *m_songList = nullptr;
-    QTableWidget *m_trackTable = nullptr;
+    SongView *m_songView = nullptr;
     QAction *m_playAction = nullptr;
     QAction *m_pauseAction = nullptr;
     QAction *m_stopAction = nullptr;
@@ -54,5 +52,4 @@ private:
     QLabel *m_songLabel = nullptr;
     QLabel *m_polyLabel = nullptr;
     QTimer *m_uiTimer = nullptr;
-    bool m_updatingTable = false;
 };

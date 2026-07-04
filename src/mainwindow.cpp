@@ -1,12 +1,10 @@
 #include "mainwindow.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileDialog>
-#include <QHeaderView>
 #include <QLabel>
 #include <QListWidget>
 #include <QMenuBar>
@@ -14,22 +12,11 @@
 #include <QSettings>
 #include <QStatusBar>
 #include <QStyle>
-#include <QTableWidget>
 #include <QTimer>
 #include <QToolBar>
 
 #include "core/miditimeline.h"
-
-namespace {
-enum TrackColumn {
-    ColTrack = 0,
-    ColName,
-    ColNotes,
-    ColMute,
-    ColSolo,
-    ColCount,
-};
-} // namespace
+#include "ui/songview.h"
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -112,16 +99,13 @@ void MainWindow::buildUi()
     dock->setWidget(m_songList);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
 
-    // Track table
-    m_trackTable = new QTableWidget(0, ColCount, this);
-    m_trackTable->setHorizontalHeaderLabels(
-        {tr("Track"), tr("Name"), tr("Notes"), tr("Mute"), tr("Solo")});
-    m_trackTable->horizontalHeader()->setSectionResizeMode(ColName, QHeaderView::Stretch);
-    m_trackTable->verticalHeader()->setVisible(false);
-    m_trackTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_trackTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    connect(m_trackTable, &QTableWidget::cellChanged, this, &MainWindow::trackTableChanged);
-    setCentralWidget(m_trackTable);
+    // Song viewer: piano roll, automation lanes, other-events strip.
+    m_songView = new SongView(this);
+    connect(m_songView, &SongView::muteMaskChanged, this,
+            [this](uint32_t mask) { m_audio.setMuteMask(mask); });
+    connect(m_songView, &SongView::soloMaskChanged, this,
+            [this](uint32_t mask) { m_audio.setSoloMask(mask); });
+    setCentralWidget(m_songView);
 
     // Status bar: polyphony meter
     m_polyLabel = new QLabel(this);
@@ -148,10 +132,10 @@ void MainWindow::openProject()
     }
     settings.setValue(QStringLiteral("lastProjectDir"), dir);
 
+    m_songView->setSong(nullptr, nullptr);
     m_audio.unloadSong();
     m_loadedSongId = -1;
     m_songLabel->clear();
-    m_trackTable->setRowCount(0);
     populateSongList();
 
     int playable = 0;
@@ -226,10 +210,12 @@ void MainWindow::loadSong(const SongInfo &song)
     SongSettings settings;
     settings.songVolume = uint8_t(song.cfg.masterVolume);
     settings.reverb = uint8_t(song.cfg.reverb > 0 ? song.cfg.reverb : 0);
+    // The view must let go of the old timeline before loadSong frees it.
+    m_songView->setSong(nullptr, nullptr);
     m_audio.loadSong(std::move(timeline), vg, settings);
     m_loadedSongId = song.id;
 
-    populateTrackTable();
+    m_songView->setSong(m_audio.timeline(), m_audio.voicegroup());
     m_songLabel->setText(QStringLiteral("  %1").arg(song.label));
 
     const MidiTimeline *tl = m_audio.timeline();
@@ -247,63 +233,6 @@ void MainWindow::loadSong(const SongInfo &song)
     updateTransportActions();
 }
 
-void MainWindow::populateTrackTable()
-{
-    const MidiTimeline *tl = m_audio.timeline();
-    m_updatingTable = true;
-    m_trackTable->setRowCount(0);
-    if (tl) {
-        for (int t = 0; t < 16; t++) {
-            const TimelineTrack &track = tl->tracks[t];
-            if (!track.used)
-                continue;
-            const int row = m_trackTable->rowCount();
-            m_trackTable->insertRow(row);
-
-            auto *numItem = new QTableWidgetItem(QString::number(t + 1));
-            numItem->setData(Qt::UserRole, t);
-            m_trackTable->setItem(row, ColTrack, numItem);
-
-            QString name = track.name;
-            if (name.isEmpty())
-                name = tr("Track %1").arg(t + 1);
-            m_trackTable->setItem(row, ColName, new QTableWidgetItem(name));
-            m_trackTable->setItem(row, ColNotes,
-                                  new QTableWidgetItem(QString::number(track.noteCount)));
-
-            auto *muteItem = new QTableWidgetItem();
-            muteItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
-            muteItem->setCheckState(Qt::Unchecked);
-            m_trackTable->setItem(row, ColMute, muteItem);
-
-            auto *soloItem = new QTableWidgetItem();
-            soloItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
-            soloItem->setCheckState(Qt::Unchecked);
-            m_trackTable->setItem(row, ColSolo, soloItem);
-        }
-    }
-    m_updatingTable = false;
-}
-
-void MainWindow::trackTableChanged(int row, int column)
-{
-    Q_UNUSED(row);
-    if (m_updatingTable || (column != ColMute && column != ColSolo))
-        return;
-
-    uint32_t muteMask = 0;
-    uint32_t soloMask = 0;
-    for (int r = 0; r < m_trackTable->rowCount(); r++) {
-        const int track = m_trackTable->item(r, ColTrack)->data(Qt::UserRole).toInt();
-        if (m_trackTable->item(r, ColMute)->checkState() == Qt::Checked)
-            muteMask |= 1u << track;
-        if (m_trackTable->item(r, ColSolo)->checkState() == Qt::Checked)
-            soloMask |= 1u << track;
-    }
-    m_audio.setMuteMask(muteMask);
-    m_audio.setSoloMask(soloMask);
-}
-
 void MainWindow::uiTick()
 {
     if (!m_audioOk)
@@ -314,6 +243,8 @@ void MainWindow::uiTick()
         m_timeLabel->setText(QStringLiteral("%1 / %2")
                                  .arg(formatTime(m_audio.playheadSamples()),
                                       formatTime(length)));
+        m_songView->setPlayheadSample(m_audio.playheadSamples(),
+                                      m_audio.transport() == Transport::Playing);
 
         const uint64_t lost = m_audio.polyLostTotal();
         QString poly = tr("PCM %1/%2 · CGB %3/4")

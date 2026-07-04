@@ -82,6 +82,15 @@ struct TempoChange {
     uint32_t usPerBeat;
 };
 
+// Parsed-but-not-played data destined for MidiTimeline::otherEvents; the
+// engine track is resolved after all tracks are mapped.
+struct RawOther {
+    uint64_t tick;
+    uint16_t smfTrack;
+    int channel; // MIDI channel, or -1 for metas/sysex
+    QString label;
+};
+
 // True when buf is exactly the single character `marker` after stripping
 // leading/trailing ASCII whitespace.
 bool textIsLoopMarker(const uint8_t *buf, uint32_t len, char marker)
@@ -101,6 +110,7 @@ struct TrackParseResult {
 
 void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
                 std::vector<RawEvent> &rawEvents, std::vector<TempoChange> &tempos,
+                std::vector<TimeSigPoint> &timeSigs, std::vector<RawOther> &others,
                 uint64_t *loopStartTick, uint64_t *loopEndTick, TrackParseResult *result)
 {
     const size_t end = r.pos + trackLen;
@@ -143,6 +153,13 @@ void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
                     break;
                 tempos.push_back({tick, (static_cast<uint32_t>(t0) << 16)
                                             | (static_cast<uint32_t>(t1) << 8) | t2});
+            } else if (metaType == 0x58 && metaLen >= 2) {
+                uint8_t num, den;
+                if (!r.readByte(&num) || !r.readByte(&den))
+                    break;
+                if (!r.skip(metaLen - 2))
+                    break;
+                timeSigs.push_back({tick, num, den});
             } else if (metaType == 0x03 && result->name.isEmpty()) {
                 // Track name
                 uint32_t readLen = std::min<uint32_t>(metaLen, 64);
@@ -171,15 +188,37 @@ void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
                     *loopStartTick = tick;
                 else if (textIsLoopMarker(textBuf, readLen, ']') && *loopEndTick == UINT64_MAX)
                     *loopEndTick = tick;
+                else {
+                    static const char *const kTextMetaNames[] = {
+                        "Text", "Copyright", "Track name", "Instrument",
+                        "Lyric", "Marker", "Cue point"};
+                    const QString text =
+                        QString::fromLatin1(reinterpret_cast<const char *>(textBuf), readLen)
+                            .trimmed();
+                    if (!text.isEmpty())
+                        others.push_back({tick, trackIndex, -1,
+                                          QStringLiteral("%1: %2")
+                                              .arg(QLatin1String(kTextMetaNames[metaType - 1]),
+                                                   text)});
+                }
+            } else if (metaType == 0x2F) {
+                if (!r.skip(metaLen))
+                    break;
             } else {
                 if (!r.skip(metaLen))
                     break;
+                others.push_back({tick, trackIndex, -1,
+                                  QStringLiteral("Meta 0x%1 (%2 bytes)")
+                                      .arg(metaType, 2, 16, QLatin1Char('0'))
+                                      .arg(metaLen)});
             }
         } else if (b == 0xF0 || b == 0xF7) {
             runningStatus = 0;
             uint32_t sysexLen;
             if (!r.readVlq(&sysexLen) || !r.skip(sysexLen))
                 break;
+            others.push_back({tick, trackIndex, -1,
+                              QStringLiteral("SysEx (%1 bytes)").arg(sysexLen)});
         } else {
             uint8_t status, data0;
             if (b & 0x80) {
@@ -209,9 +248,13 @@ void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
                     goto trackDone;
                 push(chan, data1 ? 0x9 : 0x8, data0, data1);
                 break;
-            case 0xA: // Polyphonic aftertouch: skip
+            case 0xA: // Polyphonic aftertouch: not played
                 if (!r.readByte(&data1))
                     goto trackDone;
+                others.push_back({tick, trackIndex, chan,
+                                  QStringLiteral("Poly aftertouch key %1 = %2")
+                                      .arg(data0)
+                                      .arg(data1)});
                 break;
             case 0xB: // Control change
                 if (!r.readByte(&data1))
@@ -221,7 +264,9 @@ void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
             case 0xC: // Program change (1 data byte)
                 push(chan, 0xC, data0, 0);
                 break;
-            case 0xD: // Channel pressure: skip (data0 already consumed)
+            case 0xD: // Channel pressure: not played (data0 already consumed)
+                others.push_back({tick, trackIndex, chan,
+                                  QStringLiteral("Channel pressure %1").arg(data0)});
                 break;
             case 0xE: // Pitch bend (LSB in data0)
                 if (!r.readByte(&data1))
@@ -229,6 +274,11 @@ void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
                 push(chan, 0xE, data0, data1);
                 break;
             default:
+                others.push_back({tick, trackIndex, -1,
+                                  QStringLiteral("Unrecognized status 0x%1 — rest of SMF track "
+                                                 "%2 skipped")
+                                      .arg(status, 2, 16, QLatin1Char('0'))
+                                      .arg(trackIndex)});
                 goto trackDone; // unknown status byte, bail on this track
             }
         }
@@ -257,12 +307,13 @@ uint64_t tickToSample(uint64_t tick, const std::vector<TempoChange> &tempos,
     return static_cast<uint64_t>(samples + 0.5);
 }
 
-TimelineEvent makeTempoEvent(uint64_t samplePos, double bpm)
+TimelineEvent makeTempoEvent(uint64_t samplePos, uint64_t tick, double bpm)
 {
     int b = static_cast<int>(bpm + 0.5);
     b = std::clamp(b, 1, 0x3FFF);
     TimelineEvent ev;
     ev.samplePos = samplePos;
+    ev.tick = static_cast<uint32_t>(tick);
     ev.type = TIMELINE_EVT_TEMPO;
     ev.track = 0;
     ev.data0 = static_cast<uint8_t>(b & 0x7F);
@@ -319,6 +370,8 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
 
     std::vector<RawEvent> rawEvents;
     std::vector<TempoChange> tempos;
+    std::vector<TimeSigPoint> timeSigs;
+    std::vector<RawOther> rawOthers;
     std::vector<TrackParseResult> trackResults(numTracks);
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;
@@ -333,8 +386,8 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
         if (!r.readU32(&trackLen))
             break;
         const size_t trackEnd = r.pos + trackLen;
-        parseTrack(r, trackLen, t, rawEvents, tempos, &loopStartTick, &loopEndTick,
-                   &trackResults[t]);
+        parseTrack(r, trackLen, t, rawEvents, tempos, timeSigs, rawOthers, &loopStartTick,
+                   &loopEndTick, &trackResults[t]);
         r.pos = trackEnd;
     }
 
@@ -349,6 +402,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
 
     auto timeline = std::make_unique<MidiTimeline>();
     timeline->sampleRate = sampleRate;
+    timeline->ticksPerBeat = tpqn;
 
     // Map SMF tracks (Type 1) or MIDI channels (Type 0) to engine tracks.
     std::vector<int> smfToEngine(numTracks, -1);
@@ -385,6 +439,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
 
         TimelineEvent ev;
         ev.samplePos = tickToSample(re.tick, tempos, tpqn, sampleRate);
+        ev.tick = static_cast<uint32_t>(re.tick);
         ev.type = re.type;
         ev.track = static_cast<uint8_t>(engineTrack);
         ev.data0 = re.data0;
@@ -413,13 +468,18 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
 
     // Tempo events, with the SMF default of 120 BPM prepended when the song
     // doesn't set a tempo at tick 0, so the engine (whose tempo drives LFO and
-    // vibrato rates) never runs on its unrelated init default.
+    // vibrato rates) never runs on its unrelated init default. The same points
+    // form the viewer's tempo map.
     std::vector<TimelineEvent> tempoEvents;
-    if (tempos.empty() || tempos.front().tick != 0)
-        tempoEvents.push_back(makeTempoEvent(0, 120.0));
+    if (tempos.empty() || tempos.front().tick != 0) {
+        tempoEvents.push_back(makeTempoEvent(0, 0, 120.0));
+        timeline->tempoMap.push_back({0, 0, 120.0});
+    }
     for (const TempoChange &tc : tempos) {
         const uint64_t sp = tickToSample(tc.tick, tempos, tpqn, sampleRate);
-        tempoEvents.push_back(makeTempoEvent(sp, 60000000.0 / double(tc.usPerBeat)));
+        const double bpm = 60000000.0 / double(tc.usPerBeat);
+        tempoEvents.push_back(makeTempoEvent(sp, tc.tick, bpm));
+        timeline->tempoMap.push_back({tc.tick, sp, bpm});
     }
 
     // Merge, tempo first at equal positions so it takes effect before notes.
@@ -429,13 +489,65 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
                    return a.samplePos < b.samplePos;
                });
 
-    for (const TimelineEvent &ev : timeline->events)
+    for (const TimelineEvent &ev : timeline->events) {
         timeline->lengthSamples = std::max(timeline->lengthSamples, ev.samplePos);
+        timeline->lengthTicks = std::max(timeline->lengthTicks, uint64_t(ev.tick));
+    }
 
+    timeline->loopStartTick = loopStartTick;
+    timeline->loopEndTick = loopEndTick;
     if (loopStartTick != UINT64_MAX)
         timeline->loopStartSample = tickToSample(loopStartTick, tempos, tpqn, sampleRate);
     if (loopEndTick != UINT64_MAX)
         timeline->loopEndSample = tickToSample(loopEndTick, tempos, tpqn, sampleRate);
+    if (timeline->loopEndTick != UINT64_MAX)
+        timeline->lengthTicks = std::max(timeline->lengthTicks, timeline->loopEndTick);
+
+    std::sort(timeSigs.begin(), timeSigs.end(),
+              [](const TimeSigPoint &a, const TimeSigPoint &b) { return a.tick < b.tick; });
+    timeline->timeSigs = std::move(timeSigs);
+
+    // Map the not-played events onto engine tracks (metas keep -1 unless their
+    // SMF chunk got an engine slot) and time them for display.
+    std::sort(rawOthers.begin(), rawOthers.end(),
+              [](const RawOther &a, const RawOther &b) { return a.tick < b.tick; });
+    timeline->otherEvents.reserve(rawOthers.size());
+    for (RawOther &ro : rawOthers) {
+        int engineTrack = -1;
+        if (format == 1)
+            engineTrack = smfToEngine[ro.smfTrack];
+        else if (ro.channel >= 0)
+            engineTrack = ro.channel;
+        timeline->otherEvents.push_back({ro.tick,
+                                         tickToSample(ro.tick, tempos, tpqn, sampleRate),
+                                         engineTrack, std::move(ro.label)});
+        timeline->lengthTicks = std::max(timeline->lengthTicks, ro.tick);
+    }
 
     return timeline;
+}
+
+uint64_t MidiTimeline::sampleForTick(uint64_t tick) const
+{
+    // tempoMap always has an entry at tick 0.
+    const TempoPoint *tp = &tempoMap.front();
+    for (const TempoPoint &p : tempoMap) {
+        if (p.tick > tick)
+            break;
+        tp = &p;
+    }
+    const double samplesPerTick = 60.0 / tp->bpm * sampleRate / double(ticksPerBeat);
+    return tp->samplePos + uint64_t(double(tick - tp->tick) * samplesPerTick + 0.5);
+}
+
+double MidiTimeline::tickForSample(uint64_t samplePos) const
+{
+    const TempoPoint *tp = &tempoMap.front();
+    for (const TempoPoint &p : tempoMap) {
+        if (p.samplePos > samplePos)
+            break;
+        tp = &p;
+    }
+    const double samplesPerTick = 60.0 / tp->bpm * sampleRate / double(ticksPerBeat);
+    return double(tp->tick) + double(samplePos - tp->samplePos) / samplesPerTick;
 }

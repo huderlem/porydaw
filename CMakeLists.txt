@@ -33,6 +33,7 @@ qt_add_executable(porydaw
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/viewcheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
@@ -42,6 +43,12 @@ qt_add_executable(porydaw
     src/core/timelineplayer.h
     src/project/decompproject.cpp
     src/project/decompproject.h
+    src/ui/m4asemantics.cpp
+    src/ui/m4asemantics.h
+    src/ui/songviewmodel.cpp
+    src/ui/songviewmodel.h
+    src/ui/songview.cpp
+    src/ui/songview.h
 )
 target_include_directories(porydaw PRIVATE
     src

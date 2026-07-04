@@ -113,9 +113,9 @@ mapping (from `tools/mid2agb/agb.cpp`):
 | CC 1 | `MOD` (LFO depth) | "Modulation" lane |
 | CC 5 | `PORTAMENTO` (ext) | "Portamento" lane (gated on engine profile) |
 | CC 7 / CC 10 | `VOL` / `PAN` | Volume / Pan lanes |
-| CC 12–16, 33, 39 | `MEMACC` ops, `PRIO` | Advanced view only |
-| CC 17 / 19 | `PWMC` / `PWMS` (ext) | Pulse-width lanes (gated on engine profile) |
-| CC 18 | `TUNE` | Fine-tune lane |
+| CC 12–17, 33, 39 | `MEMACC` ops, loop label, `PRIO` | Advanced view only |
+| CC 23 / 25 | `PWMC` / `PWMS` (ext) | Pulse-width lanes (gated on engine profile) |
+| CC 24 | `TUNE` | Fine-tune lane |
 | CC 20 | `BENDR` | Bend-range lane |
 | CC 21 / 22 / 26 | `LFOS` / `MODT` / `LFODL` | LFO speed / type / delay lanes |
 | CC 29 / 30 / 31 | `XCMD` (pseudo-echo vol/len) | Pseudo-echo lanes |
