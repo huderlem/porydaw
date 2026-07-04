@@ -233,6 +233,8 @@ bool SongDocument::laneEventMatches(const SmfEvent &ev, uint8_t cc, uint8_t chan
         return false;
     if (cc == DOC_CC_BEND)
         return ev.typeNibble() == 0xE;
+    if (cc == DOC_CC_VOICE)
+        return ev.typeNibble() == 0xC;
     return ev.typeNibble() == 0xB && ev.data0 == cc;
 }
 
@@ -245,6 +247,8 @@ int SongDocument::laneValue(const SmfEvent &ev, uint8_t cc) const
     }
     if (cc == DOC_CC_BEND)
         return ((int(ev.data1) << 7) | ev.data0) - 8192;
+    if (cc == DOC_CC_VOICE)
+        return ev.data0;
     return ev.data1;
 }
 
@@ -497,6 +501,8 @@ SmfEvent SongDocument::makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick,
         return makeChannelEvent(0xE, channel, tick, uint8_t(bend14 & 0x7F),
                                 uint8_t((bend14 >> 7) & 0x7F));
     }
+    if (cc == DOC_CC_VOICE)
+        return makeChannelEvent(0xC, channel, tick, uint8_t(std::clamp(value, 0, 127)), 0);
     return makeChannelEvent(0xB, channel, tick, cc, uint8_t(std::clamp(value, 0, 127)));
 }
 
@@ -510,13 +516,29 @@ void SongDocument::addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int 
     op.smfTrack = smfTrack;
     op.event = makeLaneEvent(cc, channelFor(engineTrack), tick, value);
     std::vector<EditOp> ops{op};
-    pushEdit(tr("add automation point"), std::move(ops));
+    pushEdit(cc == DOC_CC_VOICE ? tr("add voice change") : tr("add automation point"),
+             std::move(ops));
 }
 
 void SongDocument::moveLanePoint(int engineTrack, uint8_t cc, const DocLanePoint &point,
                                  uint64_t newTick, int newValue)
 {
+    const QString text =
+        cc == DOC_CC_VOICE ? tr("change voice") : tr("edit automation point");
     std::vector<EditOp> ops;
+    if (newTick == point.tick) {
+        // Value-only edit: modify in place so the event keeps its position
+        // within its tick group (mid2agb stable-sorts, so a program change
+        // hopping past a same-tick note-on would change which voice plays).
+        EditOp op;
+        op.type = EditOp::ModifyEvent;
+        op.smfTrack = point.smfTrack;
+        op.index = point.index;
+        op.event = makeLaneEvent(cc, channelFor(engineTrack), newTick, newValue);
+        ops.push_back(op);
+        pushEdit(text, std::move(ops));
+        return;
+    }
     EditOp remove;
     remove.type = EditOp::RemoveEvent;
     remove.smfTrack = point.smfTrack;
@@ -528,14 +550,13 @@ void SongDocument::moveLanePoint(int engineTrack, uint8_t cc, const DocLanePoint
     insert.smfTrack = point.smfTrack;
     insert.event = makeLaneEvent(cc, channelFor(engineTrack), newTick, newValue);
     ops.push_back(insert);
-    pushEdit(tr("edit automation point"), std::move(ops));
+    pushEdit(text, std::move(ops));
 }
 
 void SongDocument::deleteLanePoints(int engineTrack, uint8_t cc,
                                     const std::vector<DocLanePoint> &points)
 {
     Q_UNUSED(engineTrack);
-    Q_UNUSED(cc);
     if (points.empty())
         return;
     std::vector<EditOp> ops;
@@ -547,7 +568,9 @@ void SongDocument::deleteLanePoints(int engineTrack, uint8_t cc,
         }
         appendRemoveOps(ops, int(t), std::move(indices));
     }
-    pushEdit(tr("delete automation point(s)"), std::move(ops));
+    pushEdit(cc == DOC_CC_VOICE ? tr("delete voice change(s)")
+                                : tr("delete automation point(s)"),
+             std::move(ops));
 }
 
 void SongDocument::setLoopTick(bool endMarker, int64_t tick)

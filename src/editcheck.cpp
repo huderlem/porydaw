@@ -119,6 +119,35 @@ int runEditCheck(const QString &projectRoot)
             if (ok)
                 doc.deleteNotes({note});
 
+            // Voice ops: add, value-only modify (must not reorder within the
+            // tick), move to a new tick, delete.
+            if (ok) {
+                doc.addLanePoint(track, DOC_CC_VOICE, base + step, 5);
+                mutateAndCheck("events unsorted after voice add");
+                DocLanePoint vc;
+                if (!doc.findLanePoint(track, DOC_CC_VOICE, base + step, &vc)
+                    || vc.value != 5) {
+                    fail("voice change not found after add");
+                    ok = false;
+                } else {
+                    doc.moveLanePoint(track, DOC_CC_VOICE, vc, vc.tick, 9);
+                    if (!doc.findLanePoint(track, DOC_CC_VOICE, base + step, &vc)
+                        || vc.value != 9) {
+                        fail("voice value edit not applied");
+                        ok = false;
+                    } else {
+                        doc.moveLanePoint(track, DOC_CC_VOICE, vc, base + step * 6, 9);
+                        mutateAndCheck("events unsorted after voice move");
+                        if (!doc.findLanePoint(track, DOC_CC_VOICE, base + step * 6, &vc)) {
+                            fail("voice change not found after move");
+                            ok = false;
+                        } else {
+                            doc.deleteLanePoints(track, DOC_CC_VOICE, {vc});
+                        }
+                    }
+                }
+            }
+
             // Automation ops on the volume lane, plus tempo and pitch bend.
             if (ok) {
                 doc.addLanePoint(track, 7, base + step * 2, 100);

@@ -160,6 +160,11 @@ void MainWindow::buildUi()
                 if (m_audioOk && m_audio.songLoaded())
                     m_audio.previewNote(uint8_t(track), uint8_t(key), uint8_t(velocity));
             });
+    connect(m_songView, &SongView::auditionVoice, this,
+            [this](int voice, int key, int velocity) {
+                if (m_audioOk)
+                    m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
+            });
     connect(m_songView, &SongView::statusMessage, this,
             [this](const QString &text) { statusBar()->showMessage(text, 6000); });
     setCentralWidget(m_songView);

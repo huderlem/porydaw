@@ -5,13 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Edit a track's Voice/Program** (SPEC §4.2 "instrument picker", §6.1
-  track-header instrument). Program changes render as read-only markers;
-  SongDocument has no edit op for program-change events (insert/modify/
-  delete), so a track's instrument can't be changed at all. Needs the
-  document op plus a picker listing the voicegroup's entries — the M3
-  import wizard's mapping combo already renders exactly that list, and
-  AudioEngine::previewVoice can audition the selection.
 - **Velocity lane / drag handles.** Velocity is edit-able only via
   right-click → "Set velocity…" on a selection. A per-note drag handle or a
   DAW-style velocity strip under the roll would be quicker for sweeps.

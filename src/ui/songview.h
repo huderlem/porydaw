@@ -93,6 +93,13 @@ public:
     QString instrumentLabel(int track) const; // "042 name (type)" from the voicegroup
     QString voiceShortName(uint8_t program) const;
 
+    // Modal voicegroup-entry picker with press-and-hold audition. Returns
+    // false on cancel; otherwise *outVoice is the chosen entry (0-127).
+    bool pickVoice(const QString &title, int initialVoice, int *outVoice);
+    // Track-header entry point: re-pick the voice governing the track (its
+    // first program change), inserting one at tick 0 if the track has none.
+    void editTrackVoice(int track);
+
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber) for every beat, honoring the song's time signature changes.
     void forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
@@ -140,6 +147,9 @@ signals:
     void selectedTrackChanged(int track);
     // Audition request (velocity 0 releases); forwarded to the audio engine.
     void auditionNote(int track, int key, int velocity);
+    // Voicegroup-entry audition from the voice picker; routed to
+    // AudioEngine::previewVoice like the voicegroup browser's signal.
+    void auditionVoice(int voice, int key, int velocity);
     void statusMessage(const QString &text);
 
 protected:

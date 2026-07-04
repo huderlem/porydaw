@@ -1,10 +1,13 @@
 #include "songview.h"
 
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -36,6 +39,8 @@ constexpr int kStripH = 24;
 constexpr int kTrackRowH = 46;
 constexpr double kMinPxPerBeat = 4.0;
 constexpr double kMaxPxPerBeat = 640.0;
+constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
+constexpr int kVoiceAuditionVel = 112;
 
 bool isBlackKey(int key)
 {
@@ -772,12 +777,17 @@ public:
             m_rows.push_back({Row::Tempo, nullptr});
             const SongViewModel &model = m_sv->model();
             const int selected = m_sv->selectedTrack();
+            // The voice row shows whenever the track has changes; with a
+            // document attached it is always present as the place to add one.
+            bool voiceRow = m_sv->document() != nullptr;
             for (const VoiceChange &vc : model.voices) {
                 if (vc.track == selected) {
-                    m_rows.push_back({Row::Voice, nullptr});
+                    voiceRow = true;
                     break;
                 }
             }
+            if (voiceRow)
+                m_rows.push_back({Row::Voice, nullptr});
             for (const AutoLane &lane : model.lanes)
                 if (lane.track == selected)
                     m_rows.push_back({Row::Lane, &lane});
@@ -855,10 +865,14 @@ protected:
                 showLaneMenu(*row.lane, event->globalPosition().toPoint());
             return;
         }
+        if (row.kind == Row::Voice) {
+            voiceRowPress(event);
+            return;
+        }
         uint8_t cc;
         int track;
         if (!rowTarget(row, &cc, &track))
-            return; // voice row: not editable in M2
+            return;
 
         const LanePoint *nearPt = nearestPoint(row, event->pos().x());
         if (event->button() == Qt::RightButton) {
@@ -990,6 +1004,54 @@ private:
         }
     }
 
+    // Voice row: left-click a marker re-picks its voice, left-click on empty
+    // space inserts a change at the snapped tick, right-click deletes a
+    // marker. The value axis is meaningless here (a voice is an identity, not
+    // a level), so the picker dialog replaces the lanes' drag editing.
+    void voiceRowPress(QMouseEvent *event)
+    {
+        SongDocument *doc = m_sv->document();
+        const int track = m_sv->selectedTrack();
+        const std::vector<DocLanePoint> changes = doc->lanePoints(track, DOC_CC_VOICE);
+
+        const DocLanePoint *hit = nullptr;
+        int bestDist = 9; // same radius as nearestPoint
+        for (const DocLanePoint &pt : changes) {
+            const int dist =
+                std::abs(kGutterW + m_sv->contentX(double(pt.tick)) - event->pos().x());
+            if (dist < bestDist) {
+                bestDist = dist;
+                hit = &pt;
+            }
+        }
+
+        if (event->button() == Qt::RightButton) {
+            if (hit)
+                doc->deleteLanePoints(track, DOC_CC_VOICE, {*hit});
+            return;
+        }
+        if (event->button() != Qt::LeftButton)
+            return;
+        if (hit) {
+            int voice = hit->value;
+            if (m_sv->pickVoice(SongView::tr("Change voice"), hit->value, &voice)
+                && voice != hit->value)
+                doc->moveLanePoint(track, DOC_CC_VOICE, *hit, hit->tick, voice);
+        } else {
+            const uint64_t tick = m_sv->snapTick(
+                m_sv->tickAtContentX(std::max(kGutterW, event->pos().x()) - kGutterW));
+            // Preselect the voice already sounding at that tick.
+            int voice = 0;
+            for (const DocLanePoint &pt : changes) {
+                if (pt.tick > tick)
+                    break;
+                voice = pt.value;
+            }
+            if (m_sv->pickVoice(SongView::tr("Insert voice change"), voice, &voice))
+                doc->addLanePoint(track, DOC_CC_VOICE, tick, voice);
+        }
+    }
+
     // Document target of an editable row; false for the voice row.
     bool rowTarget(const Row &row, uint8_t *cc, int *track) const
     {
@@ -1117,6 +1179,15 @@ private:
             p.setPen(palette().color(QPalette::PlaceholderText));
             p.drawText(QRect(8, r.top() + 20, kGutterW - 16, 14), Qt::AlignLeft,
                        SongView::tr("empty · click to add points"));
+        } else if (row.kind == Row::Voice && m_sv->document()) {
+            int count = 0;
+            for (const VoiceChange &vc : m_sv->model().voices)
+                if (vc.track == m_sv->selectedTrack())
+                    count++;
+            p.setPen(palette().color(QPalette::PlaceholderText));
+            p.drawText(QRect(8, r.top() + 20, kGutterW - 16, 14), Qt::AlignLeft,
+                       count ? SongView::tr("%n change(s) · click to edit", nullptr, count)
+                             : SongView::tr("no voice set · click to add"));
         }
 
         p.setClipRect(plot);
@@ -1286,6 +1357,74 @@ private:
     SongView *m_sv;
 };
 
+// ---------------------------------------------------------- VoicePickerDialog
+
+// Modal instrument picker (SPEC §4.2): the voicegroup's 128 entries, the same
+// list the import wizard's mapping combo renders. Press-and-hold auditions
+// through the preview engine; double-click chooses.
+class VoicePickerDialog : public QDialog
+{
+public:
+    VoicePickerDialog(SongView *sv, const QString &title, int initialVoice,
+                      std::function<void(int, int)> audition)
+        : QDialog(sv), m_audition(std::move(audition))
+    {
+        setWindowTitle(title);
+        resize(360, 440);
+        auto *layout = new QVBoxLayout(this);
+        m_list = new QListWidget(this);
+        m_list->setUniformItemSizes(true);
+        m_list->setToolTip(SongView::tr("Click and hold to audition (middle C)."));
+        for (int v = 0; v < VOICEGROUP_SIZE; v++)
+            m_list->addItem(QStringLiteral("%1  %2")
+                                .arg(v, 3, 10, QLatin1Char('0'))
+                                .arg(sv->voiceShortName(uint8_t(v))));
+        m_list->setCurrentRow(std::clamp(initialVoice, 0, VOICEGROUP_SIZE - 1));
+        m_list->scrollToItem(m_list->currentItem(), QAbstractItemView::PositionAtCenter);
+        layout->addWidget(m_list, 1);
+
+        auto *buttons =
+            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+        layout->addWidget(buttons);
+
+        connect(m_list, &QListWidget::itemPressed, this, [this](QListWidgetItem *item) {
+            releaseVoice();
+            if (item) {
+                m_sounding = m_list->row(item);
+                m_audition(m_sounding, kVoiceAuditionVel);
+            }
+        });
+        connect(m_list, &QListWidget::itemDoubleClicked, this, [this] { accept(); });
+        m_list->viewport()->installEventFilter(this);
+    }
+
+    ~VoicePickerDialog() override { releaseVoice(); }
+
+    int selectedVoice() const { return std::max(0, m_list->currentRow()); }
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == m_list->viewport() && event->type() == QEvent::MouseButtonRelease)
+            releaseVoice();
+        return QDialog::eventFilter(watched, event);
+    }
+
+private:
+    void releaseVoice()
+    {
+        if (m_sounding < 0)
+            return;
+        m_audition(m_sounding, 0);
+        m_sounding = -1;
+    }
+
+    QListWidget *m_list;
+    std::function<void(int, int)> m_audition;
+    int m_sounding = -1;
+};
+
 // ---------------------------------------------------------- TrackHeaderPanel
 
 class TrackHeaderRow : public QWidget
@@ -1366,6 +1505,12 @@ protected:
 
     void mousePressEvent(QMouseEvent *) override { m_sv->selectTrack(m_track); }
 
+    void mouseDoubleClickEvent(QMouseEvent *) override
+    {
+        m_sv->selectTrack(m_track);
+        m_sv->editTrackVoice(m_track);
+    }
+
 private:
     SongView *m_sv;
     int m_track;
@@ -1395,9 +1540,12 @@ public:
                 if (!tl->tracks[t].used)
                     continue;
                 auto *row = new TrackHeaderRow(m_sv, t, this);
-                row->setToolTip(SongView::tr("%1 notes · program %2")
-                                    .arg(tl->tracks[t].noteCount)
-                                    .arg(tl->tracks[t].firstProgram));
+                QString tip = SongView::tr("%1 notes · %2")
+                                  .arg(tl->tracks[t].noteCount)
+                                  .arg(m_sv->instrumentLabel(t));
+                if (m_sv->document())
+                    tip += SongView::tr("\nDouble-click to change the voice");
+                row->setToolTip(tip);
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
             }
@@ -1773,6 +1921,33 @@ QString SongView::voiceShortName(uint8_t program) const
     if (name.isEmpty())
         return type.isEmpty() ? tr("Voice") : type;
     return QStringLiteral("%1 (%2)").arg(name, type);
+}
+
+bool SongView::pickVoice(const QString &title, int initialVoice, int *outVoice)
+{
+    VoicePickerDialog dialog(this, title, initialVoice, [this](int voice, int velocity) {
+        emit auditionVoice(voice, kVoiceAuditionKey, velocity);
+    });
+    if (dialog.exec() != QDialog::Accepted)
+        return false;
+    *outVoice = dialog.selectedVoice();
+    return true;
+}
+
+void SongView::editTrackVoice(int track)
+{
+    if (!m_document || track < 0 || track > 15)
+        return;
+    const std::vector<DocLanePoint> changes = m_document->lanePoints(track, DOC_CC_VOICE);
+    const int initial = changes.empty() ? 0 : changes.front().value;
+    int voice = initial;
+    if (!pickVoice(tr("Track %1 voice").arg(track + 1), initial, &voice))
+        return;
+    if (changes.empty())
+        m_document->addLanePoint(track, DOC_CC_VOICE, 0, voice);
+    else if (voice != initial)
+        m_document->moveLanePoint(track, DOC_CC_VOICE, changes.front(),
+                                  changes.front().tick, voice);
 }
 
 void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,

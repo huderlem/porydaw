@@ -19,6 +19,8 @@ constexpr uint8_t DOC_CC_TEMPO = 0xFE; // tempo metas; live in SMF track 0 only,
                                        // because mid2agb reads seq events
                                        // (tempo/timesig/loop markers) from the
                                        // first MTrk chunk exclusively
+constexpr uint8_t DOC_CC_VOICE = 0xFD; // program changes (0xC): the track's
+                                       // voice; value is the voicegroup entry
 
 // A note located in the SMF model: the note-on event plus the event that ends
 // it, paired exactly as mid2agb pairs them (first same-channel same-key
@@ -38,13 +40,13 @@ struct DocNote {
     bool unterminated() const { return endIndex == SIZE_MAX; }
 };
 
-// An automation point (CC value, pitch bend, or tempo) located in the SMF
-// model. Same staleness rule as DocNote.
+// An automation point (CC value, pitch bend, tempo, or voice change) located
+// in the SMF model. Same staleness rule as DocNote.
 struct DocLanePoint {
     int smfTrack = -1;
     size_t index = 0;
     uint64_t tick = 0;
-    int value = 0; // CC: 0-127; bend: -8192..8191; tempo: BPM
+    int value = 0; // CC: 0-127; bend: -8192..8191; tempo: BPM; voice: 0-127
 };
 
 // The editable song document (SPEC.md §4): a full-fidelity SMF model plus the
