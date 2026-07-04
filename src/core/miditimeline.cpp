@@ -1,70 +1,10 @@
 #include "miditimeline.h"
 
-#include <QFile>
 #include <algorithm>
-#include <cstring>
+
+#include "smf.h"
 
 namespace {
-
-struct Reader {
-    const uint8_t *data;
-    size_t size;
-    size_t pos = 0;
-
-    bool readByte(uint8_t *out)
-    {
-        if (pos >= size)
-            return false;
-        *out = data[pos++];
-        return true;
-    }
-
-    bool readU16(uint16_t *out)
-    {
-        if (pos + 2 > size)
-            return false;
-        *out = static_cast<uint16_t>((data[pos] << 8) | data[pos + 1]);
-        pos += 2;
-        return true;
-    }
-
-    bool readU32(uint32_t *out)
-    {
-        if (pos + 4 > size)
-            return false;
-        *out = (static_cast<uint32_t>(data[pos]) << 24)
-             | (static_cast<uint32_t>(data[pos + 1]) << 16)
-             | (static_cast<uint32_t>(data[pos + 2]) << 8)
-             | static_cast<uint32_t>(data[pos + 3]);
-        pos += 4;
-        return true;
-    }
-
-    bool skip(uint32_t n)
-    {
-        if (pos + n > size)
-            return false;
-        pos += n;
-        return true;
-    }
-
-    // Variable-length quantity, up to 4 bytes.
-    bool readVlq(uint32_t *out)
-    {
-        uint32_t val = 0;
-        for (int i = 0; i < 4; i++) {
-            uint8_t b;
-            if (!readByte(&b))
-                return false;
-            val = (val << 7) | (b & 0x7F);
-            if (!(b & 0x80)) {
-                *out = val;
-                return true;
-            }
-        }
-        return false;
-    }
-};
 
 struct RawEvent {
     uint64_t tick;
@@ -93,198 +33,14 @@ struct RawOther {
 
 // True when buf is exactly the single character `marker` after stripping
 // leading/trailing ASCII whitespace.
-bool textIsLoopMarker(const uint8_t *buf, uint32_t len, char marker)
+bool textIsLoopMarker(const char *buf, uint32_t len, char marker)
 {
     uint32_t s = 0, e = len;
     while (s < e && (buf[s] == ' ' || buf[s] == '\t' || buf[s] == '\r' || buf[s] == '\n'))
         s++;
     while (e > s && (buf[e - 1] == ' ' || buf[e - 1] == '\t' || buf[e - 1] == '\r' || buf[e - 1] == '\n'))
         e--;
-    return (e - s == 1) && static_cast<char>(buf[s]) == marker;
-}
-
-struct TrackParseResult {
-    QString name;
-    bool hasChannelEvents = false;
-};
-
-void parseTrack(Reader &r, uint32_t trackLen, uint16_t trackIndex,
-                std::vector<RawEvent> &rawEvents, std::vector<TempoChange> &tempos,
-                std::vector<TimeSigPoint> &timeSigs, std::vector<RawOther> &others,
-                uint64_t *loopStartTick, uint64_t *loopEndTick, TrackParseResult *result)
-{
-    const size_t end = r.pos + trackLen;
-    uint64_t tick = 0;
-    uint8_t runningStatus = 0;
-
-    auto push = [&](uint8_t channel, uint8_t type, uint8_t d0, uint8_t d1) {
-        RawEvent ev;
-        ev.tick = tick;
-        ev.channel = channel;
-        ev.smfTrack = trackIndex;
-        ev.type = type;
-        ev.data0 = d0;
-        ev.data1 = d1;
-        ev.origIndex = static_cast<int>(rawEvents.size());
-        rawEvents.push_back(ev);
-        result->hasChannelEvents = true;
-    };
-
-    while (r.pos < end) {
-        uint32_t delta;
-        if (!r.readVlq(&delta))
-            break;
-        tick += delta;
-
-        uint8_t b;
-        if (!r.readByte(&b))
-            break;
-
-        if (b == 0xFF) {
-            runningStatus = 0;
-            uint8_t metaType;
-            uint32_t metaLen;
-            if (!r.readByte(&metaType) || !r.readVlq(&metaLen))
-                break;
-
-            if (metaType == 0x51 && metaLen == 3) {
-                uint8_t t0, t1, t2;
-                if (!r.readByte(&t0) || !r.readByte(&t1) || !r.readByte(&t2))
-                    break;
-                tempos.push_back({tick, (static_cast<uint32_t>(t0) << 16)
-                                            | (static_cast<uint32_t>(t1) << 8) | t2});
-            } else if (metaType == 0x58 && metaLen >= 2) {
-                uint8_t num, den;
-                if (!r.readByte(&num) || !r.readByte(&den))
-                    break;
-                if (!r.skip(metaLen - 2))
-                    break;
-                timeSigs.push_back({tick, num, den});
-            } else if (metaType == 0x03 && result->name.isEmpty()) {
-                // Track name
-                uint32_t readLen = std::min<uint32_t>(metaLen, 64);
-                char nameBuf[64];
-                for (uint32_t j = 0; j < readLen; j++) {
-                    uint8_t c;
-                    if (!r.readByte(&c))
-                        goto trackDone;
-                    nameBuf[j] = static_cast<char>(c);
-                }
-                if (metaLen > readLen && !r.skip(metaLen - readLen))
-                    goto trackDone;
-                result->name = QString::fromLatin1(nameBuf, readLen).trimmed();
-            } else if (metaType >= 0x01 && metaType <= 0x07) {
-                // Text-type meta: check for loop markers ('[' / ']'), most
-                // commonly meta 0x01 (Text) or 0x06 (Marker).
-                uint32_t readLen = std::min<uint32_t>(metaLen, 32);
-                uint8_t textBuf[32];
-                for (uint32_t j = 0; j < readLen; j++) {
-                    if (!r.readByte(&textBuf[j]))
-                        goto trackDone;
-                }
-                if (metaLen > readLen && !r.skip(metaLen - readLen))
-                    goto trackDone;
-                if (textIsLoopMarker(textBuf, readLen, '[') && *loopStartTick == UINT64_MAX)
-                    *loopStartTick = tick;
-                else if (textIsLoopMarker(textBuf, readLen, ']') && *loopEndTick == UINT64_MAX)
-                    *loopEndTick = tick;
-                else {
-                    static const char *const kTextMetaNames[] = {
-                        "Text", "Copyright", "Track name", "Instrument",
-                        "Lyric", "Marker", "Cue point"};
-                    const QString text =
-                        QString::fromLatin1(reinterpret_cast<const char *>(textBuf), readLen)
-                            .trimmed();
-                    if (!text.isEmpty())
-                        others.push_back({tick, trackIndex, -1,
-                                          QStringLiteral("%1: %2")
-                                              .arg(QLatin1String(kTextMetaNames[metaType - 1]),
-                                                   text)});
-                }
-            } else if (metaType == 0x2F) {
-                if (!r.skip(metaLen))
-                    break;
-            } else {
-                if (!r.skip(metaLen))
-                    break;
-                others.push_back({tick, trackIndex, -1,
-                                  QStringLiteral("Meta 0x%1 (%2 bytes)")
-                                      .arg(metaType, 2, 16, QLatin1Char('0'))
-                                      .arg(metaLen)});
-            }
-        } else if (b == 0xF0 || b == 0xF7) {
-            runningStatus = 0;
-            uint32_t sysexLen;
-            if (!r.readVlq(&sysexLen) || !r.skip(sysexLen))
-                break;
-            others.push_back({tick, trackIndex, -1,
-                              QStringLiteral("SysEx (%1 bytes)").arg(sysexLen)});
-        } else {
-            uint8_t status, data0;
-            if (b & 0x80) {
-                status = b;
-                runningStatus = b;
-                if (!r.readByte(&data0))
-                    break;
-            } else {
-                if (!runningStatus)
-                    break;
-                status = runningStatus;
-                data0 = b;
-            }
-
-            const uint8_t type = (status >> 4) & 0x0F;
-            const uint8_t chan = status & 0x0F;
-            uint8_t data1;
-
-            switch (type) {
-            case 0x8: // Note off
-                if (!r.readByte(&data1))
-                    goto trackDone;
-                push(chan, 0x8, data0, data1);
-                break;
-            case 0x9: // Note on (velocity 0 means note off)
-                if (!r.readByte(&data1))
-                    goto trackDone;
-                push(chan, data1 ? 0x9 : 0x8, data0, data1);
-                break;
-            case 0xA: // Polyphonic aftertouch: not played
-                if (!r.readByte(&data1))
-                    goto trackDone;
-                others.push_back({tick, trackIndex, chan,
-                                  QStringLiteral("Poly aftertouch key %1 = %2")
-                                      .arg(data0)
-                                      .arg(data1)});
-                break;
-            case 0xB: // Control change
-                if (!r.readByte(&data1))
-                    goto trackDone;
-                push(chan, 0xB, data0, data1);
-                break;
-            case 0xC: // Program change (1 data byte)
-                push(chan, 0xC, data0, 0);
-                break;
-            case 0xD: // Channel pressure: not played (data0 already consumed)
-                others.push_back({tick, trackIndex, chan,
-                                  QStringLiteral("Channel pressure %1").arg(data0)});
-                break;
-            case 0xE: // Pitch bend (LSB in data0)
-                if (!r.readByte(&data1))
-                    goto trackDone;
-                push(chan, 0xE, data0, data1);
-                break;
-            default:
-                others.push_back({tick, trackIndex, -1,
-                                  QStringLiteral("Unrecognized status 0x%1 — rest of SMF track "
-                                                 "%2 skipped")
-                                      .arg(status, 2, 16, QLatin1Char('0'))
-                                      .arg(trackIndex)});
-                goto trackDone; // unknown status byte, bail on this track
-            }
-        }
-    }
-trackDone:
-    r.pos = end;
+    return (e - s == 1) && buf[s] == marker;
 }
 
 // Convert an absolute tick to an absolute sample index via the tempo map.
@@ -326,69 +82,116 @@ TimelineEvent makeTempoEvent(uint64_t samplePos, uint64_t tick, double bpm)
 std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sampleRate,
                                                  QString *error)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
-        if (error)
-            *error = QStringLiteral("Cannot open MIDI file: %1").arg(path);
+    SmfFile smf;
+    if (!SmfFile::readFile(path, &smf, error))
         return nullptr;
-    }
-    const QByteArray bytes = file.readAll();
-    file.close();
+    return build(smf, sampleRate);
+}
 
-    Reader r{reinterpret_cast<const uint8_t *>(bytes.constData()),
-             static_cast<size_t>(bytes.size())};
-
-    if (r.size < 14 || memcmp(r.data, "MThd", 4) != 0) {
-        if (error)
-            *error = QStringLiteral("Not a Standard MIDI File: %1").arg(path);
-        return nullptr;
-    }
-    r.pos = 4;
-
-    uint32_t hdrLen;
-    uint16_t format, numTracks, division;
-    if (!r.readU32(&hdrLen) || !r.readU16(&format) || !r.readU16(&numTracks)
-        || !r.readU16(&division)) {
-        if (error)
-            *error = QStringLiteral("Invalid MIDI header");
-        return nullptr;
-    }
-    if (hdrLen > 6)
-        r.pos += hdrLen - 6;
-
-    if (format > 1) {
-        if (error)
-            *error = QStringLiteral("Unsupported MIDI format %1 (only 0 and 1 supported)").arg(format);
-        return nullptr;
-    }
-    if (division & 0x8000) {
-        if (error)
-            *error = QStringLiteral("SMPTE time division is not supported");
-        return nullptr;
-    }
-    const uint32_t tpqn = division;
+std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sampleRate)
+{
+    const uint32_t tpqn = smf.division;
+    const int numTracks = int(smf.tracks.size());
 
     std::vector<RawEvent> rawEvents;
     std::vector<TempoChange> tempos;
     std::vector<TimeSigPoint> timeSigs;
     std::vector<RawOther> rawOthers;
-    std::vector<TrackParseResult> trackResults(numTracks);
+    std::vector<bool> trackHasChannelEvents(numTracks, false);
+    std::vector<QString> trackNames(numTracks);
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;
 
-    for (uint16_t t = 0; t < numTracks; t++) {
-        if (r.pos + 8 > r.size)
-            break;
-        if (memcmp(r.data + r.pos, "MTrk", 4) != 0)
-            break;
-        r.pos += 4;
-        uint32_t trackLen;
-        if (!r.readU32(&trackLen))
-            break;
-        const size_t trackEnd = r.pos + trackLen;
-        parseTrack(r, trackLen, t, rawEvents, tempos, timeSigs, rawOthers, &loopStartTick,
-                   &loopEndTick, &trackResults[t]);
-        r.pos = trackEnd;
+    for (int t = 0; t < numTracks; t++) {
+        for (const SmfEvent &sev : smf.tracks[t].events) {
+            const uint64_t tick = sev.tick;
+
+            if (sev.isChannel()) {
+                const uint8_t type = sev.typeNibble();
+                const uint8_t chan = sev.channel();
+                auto push = [&](uint8_t playType) {
+                    RawEvent ev;
+                    ev.tick = tick;
+                    ev.channel = chan;
+                    ev.smfTrack = uint16_t(t);
+                    ev.type = playType;
+                    ev.data0 = sev.data0;
+                    ev.data1 = sev.data1;
+                    ev.origIndex = static_cast<int>(rawEvents.size());
+                    rawEvents.push_back(ev);
+                    trackHasChannelEvents[t] = true;
+                };
+                switch (type) {
+                case 0x8:
+                    push(0x8);
+                    break;
+                case 0x9: // note on (velocity 0 means note off)
+                    push(sev.data1 ? 0x9 : 0x8);
+                    break;
+                case 0xA: // polyphonic aftertouch: not played
+                    rawOthers.push_back({tick, uint16_t(t), chan,
+                                         QStringLiteral("Poly aftertouch key %1 = %2")
+                                             .arg(sev.data0)
+                                             .arg(sev.data1)});
+                    break;
+                case 0xB:
+                    push(0xB);
+                    break;
+                case 0xC:
+                    push(0xC);
+                    break;
+                case 0xD: // channel pressure: not played
+                    rawOthers.push_back({tick, uint16_t(t), chan,
+                                         QStringLiteral("Channel pressure %1").arg(sev.data0)});
+                    break;
+                case 0xE:
+                    push(0xE);
+                    break;
+                }
+            } else if (sev.isSysEx()) {
+                rawOthers.push_back({tick, uint16_t(t), -1,
+                                     QStringLiteral("SysEx (%1 bytes)").arg(sev.blob.size())});
+            } else if (sev.isMeta()) {
+                const uint8_t metaType = sev.metaType;
+                const QByteArray &blob = sev.blob;
+                if (metaType == 0x51 && blob.size() == 3) {
+                    const uint8_t *p = reinterpret_cast<const uint8_t *>(blob.constData());
+                    tempos.push_back({tick, (static_cast<uint32_t>(p[0]) << 16)
+                                                | (static_cast<uint32_t>(p[1]) << 8) | p[2]});
+                } else if (metaType == 0x58 && blob.size() >= 2) {
+                    timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
+                } else if (metaType == 0x03 && trackNames[t].isEmpty()) {
+                    const int len = std::min<int>(blob.size(), 64);
+                    trackNames[t] = QString::fromLatin1(blob.constData(), len).trimmed();
+                } else if (metaType >= 0x01 && metaType <= 0x07) {
+                    // Text-type meta: check for loop markers ('[' / ']').
+                    const uint32_t len = uint32_t(std::min<int>(blob.size(), 32));
+                    if (textIsLoopMarker(blob.constData(), len, '[')
+                        && loopStartTick == UINT64_MAX) {
+                        loopStartTick = tick;
+                    } else if (textIsLoopMarker(blob.constData(), len, ']')
+                               && loopEndTick == UINT64_MAX) {
+                        loopEndTick = tick;
+                    } else {
+                        static const char *const kTextMetaNames[] = {
+                            "Text", "Copyright", "Track name", "Instrument",
+                            "Lyric", "Marker", "Cue point"};
+                        const QString text =
+                            QString::fromLatin1(blob.constData(), int(len)).trimmed();
+                        if (!text.isEmpty())
+                            rawOthers.push_back(
+                                {tick, uint16_t(t), -1,
+                                 QStringLiteral("%1: %2").arg(
+                                     QLatin1String(kTextMetaNames[metaType - 1]), text)});
+                    }
+                } else {
+                    rawOthers.push_back({tick, uint16_t(t), -1,
+                                         QStringLiteral("Meta 0x%1 (%2 bytes)")
+                                             .arg(metaType, 2, 16, QLatin1Char('0'))
+                                             .arg(blob.size())});
+                }
+            }
+        }
     }
 
     std::stable_sort(rawEvents.begin(), rawEvents.end(),
@@ -406,14 +209,14 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
 
     // Map SMF tracks (Type 1) or MIDI channels (Type 0) to engine tracks.
     std::vector<int> smfToEngine(numTracks, -1);
-    if (format == 1) {
+    if (smf.format == 1) {
         int next = 0;
-        for (uint16_t t = 0; t < numTracks; t++) {
-            if (!trackResults[t].hasChannelEvents)
+        for (int t = 0; t < numTracks; t++) {
+            if (!trackHasChannelEvents[t])
                 continue;
             if (next < 16) {
                 smfToEngine[t] = next;
-                timeline->tracks[next].name = trackResults[t].name;
+                timeline->tracks[next].name = trackNames[t];
                 next++;
             } else {
                 timeline->droppedTracks++;
@@ -429,7 +232,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
     noteEvents.reserve(rawEvents.size());
     for (const RawEvent &re : rawEvents) {
         int engineTrack;
-        if (format == 1) {
+        if (smf.format == 1) {
             engineTrack = smfToEngine[re.smfTrack];
             if (engineTrack < 0)
                 continue; // beyond 16 usable tracks
@@ -454,7 +257,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
             ti.firstProgram = ev.data0;
     }
 
-    if (format == 0) {
+    if (smf.format == 0) {
         int used = 0;
         for (int i = 0; i < 16; i++) {
             if (timeline->tracks[i].used) {
@@ -514,7 +317,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
     timeline->otherEvents.reserve(rawOthers.size());
     for (RawOther &ro : rawOthers) {
         int engineTrack = -1;
-        if (format == 1)
+        if (smf.format == 1)
             engineTrack = smfToEngine[ro.smfTrack];
         else if (ro.channel >= 0)
             engineTrack = ro.channel;

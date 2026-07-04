@@ -64,11 +64,17 @@ struct OtherEvent {
 // sharing a MIDI channel stay separate (mid2agb semantics). Chunks with no
 // channel events (e.g. a conductor track) don't consume a slot. For Type 0,
 // the MIDI channel is the engine track.
+struct SmfFile;
+
 class MidiTimeline
 {
 public:
     static std::unique_ptr<MidiTimeline> load(const QString &path, double sampleRate,
                                               QString *error);
+
+    // Projects a full-fidelity SMF model (the editable document storage) into
+    // a playable timeline. load() is readFile + build.
+    static std::unique_ptr<MidiTimeline> build(const SmfFile &smf, double sampleRate);
 
     std::vector<TimelineEvent> events; // sorted by samplePos
     TimelineTrack tracks[16];

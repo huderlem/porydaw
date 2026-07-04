@@ -133,6 +133,7 @@ void DecompProject::parseMidiCfg()
         SongCfg cfg;
         const QStringList flags =
             line.mid(colon + 1).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        cfg.rawFlags = flags;
         for (const QString &flag : flags) {
             if (flag.size() < 2 || flag[0] != QLatin1Char('-'))
                 continue;

@@ -34,11 +34,14 @@ qt_add_executable(porydaw
     src/mainwindow.cpp
     src/mainwindow.h
     src/viewcheck.cpp
+    src/roundtrip.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
     src/core/miditimeline.cpp
     src/core/miditimeline.h
+    src/core/smf.cpp
+    src/core/smf.h
     src/core/timelineplayer.cpp
     src/core/timelineplayer.h
     src/project/decompproject.cpp
@@ -71,6 +74,7 @@ endif()
 add_executable(porydaw_render_cli
     tools/porydaw_render_cli.cpp
     src/core/miditimeline.cpp
+    src/core/smf.cpp
     src/core/timelineplayer.cpp
 )
 target_include_directories(porydaw_render_cli PRIVATE src)

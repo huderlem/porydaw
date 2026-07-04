@@ -6,6 +6,7 @@
 
 // Per-song mid2agb options from the song's line in sound/songs/midi/midi.cfg.
 struct SongCfg {
+    QStringList rawFlags;    // the flags exactly as written in midi.cfg
     QString voicegroupArg;   // -G value, e.g. "_abandoned_ship" (mid2agb default: "_dummy")
     int masterVolume = 127;  // -V (0-127)
     int reverb = -1;         // -R, -1 = flag absent (no reverb override)
