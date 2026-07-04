@@ -35,7 +35,9 @@ namespace songview {
 namespace {
 
 constexpr int kRulerH = 26;
-constexpr int kLaneH = 48;
+constexpr int kLaneH = 48; // default row height; Ctrl+wheel rescales
+constexpr int kMinLaneH = 28;
+constexpr int kMaxLaneH = 128;
 constexpr int kAddLaneH = 20;
 constexpr int kLanesAreaH = 150;
 constexpr int kStripH = 24;
@@ -1148,8 +1150,8 @@ private:
 class AutomationArea : public QWidget
 {
 public:
-    explicit AutomationArea(SongView *sv)
-        : QWidget(nullptr), m_sv(sv) // parented by the scroll area
+    AutomationArea(SongView *sv, QScrollArea *scroll)
+        : QWidget(nullptr), m_sv(sv), m_scroll(scroll) // parented by the scroll area
     {
         setMinimumHeight(kLaneH);
     }
@@ -1179,10 +1181,7 @@ public:
                 if (lane.track == selected)
                     m_rows.push_back({Row::Lane, &lane});
         }
-        const int addH = m_sv->timeline() && m_sv->document() ? kAddLaneH : 0;
-        // Minimum, not fixed: the scroll area stretches the widget to fill
-        // its viewport when the user drags the lanes area taller.
-        setMinimumHeight(std::max(kLaneH, int(m_rows.size()) * kLaneH + addH));
+        applyHeight();
         update();
     }
 
@@ -1195,7 +1194,7 @@ protected:
             return;
 
         for (size_t i = 0; i < m_rows.size(); i++)
-            paintRow(p, m_rows[i], QRect(0, int(i) * kLaneH, width(), kLaneH));
+            paintRow(p, m_rows[i], QRect(0, int(i) * m_laneH, width(), m_laneH));
 
         if (m_sv->document()) {
             const QRect strip = addLaneRect();
@@ -1209,15 +1208,16 @@ protected:
         if (m_dragRow >= 0 && m_dragRow < int(m_rows.size())) {
             int minV, maxV;
             rowRange(m_rows[m_dragRow], &minV, &maxV);
-            const int top = m_dragRow * kLaneH + 5;
-            const int bottom = (m_dragRow + 1) * kLaneH - 1 - 4;
+            const int top = m_dragRow * m_laneH + 5;
+            const int bottom = (m_dragRow + 1) * m_laneH - 1 - 4;
             auto valueY = [&](int v) {
                 return bottom - (v - minV) * (bottom - top) / std::max(1, maxV - minV);
             };
             auto tickX = [&](uint64_t t) {
                 return kGutterW + m_sv->contentX(double(t));
             };
-            p.setClipRect(QRect(kGutterW, m_dragRow * kLaneH, width() - kGutterW, kLaneH));
+            p.setClipRect(
+                QRect(kGutterW, m_dragRow * m_laneH, width() - kGutterW, m_laneH));
             p.setPen(QPen(palette().color(QPalette::WindowText), 1));
             p.setBrush(Qt::NoBrush);
             if (m_gesture == Gesture::Sweep && m_sweep.size() > 1) {
@@ -1244,18 +1244,27 @@ protected:
 
     void wheelEvent(QWheelEvent *event) override
     {
+        // Same bindings as the roll's notes area: plain wheel over the plot
+        // zooms the timeline; Ctrl+wheel resizes the lane rows (the roll's
+        // key-height analog); Shift (or a trackpad's horizontal delta)
+        // scrolls horizontally. Over the gutter the wheel pages the lane
+        // list vertically via the scroll area.
         const QPoint delta = event->angleDelta();
+        const int d = delta.y() ? delta.y() : delta.x();
         if (event->modifiers() & Qt::ControlModifier) {
+            zoomLaneHeight(d, int(event->position().y()));
+        } else if (event->modifiers() & Qt::ShiftModifier) {
+            m_sv->scrollByPx(-d);
+        } else if (delta.x() && !delta.y()) {
+            m_sv->scrollByPx(-delta.x());
+        } else if (event->position().x() < kGutterW) {
+            event->ignore();
+            return;
+        } else {
             m_sv->zoomAroundContentX(std::pow(1.0015, delta.y()),
                                      int(event->position().x()) - kGutterW);
-            event->accept();
-        } else if ((event->modifiers() & Qt::ShiftModifier)
-                   || (delta.x() && !delta.y())) {
-            m_sv->scrollByPx(-(delta.y() ? delta.y() : delta.x()));
-            event->accept();
-        } else {
-            event->ignore(); // let the scroll area page vertically
         }
+        event->accept();
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -1268,7 +1277,7 @@ protected:
             showAddLaneMenu(event->globalPosition().toPoint());
             return;
         }
-        const int ri = event->pos().y() / kLaneH;
+        const int ri = event->pos().y() / m_laneH;
         if (ri < 0 || ri >= int(m_rows.size()))
             return;
         const Row &row = m_rows[ri];
@@ -1302,19 +1311,23 @@ protected:
         m_dragRow = ri;
         const bool fine = event->modifiers() & Qt::AltModifier;
         updateDrag(event->pos(), fine);
+        const LanePoint *grab = grabPoint(row, ri, event->pos());
         if (event->modifiers() & Qt::ShiftModifier) {
             // Line ramp: the press anchors one end, release commits the
-            // interpolated segment (checked before the near-point grab so a
+            // interpolated segment (checked before the point grab so a
             // ramp can start exactly on an existing point).
             m_gesture = Gesture::Line;
             m_lineStartTick = m_dragTick;
             m_lineStartValue = m_dragValue;
-        } else if (nearPt) {
+        } else if (grab) {
+            // Grabbing requires hitting the point's dot (x and y), so a
+            // freehand redraw over a dense curve isn't captured by every
+            // cell's point — sweeping overwrites them instead.
             m_gesture = Gesture::Point;
-            m_dragOrigTick = int64_t(nearPt->tick);
+            m_dragOrigTick = int64_t(grab->tick);
         } else {
             // Freehand sweep; a no-motion click degenerates to a single
-            // added point, as before.
+            // point (overwriting any point already on that tick).
             m_gesture = Gesture::Sweep;
             m_dragOrigTick = -1;
             m_sweep.assign(1, {m_dragTick, m_dragValue});
@@ -1358,10 +1371,9 @@ protected:
             if (doc->findLanePoint(track, cc, uint64_t(m_dragOrigTick), &pt))
                 doc->moveLanePoint(track, cc, pt, m_dragTick, m_dragValue);
         } else if (gesture == Gesture::Sweep) {
-            if (m_sweep.size() == 1)
-                doc->addLanePoint(track, cc, m_sweep.front().first,
-                                  m_sweep.front().second);
-            else if (!m_sweep.empty())
+            // writeLanePoints even for a plain click: it overwrites any
+            // point already sitting on the tick instead of duplicating it.
+            if (!m_sweep.empty())
                 doc->writeLanePoints(track, cc, m_sweep.front().first,
                                      m_sweep.back().first, sweepPoints());
             m_sweep.clear();
@@ -1374,7 +1386,7 @@ protected:
                 std::swap(va, vb);
             }
             if (a == b) {
-                doc->addLanePoint(track, cc, a, vb);
+                doc->writeLanePoints(track, cc, a, a, {{a, vb}});
                 return;
             }
             const uint64_t g =
@@ -1397,7 +1409,39 @@ private:
 
     QRect addLaneRect() const
     {
-        return QRect(0, int(m_rows.size()) * kLaneH, width(), kAddLaneH);
+        return QRect(0, int(m_rows.size()) * m_laneH, width(), kAddLaneH);
+    }
+
+    void applyHeight()
+    {
+        // Minimum, not fixed: the scroll area stretches the widget to fill
+        // its viewport when the user drags the lanes area taller.
+        const int addH = m_sv->timeline() && m_sv->document() ? kAddLaneH : 0;
+        setMinimumHeight(std::max(m_laneH, int(m_rows.size()) * m_laneH + addH));
+    }
+
+    // Ctrl+wheel: rescale the lane rows (the roll's key-height analog),
+    // keeping the row under the cursor pinned. anchorY is widget-local, so
+    // it already includes the scroll offset.
+    void zoomLaneHeight(int wheelDelta, int anchorY)
+    {
+        m_laneZoomAccum += wheelDelta;
+        const int steps = m_laneZoomAccum / 120;
+        if (steps == 0)
+            return;
+        m_laneZoomAccum -= steps * 120;
+        const int newH = std::clamp(m_laneH + steps * 4, kMinLaneH, kMaxLaneH);
+        if (newH == m_laneH)
+            return;
+        const double row = double(anchorY) / double(m_laneH);
+        m_laneH = newH;
+        applyHeight();
+        if (m_scroll) {
+            QScrollBar *vbar = m_scroll->verticalScrollBar();
+            const int viewportY = anchorY - vbar->value();
+            vbar->setValue(int(std::lround(row * newH)) - viewportY);
+        }
+        update();
     }
 
     // Menu of §4.2 audible parameters without a lane on the selected track.
@@ -1575,6 +1619,38 @@ private:
         return best;
     }
 
+    // Left-press grab test: near the point's dot in BOTH x and y. A dense
+    // freehand curve has a point on every grid cell, so an x-only radius
+    // (nearestPoint, kept for right-click delete) would capture every press
+    // and make redrawing impossible; grab the dot itself to move a point.
+    const LanePoint *grabPoint(const Row &row, int ri, QPoint pos) const
+    {
+        const std::vector<LanePoint> *points = rowPoints(row);
+        if (!points)
+            return nullptr;
+        int minV, maxV;
+        rowRange(row, &minV, &maxV);
+        // paintCurve's valueY mapping for this row.
+        const int top = ri * m_laneH + 5;
+        const int bottom = (ri + 1) * m_laneH - 1 - 4;
+        const LanePoint *best = nullptr;
+        int bestDist = INT_MAX;
+        for (const LanePoint &pt : *points) {
+            const int dx = kGutterW + m_sv->contentX(double(pt.tick)) - pos.x();
+            const int dy = bottom
+                           - (pt.value - minV) * (bottom - top) / std::max(1, maxV - minV)
+                           - pos.y();
+            if (std::abs(dx) > 7 || std::abs(dy) > 7)
+                continue;
+            const int dist = dx * dx + dy * dy;
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = &pt;
+            }
+        }
+        return best;
+    }
+
     double rawTickAt(int x) const
     {
         return std::max(0.0, m_sv->tickAtContentX(std::max(kGutterW, x) - kGutterW));
@@ -1588,8 +1664,8 @@ private:
         int minV, maxV;
         rowRange(row, &minV, &maxV);
         // Invert paintCurve's valueY mapping.
-        const int top = m_dragRow * kLaneH + 5;
-        const int bottom = (m_dragRow + 1) * kLaneH - 1 - 4;
+        const int top = m_dragRow * m_laneH + 5;
+        const int bottom = (m_dragRow + 1) * m_laneH - 1 - 4;
         const int y = std::clamp(pos.y(), top, bottom);
         m_dragValue = minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
         if (row.kind == Row::Tempo)
@@ -1788,7 +1864,10 @@ private:
     enum class Gesture { None, Point, Sweep, Line };
 
     SongView *m_sv;
+    QScrollArea *m_scroll;      // hosting scroll area, for lane-zoom pinning
     std::vector<Row> m_rows;
+    int m_laneH = kLaneH;       // row height; Ctrl+wheel rescales
+    int m_laneZoomAccum = 0;    // sub-notch wheel remainder, like zoomKeyHeight
     Gesture m_gesture = Gesture::None;
     int m_dragRow = -1;
     int64_t m_dragOrigTick = -1; // existing point being moved, -1 = new point
@@ -2140,7 +2219,7 @@ SongView::SongView(QWidget *parent)
     m_lanesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_lanesScroll->setWidgetResizable(true);
     m_lanesScroll->setFocusPolicy(Qt::NoFocus);
-    m_lanes = new AutomationArea(this);
+    m_lanes = new AutomationArea(this, m_lanesScroll);
     m_lanesScroll->setWidget(m_lanes);
     m_splitter->addWidget(m_lanesScroll);
     m_splitter->setStretchFactor(0, 1);

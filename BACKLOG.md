@@ -6,12 +6,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 ## M2 editor polish
 
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
-  visibility, last edit position, roll/lanes splitter position. Specced but
-  not implemented; cosmetic only.
-- **Per-lane height handle.** The lanes area as a whole is resizable via the
-  roll/lanes QSplitter, but individual rows are fixed kLaneH = 48; a drag
-  handle per row (persisted in the `.porydaw` sidecar) would let a bend lane
-  be taller than a volume lane.
+  visibility, last edit position, roll/lanes splitter position, lane row
+  height. Specced but not implemented; cosmetic only.
+- **Per-lane (individual) heights.** Ctrl+wheel rescales all lane rows
+  uniformly (m_laneH, 28-128 px); letting one lane be taller than the
+  others (e.g. bend vs. volume) would need per-row heights persisted in
+  the `.porydaw` sidecar.
 
 ## M3 onboarding polish
 
