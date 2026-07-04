@@ -1,0 +1,44 @@
+cmake_minimum_required(VERSION 3.21)
+project(porydaw VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
+set(CMAKE_AUTOUIC ON)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
+
+# ---- poryaaaa engine core (MIT, statically linked) ----
+set(PORYAAAA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/poryaaaa)
+add_library(poryaaaa_engine STATIC
+    ${PORYAAAA_DIR}/plugin/m4a_engine.c
+    ${PORYAAAA_DIR}/plugin/m4a_channel.c
+    ${PORYAAAA_DIR}/plugin/m4a_tables.c
+    ${PORYAAAA_DIR}/plugin/m4a_reverb.c
+    ${PORYAAAA_DIR}/plugin/voicegroup_loader.c
+)
+target_include_directories(poryaaaa_engine PUBLIC ${PORYAAAA_DIR}/plugin)
+if(UNIX)
+    target_link_libraries(poryaaaa_engine PUBLIC m)
+endif()
+
+# ---- porydaw application ----
+qt_add_executable(porydaw
+    src/main.cpp
+    src/mainwindow.cpp
+    src/mainwindow.h
+)
+target_link_libraries(porydaw PRIVATE Qt6::Widgets poryaaaa_engine)
+
+if(WIN32)
+    set_target_properties(porydaw PROPERTIES WIN32_EXECUTABLE TRUE)
+endif()
+if(APPLE)
+    set_target_properties(porydaw PROPERTIES MACOSX_BUNDLE TRUE)
+endif()
