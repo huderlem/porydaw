@@ -82,9 +82,10 @@ public:
     int keyHeight() const { return m_keyHeight; }
     double playheadTick() const { return m_playheadTick; }
 
-    // Edit cursor (Reaper-style): placed by clicking the ruler or empty roll
-    // space, distinct from the moving playback cursor. Playback starts here,
-    // and paste anchors here.
+    // Edit cursor (Reaper-style): placed by clicking the ruler (or empty
+    // roll space while read-only — with a document, left-click draws),
+    // distinct from the moving playback cursor. Playback starts here, and
+    // paste anchors here.
     uint64_t editCursorTick() const { return m_editCursorTick; }
     // Visual placement only (ruler drag preview); commit emits
     // editCursorMoved so playback can follow.

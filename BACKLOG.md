@@ -5,19 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Audible draw feedback on double-click.** The preview note for a newly
-  drawn note is released on mouse-up, so a quick double-click barely sounds.
-- **Right-click drag for rubber-band selection.** Multi-select is currently
-  left-drag on empty space (Drag::Band in songview.cpp); move it to
-  right-drag, freeing plain left-click for note drawing. (Right-click today
-  deletes/context-acts on notes — the two need reconciling, e.g. right-click
-  = context/delete, right-drag = band.)
-- **Left-click draws a note, hold-and-drag sizes it.** Drawing currently
-  requires a double-click (mouseDoubleClickEvent), and the new note's length
-  is fixed until a separate right-edge resize. Reaper/FL-style instead:
-  left-press on empty space creates the note at the snapped tick, and
-  dragging before release sets its duration (audition already previews
-  during draw).
 - **Resize notes from the left edge too.** Only the right edge is a resize
   handle (nearRightEdge, songview.cpp:423,457); a left-edge handle should
   move the note-on while pinning the note-off (adjusting tick + duration

@@ -1,5 +1,6 @@
 #include "songview.h"
 
+#include <QApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFontMetrics>
@@ -431,11 +432,16 @@ protected:
         const ViewNote *hit = doc ? hitNote(event->pos()) : nullptr;
 
         if (event->button() == Qt::RightButton) {
-            if (hit) {
-                if (!m_sv->isSelected(*hit))
-                    m_sv->setSelection({{hit->startTick, hit->key}});
-                showNoteMenu(event->pos());
-            }
+            // Deferred: a drag from here rubber-band-selects; releasing in
+            // place context-acts on the pressed note (or clears the
+            // selection over empty space). Resolved in mouseReleaseEvent.
+            if (!doc)
+                return;
+            m_pressPos = m_curPos = event->pos();
+            m_rightPress = true;
+            m_rightHit = hit != nullptr;
+            if (hit)
+                m_rightHitId = {hit->startTick, hit->key};
             return;
         }
         if (event->button() != Qt::LeftButton)
@@ -472,40 +478,49 @@ protected:
             } else {
                 m_drag = Drag::Move;
             }
+        } else if (doc) {
+            // Empty space: draw a note (FL/Reaper pencil style). It starts
+            // at the grid cell under the cursor and sounds while the button
+            // is held; dragging right before release sets its duration. The
+            // document note is committed on release (one undo entry).
+            const double grid = double(m_sv->gridTicks());
+            m_drawTick =
+                uint64_t(std::floor(std::max(0.0, m_pressTick) / grid) * grid);
+            m_drawDur = int64_t(m_sv->gridTicks());
+            m_drag = Drag::Draw;
+            m_sv->clearSelection();
+            ViewNote pending{};
+            pending.startTick = uint32_t(m_drawTick);
+            pending.endTick = uint32_t(m_drawTick + uint64_t(m_drawDur));
+            pending.key = uint8_t(m_pressKey);
+            pending.velocity = m_lastVelocity;
+            pending.track = uint8_t(m_sv->selectedTrack());
+            m_sv->announceNote(pending);
+            m_sv->audition(m_sv->selectedTrack(), m_pressKey, m_lastVelocity);
+            m_auditioned = true;
         } else {
-            // Empty space: park the edit cursor at the click (snapped), like
-            // Reaper's arrange view; playback follows when running. A drag
-            // still band-selects from the press point.
+            // Read-only (no document): park the edit cursor at the click,
+            // like the ruler; playback follows when running.
             m_sv->commitEditCursor(m_sv->snapTick(m_pressTick));
-            if (doc) {
-                if (!(event->modifiers() & Qt::ControlModifier))
-                    m_sv->clearSelection();
-                m_drag = Drag::Band;
-            }
         }
         update();
     }
 
     void mouseDoubleClickEvent(QMouseEvent *event) override
     {
-        SongDocument *doc = m_sv->document();
-        if (!doc || event->button() != Qt::LeftButton
-            || event->pos().x() < kKeyboardW || hitNote(event->pos()))
-            return;
-        const uint64_t tick =
-            m_sv->snapTick(m_sv->tickAtContentX(event->pos().x() - kKeyboardW));
-        const int key = yToKey(event->pos().y());
-        doc->addNote(m_sv->selectedTrack(), tick, uint8_t(key),
-                     uint32_t(m_sv->gridTicks()), m_lastVelocity);
-        m_sv->setSelection({{uint32_t(tick), uint8_t(key)}});
-        m_sv->audition(m_sv->selectedTrack(), key, m_lastVelocity);
-        m_auditioned = true;
-        m_drag = Drag::None;
+        // A fast click-click should behave as two presses (draw, then grab
+        // the drawn note) — Qt replaces the second press with this event.
+        mousePressEvent(event);
     }
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
         m_curPos = event->pos();
+        if (m_rightPress && m_drag == Drag::None
+            && (event->pos() - m_pressPos).manhattanLength()
+                   >= QApplication::startDragDistance()) {
+            m_drag = Drag::Band;
+        }
         if (m_drag == Drag::None) {
             // Hover cursor: resize handle at note right edges, velocity
             // handle at their left ends.
@@ -578,6 +593,15 @@ protected:
                 }
                 update();
             }
+        } else if (m_drag == Drag::Draw) {
+            // The note's right edge follows the cursor, rounded up to the
+            // next grid line (never shorter than one grid cell).
+            const int64_t past = int64_t(std::llround(tick)) - int64_t(m_drawTick);
+            const int64_t dur = std::max(grid, (past + grid - 1) / grid * grid);
+            if (dur != m_drawDur) {
+                m_drawDur = dur;
+                update();
+            }
         } else if (m_drag == Drag::Band) {
             update();
         }
@@ -593,16 +617,35 @@ protected:
             m_sv->audition(m_sv->selectedTrack(), 0, 0);
             m_auditioned = false;
         }
+        SongDocument *doc = m_sv->document();
+        if (event->button() == Qt::RightButton && m_rightPress) {
+            const Drag drag = m_drag;
+            m_rightPress = false;
+            m_drag = Drag::None;
+            if (drag == Drag::Band) {
+                selectBand(QRect(m_pressPos, m_curPos).normalized(),
+                           event->modifiers() & Qt::ControlModifier);
+            } else if (doc && m_rightHit) {
+                const std::vector<SongView::NoteId> &sel = m_sv->selection();
+                if (std::find(sel.begin(), sel.end(), m_rightHitId) == sel.end())
+                    m_sv->setSelection({m_rightHitId});
+                showNoteMenu(event->pos());
+            } else {
+                m_sv->clearSelection();
+            }
+            update();
+            return;
+        }
         if (event->button() != Qt::LeftButton || m_drag == Drag::None)
             return;
 
-        SongDocument *doc = m_sv->document();
         const Drag drag = m_drag;
         m_drag = Drag::None;
 
-        if (drag == Drag::Band) {
-            selectBand(QRect(m_pressPos, m_curPos).normalized(),
-                       event->modifiers() & Qt::ControlModifier);
+        if (doc && drag == Drag::Draw) {
+            doc->addNote(m_sv->selectedTrack(), m_drawTick, uint8_t(m_pressKey),
+                         uint32_t(m_drawDur), m_lastVelocity);
+            m_sv->setSelection({{uint32_t(m_drawTick), uint8_t(m_pressKey)}});
         } else if (doc && drag == Drag::Move && (m_dTick != 0 || m_dKey != 0)) {
             const std::vector<DocNote> notes = resolveSelection();
             doc->moveNotes(notes, m_dTick, m_dKey);
@@ -662,6 +705,7 @@ protected:
         }
         if (event->key() == Qt::Key_Escape) {
             m_drag = Drag::None;
+            m_rightPress = false;
             m_sv->clearSelection();
             update();
             event->accept();
@@ -679,7 +723,7 @@ protected:
     }
 
 private:
-    enum class Drag { None, Band, Move, Resize, Velocity };
+    enum class Drag { None, Band, Move, Resize, Velocity, Draw };
 
     int keyToY(int key) const
     {
@@ -839,9 +883,23 @@ private:
         }
     }
 
-    // Dashed outlines of the selected notes at their dragged position/length.
+    // Dashed outlines of the selected notes at their dragged position/length,
+    // or the pending note of a draw gesture (solid, like the real note).
     void drawDragPreview(QPainter &p, const SongViewModel &model, int selected)
     {
+        if (m_drag == Drag::Draw) {
+            const int x0 = kKeyboardW + m_sv->contentX(double(m_drawTick));
+            const int x1 =
+                kKeyboardW + m_sv->contentX(double(m_drawTick + uint64_t(m_drawDur)));
+            const QRect r(x0, keyToY(m_pressKey) + 1, std::max(2, x1 - x0),
+                          std::max(2, m_sv->keyHeight() - 1));
+            QColor c = SongView::trackColor(selected);
+            c.setAlpha(120 + m_lastVelocity);
+            p.fillRect(r, c);
+            p.setPen(QPen(SongView::trackColor(selected).darker(150), 1));
+            p.drawRect(r.adjusted(0, 0, -1, -1));
+            return;
+        }
         if (m_drag != Drag::Move && m_drag != Drag::Resize)
             return;
         if (m_dTick == 0 && m_dKey == 0 && m_dDur == 0)
@@ -953,6 +1011,11 @@ private:
     int m_dKey = 0;
     int64_t m_dDur = 0;
     int m_dVel = 0;
+    uint64_t m_drawTick = 0;   // pending note of a draw gesture
+    int64_t m_drawDur = 0;
+    bool m_rightPress = false; // right button held; band vs. menu undecided
+    bool m_rightHit = false;   // that press landed on a note…
+    SongView::NoteId m_rightHitId{}; // …this one
     ViewNote m_velAnchor{};    // pressed note of a velocity drag (a copy)
     int m_velAudEff = -1;      // last effective velocity auditioned mid-drag
     uint32_t m_hoverTick = 0;  // hovered note, for its velocity grip
