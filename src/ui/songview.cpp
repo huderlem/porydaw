@@ -6,6 +6,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -848,15 +849,10 @@ protected:
             return;
         const Row &row = m_rows[ri];
         if (event->pos().x() < kGutterW) {
-            // Gutter: a lane that has no points yet exists only as view
-            // state, so offer to take it back out.
-            if (event->button() == Qt::RightButton && row.kind == Row::Lane
-                && row.lane->points.empty()) {
-                QMenu menu;
-                QAction *remove = menu.addAction(SongView::tr("Remove empty lane"));
-                if (menu.exec(event->globalPosition().toPoint()) == remove)
-                    m_sv->removeEmptyLane(row.lane->track, row.lane->cc);
-            }
+            if (row.kind == Row::Lane
+                && (event->button() == Qt::LeftButton
+                    || event->button() == Qt::RightButton))
+                showLaneMenu(*row.lane, event->globalPosition().toPoint());
             return;
         }
         uint8_t cc;
@@ -949,6 +945,49 @@ private:
         QAction *chosen = menu.exec(globalPos);
         if (chosen && chosen->data().isValid())
             m_sv->addEmptyLane(track, uint8_t(chosen->data().toInt()));
+    }
+
+    // Gutter menu on a CC/bend lane: clear its events (the lane stays,
+    // empty), or delete the lane outright — confirmed first while it still
+    // has events, since that throws the whole curve away in one step.
+    void showLaneMenu(const AutoLane &lane, const QPoint &globalPos)
+    {
+        // Copies: the menu's actions mutate the model, and lane points into it.
+        const int track = lane.track;
+        const uint8_t cc = lane.cc;
+        const QString name = lane.name;
+        const bool empty = lane.points.empty();
+
+        QMenu menu;
+        QAction *clear = menu.addAction(SongView::tr("Clear events"));
+        clear->setEnabled(!empty);
+        QAction *del = menu.addAction(empty ? SongView::tr("Remove empty lane")
+                                            : SongView::tr("Delete lane"));
+        QAction *chosen = menu.exec(globalPos);
+        if (!chosen)
+            return;
+
+        SongDocument *doc = m_sv->document();
+        const std::vector<DocLanePoint> points = doc->lanePoints(track, cc);
+        if (chosen == clear) {
+            if (points.empty())
+                return;
+            // Keep the row alive as an empty lane once its events go.
+            m_sv->addEmptyLane(track, cc);
+            doc->deleteLanePoints(track, cc, points);
+        } else if (chosen == del) {
+            if (!points.empty()
+                && QMessageBox::question(
+                       this, SongView::tr("Delete lane"),
+                       SongView::tr("Delete the %1 lane and its %2 events?")
+                           .arg(name)
+                           .arg(points.size()))
+                       != QMessageBox::Yes)
+                return;
+            m_sv->removeEmptyLane(track, cc); // forget the view state first
+            if (!points.empty())
+                doc->deleteLanePoints(track, cc, points);
+        }
     }
 
     // Document target of an editable row; false for the voice row.
