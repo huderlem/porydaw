@@ -487,16 +487,17 @@ protected:
             m_drawTick =
                 uint64_t(std::floor(std::max(0.0, m_pressTick) / grid) * grid);
             m_drawDur = int64_t(m_sv->gridTicks());
+            m_drawKey = m_pressKey;
             m_drag = Drag::Draw;
             m_sv->clearSelection();
             ViewNote pending{};
             pending.startTick = uint32_t(m_drawTick);
             pending.endTick = uint32_t(m_drawTick + uint64_t(m_drawDur));
-            pending.key = uint8_t(m_pressKey);
+            pending.key = uint8_t(m_drawKey);
             pending.velocity = m_lastVelocity;
             pending.track = uint8_t(m_sv->selectedTrack());
             m_sv->announceNote(pending);
-            m_sv->audition(m_sv->selectedTrack(), m_pressKey, m_lastVelocity);
+            m_sv->audition(m_sv->selectedTrack(), m_drawKey, m_lastVelocity);
             m_auditioned = true;
         } else {
             // Read-only (no document): park the edit cursor at the click,
@@ -595,11 +596,19 @@ protected:
             }
         } else if (m_drag == Drag::Draw) {
             // The note's right edge follows the cursor, rounded up to the
-            // next grid line (never shorter than one grid cell).
+            // next grid line (never shorter than one grid cell), and its key
+            // follows the cursor vertically — a slight misclick on mouse-down
+            // is fixable mid-gesture, with the new pitch auditioned.
             const int64_t past = int64_t(std::llround(tick)) - int64_t(m_drawTick);
             const int64_t dur = std::max(grid, (past + grid - 1) / grid * grid);
-            if (dur != m_drawDur) {
+            const int key = yToKey(event->pos().y());
+            if (dur != m_drawDur || key != m_drawKey) {
                 m_drawDur = dur;
+                if (key != m_drawKey) {
+                    m_drawKey = key;
+                    m_sv->audition(m_sv->selectedTrack(), m_drawKey, m_lastVelocity);
+                    m_auditioned = true;
+                }
                 update();
             }
         } else if (m_drag == Drag::Band) {
@@ -643,9 +652,9 @@ protected:
         m_drag = Drag::None;
 
         if (doc && drag == Drag::Draw) {
-            doc->addNote(m_sv->selectedTrack(), m_drawTick, uint8_t(m_pressKey),
+            doc->addNote(m_sv->selectedTrack(), m_drawTick, uint8_t(m_drawKey),
                          uint32_t(m_drawDur), m_lastVelocity);
-            m_sv->setSelection({{uint32_t(m_drawTick), uint8_t(m_pressKey)}});
+            m_sv->setSelection({{uint32_t(m_drawTick), uint8_t(m_drawKey)}});
         } else if (doc && drag == Drag::Move && (m_dTick != 0 || m_dKey != 0)) {
             const std::vector<DocNote> notes = resolveSelection();
             doc->moveNotes(notes, m_dTick, m_dKey);
@@ -891,7 +900,7 @@ private:
             const int x0 = kKeyboardW + m_sv->contentX(double(m_drawTick));
             const int x1 =
                 kKeyboardW + m_sv->contentX(double(m_drawTick + uint64_t(m_drawDur)));
-            const QRect r(x0, keyToY(m_pressKey) + 1, std::max(2, x1 - x0),
+            const QRect r(x0, keyToY(m_drawKey) + 1, std::max(2, x1 - x0),
                           std::max(2, m_sv->keyHeight() - 1));
             QColor c = SongView::trackColor(selected);
             c.setAlpha(120 + m_lastVelocity);
@@ -1013,6 +1022,7 @@ private:
     int m_dVel = 0;
     uint64_t m_drawTick = 0;   // pending note of a draw gesture
     int64_t m_drawDur = 0;
+    int m_drawKey = 0;         // follows the cursor vertically mid-draw
     bool m_rightPress = false; // right button held; band vs. menu undecided
     bool m_rightHit = false;   // that press landed on a note…
     SongView::NoteId m_rightHitId{}; // …this one
