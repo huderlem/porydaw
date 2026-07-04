@@ -5,28 +5,13 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Finer-grained automation editing + multi-point drag.** Lane edits are
-  one point per click and snap to the clock grid; there's no way to sweep a
-  curve. Add freehand drag across a lane writing a stream of points (thinned
-  to the grid, replacing overwritten ones — one undo command for the whole
-  gesture), plus a line-segment drag for ramps. Also allow finer time
-  placement when the grid is coarse (the document supports any tick;
-  mid2agb quantizes to clocks on compile, so sub-clock points are mostly
-  useful with -X / higher divisions).
-- **Vertically resizable automation area.** The lanes sit in a QScrollArea
-  with a fixed height (kLanesAreaH, songview.cpp buildUi) under the roll, so
-  they can never be enlarged. Put the roll and the lanes area in a vertical
-  QSplitter so the user can drag the boundary; consider a per-lane height
-  handle too (rows are fixed kLaneH = 48). Persist the split (and lane
-  heights) in the `.porydaw` sidecar view state once that lands.
-- **Sub-beat ruler/grid subdivisions.** SongView::forEachGridLine enumerates
-  beats only, so the ruler ticks and the roll's vertical grid bottom out at
-  quarter notes at any zoom — even though editing snaps to the finer
-  ticksPerClock grid. Add zoom-adaptive subdivisions (8th/16th… down to the
-  mid2agb clock grid, the real snap resolution) fading in the way beat lines
-  already gate on pxPerBeat >= 10, with lighter strokes per level.
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
-  visibility, last edit position. Specced but not implemented; cosmetic only.
+  visibility, last edit position, roll/lanes splitter position. Specced but
+  not implemented; cosmetic only.
+- **Per-lane height handle.** The lanes area as a whole is resizable via the
+  roll/lanes QSplitter, but individual rows are fixed kLaneH = 48; a drag
+  handle per row (persisted in the `.porydaw` sidecar) would let a bend lane
+  be taller than a volume lane.
 
 ## M3 onboarding polish
 

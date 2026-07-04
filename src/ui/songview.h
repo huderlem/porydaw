@@ -16,6 +16,7 @@ extern "C" {
 
 class QScrollArea;
 class QScrollBar;
+class QSplitter;
 class SongDocument;
 
 namespace songview {
@@ -119,7 +120,10 @@ public:
     // Snap grid in ticks: the visible beat subdivision, never finer than the
     // song's mid2agb clock base.
     uint64_t gridTicks() const;
-    uint64_t snapTick(double tick) const;
+    // Fine placement (Alt-drag in the lanes): the mid2agb clock grid — the
+    // document's real resolution — regardless of the zoom-dependent grid.
+    uint64_t fineGridTicks() const;
+    uint64_t snapTick(double tick, bool fine = false) const;
 
     // Note selection on the selected track, identified by (startTick, key) so
     // it survives document rebuilds.
@@ -218,6 +222,8 @@ private:
     songview::PianoRoll *m_roll = nullptr;
     songview::AutomationArea *m_lanes = nullptr;
     QScrollArea *m_lanesScroll = nullptr;
+    QSplitter *m_splitter = nullptr; // roll above, lanes area below
+    bool m_splitInit = false;        // initial sizes applied on first layout
     songview::OtherStrip *m_strip = nullptr;
     QScrollBar *m_hbar = nullptr;
     QScrollBar *m_vbar = nullptr;

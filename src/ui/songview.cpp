@@ -18,6 +18,7 @@
 #include <QPainterPath>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSplitter>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -115,7 +116,38 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin
     }
 }
 
-// Vertical bar/beat grid lines inside rect.
+// Subdivision level of a sub-beat grid tick: 1 = half beat, 2 = quarter
+// beat, 3 = finer. Cosmetic only (drives the line fade).
+int subGridLevel(uint64_t tick, uint64_t tpb)
+{
+    if (tick % std::max<uint64_t>(1, tpb / 2) == 0)
+        return 1;
+    if (tick % std::max<uint64_t>(1, tpb / 4) == 0)
+        return 2;
+    return 3;
+}
+
+// Calls fn(tick, level) for every sub-beat snap-grid position in [t0, t1)
+// that is not a beat line, at the current zoom's snap resolution
+// (SongView::gridTicks, which bottoms out at the mid2agb clock grid). No
+// callbacks when the grid is at (or coarser than) whole beats.
+void forEachSubGridLine(const SongView *sv, double t0, double t1,
+                        const std::function<void(uint64_t, int)> &fn)
+{
+    const uint64_t tpb = sv->timeline()->ticksPerBeat;
+    const uint64_t g = sv->gridTicks();
+    if (g == 0 || g >= tpb || sv->pxPerBeat() < 10.0)
+        return;
+    for (uint64_t tick = uint64_t(std::max(0.0, t0) / double(g)) * g;
+         tick < uint64_t(t1); tick += g) {
+        if (tick % tpb == 0)
+            continue; // beat/bar lines are drawn separately
+        fn(tick, subGridLevel(tick, tpb));
+    }
+}
+
+// Vertical bar/beat grid lines inside rect, with zoom-adaptive sub-beat
+// lines at the snap grid's positions fading lighter per subdivision level.
 void drawGrid(QPainter &p, const SongView *sv, const QRect &rect, int origin)
 {
     if (!sv->timeline())
@@ -126,6 +158,15 @@ void drawGrid(QPainter &p, const SongView *sv, const QRect &rect, int origin)
     const QColor barColor = sv->palette().color(QPalette::Mid);
     QColor beatColor = barColor;
     beatColor.setAlpha(70);
+
+    QColor subColor = barColor;
+    forEachSubGridLine(sv, t0, t1, [&](uint64_t tick, int level) {
+        const int x = origin + sv->contentX(double(tick));
+        subColor.setAlpha(level == 1 ? 48 : level == 2 ? 34 : 22);
+        p.setPen(subColor);
+        p.drawLine(x, rect.top(), x, rect.bottom());
+    });
+
     sv->forEachGridLine(uint64_t(t0), uint64_t(t1),
                         [&](uint64_t tick, bool isBar, int) {
                             if (!isBar && !drawBeats)
@@ -174,6 +215,14 @@ protected:
         const double t0 = std::max(0.0, m_sv->tickAtContentX(0));
         const double t1 = m_sv->tickAtContentX(area.width()) + 1;
         const QColor fg = palette().color(QPalette::WindowText);
+
+        // Short sub-beat ticks at the snap grid, mirroring the roll's grid.
+        p.setPen(palette().color(QPalette::Mid));
+        forEachSubGridLine(m_sv, t0, t1, [&](uint64_t tick, int level) {
+            const int x = kGutterW + m_sv->contentX(double(tick));
+            p.drawLine(x, height() - (level == 1 ? 5 : 3), x, height() - 1);
+        });
+
         int lastLabelX = -1000; // not INT_MIN: x - lastLabelX must not overflow
         m_sv->forEachGridLine(uint64_t(t0), uint64_t(t1),
                               [&](uint64_t tick, bool isBar, int barNumber) {
@@ -1109,6 +1158,8 @@ public:
     {
         m_rows.clear();
         m_dragRow = -1;
+        m_gesture = Gesture::None;
+        m_sweep.clear();
         if (m_sv->timeline()) {
             m_rows.push_back({Row::Tempo, nullptr});
             const SongViewModel &model = m_sv->model();
@@ -1129,7 +1180,9 @@ public:
                     m_rows.push_back({Row::Lane, &lane});
         }
         const int addH = m_sv->timeline() && m_sv->document() ? kAddLaneH : 0;
-        setFixedHeight(std::max(kLaneH, int(m_rows.size()) * kLaneH + addH));
+        // Minimum, not fixed: the scroll area stretches the widget to fill
+        // its viewport when the user drags the lanes area taller.
+        setMinimumHeight(std::max(kLaneH, int(m_rows.size()) * kLaneH + addH));
         update();
     }
 
@@ -1151,18 +1204,38 @@ protected:
                        SongView::tr("+ Add lane"));
         }
 
-        // Point-drag preview: marker plus the value it will commit to.
+        // Drag preview: the pending stream (sweep) or ramp (line), plus a
+        // marker with the value the gesture will commit at the cursor.
         if (m_dragRow >= 0 && m_dragRow < int(m_rows.size())) {
             int minV, maxV;
             rowRange(m_rows[m_dragRow], &minV, &maxV);
             const int top = m_dragRow * kLaneH + 5;
             const int bottom = (m_dragRow + 1) * kLaneH - 1 - 4;
-            const int x = kGutterW + m_sv->contentX(double(m_dragTick));
-            const int y = bottom
-                          - (m_dragValue - minV) * (bottom - top) / std::max(1, maxV - minV);
+            auto valueY = [&](int v) {
+                return bottom - (v - minV) * (bottom - top) / std::max(1, maxV - minV);
+            };
+            auto tickX = [&](uint64_t t) {
+                return kGutterW + m_sv->contentX(double(t));
+            };
             p.setClipRect(QRect(kGutterW, m_dragRow * kLaneH, width() - kGutterW, kLaneH));
             p.setPen(QPen(palette().color(QPalette::WindowText), 1));
             p.setBrush(Qt::NoBrush);
+            if (m_gesture == Gesture::Sweep && m_sweep.size() > 1) {
+                // Hold-value steps, like paintCurve draws committed points.
+                for (size_t i = 0; i + 1 < m_sweep.size(); i++) {
+                    const int y = valueY(m_sweep[i].second);
+                    p.drawLine(tickX(m_sweep[i].first), y,
+                               tickX(m_sweep[i + 1].first), y);
+                    p.drawLine(tickX(m_sweep[i + 1].first), y,
+                               tickX(m_sweep[i + 1].first),
+                               valueY(m_sweep[i + 1].second));
+                }
+            } else if (m_gesture == Gesture::Line) {
+                p.drawLine(tickX(m_lineStartTick), valueY(m_lineStartValue),
+                           tickX(m_dragTick), valueY(m_dragValue));
+            }
+            const int x = tickX(m_dragTick);
+            const int y = valueY(m_dragValue);
             p.drawEllipse(QPoint(x, y), 3, 3);
             p.drawText(QPoint(x + 6, y - 4), QString::number(m_dragValue));
             p.setClipping(false);
@@ -1227,8 +1300,27 @@ protected:
         if (event->button() != Qt::LeftButton)
             return;
         m_dragRow = ri;
-        m_dragOrigTick = nearPt ? int64_t(nearPt->tick) : -1;
-        updateDrag(event->pos());
+        const bool fine = event->modifiers() & Qt::AltModifier;
+        updateDrag(event->pos(), fine);
+        if (event->modifiers() & Qt::ShiftModifier) {
+            // Line ramp: the press anchors one end, release commits the
+            // interpolated segment (checked before the near-point grab so a
+            // ramp can start exactly on an existing point).
+            m_gesture = Gesture::Line;
+            m_lineStartTick = m_dragTick;
+            m_lineStartValue = m_dragValue;
+        } else if (nearPt) {
+            m_gesture = Gesture::Point;
+            m_dragOrigTick = int64_t(nearPt->tick);
+        } else {
+            // Freehand sweep; a no-motion click degenerates to a single
+            // added point, as before.
+            m_gesture = Gesture::Sweep;
+            m_dragOrigTick = -1;
+            m_sweep.assign(1, {m_dragTick, m_dragValue});
+            m_prevTick = rawTickAt(event->pos().x());
+            m_prevValue = m_dragValue;
+        }
         update();
     }
 
@@ -1236,7 +1328,10 @@ protected:
     {
         if (m_dragRow < 0)
             return;
-        updateDrag(event->pos());
+        const bool fine = event->modifiers() & Qt::AltModifier;
+        updateDrag(event->pos(), fine);
+        if (m_gesture == Gesture::Sweep)
+            extendSweep(event->pos(), fine);
         update();
     }
 
@@ -1246,6 +1341,8 @@ protected:
             || m_dragRow >= int(m_rows.size()))
             return;
         const Row &row = m_rows[m_dragRow];
+        const Gesture gesture = m_gesture;
+        m_gesture = Gesture::None;
         m_dragRow = -1;
         update();
 
@@ -1254,12 +1351,41 @@ protected:
         int track;
         if (!doc || !rowTarget(row, &cc, &track))
             return;
-        if (m_dragOrigTick >= 0) {
+        if (gesture == Gesture::Point) {
+            if (m_dragOrigTick < 0)
+                return;
             DocLanePoint pt;
             if (doc->findLanePoint(track, cc, uint64_t(m_dragOrigTick), &pt))
                 doc->moveLanePoint(track, cc, pt, m_dragTick, m_dragValue);
-        } else {
-            doc->addLanePoint(track, cc, m_dragTick, m_dragValue);
+        } else if (gesture == Gesture::Sweep) {
+            if (m_sweep.size() == 1)
+                doc->addLanePoint(track, cc, m_sweep.front().first,
+                                  m_sweep.front().second);
+            else if (!m_sweep.empty())
+                doc->writeLanePoints(track, cc, m_sweep.front().first,
+                                     m_sweep.back().first, sweepPoints());
+            m_sweep.clear();
+        } else if (gesture == Gesture::Line) {
+            const bool fine = event->modifiers() & Qt::AltModifier;
+            uint64_t a = m_lineStartTick, b = m_dragTick;
+            int va = m_lineStartValue, vb = m_dragValue;
+            if (a > b) {
+                std::swap(a, b);
+                std::swap(va, vb);
+            }
+            if (a == b) {
+                doc->addLanePoint(track, cc, a, vb);
+                return;
+            }
+            const uint64_t g =
+                std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicks());
+            std::vector<SongDocument::LanePointValue> pts;
+            for (uint64_t t = a; t < b; t += g)
+                pts.push_back({t, va
+                                      + int(std::llround(double(vb - va) * double(t - a)
+                                                         / double(b - a)))});
+            pts.push_back({b, vb});
+            doc->writeLanePoints(track, cc, a, b, pts);
         }
     }
 
@@ -1449,7 +1575,12 @@ private:
         return best;
     }
 
-    void updateDrag(QPoint pos)
+    double rawTickAt(int x) const
+    {
+        return std::max(0.0, m_sv->tickAtContentX(std::max(kGutterW, x) - kGutterW));
+    }
+
+    void updateDrag(QPoint pos, bool fine)
     {
         if (m_dragRow < 0 || m_dragRow >= int(m_rows.size()))
             return;
@@ -1463,8 +1594,52 @@ private:
         m_dragValue = minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
         if (row.kind == Row::Tempo)
             m_dragValue = std::max(1, m_dragValue);
-        m_dragTick = m_sv->snapTick(
-            m_sv->tickAtContentX(std::max(kGutterW, pos.x()) - kGutterW));
+        m_dragTick = m_sv->snapTick(rawTickAt(pos.x()), fine);
+    }
+
+    // Freehand sweep bookkeeping: fills every grid cell crossed since the
+    // last mouse sample (linear interpolation, so a fast drag leaves no
+    // gaps), overwriting cells swept more than once.
+    void extendSweep(QPoint pos, bool fine)
+    {
+        const double rawTick = rawTickAt(pos.x());
+        const uint64_t g =
+            std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicks());
+        const double from = m_prevTick;
+        const double to = rawTick;
+        const uint64_t t0 = m_sv->snapTick(std::min(from, to), fine);
+        const uint64_t t1 = m_sv->snapTick(std::max(from, to), fine);
+        for (uint64_t t = t0; t <= t1; t += g) {
+            int v = m_dragValue;
+            if (to != from) {
+                const double f =
+                    std::clamp((double(t) - from) / (to - from), 0.0, 1.0);
+                v = m_prevValue + int(std::llround(f * (m_dragValue - m_prevValue)));
+            }
+            sweepUpsert(t, v);
+        }
+        m_prevTick = rawTick;
+        m_prevValue = m_dragValue;
+    }
+
+    void sweepUpsert(uint64_t tick, int value)
+    {
+        auto it = std::lower_bound(
+            m_sweep.begin(), m_sweep.end(), tick,
+            [](const std::pair<uint64_t, int> &a, uint64_t t) { return a.first < t; });
+        if (it != m_sweep.end() && it->first == tick)
+            it->second = value;
+        else
+            m_sweep.insert(it, {tick, value});
+    }
+
+    std::vector<SongDocument::LanePointValue> sweepPoints() const
+    {
+        std::vector<SongDocument::LanePointValue> pts;
+        pts.reserve(m_sweep.size());
+        for (const std::pair<uint64_t, int> &s : m_sweep)
+            pts.push_back({s.first, s.second});
+        return pts;
     }
 
     void paintRow(QPainter &p, const Row &row, const QRect &r)
@@ -1606,12 +1781,24 @@ private:
         }
     }
 
+    // Left-drag gestures: Point moves an existing point (press landed near
+    // one), Sweep freehand-draws a stream of points, Line (Shift) commits an
+    // interpolated ramp between press and release. Alt snaps to the clock
+    // grid instead of the visible grid throughout.
+    enum class Gesture { None, Point, Sweep, Line };
+
     SongView *m_sv;
     std::vector<Row> m_rows;
+    Gesture m_gesture = Gesture::None;
     int m_dragRow = -1;
     int64_t m_dragOrigTick = -1; // existing point being moved, -1 = new point
     uint64_t m_dragTick = 0;
     int m_dragValue = 0;
+    std::vector<std::pair<uint64_t, int>> m_sweep; // tick-sorted freehand samples
+    uint64_t m_lineStartTick = 0; // Shift-drag anchor
+    int m_lineStartValue = 0;
+    double m_prevTick = 0.0; // last raw (unsnapped) sweep sample
+    int m_prevValue = 0;
 };
 
 // ---------------------------------------------------------------- OtherStrip
@@ -1921,7 +2108,13 @@ SongView::SongView(QWidget *parent)
     m_ruler = new TimeRuler(this);
     vbox->addWidget(m_ruler);
 
-    auto *mid = new QHBoxLayout;
+    // Roll (with headers) above, automation lanes below, split by a
+    // draggable boundary; kLanesAreaH is only the initial lanes height.
+    m_splitter = new QSplitter(Qt::Vertical, this);
+    m_splitter->setChildrenCollapsible(false);
+    auto *rollPane = new QWidget(m_splitter);
+    auto *mid = new QHBoxLayout(rollPane);
+    mid->setContentsMargins(0, 0, 0, 0);
     mid->setSpacing(0);
     auto *headerScroll = new QScrollArea(this);
     headerScroll->setFixedWidth(kHeaderW);
@@ -1939,17 +2132,20 @@ SongView::SongView(QWidget *parent)
     mid->addWidget(m_roll, 1);
     m_vbar = new QScrollBar(Qt::Vertical, this);
     mid->addWidget(m_vbar);
-    vbox->addLayout(mid, 1);
+    m_splitter->addWidget(rollPane);
 
     m_lanesScroll = new QScrollArea(this);
-    m_lanesScroll->setFixedHeight(kLanesAreaH);
+    m_lanesScroll->setMinimumHeight(kLaneH + kAddLaneH);
     m_lanesScroll->setFrameShape(QFrame::NoFrame);
     m_lanesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_lanesScroll->setWidgetResizable(true);
     m_lanesScroll->setFocusPolicy(Qt::NoFocus);
     m_lanes = new AutomationArea(this);
     m_lanesScroll->setWidget(m_lanes);
-    vbox->addWidget(m_lanesScroll);
+    m_splitter->addWidget(m_lanesScroll);
+    m_splitter->setStretchFactor(0, 1);
+    m_splitter->setStretchFactor(1, 0);
+    vbox->addWidget(m_splitter, 1);
 
     m_strip = new OtherStrip(this);
     vbox->addWidget(m_strip);
@@ -2137,17 +2333,25 @@ uint64_t SongView::gridTicks() const
         return 24;
     const uint64_t tpb = std::max<uint32_t>(1, m_timeline->ticksPerBeat);
     const uint64_t clock = m_document ? m_document->ticksPerClock() : 1;
-    // Finest visible beat subdivision at least ~8 px wide.
-    for (uint64_t div : {uint64_t(8), uint64_t(4), uint64_t(2), uint64_t(1)}) {
+    // Finest visible beat subdivision at least ~8 px wide, floored at the
+    // mid2agb clock grid (divisions 24/48 reach it exactly at deep zoom).
+    for (uint64_t div : {uint64_t(48), uint64_t(32), uint64_t(24), uint64_t(16),
+                         uint64_t(8), uint64_t(4), uint64_t(2), uint64_t(1)}) {
         if (pxPerBeat() / double(div) >= 8.0)
             return std::max(std::max<uint64_t>(1, tpb / div), clock);
     }
     return std::max(tpb, clock);
 }
 
-uint64_t SongView::snapTick(double tick) const
+uint64_t SongView::fineGridTicks() const
 {
-    const double g = double(gridTicks());
+    return m_document ? std::max<uint32_t>(1, m_document->ticksPerClock())
+                      : gridTicks();
+}
+
+uint64_t SongView::snapTick(double tick, bool fine) const
+{
+    const double g = double(fine ? fineGridTicks() : gridTicks());
     return uint64_t(std::round(std::max(0.0, tick) / g) * g);
 }
 
@@ -2455,5 +2659,12 @@ void SongView::refreshTimelineViews()
 void SongView::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    // The splitter starts with the lanes area at its classic fixed height;
+    // sizes can only be applied once real geometry exists.
+    if (!m_splitInit && m_splitter->height() > 0) {
+        m_splitInit = true;
+        m_splitter->setSizes(
+            {std::max(120, m_splitter->height() - kLanesAreaH), kLanesAreaH});
+    }
     updateScrollbars();
 }

@@ -111,6 +111,15 @@ public:
     void nudgeNotesVelocity(const std::vector<DocNote> &notes, int delta);
 
     void addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int value);
+    // Gesture write (freehand sweep / line ramp): replaces every point of the
+    // lane inside [tickBegin, tickEnd] with the given stream, as one undoable
+    // command. Not for DOC_CC_VOICE (the voice row has no drag editing).
+    struct LanePointValue {
+        uint64_t tick;
+        int value;
+    };
+    void writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBegin,
+                         uint64_t tickEnd, const std::vector<LanePointValue> &points);
     void moveLanePoint(int engineTrack, uint8_t cc, const DocLanePoint &point,
                        uint64_t newTick, int newValue);
     void deleteLanePoints(int engineTrack, uint8_t cc,

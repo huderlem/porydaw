@@ -579,6 +579,32 @@ void SongDocument::addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int 
              std::move(ops));
 }
 
+void SongDocument::writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBegin,
+                                   uint64_t tickEnd,
+                                   const std::vector<LanePointValue> &points)
+{
+    const int smfTrack = cc == DOC_CC_TEMPO ? 0 : smfTrackFor(engineTrack);
+    if (smfTrack < 0 || m_smf.tracks.empty() || points.empty())
+        return;
+    std::vector<EditOp> ops;
+    // Points already inside the swept range are overwritten by the gesture.
+    std::vector<size_t> overwritten;
+    for (const DocLanePoint &pt : lanePoints(engineTrack, cc)) {
+        if (pt.tick >= tickBegin && pt.tick <= tickEnd)
+            overwritten.push_back(pt.index);
+    }
+    appendRemoveOps(ops, smfTrack, std::move(overwritten));
+    const uint8_t channel = channelFor(engineTrack);
+    for (const LanePointValue &pt : points) {
+        EditOp op;
+        op.type = EditOp::InsertEvent;
+        op.smfTrack = smfTrack;
+        op.event = makeLaneEvent(cc, channel, pt.tick, pt.value);
+        ops.push_back(op);
+    }
+    pushEdit(tr("draw automation points"), std::move(ops));
+}
+
 void SongDocument::moveLanePoint(int engineTrack, uint8_t cc, const DocLanePoint &point,
                                  uint64_t newTick, int newValue)
 {
