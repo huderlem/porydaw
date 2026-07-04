@@ -26,10 +26,16 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   the selected track.
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
   visibility, last edit position. Specced but not implemented; cosmetic only.
-- **Playhead seek** by clicking/dragging in the ruler. Needs a UI→audio seek
-  command (TimelinePlayer::seek exists but is only used for edit-time
-  timeline swaps); note the engine state after a jump is approximate until
-  the next CC/program events replay.
+- **Reaper-style transport: edit cursor + spacebar play/pause toggle.**
+  Two cursors, as in Reaper: an *edit cursor* placed by clicking in the
+  ruler/roll, distinct from the moving *playback cursor*. Spacebar toggles
+  play/pause and playback starts from the edit cursor (today Space is bound
+  to the Play action only, and playing from Stopped always resets to 0).
+  Needs a UI→audio seek/start-at command (TimelinePlayer::seek exists but
+  is only used for edit-time timeline swaps), the edit-cursor rendering in
+  the ruler/roll, and the Space rebind; note the engine state after a jump
+  is approximate until the next CC/program events replay (Reaper-style
+  chase of CC/program state at seek would fix that).
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
 
