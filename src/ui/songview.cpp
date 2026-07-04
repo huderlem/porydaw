@@ -50,12 +50,6 @@ constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup brows
 constexpr int kVoiceAuditionVel = 112;
 // Resize hit-zone half-width at a note's left/right edges.
 constexpr int kEdgeW = 3;
-// Velocity drag handle just inboard of a note's left resize zone: hit-zone
-// width, and the minimum note width that gets one (narrow notes stay
-// all-Move; the right-click menu remains the fallback). The minimum keeps
-// the zone clear of the right edge's resize zone.
-constexpr int kVelHandleW = 8;
-constexpr int kVelHandleMinNoteW = 18;
 
 bool isBlackKey(int key)
 {
@@ -610,8 +604,8 @@ protected:
             m_drag = Drag::Band;
         }
         if (m_drag == Drag::None) {
-            // Hover cursor: resize handle at note right edges, velocity
-            // handle at their left ends.
+            // Hover cursor: resize handle at note left/right edges, velocity
+            // handle across the top strip (when zoomed in enough).
             const ViewNote *hit =
                 m_sv->document() && event->pos().x() >= kKeyboardW ? hitNote(event->pos())
                                                                    : nullptr;
@@ -622,18 +616,6 @@ protected:
                           : hit && nearVelocityHandle(*hit, event->pos())
                                 ? Qt::SizeVerCursor
                                 : Qt::ArrowCursor);
-            // Repaint when the hovered note changes so its velocity grip
-            // appears/disappears.
-            const bool hasHover = hit != nullptr;
-            if (hasHover != m_hasHover
-                || (hit && (hit->startTick != m_hoverTick || hit->key != m_hoverKey))) {
-                m_hasHover = hasHover;
-                if (hit) {
-                    m_hoverTick = hit->startTick;
-                    m_hoverKey = hit->key;
-                }
-                update();
-            }
             return;
         }
 
@@ -837,14 +819,6 @@ protected:
         QWidget::keyPressEvent(event);
     }
 
-    void leaveEvent(QEvent *) override
-    {
-        if (m_hasHover) {
-            m_hasHover = false;
-            update();
-        }
-    }
-
 private:
     enum class Drag { None, Band, Move, Resize, ResizeLeft, Velocity, Draw };
 
@@ -896,15 +870,18 @@ private:
 
     bool nearVelocityHandle(const ViewNote &note, QPoint pos) const
     {
+        if (m_sv->keyHeight() < kVelHandleMinKeyH)
+            return false;
         const QRect r = noteRect(note);
-        return r.width() >= kVelHandleMinNoteW && pos.x() > r.left() + kEdgeW
-            && pos.x() <= r.left() + kEdgeW + kVelHandleW;
+        return pos.x() > r.left() + kEdgeW && pos.x() < r.right() - kEdgeW
+            && pos.y() < r.top() + velHandleZoneH(r);
     }
 
-    QRect velHandleRect(const QRect &noteRect) const
+    // Height of the top strip that grabs as the velocity handle: a third of
+    // the note, kept clear of dwarfing the Move zone at low zoom.
+    static int velHandleZoneH(const QRect &noteRect)
     {
-        return QRect(noteRect.left() + kEdgeW + 2, noteRect.top() + 1, 3,
-                     std::max(2, noteRect.height() - 2));
+        return std::clamp(noteRect.height() / 3, 2, 6);
     }
 
     // Resolves the current selection to document notes (skips stale ids).
@@ -972,6 +949,12 @@ private:
     void drawNotes(QPainter &p, const SongViewModel &model, int selected, bool ghostPass)
     {
         const int keyH = m_sv->keyHeight();
+        const bool velZoomed = keyH >= kVelHandleMinKeyH;
+        if (!ghostPass && m_drag == Drag::Velocity) {
+            QFont f = p.font();
+            f.setPixelSize(std::clamp(keyH - 3, 7, 11));
+            p.setFont(f);
+        }
         for (const ViewNote &note : model.notes) {
             const bool ghost = note.track != selected;
             if (ghost != ghostPass)
@@ -991,14 +974,26 @@ private:
                     vel = std::clamp(int(note.velocity) + m_dVel, 1, 127);
                 c.setAlpha(120 + vel); // velocity shows as opacity
                 p.fillRect(r, c);
-                // Velocity grip on the hovered/selected notes (drag it
-                // vertically to adjust the whole selection).
-                const bool hovered = m_hasHover && note.startTick == m_hoverTick
-                                     && note.key == m_hoverKey;
-                if ((hovered || m_sv->isSelected(note))
-                    && r.width() >= kVelHandleMinNoteW)
-                    p.fillRect(velHandleRect(r),
+                // Velocity bar (bottom = 0, top = 127) once zoomed in enough
+                // for the full-width handle; it tracks the drag preview.
+                if (velZoomed) {
+                    const int barH = r.height() >= 20 ? 2 : 1;
+                    const int innerH = r.height() - 2;
+                    const int y = std::min(
+                        r.top() + 1 + (127 - vel) * (innerH - 1) / 127,
+                        r.bottom() - barH);
+                    p.fillRect(QRect(r.left() + 1, y, std::max(1, r.width() - 2), barH),
                                SongView::trackColor(note.track).darker(170));
+                }
+                // While a velocity drag is live, every current-track note
+                // shows its (previewed) value.
+                if (m_drag == Drag::Velocity) {
+                    const QString text = QString::number(vel);
+                    if (r.width() >= p.fontMetrics().horizontalAdvance(text) + 4) {
+                        p.setPen(c.lightness() > 127 ? Qt::black : Qt::white);
+                        p.drawText(r, Qt::AlignCenter, text);
+                    }
+                }
                 if (m_sv->isSelected(note)) {
                     p.setPen(QPen(palette().color(QPalette::HighlightedText), 1));
                     p.drawRect(r.adjusted(0, 0, -1, -1));
@@ -1158,9 +1153,6 @@ private:
     SongView::NoteId m_rightHitId{}; // …this one
     ViewNote m_velAnchor{};    // pressed note of a velocity drag (a copy)
     int m_velAudEff = -1;      // last effective velocity auditioned mid-drag
-    uint32_t m_hoverTick = 0;  // hovered note, for its velocity grip
-    uint8_t m_hoverKey = 0;
-    bool m_hasHover = false;
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
     bool m_auditioned = false; // a drag/draw preview note is sounding
     uint8_t m_lastVelocity = 100;

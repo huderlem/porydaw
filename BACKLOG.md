@@ -3,15 +3,6 @@
 Small deferred items that don't warrant a SPEC.md change. Milestone scope
 lives in SPEC.md §8; this is the loose-ends list between milestones.
 
-## M2 editor polish
-
-- **full-width velocity handle**: like Reaper, the velocity handle on each
-  note should be full-width, not just only on the left side. It is only visible/active
-  when vertically zoomed in enough, like Reaper. When zoomed enough
-  a thin horizontal bar should be drawn inside the note to indicate the velocity
-  level (0 = bottom, 127 = top). It should also display the volume values inside
-  all current-track notes while the user is in the act of dragging the volume handle.
-
 ## M3 onboarding polish
 
 - **Voicegroup browser: expand keysplits/drumkits** into per-key sub-entries

@@ -34,6 +34,14 @@ class TrackHeaderPanel;
 constexpr int kHeaderW = 210;
 constexpr int kKeyboardW = 52;
 constexpr int kGutterW = kHeaderW + kKeyboardW;
+
+// Full-width velocity handle (Reaper-style): with at least this much
+// vertical zoom, the top strip of a note drags velocity across its whole
+// width, and a thin horizontal bar inside the note shows the level
+// (bottom = 0, top = 127). Below the threshold notes are all-Move; the
+// right-click menu remains the velocity fallback. Also the default key
+// height, so the handle is available out of the box.
+constexpr int kVelHandleMinKeyH = 12;
 } // namespace songview
 
 // Song view: time ruler, multi-track piano roll (selected track in full
@@ -71,7 +79,7 @@ public:
     struct ViewState {
         bool valid = false;
         double pxPerBeat = 32.0;  // horizontal zoom (ticks-per-beat neutral)
-        int keyHeight = 9;        // vertical roll zoom
+        int keyHeight = songview::kVelHandleMinKeyH; // vertical roll zoom
         int scrollPx = 0;
         int scrollY = 0;
         int selectedTrack = 0;
@@ -228,7 +236,7 @@ private:
     double m_pxPerTick = 1.0;
     int m_scrollPx = 0;
     int m_scrollY = 0;
-    int m_keyHeight = 9;
+    int m_keyHeight = songview::kVelHandleMinKeyH;
     int m_keyZoomAccum = 0; // sub-notch wheel remainder for zoomKeyHeight
     int m_selectedTrack = 0;
     double m_playheadTick = 0.0;
