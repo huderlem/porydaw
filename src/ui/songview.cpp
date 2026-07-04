@@ -1757,6 +1757,10 @@ SongView::SongView(QWidget *parent)
     headerScroll->setFrameShape(QFrame::NoFrame);
     headerScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     headerScroll->setWidgetResizable(true);
+    // The roll owns keyboard editing (delete, copy/paste); the scroll areas
+    // must not steal its focus on click (QAbstractScrollArea defaults to
+    // StrongFocus, which broke shortcuts right after a track switch).
+    headerScroll->setFocusPolicy(Qt::NoFocus);
     m_headers = new TrackHeaderPanel(this);
     headerScroll->setWidget(m_headers);
     mid->addWidget(headerScroll);
@@ -1771,6 +1775,7 @@ SongView::SongView(QWidget *parent)
     m_lanesScroll->setFrameShape(QFrame::NoFrame);
     m_lanesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_lanesScroll->setWidgetResizable(true);
+    m_lanesScroll->setFocusPolicy(Qt::NoFocus);
     m_lanes = new AutomationArea(this);
     m_lanesScroll->setWidget(m_lanes);
     vbox->addWidget(m_lanesScroll);
@@ -2040,6 +2045,9 @@ void SongView::selectTrack(int track)
     m_selection.clear();
     m_headers->syncSelection();
     m_lanes->rebuildRows();
+    // Switching tracks readies the roll for keyboard editing (e.g. copy on
+    // one track, click another's header, paste), wherever focus was.
+    m_roll->setFocus();
     m_roll->update();
     emit selectedTrackChanged(track);
 }
