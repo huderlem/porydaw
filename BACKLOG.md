@@ -87,6 +87,19 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   multiple of 24 are imported as-is (mid2agb quantizes); an optional rescale
   to 24/48 clocks would make the editor grid exact for them.
 
+## App settings
+
+- **Engine settings page: view/modify global poryaaaa knobs** (SPEC §7:
+  "GBA-accuracy knobs surfaced in app settings, defaulted to
+  hardware-accurate"). maxPcmChannels (polyphony, default 5) and pcmMixRate
+  (13379 Hz) are hardcoded SongSettings defaults in audioengine.h — only the
+  polyphony meter even reads the limit — and the engine's analogFilter
+  toggle isn't surfaced at all. Needs an app settings dialog persisting via
+  QSettings, applied through AudioEngine::updateSettings (which already
+  handles mix-rate changes) and mirrored to the preview engine; SPEC §7's
+  audio-device selection page is a natural roommate. Reverb stays per-song
+  (midi.cfg -R), not global.
+
 ## Deferred infrastructure
 
 - **GitHub Actions CI** for Win/macOS/Linux builds (SPEC §8 M0 mentions it;
