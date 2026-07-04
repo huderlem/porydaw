@@ -82,6 +82,15 @@ public:
     int keyHeight() const { return m_keyHeight; }
     double playheadTick() const { return m_playheadTick; }
 
+    // Edit cursor (Reaper-style): placed by clicking the ruler or empty roll
+    // space, distinct from the moving playback cursor. Playback starts here,
+    // and paste anchors here.
+    uint64_t editCursorTick() const { return m_editCursorTick; }
+    // Visual placement only (ruler drag preview); commit emits
+    // editCursorMoved so playback can follow.
+    void setEditCursorTick(uint64_t tick);
+    void commitEditCursor(uint64_t tick);
+
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
     bool trackMuted(int track) const { return m_muteMask & (1u << track); }
@@ -127,7 +136,7 @@ public:
     void clearSelection();
 
     // App-internal note clipboard (copy/paste in the roll). Ticks are offsets
-    // from the copied block's start so paste can re-anchor at the playhead.
+    // from the copied block's start so paste can re-anchor at the edit cursor.
     // Survives track switches and document rebuilds; cleared on song swap
     // (another song's ticks-per-beat may differ).
     struct ClipNote {
@@ -166,6 +175,9 @@ signals:
     // AudioEngine::previewVoice like the voicegroup browser's signal.
     void auditionVoice(int voice, int key, int velocity);
     void statusMessage(const QString &text);
+    // Edit cursor committed to a new position (click released); the main
+    // window seeks playback here when not stopped.
+    void editCursorMoved(uint64_t tick);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -188,6 +200,7 @@ private:
     int m_keyHeight = 9;
     int m_selectedTrack = 0;
     double m_playheadTick = 0.0;
+    uint64_t m_editCursorTick = 0;
     bool m_playing = false;
     uint32_t m_muteMask = 0;
     uint32_t m_soloMask = 0;

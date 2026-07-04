@@ -5,18 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
-  visibility, last edit position. Specced but not implemented; cosmetic only.
-- **Reaper-style transport: edit cursor + spacebar play/pause toggle.**
-  Two cursors, as in Reaper: an *edit cursor* placed by clicking in the
-  ruler/roll, distinct from the moving *playback cursor*. Spacebar toggles
-  play/pause and playback starts from the edit cursor (today Space is bound
-  to the Play action only, and playing from Stopped always resets to 0).
-  Needs a UI→audio seek/start-at command (TimelinePlayer::seek exists but
-  is only used for edit-time timeline swaps), the edit-cursor rendering in
-  the ruler/roll, and the Space rebind; pair the jump with
-  TimelinePlayer::chase (already used by edit-time swaps) so CC/program/
-  bend state is exact at the landing position.
 - **Audible draw feedback on double-click.** The preview note for a newly
   drawn note is released on mouse-up, so a quick double-click barely sounds.
 - **Right-click drag for rubber-band selection.** Multi-select is currently
@@ -62,6 +50,8 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   ticksPerClock grid. Add zoom-adaptive subdivisions (8th/16th… down to the
   mid2agb clock grid, the real snap resolution) fading in the way beat lines
   already gate on pxPerBeat >= 10, with lighter strokes per level.
+- **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane
+  visibility, last edit position. Specced but not implemented; cosmetic only.
 
 ## M3 onboarding polish
 

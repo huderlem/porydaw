@@ -191,6 +191,26 @@ void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
         ma_device_start(m_device);
 }
 
+void AudioEngine::seek(uint64_t samplePos)
+{
+    if (!m_timeline)
+        return;
+    if (m_deviceStarted)
+        ma_device_stop(m_device);
+
+    // Same recipe as updateTimeline: release sounding notes (their note-offs
+    // are behind the new position) and chase so controller state is exact at
+    // the landing position.
+    for (int track = 0; track < MAX_TRACKS; track++)
+        m4a_engine_all_notes_off(m_engine.get(), track);
+    m_player.seek(samplePos, m_timeline.get());
+    TimelinePlayer::chase(m_engine.get(), m_timeline.get(), samplePos);
+    m_playhead.store(samplePos);
+
+    if (m_deviceStarted)
+        ma_device_start(m_device);
+}
+
 void AudioEngine::updateSettings(const SongSettings &settings)
 {
     if (m_deviceStarted)
@@ -349,10 +369,10 @@ void AudioEngine::applyTransportTransition()
             m4a_engine_all_notes_off(m_engine.get(), track);
         break;
     case Transport::Playing:
-        if (m_appliedTransport == static_cast<int>(Transport::Stopped)) {
-            m_player.reset();
+        // No player reset here: the Stopped transition already rewound to 0,
+        // and a seek() between stop and play deliberately moves the start.
+        if (m_appliedTransport == static_cast<int>(Transport::Stopped))
             m4a_engine_reset_poly_stats(m_engine.get());
-        }
         break;
     }
     m_appliedTransport = t;

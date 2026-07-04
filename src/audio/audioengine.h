@@ -65,6 +65,11 @@ public:
     // transport state and the playhead position. Sounding notes are released
     // (their note-offs may have moved or vanished in the new timeline).
     void updateTimeline(std::unique_ptr<MidiTimeline> timeline);
+    // Cold: jumps the playhead. Releases sounding notes and chases controller
+    // state so CC/program/bend/tempo are exact at the landing position. Works
+    // in any transport state; playing from Stopped starts wherever the last
+    // seek (or the stop-time reset to 0) left the playhead.
+    void seek(uint64_t samplePos);
     // Cold: re-applies song settings (master volume, reverb) to the engine.
     void updateSettings(const SongSettings &settings);
     // Cold: swaps the voicegroup (takes ownership); cuts all sound.

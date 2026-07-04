@@ -58,6 +58,9 @@ private:
     // Prompts to save a dirty document; false = user cancelled the action.
     bool maybeSaveSong();
     LoadedVoiceGroup *loadVoicegroupFor(const SongCfg &cfg, QString *tried);
+    // Starts (or resumes) playback; from Stopped, seeks to the edit cursor
+    // first so playback begins there.
+    void startPlayback();
     void updateTransportActions();
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
@@ -79,6 +82,7 @@ private:
     QAction *m_importAction = nullptr;
     QAction *m_checklistAction = nullptr;
     QAction *m_playAction = nullptr;
+    QAction *m_playPauseAction = nullptr;
     QAction *m_pauseAction = nullptr;
     QAction *m_stopAction = nullptr;
     QAction *m_loopAction = nullptr;

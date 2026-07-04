@@ -19,6 +19,8 @@
 
 #include <QCloseEvent>
 
+#include <algorithm>
+
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
@@ -102,9 +104,20 @@ void MainWindow::buildUi()
     transport->setMovable(false);
 
     m_playAction = new QAction(style()->standardIcon(QStyle::SP_MediaPlay), tr("Play"), this);
-    m_playAction->setShortcut(Qt::Key_Space);
-    connect(m_playAction, &QAction::triggered, this, [this] { m_audio.play(); });
+    connect(m_playAction, &QAction::triggered, this, &MainWindow::startPlayback);
     transport->addAction(m_playAction);
+
+    // Space toggles play/pause (Reaper-style); a window-level action so it
+    // works wherever focus is, like the old Space=Play binding did.
+    m_playPauseAction = new QAction(tr("Play/Pause"), this);
+    m_playPauseAction->setShortcut(Qt::Key_Space);
+    connect(m_playPauseAction, &QAction::triggered, this, [this] {
+        if (m_audio.transport() == Transport::Playing)
+            m_audio.pause();
+        else
+            startPlayback();
+    });
+    addAction(m_playPauseAction);
 
     m_pauseAction = new QAction(style()->standardIcon(QStyle::SP_MediaPause), tr("Pause"), this);
     connect(m_pauseAction, &QAction::triggered, this, [this] { m_audio.pause(); });
@@ -167,6 +180,12 @@ void MainWindow::buildUi()
             });
     connect(m_songView, &SongView::statusMessage, this,
             [this](const QString &text) { statusBar()->showMessage(text, 6000); });
+    // Moving the edit cursor while playing (or paused) seeks playback there,
+    // chasing controller state to the landing position.
+    connect(m_songView, &SongView::editCursorMoved, this, [this](uint64_t tick) {
+        if (m_audioOk && m_audio.songLoaded() && m_audio.transport() != Transport::Stopped)
+            m_audio.seek(m_audio.timeline()->sampleForTick(tick));
+    });
     setCentralWidget(m_songView);
 
     // Status bar: polyphony meter
@@ -575,11 +594,21 @@ void MainWindow::uiTick()
     updateTransportActions();
 }
 
+void MainWindow::startPlayback()
+{
+    if (!m_audioOk || !m_audio.songLoaded())
+        return;
+    if (m_audio.transport() == Transport::Stopped)
+        m_audio.seek(m_audio.timeline()->sampleForTick(m_songView->editCursorTick()));
+    m_audio.play();
+}
+
 void MainWindow::updateTransportActions()
 {
     const bool loaded = m_audioOk && m_audio.songLoaded();
     const Transport t = m_audio.transport();
     m_playAction->setEnabled(loaded && t != Transport::Playing);
+    m_playPauseAction->setEnabled(loaded);
     m_pauseAction->setEnabled(loaded && t == Transport::Playing);
     m_stopAction->setEnabled(loaded && t != Transport::Stopped);
     m_loopAction->setEnabled(loaded);
@@ -666,8 +695,42 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
           playedSeconds, int(m_audio.transport()), m_audio.activePcmChannels(),
           m_audio.maxPcmChannels());
 
-    const bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0
+    bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0
         && m_audio.playheadSamples() >= posBeforeEdit;
+
+    // M2 polish: edit-cursor seek mid-playback, then play-from-cursor out of
+    // Stopped (both go through AudioEngine::seek + chase). Loop disabled so
+    // a wrap can't drop the playhead below the seek target.
+    if (ok) {
+        m_audio.setLoopEnabled(false);
+        const MidiTimeline *tl = m_audio.timeline();
+        const uint64_t seekTick =
+            std::min<uint64_t>(tl->lengthTicks / 2, uint64_t(tl->ticksPerBeat) * 16);
+        const uint64_t seekSample = tl->sampleForTick(seekTick);
+        m_songView->commitEditCursor(seekTick); // transport is Playing: seeks
+        QTimer::singleShot(300, &loop, &QEventLoop::quit);
+        loop.exec();
+        const uint64_t afterSeek = m_audio.playheadSamples();
+        m_audio.stop();
+        QTimer::singleShot(200, &loop, &QEventLoop::quit);
+        loop.exec();
+        startPlayback(); // Stopped: must seek back to the edit cursor
+        QTimer::singleShot(300, &loop, &QEventLoop::quit);
+        loop.exec();
+        const uint64_t afterRestart = m_audio.playheadSamples();
+        ok = afterSeek >= seekSample && m_audio.transport() == Transport::Playing
+            && afterRestart >= seekSample;
+        m_audio.setLoopEnabled(true);
+        if (ok)
+            qInfo("selftest: edit-cursor seek + play-from-cursor OK (cursor %.2fs)",
+                  double(seekSample) / m_audio.sampleRate());
+        else
+            qWarning("selftest: edit-cursor seek FAILED (cursor %.2fs, playhead %.2fs "
+                     "after seek, %.2fs after restart)",
+                     double(seekSample) / m_audio.sampleRate(),
+                     double(afterSeek) / m_audio.sampleRate(),
+                     double(afterRestart) / m_audio.sampleRate());
+    }
     m_audio.stop();
     qInfo("selftest: %s", ok ? "PASS" : "FAIL");
     return ok;

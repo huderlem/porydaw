@@ -95,6 +95,13 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin
         }
     }
 
+    // Edit cursor (dashed, theme foreground) under the playback cursor.
+    const int ex = origin + sv->contentX(double(sv->editCursorTick()));
+    if (ex >= rect.left() && ex <= rect.right()) {
+        p.setPen(QPen(sv->palette().color(QPalette::WindowText), 1, Qt::DashLine));
+        p.drawLine(ex, rect.top(), ex, rect.bottom());
+    }
+
     const int px = origin + sv->contentX(sv->playheadTick());
     if (px >= rect.left() && px <= rect.right()) {
         p.setPen(QPen(playheadColor(), 1));
@@ -222,12 +229,14 @@ protected:
     {
         SongDocument *doc = m_sv->document();
         const MidiTimeline *tl = m_sv->timeline();
-        if (!doc || !tl || event->pos().x() < kGutterW)
+        if (!tl || event->pos().x() < kGutterW)
             return;
         const uint64_t clickTick =
             m_sv->snapTick(m_sv->tickAtContentX(event->pos().x() - kGutterW));
 
         if (event->button() == Qt::RightButton) {
+            if (!doc)
+                return;
             QMenu menu(this);
             QAction *setStart = menu.addAction(SongView::tr("Set loop start here"));
             QAction *setEnd = menu.addAction(SongView::tr("Set loop end here"));
@@ -250,19 +259,31 @@ protected:
         }
         if (event->button() != Qt::LeftButton)
             return;
-        m_dragMarker = hitMarker(event->pos().x());
+        m_dragMarker = doc ? hitMarker(event->pos().x()) : -1;
         if (m_dragMarker >= 0) {
             m_dragTick = clickTick;
             update();
+            return;
         }
+        // Elsewhere on the ruler: place the edit cursor (drag scrubs it;
+        // playback follows on release).
+        m_placingCursor = true;
+        m_sv->setEditCursorTick(clickTick);
     }
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
-        if (m_dragMarker >= 0) {
-            m_dragTick = m_sv->snapTick(
+        const auto dragTick = [this, event] {
+            return m_sv->snapTick(
                 m_sv->tickAtContentX(std::max(kGutterW, event->pos().x()) - kGutterW));
+        };
+        if (m_dragMarker >= 0) {
+            m_dragTick = dragTick();
             update();
+            return;
+        }
+        if (m_placingCursor) {
+            m_sv->setEditCursorTick(dragTick());
             return;
         }
         setCursor(m_sv->document() && hitMarker(event->pos().x()) >= 0 ? Qt::SplitHCursor
@@ -271,7 +292,14 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
-        if (event->button() != Qt::LeftButton || m_dragMarker < 0)
+        if (event->button() != Qt::LeftButton)
+            return;
+        if (m_placingCursor) {
+            m_placingCursor = false;
+            m_sv->commitEditCursor(m_sv->editCursorTick());
+            return;
+        }
+        if (m_dragMarker < 0)
             return;
         const bool endMarker = m_dragMarker == 1;
         m_dragMarker = -1;
@@ -299,6 +327,7 @@ private:
     SongView *m_sv;
     int m_dragMarker = -1;
     uint64_t m_dragTick = 0;
+    bool m_placingCursor = false;
 };
 
 // ---------------------------------------------------------------- PianoRoll
@@ -443,10 +472,16 @@ protected:
             } else {
                 m_drag = Drag::Move;
             }
-        } else if (doc) {
-            if (!(event->modifiers() & Qt::ControlModifier))
-                m_sv->clearSelection();
-            m_drag = Drag::Band;
+        } else {
+            // Empty space: park the edit cursor at the click (snapped), like
+            // Reaper's arrange view; playback follows when running. A drag
+            // still band-selects from the press point.
+            m_sv->commitEditCursor(m_sv->snapTick(m_pressTick));
+            if (doc) {
+                if (!(event->modifiers() & Qt::ControlModifier))
+                    m_sv->clearSelection();
+                m_drag = Drag::Band;
+            }
         }
         update();
     }
@@ -607,7 +642,7 @@ protected:
             return;
         }
         if (doc && event->matches(QKeySequence::Paste)) {
-            pasteAtPlayhead();
+            pasteAtEditCursor();
             event->accept();
             return;
         }
@@ -728,15 +763,15 @@ private:
         m_sv->announce(SongView::tr("Copied %n note(s)", nullptr, int(notes.size())));
     }
 
-    // Pastes the clipboard onto the selected track, anchored at the playhead
-    // (snapped to the grid), and selects the pasted notes.
-    void pasteAtPlayhead()
+    // Pastes the clipboard onto the selected track, anchored at the edit
+    // cursor (snapped to the grid), and selects the pasted notes.
+    void pasteAtEditCursor()
     {
         SongDocument *doc = m_sv->document();
         const std::vector<SongView::ClipNote> &clip = m_sv->noteClipboard();
         if (!doc || clip.empty())
             return;
-        const uint64_t base = m_sv->snapTick(m_sv->playheadTick());
+        const uint64_t base = m_sv->snapTick(double(m_sv->editCursorTick()));
         std::vector<SongDocument::NewNote> notes;
         std::vector<SongView::NoteId> ids;
         for (const SongView::ClipNote &cn : clip) {
@@ -1816,6 +1851,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     emit muteMaskChanged(0);
     emit soloMaskChanged(0);
     m_playheadTick = 0.0;
+    m_editCursorTick = 0;
     m_playing = false;
     m_scrollPx = 0;
 
@@ -2030,6 +2066,20 @@ void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
             setHScroll(int(m_playheadTick * m_pxPerTick) - vw / 10);
     }
     refreshTimelineViews();
+}
+
+void SongView::setEditCursorTick(uint64_t tick)
+{
+    if (m_editCursorTick == tick)
+        return;
+    m_editCursorTick = tick;
+    refreshTimelineViews();
+}
+
+void SongView::commitEditCursor(uint64_t tick)
+{
+    setEditCursorTick(tick);
+    emit editCursorMoved(tick);
 }
 
 double SongView::pxPerBeat() const
