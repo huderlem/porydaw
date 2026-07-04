@@ -69,6 +69,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   placement when the grid is coarse (the document supports any tick;
   mid2agb quantizes to clocks on compile, so sub-clock points are mostly
   useful with -X / higher divisions).
+- **Vertically resizable automation area.** The lanes sit in a QScrollArea
+  with a fixed height (kLanesAreaH, songview.cpp buildUi) under the roll, so
+  they can never be enlarged. Put the roll and the lanes area in a vertical
+  QSplitter so the user can drag the boundary; consider a per-lane height
+  handle too (rows are fixed kLaneH = 48). Persist the split (and lane
+  heights) in the `.porydaw` sidecar view state once that lands.
 - **Sub-beat ruler/grid subdivisions.** SongView::forEachGridLine enumerates
   beats only, so the ruler ticks and the roll's vertical grid bottom out at
   quarter notes at any zoom — even though editing snaps to the finer
