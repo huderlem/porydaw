@@ -5,6 +5,13 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
+- **Add automation lanes for parameters with no events** (SPEC §6.1:
+  "addable from the m4a parameter list"). The lane list is built solely
+  from events already in the file (songviewmodel.cpp laneFor), so a
+  parameter can't be automated from scratch. Needs an "+ Add lane" picker
+  offering the §4.2 audible parameters, with the empty lane surviving
+  until it gets a point; SongDocument::addLanePoint already handles
+  creating the first point for any (track, CC).
 - **Velocity lane / drag handles.** Velocity is edit-able only via
   right-click → "Set velocity…" on a selection. A per-note drag handle or a
   DAW-style velocity strip under the roll would be quicker for sweeps.
