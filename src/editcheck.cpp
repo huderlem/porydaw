@@ -116,6 +116,20 @@ int runEditCheck(const QString &projectRoot)
                     ok = false;
                 }
             }
+            if (ok) {
+                doc.nudgeNotesVelocity({note}, -30);
+                if (!doc.findNote(track, base + step * 8, 63, &note) || note.velocity != 58) {
+                    fail("velocity nudge not applied");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.nudgeNotesVelocity({note}, 200); // must clamp to 127
+                if (!doc.findNote(track, base + step * 8, 63, &note) || note.velocity != 127) {
+                    fail("velocity nudge not clamped");
+                    ok = false;
+                }
+            }
             if (ok)
                 doc.deleteNotes({note});
 

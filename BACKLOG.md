@@ -5,9 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 editor polish
 
-- **Velocity lane / drag handles.** Velocity is edit-able only via
-  right-click → "Set velocity…" on a selection. A per-note drag handle or a
-  DAW-style velocity strip under the roll would be quicker for sweeps.
 - **Copy/paste of notes** (and paste at playhead), plus Ctrl+A select-all on
   the selected track.
 - **`.porydaw` sidecar view state** (SPEC §4.4): per-song zoom, lane

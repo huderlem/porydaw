@@ -480,6 +480,23 @@ void SongDocument::setNotesVelocity(const std::vector<DocNote> &notes, uint8_t v
     pushEdit(tr("set velocity"), std::move(ops));
 }
 
+void SongDocument::nudgeNotesVelocity(const std::vector<DocNote> &notes, int delta)
+{
+    if (notes.empty() || delta == 0)
+        return;
+    std::vector<EditOp> ops;
+    for (const DocNote &note : notes) {
+        EditOp op;
+        op.type = EditOp::ModifyEvent;
+        op.smfTrack = note.smfTrack;
+        op.index = note.onIndex;
+        op.event = makeChannelEvent(0x9, note.channel, note.tick, note.key,
+                                    uint8_t(std::clamp(int(note.velocity) + delta, 1, 127)));
+        ops.push_back(op);
+    }
+    pushEdit(tr("adjust velocity"), std::move(ops));
+}
+
 SmfEvent SongDocument::makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick,
                                      int value) const
 {
