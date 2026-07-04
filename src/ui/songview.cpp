@@ -2,7 +2,10 @@
 
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -16,6 +19,9 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+
+#include "core/mid2agbtables.h"
+#include "core/songdocument.h"
 
 namespace songview {
 
@@ -130,6 +136,7 @@ public:
         : QWidget(sv), m_sv(sv)
     {
         setFixedHeight(kRulerH);
+        setMouseTracking(true);
     }
 
 protected:
@@ -183,6 +190,13 @@ protected:
             p.drawText(kGutterW + m_sv->contentX(double(tl->loopEndTick)) + 2, 11,
                        QStringLiteral("]"));
 
+        // Marker drag preview.
+        if (m_dragMarker >= 0) {
+            const int x = kGutterW + m_sv->contentX(double(m_dragTick));
+            p.setPen(QPen(loopEdge(), 2));
+            p.drawLine(x, 0, x, height());
+        }
+
         // Playhead handle.
         const int px = kGutterW + m_sv->contentX(m_sv->playheadTick());
         if (px >= area.left() && px <= area.right()) {
@@ -206,8 +220,87 @@ protected:
         event->accept();
     }
 
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        const MidiTimeline *tl = m_sv->timeline();
+        if (!doc || !tl || event->pos().x() < kGutterW)
+            return;
+        const uint64_t clickTick =
+            m_sv->snapTick(m_sv->tickAtContentX(event->pos().x() - kGutterW));
+
+        if (event->button() == Qt::RightButton) {
+            QMenu menu(this);
+            QAction *setStart = menu.addAction(SongView::tr("Set loop start here"));
+            QAction *setEnd = menu.addAction(SongView::tr("Set loop end here"));
+            QAction *remove = menu.addAction(SongView::tr("Remove loop markers"));
+            remove->setEnabled(tl->loopStartTick != UINT64_MAX
+                               || tl->loopEndTick != UINT64_MAX);
+            QAction *chosen = menu.exec(event->globalPosition().toPoint());
+            if (chosen == setStart) {
+                doc->setLoopTick(false, int64_t(clickTick));
+            } else if (chosen == setEnd) {
+                doc->setLoopTick(true, int64_t(clickTick));
+            } else if (chosen == remove) {
+                // Two commands; undo restores them one at a time.
+                if (tl->loopStartTick != UINT64_MAX)
+                    doc->setLoopTick(false, -1);
+                if (m_sv->timeline()->loopEndTick != UINT64_MAX)
+                    doc->setLoopTick(true, -1);
+            }
+            return;
+        }
+        if (event->button() != Qt::LeftButton)
+            return;
+        m_dragMarker = hitMarker(event->pos().x());
+        if (m_dragMarker >= 0) {
+            m_dragTick = clickTick;
+            update();
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (m_dragMarker >= 0) {
+            m_dragTick = m_sv->snapTick(
+                m_sv->tickAtContentX(std::max(kGutterW, event->pos().x()) - kGutterW));
+            update();
+            return;
+        }
+        setCursor(m_sv->document() && hitMarker(event->pos().x()) >= 0 ? Qt::SplitHCursor
+                                                                       : Qt::ArrowCursor);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() != Qt::LeftButton || m_dragMarker < 0)
+            return;
+        const bool endMarker = m_dragMarker == 1;
+        m_dragMarker = -1;
+        if (SongDocument *doc = m_sv->document())
+            doc->setLoopTick(endMarker, int64_t(m_dragTick));
+        update();
+    }
+
 private:
+    // 0 = start marker, 1 = end marker, -1 = neither near x.
+    int hitMarker(int x) const
+    {
+        const MidiTimeline *tl = m_sv->timeline();
+        if (!tl)
+            return -1;
+        if (tl->loopStartTick != UINT64_MAX
+            && std::abs(kGutterW + m_sv->contentX(double(tl->loopStartTick)) - x) <= 6)
+            return 0;
+        if (tl->loopEndTick != UINT64_MAX
+            && std::abs(kGutterW + m_sv->contentX(double(tl->loopEndTick)) - x) <= 6)
+            return 1;
+        return -1;
+    }
+
     SongView *m_sv;
+    int m_dragMarker = -1;
+    uint64_t m_dragTick = 0;
 };
 
 // ---------------------------------------------------------------- PianoRoll
@@ -220,6 +313,8 @@ public:
     {
         setMinimumHeight(120);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+        setMouseTracking(true);
+        setFocusPolicy(Qt::ClickFocus);
     }
 
 protected:
@@ -260,6 +355,16 @@ protected:
         const int selected = m_sv->selectedTrack();
         drawNotes(p, model, selected, true);
         drawNotes(p, model, selected, false);
+        drawDragPreview(p, model, selected);
+
+        if (m_drag == Drag::Band) {
+            const QRect band = QRect(m_pressPos, m_curPos).normalized();
+            QColor c = palette().color(QPalette::Highlight);
+            p.setPen(QPen(c, 1, Qt::DashLine));
+            c.setAlpha(30);
+            p.fillRect(band, c);
+            p.drawRect(band);
+        }
 
         drawOverlays(p, m_sv, grid, kKeyboardW);
 
@@ -280,10 +385,243 @@ protected:
         event->accept();
     }
 
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        setFocus();
+        if (!m_sv->timeline())
+            return;
+
+        // Keyboard column: audition the clicked key on the selected track.
+        if (event->pos().x() < kKeyboardW) {
+            if (event->button() == Qt::LeftButton) {
+                m_kbdKey = yToKey(event->pos().y());
+                m_sv->audition(m_sv->selectedTrack(), m_kbdKey, 100);
+            }
+            return;
+        }
+
+        SongDocument *doc = m_sv->document();
+        const ViewNote *hit = doc ? hitNote(event->pos()) : nullptr;
+
+        if (event->button() == Qt::RightButton) {
+            if (hit) {
+                if (!m_sv->isSelected(*hit))
+                    m_sv->setSelection({{hit->startTick, hit->key}});
+                showNoteMenu(event->pos());
+            }
+            return;
+        }
+        if (event->button() != Qt::LeftButton)
+            return;
+
+        m_pressPos = m_curPos = event->pos();
+        m_pressTick = m_sv->tickAtContentX(event->pos().x() - kKeyboardW);
+        m_pressKey = yToKey(event->pos().y());
+        m_dTick = 0;
+        m_dKey = 0;
+        m_dDur = 0;
+
+        if (hit) {
+            std::vector<SongView::NoteId> ids = m_sv->selection();
+            const SongView::NoteId id{hit->startTick, hit->key};
+            if (event->modifiers() & Qt::ControlModifier) {
+                const auto it = std::find(ids.begin(), ids.end(), id);
+                if (it != ids.end())
+                    ids.erase(it);
+                else
+                    ids.push_back(id);
+                m_sv->setSelection(std::move(ids));
+            } else if (!m_sv->isSelected(*hit)) {
+                m_sv->setSelection({id});
+            }
+            m_sv->announceNote(*hit);
+            m_drag = nearRightEdge(*hit, event->pos()) ? Drag::Resize : Drag::Move;
+        } else if (doc) {
+            if (!(event->modifiers() & Qt::ControlModifier))
+                m_sv->clearSelection();
+            m_drag = Drag::Band;
+        }
+        update();
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc || event->button() != Qt::LeftButton
+            || event->pos().x() < kKeyboardW || hitNote(event->pos()))
+            return;
+        const uint64_t tick =
+            m_sv->snapTick(m_sv->tickAtContentX(event->pos().x() - kKeyboardW));
+        const int key = yToKey(event->pos().y());
+        doc->addNote(m_sv->selectedTrack(), tick, uint8_t(key),
+                     uint32_t(m_sv->gridTicks()), m_lastVelocity);
+        m_sv->setSelection({{uint32_t(tick), uint8_t(key)}});
+        m_sv->audition(m_sv->selectedTrack(), key, m_lastVelocity);
+        m_auditioned = true;
+        m_drag = Drag::None;
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        m_curPos = event->pos();
+        if (m_drag == Drag::None) {
+            // Hover cursor: resize handle at note right edges.
+            const ViewNote *hit =
+                m_sv->document() && event->pos().x() >= kKeyboardW ? hitNote(event->pos())
+                                                                   : nullptr;
+            setCursor(hit && nearRightEdge(*hit, event->pos()) ? Qt::SizeHorCursor
+                                                               : Qt::ArrowCursor);
+            return;
+        }
+
+        const double tick = m_sv->tickAtContentX(event->pos().x() - kKeyboardW);
+        const int64_t grid = int64_t(m_sv->gridTicks());
+        const int64_t rawD = int64_t(std::llround(tick - m_pressTick));
+        const int64_t snappedD = (rawD >= 0 ? rawD + grid / 2 : rawD - grid / 2) / grid * grid;
+
+        if (m_drag == Drag::Move) {
+            const int dKey = yToKey(event->pos().y()) - m_pressKey;
+            if (snappedD != m_dTick || dKey != m_dKey) {
+                m_dTick = snappedD;
+                if (dKey != m_dKey) {
+                    m_dKey = dKey;
+                    // Audition the new pitch while dragging vertically.
+                    const std::vector<DocNote> notes = resolveSelection();
+                    if (!notes.empty()) {
+                        const int key =
+                            std::clamp(int(notes.front().key) + m_dKey, 0, 127);
+                        m_sv->audition(m_sv->selectedTrack(), key,
+                                                notes.front().velocity);
+                        m_auditioned = true;
+                    }
+                }
+                update();
+            }
+        } else if (m_drag == Drag::Resize) {
+            if (snappedD != m_dDur) {
+                m_dDur = snappedD;
+                update();
+            }
+        } else if (m_drag == Drag::Band) {
+            update();
+        }
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (m_kbdKey >= 0) {
+            m_sv->audition(m_sv->selectedTrack(), m_kbdKey, 0);
+            m_kbdKey = -1;
+        }
+        if (m_auditioned) {
+            m_sv->audition(m_sv->selectedTrack(), 0, 0);
+            m_auditioned = false;
+        }
+        if (event->button() != Qt::LeftButton || m_drag == Drag::None)
+            return;
+
+        SongDocument *doc = m_sv->document();
+        const Drag drag = m_drag;
+        m_drag = Drag::None;
+
+        if (drag == Drag::Band) {
+            selectBand(QRect(m_pressPos, m_curPos).normalized(),
+                       event->modifiers() & Qt::ControlModifier);
+        } else if (doc && drag == Drag::Move && (m_dTick != 0 || m_dKey != 0)) {
+            const std::vector<DocNote> notes = resolveSelection();
+            doc->moveNotes(notes, m_dTick, m_dKey);
+            // Follow the notes with the selection.
+            std::vector<SongView::NoteId> ids;
+            for (const DocNote &note : notes)
+                ids.push_back(
+                    {uint32_t(std::max<int64_t>(0, int64_t(note.tick) + m_dTick)),
+                     uint8_t(std::clamp(int(note.key) + m_dKey, 0, 127))});
+            m_sv->setSelection(std::move(ids));
+        } else if (doc && drag == Drag::Resize && m_dDur != 0) {
+            doc->resizeNotes(resolveSelection(), m_dDur);
+        }
+        m_dTick = 0;
+        m_dKey = 0;
+        m_dDur = 0;
+        update();
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        if (doc && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
+            const std::vector<DocNote> notes = resolveSelection();
+            if (!notes.empty()) {
+                doc->deleteNotes(notes);
+                m_sv->clearSelection();
+            }
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Escape) {
+            m_drag = Drag::None;
+            m_sv->clearSelection();
+            update();
+            event->accept();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
 private:
+    enum class Drag { None, Band, Move, Resize };
+
     int keyToY(int key) const
     {
         return (127 - key) * m_sv->keyHeight() - m_sv->scrollY();
+    }
+
+    int yToKey(int y) const
+    {
+        return std::clamp(127 - (y + m_sv->scrollY()) / m_sv->keyHeight(), 0, 127);
+    }
+
+    QRect noteRect(const ViewNote &note) const
+    {
+        const int x0 = kKeyboardW + m_sv->contentX(double(note.startTick));
+        const int x1 = kKeyboardW + m_sv->contentX(double(note.endTick));
+        return QRect(x0, keyToY(note.key) + 1, std::max(2, x1 - x0),
+                     std::max(2, m_sv->keyHeight() - 1));
+    }
+
+    // Topmost (last-drawn) note of the selected track under pos.
+    const ViewNote *hitNote(QPoint pos) const
+    {
+        const int selected = m_sv->selectedTrack();
+        const ViewNote *hit = nullptr;
+        for (const ViewNote &note : m_sv->model().notes) {
+            if (note.track != selected)
+                continue;
+            if (noteRect(note).adjusted(0, 0, 2, 0).contains(pos))
+                hit = &note;
+        }
+        return hit;
+    }
+
+    bool nearRightEdge(const ViewNote &note, QPoint pos) const
+    {
+        const QRect r = noteRect(note);
+        return pos.x() >= r.right() - 3 && pos.x() <= r.right() + 3;
+    }
+
+    // Resolves the current selection to document notes (skips stale ids).
+    std::vector<DocNote> resolveSelection() const
+    {
+        std::vector<DocNote> notes;
+        SongDocument *doc = m_sv->document();
+        if (!doc)
+            return notes;
+        for (const SongView::NoteId &id : m_sv->selection()) {
+            DocNote note;
+            if (doc->findNote(m_sv->selectedTrack(), id.tick, id.key, &note))
+                notes.push_back(note);
+        }
+        return notes;
     }
 
     void drawNotes(QPainter &p, const SongViewModel &model, int selected, bool ghostPass)
@@ -293,14 +631,11 @@ private:
             const bool ghost = note.track != selected;
             if (ghost != ghostPass)
                 continue;
-            const int x0 = kKeyboardW + m_sv->contentX(double(note.startTick));
-            const int x1 = kKeyboardW + m_sv->contentX(double(note.endTick));
-            if (x1 < kKeyboardW || x0 > width())
+            const QRect r = noteRect(note);
+            if (r.right() < kKeyboardW || r.left() > width())
                 continue;
-            const int y = keyToY(note.key);
-            if (y + keyH < 0 || y > height())
+            if (r.bottom() < 0 || r.top() > height())
                 continue;
-            QRect r(x0, y + 1, std::max(2, x1 - x0), std::max(2, keyH - 1));
             QColor c = SongView::trackColor(note.track);
             if (ghost) {
                 c.setAlpha(60);
@@ -308,11 +643,68 @@ private:
             } else {
                 c.setAlpha(120 + note.velocity); // velocity shows as opacity
                 p.fillRect(r, c);
-                p.setPen(note.unterminated
-                             ? QPen(playheadColor(), 1, Qt::DashLine)
-                             : QPen(SongView::trackColor(note.track).darker(150), 1));
-                p.drawRect(r.adjusted(0, 0, -1, -1));
+                if (m_sv->isSelected(note)) {
+                    p.setPen(QPen(palette().color(QPalette::HighlightedText), 1));
+                    p.drawRect(r.adjusted(0, 0, -1, -1));
+                    p.setPen(QPen(palette().color(QPalette::Highlight), 1));
+                    p.drawRect(r.adjusted(-1, -1, 0, 0));
+                } else {
+                    p.setPen(note.unterminated
+                                 ? QPen(playheadColor(), 1, Qt::DashLine)
+                                 : QPen(SongView::trackColor(note.track).darker(150), 1));
+                    p.drawRect(r.adjusted(0, 0, -1, -1));
+                }
             }
+        }
+    }
+
+    // Dashed outlines of the selected notes at their dragged position/length.
+    void drawDragPreview(QPainter &p, const SongViewModel &model, int selected)
+    {
+        if (m_drag != Drag::Move && m_drag != Drag::Resize)
+            return;
+        if (m_dTick == 0 && m_dKey == 0 && m_dDur == 0)
+            return;
+        p.setPen(QPen(palette().color(QPalette::WindowText), 1, Qt::DashLine));
+        for (const ViewNote &note : model.notes) {
+            if (note.track != selected || !m_sv->isSelected(note))
+                continue;
+            const int64_t tick = std::max<int64_t>(0, int64_t(note.startTick) + m_dTick);
+            const int64_t endTick = std::max<int64_t>(
+                tick + 1, int64_t(note.endTick) + m_dTick + m_dDur);
+            const int key = std::clamp(int(note.key) + m_dKey, 0, 127);
+            const int x0 = kKeyboardW + m_sv->contentX(double(tick));
+            const int x1 = kKeyboardW + m_sv->contentX(double(endTick));
+            p.drawRect(QRect(x0, keyToY(key) + 1, std::max(2, x1 - x0),
+                             std::max(2, m_sv->keyHeight() - 1)));
+        }
+    }
+
+    void showNoteMenu(QPoint pos)
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc)
+            return;
+        const std::vector<DocNote> notes = resolveSelection();
+        if (notes.empty())
+            return;
+        QMenu menu(this);
+        QAction *velocity = menu.addAction(
+            SongView::tr("Set velocity… (%1)").arg(notes.front().velocity));
+        QAction *del = menu.addAction(SongView::tr("Delete"));
+        QAction *chosen = menu.exec(mapToGlobal(pos));
+        if (chosen == velocity) {
+            bool ok = false;
+            const int v = QInputDialog::getInt(
+                this, SongView::tr("Note velocity"),
+                SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
+                    .arg(mid2agbEffectiveVelocity(1)),
+                notes.front().velocity, 1, 127, 1, &ok);
+            if (ok)
+                doc->setNotesVelocity(notes, uint8_t(v));
+        } else if (chosen == del) {
+            doc->deleteNotes(notes);
+            m_sv->clearSelection();
         }
     }
 
@@ -342,7 +734,36 @@ private:
         p.drawLine(kKeyboardW - 1, 0, kKeyboardW - 1, height());
     }
 
+    // Selects the selected track's notes intersecting the band rect.
+    void selectBand(const QRect &band, bool additive)
+    {
+        std::vector<SongView::NoteId> ids = additive
+                                                ? m_sv->selection()
+                                                : std::vector<SongView::NoteId>();
+        for (const ViewNote &note : m_sv->model().notes) {
+            if (note.track != m_sv->selectedTrack())
+                continue;
+            if (!noteRect(note).intersects(band))
+                continue;
+            const SongView::NoteId id{note.startTick, note.key};
+            if (std::find(ids.begin(), ids.end(), id) == ids.end())
+                ids.push_back(id);
+        }
+        m_sv->setSelection(std::move(ids));
+    }
+
     SongView *m_sv;
+    Drag m_drag = Drag::None;
+    QPoint m_pressPos;
+    QPoint m_curPos;
+    double m_pressTick = 0.0;
+    int m_pressKey = 0;
+    int64_t m_dTick = 0;
+    int m_dKey = 0;
+    int64_t m_dDur = 0;
+    int m_kbdKey = -1;         // key sounding from a keyboard-column press
+    bool m_auditioned = false; // a drag/draw preview note is sounding
+    uint8_t m_lastVelocity = 100;
 };
 
 // ----------------------------------------------------------- AutomationArea
@@ -359,6 +780,7 @@ public:
     void rebuildRows()
     {
         m_rows.clear();
+        m_dragRow = -1;
         if (m_sv->timeline()) {
             m_rows.push_back({Row::Tempo, nullptr});
             const SongViewModel &model = m_sv->model();
@@ -387,6 +809,23 @@ protected:
 
         for (size_t i = 0; i < m_rows.size(); i++)
             paintRow(p, m_rows[i], QRect(0, int(i) * kLaneH, width(), kLaneH));
+
+        // Point-drag preview: marker plus the value it will commit to.
+        if (m_dragRow >= 0 && m_dragRow < int(m_rows.size())) {
+            int minV, maxV;
+            rowRange(m_rows[m_dragRow], &minV, &maxV);
+            const int top = m_dragRow * kLaneH + 5;
+            const int bottom = (m_dragRow + 1) * kLaneH - 1 - 4;
+            const int x = kGutterW + m_sv->contentX(double(m_dragTick));
+            const int y = bottom
+                          - (m_dragValue - minV) * (bottom - top) / std::max(1, maxV - minV);
+            p.setClipRect(QRect(kGutterW, m_dragRow * kLaneH, width() - kGutterW, kLaneH));
+            p.setPen(QPen(palette().color(QPalette::WindowText), 1));
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(QPoint(x, y), 3, 3);
+            p.drawText(QPoint(x + 6, y - 4), QString::number(m_dragValue));
+            p.setClipping(false);
+        }
     }
 
     void wheelEvent(QWheelEvent *event) override
@@ -400,11 +839,147 @@ protected:
         }
     }
 
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc || event->pos().x() < kGutterW)
+            return;
+        const int ri = event->pos().y() / kLaneH;
+        if (ri < 0 || ri >= int(m_rows.size()))
+            return;
+        const Row &row = m_rows[ri];
+        uint8_t cc;
+        int track;
+        if (!rowTarget(row, &cc, &track))
+            return; // voice row: not editable in M2
+
+        const LanePoint *nearPt = nearestPoint(row, event->pos().x());
+        if (event->button() == Qt::RightButton) {
+            if (nearPt) {
+                DocLanePoint pt;
+                if (doc->findLanePoint(track, cc, nearPt->tick, &pt))
+                    doc->deleteLanePoints(track, cc, {pt});
+            }
+            return;
+        }
+        if (event->button() != Qt::LeftButton)
+            return;
+        m_dragRow = ri;
+        m_dragOrigTick = nearPt ? int64_t(nearPt->tick) : -1;
+        updateDrag(event->pos());
+        update();
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (m_dragRow < 0)
+            return;
+        updateDrag(event->pos());
+        update();
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (event->button() != Qt::LeftButton || m_dragRow < 0
+            || m_dragRow >= int(m_rows.size()))
+            return;
+        const Row &row = m_rows[m_dragRow];
+        m_dragRow = -1;
+        update();
+
+        SongDocument *doc = m_sv->document();
+        uint8_t cc;
+        int track;
+        if (!doc || !rowTarget(row, &cc, &track))
+            return;
+        if (m_dragOrigTick >= 0) {
+            DocLanePoint pt;
+            if (doc->findLanePoint(track, cc, uint64_t(m_dragOrigTick), &pt))
+                doc->moveLanePoint(track, cc, pt, m_dragTick, m_dragValue);
+        } else {
+            doc->addLanePoint(track, cc, m_dragTick, m_dragValue);
+        }
+    }
+
 private:
     struct Row {
         enum Kind { Tempo, Voice, Lane } kind;
         const AutoLane *lane;
     };
+
+    // Document target of an editable row; false for the voice row.
+    bool rowTarget(const Row &row, uint8_t *cc, int *track) const
+    {
+        if (row.kind == Row::Tempo) {
+            *cc = DOC_CC_TEMPO;
+            *track = m_sv->selectedTrack();
+            return true;
+        }
+        if (row.kind == Row::Lane) {
+            *cc = row.lane->cc; // LANE_CC_BEND == DOC_CC_BEND
+            *track = row.lane->track;
+            return true;
+        }
+        return false;
+    }
+
+    const std::vector<LanePoint> *rowPoints(const Row &row) const
+    {
+        if (row.kind == Row::Tempo)
+            return &m_sv->model().tempoLane;
+        if (row.kind == Row::Lane)
+            return &row.lane->points;
+        return nullptr;
+    }
+
+    void rowRange(const Row &row, int *minV, int *maxV) const
+    {
+        *minV = 0;
+        *maxV = 127;
+        if (row.kind == Row::Tempo) {
+            *maxV = 200;
+            for (const LanePoint &pt : m_sv->model().tempoLane)
+                *maxV = std::max(*maxV, pt.value + 20);
+        } else if (row.kind == Row::Lane && row.lane->cc == LANE_CC_BEND) {
+            *minV = -8192;
+            *maxV = 8191;
+        }
+    }
+
+    const LanePoint *nearestPoint(const Row &row, int x) const
+    {
+        const std::vector<LanePoint> *points = rowPoints(row);
+        if (!points)
+            return nullptr;
+        const LanePoint *best = nullptr;
+        int bestDist = 9;
+        for (const LanePoint &pt : *points) {
+            const int dist = std::abs(kGutterW + m_sv->contentX(double(pt.tick)) - x);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = &pt;
+            }
+        }
+        return best;
+    }
+
+    void updateDrag(QPoint pos)
+    {
+        if (m_dragRow < 0 || m_dragRow >= int(m_rows.size()))
+            return;
+        const Row &row = m_rows[m_dragRow];
+        int minV, maxV;
+        rowRange(row, &minV, &maxV);
+        // Invert paintCurve's valueY mapping.
+        const int top = m_dragRow * kLaneH + 5;
+        const int bottom = (m_dragRow + 1) * kLaneH - 1 - 4;
+        const int y = std::clamp(pos.y(), top, bottom);
+        m_dragValue = minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
+        if (row.kind == Row::Tempo)
+            m_dragValue = std::max(1, m_dragValue);
+        m_dragTick = m_sv->snapTick(
+            m_sv->tickAtContentX(std::max(kGutterW, pos.x()) - kGutterW));
+    }
 
     void paintRow(QPainter &p, const Row &row, const QRect &r)
     {
@@ -419,17 +994,13 @@ private:
         int minV = 0, maxV = 127;
         const std::vector<LanePoint> *points = nullptr;
         QColor curve = palette().color(QPalette::Highlight);
+        rowRange(row, &minV, &maxV);
         switch (row.kind) {
-        case Row::Tempo: {
+        case Row::Tempo:
             name = SongView::tr("Tempo (BPM)");
             points = &m_sv->model().tempoLane;
-            maxV = 200;
-            for (const LanePoint &pt : *points)
-                maxV = std::max(maxV, pt.value + 20);
-            minV = 0;
             curve = QColor(0xb0, 0x60, 0xd0);
             break;
-        }
         case Row::Voice:
             name = SongView::tr("Voice");
             break;
@@ -440,10 +1011,6 @@ private:
                        : QStringLiteral("%1 (%2)").arg(row.lane->name,
                                                        QLatin1String(info.name));
             points = &row.lane->points;
-            if (row.lane->cc == LANE_CC_BEND) {
-                minV = -8192;
-                maxV = 8191;
-            }
             curve = SongView::trackColor(row.lane->track);
             break;
         }
@@ -542,6 +1109,10 @@ private:
 
     SongView *m_sv;
     std::vector<Row> m_rows;
+    int m_dragRow = -1;
+    int64_t m_dragOrigTick = -1; // existing point being moved, -1 = new point
+    uint64_t m_dragTick = 0;
+    int m_dragValue = 0;
 };
 
 // ---------------------------------------------------------------- OtherStrip
@@ -650,6 +1221,9 @@ public:
         m_mute->setToolTip(SongView::tr("Mute"));
         m_mute->setStyleSheet(
             QStringLiteral("QToolButton:checked { background: #d9534f; color: white; }"));
+        // Headers are rebuilt on every document edit; keep the persistent
+        // mute/solo state (checked before connect, so nothing re-emits).
+        m_mute->setChecked(sv->trackMuted(track));
         connect(m_mute, &QToolButton::toggled, this,
                 [this](bool on) { m_sv->setTrackMute(m_track, on); });
         m_solo = new QToolButton(this);
@@ -659,6 +1233,7 @@ public:
         m_solo->setToolTip(SongView::tr("Solo"));
         m_solo->setStyleSheet(
             QStringLiteral("QToolButton:checked { background: #5cb85c; color: white; }"));
+        m_solo->setChecked(sv->trackSoloed(track));
         connect(m_solo, &QToolButton::toggled, this,
                 [this](bool on) { m_sv->setTrackSolo(m_track, on); });
         buttons->addWidget(m_mute);
@@ -823,6 +1398,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_timeline = timeline;
     m_voicegroup = voicegroup;
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
+    m_selection.clear();
     m_muteMask = 0;
     m_soloMask = 0;
     emit muteMaskChanged(0);
@@ -865,6 +1441,112 @@ void SongView::rebuildAfterSongChange()
     refreshTimelineViews();
 }
 
+void SongView::updateSong(const MidiTimeline *timeline)
+{
+    m_timeline = timeline;
+    m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
+
+    if (timeline && !timeline->tracks[m_selectedTrack].used) {
+        // The edited track disappeared (e.g. undo of its only events).
+        m_selectedTrack = 0;
+        for (int t = 0; t < 16; t++) {
+            if (timeline->tracks[t].used) {
+                m_selectedTrack = t;
+                break;
+            }
+        }
+    }
+
+    // Keep only selection ids that still resolve to a note.
+    std::vector<NoteId> keep;
+    for (const NoteId &id : m_selection) {
+        for (const ViewNote &note : m_model.notes) {
+            if (note.track == m_selectedTrack && note.startTick == id.tick
+                && note.key == id.key) {
+                keep.push_back(id);
+                break;
+            }
+        }
+    }
+    m_selection = std::move(keep);
+
+    m_headers->rebuild();
+    m_lanes->rebuildRows();
+    updateScrollbars();
+    refreshTimelineViews();
+}
+
+void SongView::setDocument(SongDocument *document)
+{
+    m_document = document;
+    m_selection.clear();
+}
+
+void SongView::setVoicegroup(const LoadedVoiceGroup *voicegroup)
+{
+    m_voicegroup = voicegroup;
+    m_headers->rebuild();
+    refreshTimelineViews();
+}
+
+uint64_t SongView::gridTicks() const
+{
+    if (!m_timeline)
+        return 24;
+    const uint64_t tpb = std::max<uint32_t>(1, m_timeline->ticksPerBeat);
+    const uint64_t clock = m_document ? m_document->ticksPerClock() : 1;
+    // Finest visible beat subdivision at least ~8 px wide.
+    for (uint64_t div : {uint64_t(8), uint64_t(4), uint64_t(2), uint64_t(1)}) {
+        if (pxPerBeat() / double(div) >= 8.0)
+            return std::max(std::max<uint64_t>(1, tpb / div), clock);
+    }
+    return std::max(tpb, clock);
+}
+
+uint64_t SongView::snapTick(double tick) const
+{
+    const double g = double(gridTicks());
+    return uint64_t(std::round(std::max(0.0, tick) / g) * g);
+}
+
+bool SongView::isSelected(const ViewNote &note) const
+{
+    if (note.track != m_selectedTrack)
+        return false;
+    const NoteId id{note.startTick, note.key};
+    return std::find(m_selection.begin(), m_selection.end(), id) != m_selection.end();
+}
+
+void SongView::setSelection(std::vector<NoteId> ids)
+{
+    m_selection = std::move(ids);
+    m_roll->update();
+}
+
+void SongView::clearSelection()
+{
+    if (!m_selection.empty()) {
+        m_selection.clear();
+        m_roll->update();
+    }
+}
+
+void SongView::announceNote(const ViewNote &note)
+{
+    if (!m_timeline)
+        return;
+    const bool ext = m_document && m_document->cfg().extendedClocks;
+    const bool exact = m_document && m_document->cfg().exactGate;
+    const int64_t ticks = int64_t(note.endTick) - int64_t(note.startTick);
+    emit statusMessage(tr("%1 · velocity %2 → plays %3 · length %4 ticks → %5 clocks")
+                           .arg(keyName(note.key))
+                           .arg(note.velocity)
+                           .arg(mid2agbEffectiveVelocity(note.velocity))
+                           .arg(ticks)
+                           .arg(mid2agbEffectiveDuration(ticks, m_timeline->ticksPerBeat,
+                                                         ext, exact)));
+}
+
 void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
 {
     if (!m_timeline)
@@ -890,6 +1572,7 @@ void SongView::selectTrack(int track)
     if (track == m_selectedTrack || track < 0 || track > 15)
         return;
     m_selectedTrack = track;
+    m_selection.clear();
     m_headers->syncSelection();
     m_lanes->rebuildRows();
     m_roll->update();

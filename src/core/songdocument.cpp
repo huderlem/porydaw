@@ -154,46 +154,58 @@ bool SongDocument::save(QString *error)
         setBoolFlag(flags, 'N', m_cfg.noCompression);
         m_cfg.rawFlags = flags;
 
+        // Binary in/out: only the song's own line may change, byte for byte —
+        // including CRLF line endings (vanilla midi.cfg uses them).
         const QString cfgPath =
             QFileInfo(m_midPath).dir().filePath(QStringLiteral("midi.cfg"));
-        QStringList lines;
+        QByteArray content;
         {
             QFile in(cfgPath);
-            if (in.open(QIODevice::ReadOnly | QIODevice::Text))
-                lines = QString::fromUtf8(in.readAll()).split(QLatin1Char('\n'));
+            if (in.open(QIODevice::ReadOnly))
+                content = in.readAll();
         }
-        // Drop a trailing empty piece so appends don't create blank lines;
-        // restored by the final join+newline below.
-        if (!lines.isEmpty() && lines.last().isEmpty())
-            lines.removeLast();
+        const bool endsWithNewline = content.isEmpty() || content.endsWith('\n');
+        const bool crlf = content.contains("\r\n");
+        QList<QByteArray> lines = content.split('\n');
+        if (endsWithNewline && !lines.isEmpty())
+            lines.removeLast(); // the empty piece after the final newline
 
         const QString fileName = m_label + QStringLiteral(".mid");
+        const QByteArray flagBytes = flags.join(QLatin1Char(' ')).toUtf8();
         bool replaced = false;
-        for (QString &line : lines) {
-            const int colon = line.indexOf(QLatin1Char(':'));
-            if (colon <= 0)
-                continue;
-            if (line.left(colon).trimmed() != fileName)
+        for (QByteArray &line : lines) {
+            const bool hadCr = line.endsWith('\r');
+            const QString text = QString::fromUtf8(hadCr ? line.chopped(1) : line);
+            const int colon = text.indexOf(QLatin1Char(':'));
+            if (colon <= 0 || text.left(colon).trimmed() != fileName)
                 continue;
             // Keep the original name-column padding.
             int flagStart = colon + 1;
-            while (flagStart < line.size() && line[flagStart] == QLatin1Char(' '))
+            while (flagStart < text.size() && text[flagStart] == QLatin1Char(' '))
                 flagStart++;
-            line = line.left(flagStart) + flags.join(QLatin1Char(' '));
+            line = text.left(flagStart).toUtf8() + flagBytes;
+            if (hadCr)
+                line += '\r';
             replaced = true;
             break;
         }
-        if (!replaced)
-            lines.append(QStringLiteral("%1: %2").arg(fileName, flags.join(QLatin1Char(' '))));
+        if (!replaced) {
+            QByteArray line = fileName.toUtf8() + ": " + flagBytes;
+            if (crlf)
+                line += '\r';
+            lines.append(line);
+        }
 
         QFile out(cfgPath);
-        if (!out.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        if (!out.open(QIODevice::WriteOnly)) {
             if (error)
                 *error = QStringLiteral("Cannot write %1").arg(cfgPath);
             return false;
         }
-        out.write(lines.join(QLatin1Char('\n')).toUtf8());
-        out.write("\n");
+        QByteArray joined = lines.join('\n');
+        if (endsWithNewline)
+            joined += '\n';
+        out.write(joined);
         m_savedCfg = m_cfg;
         m_hadCfgLine = true;
     }

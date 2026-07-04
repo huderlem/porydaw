@@ -47,6 +47,10 @@ public:
     // mid2agb emits "voicegroup" + <-G arg> as the symbol; poryaaaa's loader
     // wants the file-basename form with any "voicegroup_" prefix stripped.
     static QStringList voicegroupCandidates(const SongInfo &song);
+    static QStringList voicegroupCandidates(const SongCfg &cfg);
+
+    // Refreshes a song's cached cfg after porydaw writes its midi.cfg line.
+    void setSongCfg(int id, const SongCfg &cfg);
 
 private:
     bool parseSongTable(QString *error);

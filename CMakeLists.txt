@@ -36,9 +36,12 @@ qt_add_executable(porydaw
     src/viewcheck.cpp
     src/roundtrip.cpp
     src/editcheck.cpp
+    src/savecheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
+    src/core/mid2agbtables.cpp
+    src/core/mid2agbtables.h
     src/core/miditimeline.cpp
     src/core/miditimeline.h
     src/core/smf.cpp
@@ -51,6 +54,8 @@ qt_add_executable(porydaw
     src/project/decompproject.h
     src/ui/m4asemantics.cpp
     src/ui/m4asemantics.h
+    src/ui/songsettingsdialog.cpp
+    src/ui/songsettingsdialog.h
     src/ui/songviewmodel.cpp
     src/ui/songviewmodel.h
     src/ui/songview.cpp

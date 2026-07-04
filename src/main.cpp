@@ -9,6 +9,9 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong = QSt
 int runRoundTrip(const QString &projectRoot, const QString &mid2agbPath = QString());
 // editcheck.cpp; M2 undo-integrity check over every edit-operation type.
 int runEditCheck(const QString &projectRoot);
+// savecheck.cpp; M2 edited-save check (writes into the project: use a copy).
+int runSaveCheck(const QString &projectRoot, const QString &songLabel,
+                 const QString &mid2agbPath = QString());
 
 int main(int argc, char *argv[])
 {
@@ -22,6 +25,11 @@ int main(int argc, char *argv[])
     if (selfTest >= 0 && selfTest + 2 < args.size()) {
         MainWindow window;
         return window.runSelfTest(args[selfTest + 1], args[selfTest + 2]) ? 0 : 1;
+    }
+    const int saveCheck = args.indexOf(QStringLiteral("--savecheck"));
+    if (saveCheck >= 0 && saveCheck + 2 < args.size()) {
+        const QString mid2agb = saveCheck + 3 < args.size() ? args[saveCheck + 3] : QString();
+        return runSaveCheck(args[saveCheck + 1], args[saveCheck + 2], mid2agb);
     }
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())

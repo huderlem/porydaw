@@ -4,6 +4,7 @@
 #include <QWidget>
 #include <cstdint>
 #include <functional>
+#include <vector>
 
 #include "core/miditimeline.h"
 #include "ui/songviewmodel.h"
@@ -14,6 +15,7 @@ extern "C" {
 
 class QScrollArea;
 class QScrollBar;
+class SongDocument;
 
 namespace songview {
 class TimeRuler;
@@ -30,11 +32,14 @@ constexpr int kKeyboardW = 52;
 constexpr int kGutterW = kHeaderW + kKeyboardW;
 } // namespace songview
 
-// Read-only song viewer (M1): time ruler, multi-track piano roll (selected
-// track in full color, others ghosted), per-track automation lanes with m4a
-// names, an "other events" strip, and track headers with instrument names
-// from the loaded voicegroup. The MidiTimeline and LoadedVoiceGroup must
-// outlive the view or be cleared with setSong(nullptr, nullptr) first.
+// Song view: time ruler, multi-track piano roll (selected track in full
+// color, others ghosted), per-track automation lanes with m4a names, an
+// "other events" strip, and track headers with instrument names from the
+// loaded voicegroup. Read-only over a MidiTimeline (M1); when a SongDocument
+// is attached (M2) the selected track is editable: note draw/move/resize/
+// velocity/delete in the roll, point editing in the lanes, loop-marker
+// dragging in the ruler. The MidiTimeline and LoadedVoiceGroup must outlive
+// the view or be cleared with setSong(nullptr, nullptr) first.
 class SongView : public QWidget
 {
     Q_OBJECT
@@ -43,7 +48,18 @@ public:
     explicit SongView(QWidget *parent = nullptr);
 
     void setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voicegroup);
+    // Timeline swap after a document edit: keeps zoom, scroll, track
+    // selection, mute/solo, and re-resolves the note selection.
+    void updateSong(const MidiTimeline *timeline);
     void setPlayheadSample(uint64_t samplePos, bool playing);
+
+    // Editing is enabled while a document is attached (may be null).
+    void setDocument(SongDocument *document);
+    SongDocument *document() const { return m_document; }
+
+    // Voicegroup swap after a -G settings change (labels only; may be null
+    // while the audio engine frees the old one).
+    void setVoicegroup(const LoadedVoiceGroup *voicegroup);
 
     // --- shared state for the child widgets ---
     const MidiTimeline *timeline() const { return m_timeline; }
@@ -74,6 +90,36 @@ public:
     void forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
                          const std::function<void(uint64_t, bool, int)> &fn) const;
 
+    // --- editing support for the child widgets ---
+    // Snap grid in ticks: the visible beat subdivision, never finer than the
+    // song's mid2agb clock base.
+    uint64_t gridTicks() const;
+    uint64_t snapTick(double tick) const;
+
+    // Note selection on the selected track, identified by (startTick, key) so
+    // it survives document rebuilds.
+    struct NoteId {
+        uint32_t tick;
+        uint8_t key;
+        bool operator==(const NoteId &other) const
+        {
+            return tick == other.tick && key == other.key;
+        }
+    };
+    const std::vector<NoteId> &selection() const { return m_selection; }
+    bool isSelected(const ViewNote &note) const;
+    void setSelection(std::vector<NoteId> ids);
+    void clearSelection();
+
+    // "velocity 93 → plays 96 · length 25 → 24 clocks" for the status bar.
+    void announceNote(const ViewNote &note);
+
+    // Child-widget entry point for the auditionNote signal.
+    void audition(int track, int key, int velocity)
+    {
+        emit auditionNote(track, key, velocity);
+    }
+
     // Interaction from children.
     void zoomAroundContentX(double factor, int anchorContentX);
     void scrollByPx(int dx);
@@ -84,6 +130,9 @@ signals:
     void muteMaskChanged(uint32_t mask);
     void soloMaskChanged(uint32_t mask);
     void selectedTrackChanged(int track);
+    // Audition request (velocity 0 releases); forwarded to the audio engine.
+    void auditionNote(int track, int key, int velocity);
+    void statusMessage(const QString &text);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -96,6 +145,7 @@ private:
 
     const MidiTimeline *m_timeline = nullptr;
     const LoadedVoiceGroup *m_voicegroup = nullptr;
+    SongDocument *m_document = nullptr;
     SongViewModel m_model;
 
     double m_pxPerTick = 1.0;
@@ -107,6 +157,7 @@ private:
     bool m_playing = false;
     uint32_t m_muteMask = 0;
     uint32_t m_soloMask = 0;
+    std::vector<NoteId> m_selection;
 
     songview::TimeRuler *m_ruler = nullptr;
     songview::TrackHeaderPanel *m_headers = nullptr;

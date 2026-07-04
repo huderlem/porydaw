@@ -179,9 +179,22 @@ void DecompProject::parseMidiCfg()
 
 QStringList DecompProject::voicegroupCandidates(const SongInfo &song)
 {
+    return voicegroupCandidates(song.cfg);
+}
+
+void DecompProject::setSongCfg(int id, const SongCfg &cfg)
+{
+    if (id >= 0 && id < m_songs.size()) {
+        m_songs[id].cfg = cfg;
+        m_songs[id].hasCfg = true;
+    }
+}
+
+QStringList DecompProject::voicegroupCandidates(const SongCfg &cfg)
+{
     // mid2agb's default -G argument is "_dummy" (symbol voicegroup_dummy).
-    const QString arg = song.cfg.voicegroupArg.isEmpty() ? QStringLiteral("_dummy")
-                                                         : song.cfg.voicegroupArg;
+    const QString arg = cfg.voicegroupArg.isEmpty() ? QStringLiteral("_dummy")
+                                                    : cfg.voicegroupArg;
     const QString symbol = QStringLiteral("voicegroup") + arg;
 
     QStringList candidates;

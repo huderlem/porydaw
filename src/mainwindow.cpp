@@ -15,7 +15,10 @@
 #include <QTimer>
 #include <QToolBar>
 
+#include <QCloseEvent>
+
 #include "core/miditimeline.h"
+#include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
 
 MainWindow::MainWindow(QWidget *parent)
@@ -56,9 +59,28 @@ void MainWindow::buildUi()
     QAction *openAction = fileMenu->addAction(tr("&Open Project..."), this,
                                               &MainWindow::openProject);
     openAction->setShortcut(QKeySequence::Open);
+    m_saveAction = fileMenu->addAction(tr("&Save Song"), this, &MainWindow::saveSong);
+    m_saveAction->setShortcut(QKeySequence::Save);
+    m_saveAction->setEnabled(false);
     fileMenu->addSeparator();
-    QAction *quitAction = fileMenu->addAction(tr("&Quit"), qApp, &QApplication::quit);
+    QAction *quitAction = fileMenu->addAction(tr("&Quit"), this, &QWidget::close);
     quitAction->setShortcut(QKeySequence::Quit);
+
+    QMenu *editMenu = menuBar()->addMenu(tr("&Edit"));
+    QAction *undoAction = m_doc.undoStack()->createUndoAction(this, tr("&Undo"));
+    undoAction->setShortcut(QKeySequence::Undo);
+    editMenu->addAction(undoAction);
+    QAction *redoAction = m_doc.undoStack()->createRedoAction(this, tr("&Redo"));
+    redoAction->setShortcut(QKeySequence::Redo);
+    editMenu->addAction(redoAction);
+    editMenu->addSeparator();
+    m_settingsAction = editMenu->addAction(tr("Song Se&ttings..."), this,
+                                           &MainWindow::openSongSettings);
+    m_settingsAction->setEnabled(false);
+
+    connect(&m_doc, &SongDocument::documentChanged, this, &MainWindow::onDocumentChanged);
+    connect(m_doc.undoStack(), &QUndoStack::cleanChanged, this,
+            [this](bool) { updateWindowTitle(); });
 
     // Transport toolbar
     QToolBar *transport = addToolBar(tr("Transport"));
@@ -105,6 +127,13 @@ void MainWindow::buildUi()
             [this](uint32_t mask) { m_audio.setMuteMask(mask); });
     connect(m_songView, &SongView::soloMaskChanged, this,
             [this](uint32_t mask) { m_audio.setSoloMask(mask); });
+    connect(m_songView, &SongView::auditionNote, this,
+            [this](int track, int key, int velocity) {
+                if (m_audioOk && m_audio.songLoaded())
+                    m_audio.previewNote(uint8_t(track), uint8_t(key), uint8_t(velocity));
+            });
+    connect(m_songView, &SongView::statusMessage, this,
+            [this](const QString &text) { statusBar()->showMessage(text, 6000); });
     setCentralWidget(m_songView);
 
     // Status bar: polyphony meter
@@ -125,6 +154,9 @@ void MainWindow::openProject()
     QElapsedTimer timer;
     timer.start();
 
+    if (!maybeSaveSong())
+        return;
+
     QString error;
     if (!m_project.open(dir, &error)) {
         QMessageBox::warning(this, tr("Open Project"), error);
@@ -132,10 +164,15 @@ void MainWindow::openProject()
     }
     settings.setValue(QStringLiteral("lastProjectDir"), dir);
 
+    m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
     m_audio.unloadSong();
+    m_doc.undoStack()->clear();
     m_loadedSongId = -1;
     m_songLabel->clear();
+    m_saveAction->setEnabled(false);
+    m_settingsAction->setEnabled(false);
+    updateWindowTitle();
     populateSongList();
 
     int playable = 0;
@@ -173,9 +210,26 @@ void MainWindow::songActivated(QListWidgetItem *item)
     loadSong(m_project.songs().at(songId));
 }
 
+LoadedVoiceGroup *MainWindow::loadVoicegroupFor(const SongCfg &cfg, QString *tried)
+{
+    const QStringList candidates = DecompProject::voicegroupCandidates(cfg);
+    if (tried)
+        *tried = candidates.join(QStringLiteral(", "));
+    const QByteArray rootUtf8 = m_project.root().toLocal8Bit();
+    for (const QString &name : candidates) {
+        LoadedVoiceGroup *vg =
+            voicegroup_load(rootUtf8.constData(), name.toLocal8Bit().constData(), nullptr);
+        if (vg)
+            return vg;
+    }
+    return nullptr;
+}
+
 void MainWindow::loadSong(const SongInfo &song)
 {
     if (!m_audioOk)
+        return;
+    if (!maybeSaveSong())
         return;
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -183,27 +237,20 @@ void MainWindow::loadSong(const SongInfo &song)
     timer.start();
 
     QString error;
-    auto timeline = MidiTimeline::load(song.midPath, m_audio.sampleRate(), &error);
-    if (!timeline) {
+    if (!m_doc.load(song, &error)) {
         QApplication::restoreOverrideCursor();
         QMessageBox::warning(this, tr("Load Song"), error);
         return;
     }
+    auto timeline = m_doc.buildTimeline(m_audio.sampleRate());
 
-    LoadedVoiceGroup *vg = nullptr;
-    const QStringList candidates = DecompProject::voicegroupCandidates(song);
-    const QByteArray rootUtf8 = m_project.root().toLocal8Bit();
-    for (const QString &name : candidates) {
-        vg = voicegroup_load(rootUtf8.constData(), name.toLocal8Bit().constData(), nullptr);
-        if (vg)
-            break;
-    }
+    QString tried;
+    LoadedVoiceGroup *vg = loadVoicegroupFor(song.cfg, &tried);
     if (!vg) {
         QApplication::restoreOverrideCursor();
-        QMessageBox::warning(
-            this, tr("Load Song"),
-            tr("Could not load the voicegroup for %1 (tried: %2).")
-                .arg(song.label, candidates.join(QStringLiteral(", "))));
+        QMessageBox::warning(this, tr("Load Song"),
+                             tr("Could not load the voicegroup for %1 (tried: %2).")
+                                 .arg(song.label, tried));
         return;
     }
 
@@ -211,11 +258,19 @@ void MainWindow::loadSong(const SongInfo &song)
     settings.songVolume = uint8_t(song.cfg.masterVolume);
     settings.reverb = uint8_t(song.cfg.reverb > 0 ? song.cfg.reverb : 0);
     // The view must let go of the old timeline before loadSong frees it.
+    m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
     m_audio.loadSong(std::move(timeline), vg, settings);
     m_loadedSongId = song.id;
+    m_appliedVoicegroupArg = song.cfg.voicegroupArg;
+    m_appliedVolume = song.cfg.masterVolume;
+    m_appliedReverb = song.cfg.reverb;
 
     m_songView->setSong(m_audio.timeline(), m_audio.voicegroup());
+    m_songView->setDocument(&m_doc);
+    m_saveAction->setEnabled(true);
+    m_settingsAction->setEnabled(true);
+    updateWindowTitle();
     m_songLabel->setText(QStringLiteral("  %1").arg(song.label));
 
     const MidiTimeline *tl = m_audio.timeline();
@@ -231,6 +286,103 @@ void MainWindow::loadSong(const SongInfo &song)
 
     QApplication::restoreOverrideCursor();
     updateTransportActions();
+}
+
+void MainWindow::onDocumentChanged()
+{
+    if (!m_audioOk || !m_audio.songLoaded())
+        return;
+
+    const SongCfg &cfg = m_doc.cfg();
+    if (cfg.voicegroupArg != m_appliedVoicegroupArg) {
+        QString tried;
+        if (LoadedVoiceGroup *vg = loadVoicegroupFor(cfg, &tried)) {
+            m_songView->setVoicegroup(nullptr);
+            m_audio.updateVoicegroup(vg);
+            m_songView->setVoicegroup(m_audio.voicegroup());
+            m_appliedVoicegroupArg = cfg.voicegroupArg;
+        } else {
+            statusBar()->showMessage(
+                tr("Voicegroup not found (tried: %1) — keeping the previous one until save.")
+                    .arg(tried),
+                8000);
+        }
+    }
+    if (cfg.masterVolume != m_appliedVolume || cfg.reverb != m_appliedReverb) {
+        SongSettings settings;
+        settings.songVolume = uint8_t(cfg.masterVolume);
+        settings.reverb = uint8_t(cfg.reverb > 0 ? cfg.reverb : 0);
+        m_audio.updateSettings(settings);
+        m_appliedVolume = cfg.masterVolume;
+        m_appliedReverb = cfg.reverb;
+    }
+
+    m_audio.updateTimeline(m_doc.buildTimeline(m_audio.sampleRate()));
+    m_songView->updateSong(m_audio.timeline());
+    updateWindowTitle();
+}
+
+void MainWindow::saveSong()
+{
+    if (m_loadedSongId < 0)
+        return;
+    QString error;
+    if (!m_doc.save(&error)) {
+        QMessageBox::warning(this, tr("Save Song"), error);
+        return;
+    }
+    m_project.setSongCfg(m_loadedSongId, m_doc.cfg());
+    statusBar()->showMessage(tr("Saved %1").arg(m_doc.midPath()), 5000);
+    updateWindowTitle();
+}
+
+void MainWindow::openSongSettings()
+{
+    if (m_loadedSongId < 0)
+        return;
+    SongSettingsDialog dialog(m_doc.cfg(), m_doc.label(), this);
+    if (dialog.exec() == QDialog::Accepted)
+        m_doc.setCfg(dialog.cfg());
+}
+
+bool MainWindow::maybeSaveSong()
+{
+    if (m_loadedSongId < 0 || !m_doc.isDirty())
+        return true;
+    const auto choice = QMessageBox::question(
+        this, tr("Unsaved Changes"),
+        tr("%1 has unsaved changes. Save them?").arg(m_doc.label()),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    if (choice == QMessageBox::Cancel)
+        return false;
+    if (choice == QMessageBox::Save) {
+        QString error;
+        if (!m_doc.save(&error)) {
+            QMessageBox::warning(this, tr("Save Song"), error);
+            return false;
+        }
+        m_project.setSongCfg(m_loadedSongId, m_doc.cfg());
+    }
+    return true;
+}
+
+void MainWindow::updateWindowTitle()
+{
+    if (m_loadedSongId >= 0) {
+        setWindowTitle(QStringLiteral("%1[*] — porydaw").arg(m_doc.label()));
+        setWindowModified(m_doc.isDirty());
+    } else {
+        setWindowTitle(QStringLiteral("porydaw"));
+        setWindowModified(false);
+    }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    if (maybeSaveSong())
+        event->accept();
+    else
+        event->ignore();
 }
 
 void MainWindow::uiTick()
@@ -303,15 +455,36 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
 
     m_audio.play();
     QEventLoop loop;
-    QTimer::singleShot(3000, &loop, &QEventLoop::quit);
+    QTimer::singleShot(1500, &loop, &QEventLoop::quit);
     loop.exec();
+
+    // M2: edit during playback — exercises the documentChanged plumbing
+    // (timeline rebuild, playhead-preserving audio swap, view refresh).
+    const uint64_t posBeforeEdit = m_audio.playheadSamples();
+    m_doc.addNote(m_songView->selectedTrack(), 0, 60, 24, 100);
+    m_doc.addLanePoint(m_songView->selectedTrack(), 7, 0, 100);
+    if (!m_doc.isDirty()) {
+        qWarning("selftest: document not dirty after edits");
+        return false;
+    }
+    QTimer::singleShot(1500, &loop, &QEventLoop::quit);
+    loop.exec();
+    m_doc.undoStack()->undo();
+    m_doc.undoStack()->undo();
+    if (m_doc.isDirty()) {
+        qWarning("selftest: document still dirty after undoing all edits");
+        return false;
+    }
+    qInfo("selftest: edit + undo during playback OK (playhead %.2fs at edit)",
+          double(posBeforeEdit) / m_audio.sampleRate());
 
     const double playedSeconds = double(m_audio.playheadSamples()) / m_audio.sampleRate();
     qInfo("selftest: after 3s wall clock — playhead %.2fs, transport %d, PCM %d/%d active",
           playedSeconds, int(m_audio.transport()), m_audio.activePcmChannels(),
           m_audio.maxPcmChannels());
 
-    const bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0;
+    const bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0
+        && m_audio.playheadSamples() >= posBeforeEdit;
     m_audio.stop();
     qInfo("selftest: %s", ok ? "PASS" : "FAIL");
     return ok;
