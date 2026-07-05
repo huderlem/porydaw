@@ -824,6 +824,18 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
                                        [](uint64_t t, const SmfEvent &e) {
                                            return t < e.tick;
                                        });
+            // Setup events (program change, CC, bend) must precede same-tick
+            // notes or the note plays with the stale value — both here and in
+            // mid2agb, which keeps file order within a tick.
+            if (op.event.isChannel() && op.event.typeNibble() >= 0xB) {
+                while (it != evs.begin()) {
+                    const SmfEvent &prev = *std::prev(it);
+                    if (prev.tick != op.event.tick || !prev.isChannel()
+                        || prev.typeNibble() > 0x9)
+                        break;
+                    --it;
+                }
+            }
             op.index = size_t(it - evs.begin());
             evs.insert(it, op.event);
             op.oldEndTick = track.endTick;
