@@ -495,7 +495,7 @@ protected:
         if (event->pos().x() < kKeyboardW) {
             if (event->button() == Qt::LeftButton) {
                 m_kbdKey = yToKey(event->pos().y());
-                m_sv->audition(m_sv->selectedTrack(), m_kbdKey, 100);
+                auditionKey(m_kbdKey, 100);
             }
             return;
         }
@@ -552,6 +552,10 @@ protected:
             } else {
                 m_drag = Drag::Move;
             }
+            // Sound the grabbed note so a press gives the same pitch feedback
+            // a drag already does.
+            auditionKey(hit->key, hit->velocity);
+            m_auditioned = true;
         } else if (doc) {
             // Empty space: draw a note (FL/Reaper pencil style). It starts
             // at the grid cell under the cursor and sounds while the button
@@ -571,7 +575,7 @@ protected:
             pending.velocity = m_lastVelocity;
             pending.track = uint8_t(m_sv->selectedTrack());
             m_sv->announceNote(pending);
-            m_sv->audition(m_sv->selectedTrack(), m_drawKey, m_lastVelocity);
+            auditionKey(m_drawKey, m_lastVelocity);
             m_auditioned = true;
         } else {
             // Read-only (no document): park the edit cursor at the click,
@@ -596,6 +600,16 @@ protected:
             m_panPos = pos;
             m_sv->scrollByPx(-d.x());
             m_sv->scrollRollBy(-d.y());
+            return;
+        }
+        if (m_kbdKey >= 0) {
+            // Keyboard column: dragging glisses — the sounding key follows
+            // the cursor (the engine's mono preview releases the old key).
+            const int key = yToKey(event->pos().y());
+            if (key != m_kbdKey) {
+                m_kbdKey = key;
+                auditionKey(m_kbdKey, 100);
+            }
             return;
         }
         m_curPos = event->pos();
@@ -636,8 +650,7 @@ protected:
                     if (!notes.empty()) {
                         const int key =
                             std::clamp(int(notes.front().key) + m_dKey, 0, 127);
-                        m_sv->audition(m_sv->selectedTrack(), key,
-                                                notes.front().velocity);
+                        auditionKey(key, notes.front().velocity);
                         m_auditioned = true;
                     }
                 }
@@ -666,7 +679,7 @@ protected:
                 const int eff = mid2agbEffectiveVelocity(vel);
                 if (eff != m_velAudEff) {
                     m_velAudEff = eff;
-                    m_sv->audition(m_sv->selectedTrack(), m_velAnchor.key, vel);
+                    auditionKey(m_velAnchor.key, vel);
                     m_auditioned = true;
                 }
                 update();
@@ -683,7 +696,7 @@ protected:
                 m_drawDur = dur;
                 if (key != m_drawKey) {
                     m_drawKey = key;
-                    m_sv->audition(m_sv->selectedTrack(), m_drawKey, m_lastVelocity);
+                    auditionKey(m_drawKey, m_lastVelocity);
                     m_auditioned = true;
                 }
                 update();
@@ -701,11 +714,11 @@ protected:
             return;
         }
         if (m_kbdKey >= 0) {
-            m_sv->audition(m_sv->selectedTrack(), m_kbdKey, 0);
+            auditionKey(m_kbdKey, 0);
             m_kbdKey = -1;
         }
         if (m_auditioned) {
-            m_sv->audition(m_sv->selectedTrack(), 0, 0);
+            auditionKey(0, 0);
             m_auditioned = false;
         }
         SongDocument *doc = m_sv->document();
@@ -831,6 +844,18 @@ private:
     int yToKey(int y) const
     {
         return std::clamp(127 - (y + m_sv->scrollY()) / m_sv->keyHeight(), 0, 127);
+    }
+
+    // All roll auditions go through here so the keyboard column can mark the
+    // sounding key (velocity 0 releases and clears the mark).
+    void auditionKey(int key, int velocity)
+    {
+        m_sv->audition(m_sv->selectedTrack(), key, velocity);
+        const int sounding = velocity > 0 ? key : -1;
+        if (sounding != m_soundingKey) {
+            m_soundingKey = sounding;
+            update(0, 0, kKeyboardW, height());
+        }
     }
 
     QRect noteRect(const ViewNote &note) const
@@ -1103,15 +1128,23 @@ private:
             const int y = keyToY(key);
             if (y + keyH < 0 || y > height())
                 continue;
+            const bool sounding = key == m_soundingKey;
             if (isBlackKey(key)) {
-                p.fillRect(QRect(0, y, kKeyboardW * 3 / 5, keyH), QColor(0x2e, 0x2e, 0x2e));
-            } else if (key % 12 == 0) {
-                p.setPen(QColor(0x9a, 0x9a, 0x9a));
-                p.drawLine(0, y + keyH, kKeyboardW, y + keyH);
-                p.setPen(QColor(0x50, 0x50, 0x50));
-                if (keyH >= 7)
-                    p.drawText(QRect(0, y, kKeyboardW - 3, keyH),
-                               Qt::AlignRight | Qt::AlignVCenter, keyName(key));
+                p.fillRect(QRect(0, y, kKeyboardW * 3 / 5, keyH),
+                           sounding ? m_sv->palette().color(QPalette::Highlight)
+                                    : QColor(0x2e, 0x2e, 0x2e));
+            } else {
+                if (sounding)
+                    p.fillRect(QRect(0, y, kKeyboardW, keyH),
+                               m_sv->palette().color(QPalette::Highlight));
+                if (key % 12 == 0) {
+                    p.setPen(QColor(0x9a, 0x9a, 0x9a));
+                    p.drawLine(0, y + keyH, kKeyboardW, y + keyH);
+                    p.setPen(QColor(0x50, 0x50, 0x50));
+                    if (keyH >= 7)
+                        p.drawText(QRect(0, y, kKeyboardW - 3, keyH),
+                                   Qt::AlignRight | Qt::AlignVCenter, keyName(key));
+                }
             }
         }
         p.setPen(m_sv->palette().color(QPalette::Mid));
@@ -1155,6 +1188,7 @@ private:
     ViewNote m_velAnchor{};    // pressed note of a velocity drag (a copy)
     int m_velAudEff = -1;      // last effective velocity auditioned mid-drag
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
+    int m_soundingKey = -1;    // auditioned key highlighted on the keyboard
     bool m_auditioned = false; // a drag/draw preview note is sounding
     uint8_t m_lastVelocity = 100;
     bool m_panning = false;    // middle-drag pan
