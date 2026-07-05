@@ -12,7 +12,7 @@ class QSpinBox;
 struct EngineSettings {
     int maxPcmChannels = 5;      // pokeemerald m4aSoundInit default
     float pcmMixRate = 13379.0f; // GBA DirectSound rate; 0 = follow host rate
-    bool analogFilter = true;    // GBA analog output low-pass
+    bool analogFilter = false;   // GBA analog output low-pass; niche, off by default
 
     static EngineSettings load();
     void save() const;

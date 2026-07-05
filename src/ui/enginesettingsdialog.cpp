@@ -4,7 +4,6 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
-#include <QLabel>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -89,18 +88,10 @@ EngineSettingsDialog::EngineSettingsDialog(const EngineSettings &settings, QWidg
     layout->addLayout(form);
     layout->addWidget(m_analogFilter);
 
-    auto *note = new QLabel(tr("Global playback accuracy knobs, saved per user — "
-                               "never written to the project. Reverb is per-song: "
-                               "Edit → Song Settings."),
-                            this);
-    note->setWordWrap(true);
-    note->setStyleSheet(QStringLiteral("color: gray;"));
-    layout->addWidget(note);
-
     auto *buttons =
         new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     QPushButton *defaultsButton =
-        buttons->addButton(tr("Hardware Defaults"), QDialogButtonBox::ResetRole);
+        buttons->addButton(tr("Restore Defaults"), QDialogButtonBox::ResetRole);
     connect(defaultsButton, &QPushButton::clicked, this,
             [this] { applyToWidgets(EngineSettings()); });
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
