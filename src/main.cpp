@@ -1,4 +1,5 @@
 #include <QApplication>
+#include <QStyleHints>
 
 #include "mainwindow.h"
 
@@ -22,6 +23,11 @@ int runExportCheck(const QString &projectRoot, const QString &songLabel);
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    // The OS dark theme renders badly (notably on Windows); force light until
+    // the widgets are audited for dark palettes.
+    app.styleHints()->setColorScheme(Qt::ColorScheme::Light);
+#endif
     QApplication::setApplicationName("porydaw");
     QApplication::setApplicationVersion("0.1.0");
     QApplication::setOrganizationName("huderlem");
