@@ -696,6 +696,108 @@ void SongDocument::setLoopTick(bool endMarker, int64_t tick)
     pushEdit(endMarker ? tr("set loop end") : tr("set loop start"), std::move(ops));
 }
 
+int SongDocument::freeChannel() const
+{
+    bool used[16] = {};
+    if (m_smf.format == 0) {
+        for (const SmfEvent &ev : m_smf.tracks[0].events) {
+            if (ev.isChannel())
+                used[ev.channel()] = true;
+        }
+    } else {
+        for (uint8_t c : m_engineChannel)
+            used[c] = true;
+    }
+    for (int c = 0; c < 16; c++) {
+        if (!used[c])
+            return c;
+    }
+    return -1;
+}
+
+bool SongDocument::canAddTrack() const
+{
+    if (m_smf.tracks.empty())
+        return false;
+    if (m_smf.format != 0 && engineTrackCount() >= 16)
+        return false;
+    return freeChannel() >= 0;
+}
+
+int SongDocument::addTrack(int voice)
+{
+    if (!canAddTrack())
+        return -1;
+    const int channel = freeChannel();
+    std::vector<EditOp> ops;
+    int smfTrack = 0;
+    if (m_smf.format != 0) {
+        smfTrack = int(m_smf.tracks.size());
+        EditOp insert;
+        insert.type = EditOp::InsertTrack;
+        insert.smfTrack = smfTrack;
+        ops.push_back(insert);
+    }
+    EditOp seed;
+    seed.type = EditOp::InsertEvent;
+    seed.smfTrack = smfTrack;
+    seed.event = makeChannelEvent(0xC, uint8_t(channel), 0,
+                                  uint8_t(std::clamp(voice, 0, 127)), 0);
+    ops.push_back(seed);
+    pushEdit(tr("add track"), std::move(ops));
+
+    if (m_smf.format == 0)
+        return channel;
+    for (int t = 0; t < engineTrackCount(); t++) {
+        if (m_engineToSmf[t] == smfTrack)
+            return t;
+    }
+    return -1;
+}
+
+void SongDocument::deleteTrack(int engineTrack)
+{
+    const int smfTrack = smfTrackFor(engineTrack);
+    if (smfTrack < 0)
+        return;
+    std::vector<EditOp> ops;
+    const auto &evs = m_smf.tracks[smfTrack].events;
+    if (m_smf.format == 0 || smfTrack == 0) {
+        // Chunk 0 stays (it is the seq chunk), and format 0 has only the one
+        // chunk: strip the track's channel events, keep everything else.
+        const uint8_t channel = channelFor(engineTrack);
+        std::vector<size_t> indices;
+        for (size_t i = 0; i < evs.size(); i++) {
+            if (!evs[i].isChannel())
+                continue;
+            if (m_smf.format == 0 && evs[i].channel() != channel)
+                continue;
+            indices.push_back(i);
+        }
+        appendRemoveOps(ops, smfTrack, std::move(indices));
+    } else {
+        // If the winning loop marker lives in the doomed chunk, move it to
+        // chunk 0 (where setLoopTick puts new ones) so the loop survives.
+        for (int endMarker = 0; endMarker <= 1; endMarker++) {
+            int markerTrack;
+            size_t markerIndex;
+            if (findLoopMarkerEvent(endMarker != 0, &markerTrack, &markerIndex)
+                && markerTrack == smfTrack) {
+                EditOp rescue;
+                rescue.type = EditOp::InsertEvent;
+                rescue.smfTrack = 0;
+                rescue.event = evs[markerIndex];
+                ops.push_back(rescue);
+            }
+        }
+        EditOp remove;
+        remove.type = EditOp::RemoveTrack;
+        remove.smfTrack = smfTrack;
+        ops.push_back(remove);
+    }
+    pushEdit(tr("delete track"), std::move(ops));
+}
+
 void SongDocument::setCfg(const SongCfg &cfg)
 {
     if (cfgSemanticEqual(cfg, m_cfg))
@@ -711,10 +813,10 @@ std::unique_ptr<MidiTimeline> SongDocument::buildTimeline(double sampleRate) con
 void SongDocument::applyOps(std::vector<EditOp> &ops)
 {
     for (EditOp &op : ops) {
-        SmfTrack &track = m_smf.tracks[op.smfTrack];
-        auto &evs = track.events;
         switch (op.type) {
         case EditOp::InsertEvent: {
+            SmfTrack &track = m_smf.tracks[op.smfTrack];
+            auto &evs = track.events;
             // End of the tick group, so unedited same-tick data keeps its
             // original relative order (mid2agb stable-sorts by time+type, so
             // same-type order within a tick is significant).
@@ -729,13 +831,24 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
                 track.endTick = op.event.tick;
             break;
         }
-        case EditOp::RemoveEvent:
+        case EditOp::RemoveEvent: {
+            auto &evs = m_smf.tracks[op.smfTrack].events;
             op.oldEvent = evs[op.index];
             evs.erase(evs.begin() + long(op.index));
             break;
-        case EditOp::ModifyEvent:
+        }
+        case EditOp::ModifyEvent: {
+            auto &evs = m_smf.tracks[op.smfTrack].events;
             op.oldEvent = evs[op.index];
             evs[op.index] = op.event;
+            break;
+        }
+        case EditOp::InsertTrack:
+            m_smf.tracks.insert(m_smf.tracks.begin() + long(op.smfTrack), op.trackData);
+            break;
+        case EditOp::RemoveTrack:
+            op.trackData = m_smf.tracks[op.smfTrack];
+            m_smf.tracks.erase(m_smf.tracks.begin() + long(op.smfTrack));
             break;
         }
     }
@@ -746,18 +859,26 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
 {
     for (auto it = ops.rbegin(); it != ops.rend(); ++it) {
         EditOp &op = *it;
-        SmfTrack &track = m_smf.tracks[op.smfTrack];
-        auto &evs = track.events;
         switch (op.type) {
-        case EditOp::InsertEvent:
-            evs.erase(evs.begin() + long(op.index));
+        case EditOp::InsertEvent: {
+            SmfTrack &track = m_smf.tracks[op.smfTrack];
+            track.events.erase(track.events.begin() + long(op.index));
             track.endTick = op.oldEndTick;
             break;
-        case EditOp::RemoveEvent:
+        }
+        case EditOp::RemoveEvent: {
+            auto &evs = m_smf.tracks[op.smfTrack].events;
             evs.insert(evs.begin() + long(op.index), op.oldEvent);
             break;
+        }
         case EditOp::ModifyEvent:
-            evs[op.index] = op.oldEvent;
+            m_smf.tracks[op.smfTrack].events[op.index] = op.oldEvent;
+            break;
+        case EditOp::InsertTrack:
+            m_smf.tracks.erase(m_smf.tracks.begin() + long(op.smfTrack));
+            break;
+        case EditOp::RemoveTrack:
+            m_smf.tracks.insert(m_smf.tracks.begin() + long(op.smfTrack), op.trackData);
             break;
         }
     }

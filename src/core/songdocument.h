@@ -128,6 +128,21 @@ public:
     // Move or create a loop marker; tick == -1 removes it.
     void setLoopTick(bool endMarker, int64_t tick);
 
+    // Track create/delete. A track needs a channel event to occupy an engine
+    // slot (rebuildTrackMap), so a new track is seeded with a program change
+    // at tick 0 carrying the given voicegroup entry. Format 1 appends a new
+    // MTrk chunk on an unused MIDI channel; format 0 claims an event-free
+    // channel of the single chunk. Returns the new engine track, -1 if none
+    // is free.
+    bool canAddTrack() const;
+    int addTrack(int voice);
+    // Format 1: removes the track's chunk — except chunk 0 (the seq chunk
+    // mid2agb reads tempo/timesig/loop from), which only has its channel
+    // events stripped; a winning loop marker inside a removed chunk is moved
+    // to chunk 0 so the loop survives. Format 0: removes every event on the
+    // track's channel.
+    void deleteTrack(int engineTrack);
+
     void setCfg(const SongCfg &cfg);
 
     // Playable projection for the audio engine (MidiTimeline::build).
@@ -142,18 +157,28 @@ private:
     friend class SongCfgCommand;
 
     struct EditOp {
-        enum Type { InsertEvent, RemoveEvent, ModifyEvent } type;
+        enum Type {
+            InsertEvent,
+            RemoveEvent,
+            ModifyEvent,
+            InsertTrack, // insert trackData as chunk smfTrack
+            RemoveTrack  // remove chunk smfTrack (contents recorded on apply)
+        } type;
         int smfTrack = 0;
         size_t index = 0;   // Remove/Modify: target; Insert: recorded on apply
         SmfEvent event;     // Insert: new event; Modify: new content (same tick)
         SmfEvent oldEvent;  // recorded on apply (Remove/Modify)
         uint64_t oldEndTick = 0; // recorded on apply (Insert past track end)
+        SmfTrack trackData; // InsertTrack: content; RemoveTrack: recorded on apply
     };
 
     void applyOps(std::vector<EditOp> &ops);
     void revertOps(std::vector<EditOp> &ops);
     void pushEdit(const QString &text, std::vector<EditOp> ops);
     void rebuildTrackMap();
+    // Lowest MIDI channel a new track can take: format 0, one with no events;
+    // format 1, one no existing engine track uses. -1 when all 16 are taken.
+    int freeChannel() const;
 
     // Builder helpers (operate on current state; see applyOps for index rules).
     SmfEvent makeChannelEvent(uint8_t typeNibble, uint8_t channel, uint64_t tick,

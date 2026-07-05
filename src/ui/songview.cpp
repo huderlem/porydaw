@@ -1,6 +1,7 @@
 #include "songview.h"
 
 #include <QApplication>
+#include <QContextMenuEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFontMetrics>
@@ -2277,6 +2278,28 @@ protected:
         m_sv->editTrackVoice(m_track);
     }
 
+    void contextMenuEvent(QContextMenuEvent *event) override
+    {
+        if (!m_sv->document())
+            return;
+        m_sv->selectTrack(m_track);
+        QMenu menu(this);
+        QAction *voiceAction = menu.addAction(SongView::tr("Change voice..."));
+        QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
+        QAction *chosen = menu.exec(event->globalPos());
+        // Queued: both edits rebuild the header panel, which deletes this
+        // row out from under its own event handler.
+        if (chosen == voiceAction) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
+                Qt::QueuedConnection);
+        } else if (chosen == deleteAction) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->deleteTrack(t); },
+                Qt::QueuedConnection);
+        }
+    }
+
 private:
     SongView *m_sv;
     int m_track;
@@ -2310,10 +2333,24 @@ public:
                                   .arg(tl->tracks[t].noteCount)
                                   .arg(m_sv->instrumentLabel(t));
                 if (m_sv->document())
-                    tip += SongView::tr("\nDouble-click to change the voice");
+                    tip += SongView::tr(
+                        "\nDouble-click to change the voice · right-click to delete");
                 row->setToolTip(tip);
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
+            }
+            SongDocument *doc = m_sv->document();
+            if (doc && doc->canAddTrack()) {
+                auto *add = new QToolButton(this);
+                add->setText(SongView::tr("+ Add track"));
+                add->setAutoRaise(true);
+                add->setToolTip(SongView::tr("Add a track (picks its voice first)"));
+                // Queued: the edit rebuilds this panel, deleting the button
+                // out from under its own clicked handler.
+                connect(add, &QToolButton::clicked, m_sv,
+                        [sv = m_sv] { sv->addTrack(); }, Qt::QueuedConnection);
+                m_layout->insertWidget(m_layout->count() - 1, add);
+                m_rows.push_back(add);
             }
         }
     }
@@ -2502,6 +2539,7 @@ void SongView::setDocument(SongDocument *document)
 {
     m_document = document;
     m_selection.clear();
+    m_headers->rebuild();   // the "+ Add track" button follows editability
     m_lanes->rebuildRows(); // the "+ Add lane" strip follows editability
 }
 
@@ -2814,6 +2852,71 @@ void SongView::editTrackVoice(int track)
     else if (voice != initial)
         m_document->moveLanePoint(track, DOC_CC_VOICE, changes.front(),
                                   changes.front().tick, voice);
+}
+
+void SongView::addTrack()
+{
+    if (!m_document || !m_document->canAddTrack())
+        return;
+    int voice = 0;
+    if (!pickVoice(tr("New track voice"), 0, &voice))
+        return;
+    const int track = m_document->addTrack(voice); // rebuilds via documentChanged
+    if (track >= 0) {
+        selectTrack(track);
+        announce(tr("Added track %1").arg(track + 1));
+    }
+}
+
+void SongView::deleteTrack(int track)
+{
+    if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
+        return;
+    if (m_document->smf().format != 0) {
+        // Removing a format-1 chunk shifts every higher engine slot down by
+        // one; move the per-track view state with it, before the document
+        // edit rebuilds the headers and lanes. (Format 0 slots are fixed
+        // channels: just drop the deleted track's state.)
+        const uint32_t low = (1u << track) - 1;
+        const uint32_t mute = (m_muteMask & low) | ((m_muteMask >> 1) & ~low);
+        const uint32_t solo = (m_soloMask & low) | ((m_soloMask >> 1) & ~low);
+        if (mute != m_muteMask) {
+            m_muteMask = mute;
+            emit muteMaskChanged(mute);
+        }
+        if (solo != m_soloMask) {
+            m_soloMask = solo;
+            emit soloMaskChanged(solo);
+        }
+        for (auto it = m_emptyLanes.begin(); it != m_emptyLanes.end();) {
+            if (it->first == track) {
+                it = m_emptyLanes.erase(it);
+            } else {
+                if (it->first > track)
+                    it->first--;
+                ++it;
+            }
+        }
+        if (m_selectedTrack > track)
+            m_selectedTrack--;
+    } else {
+        const uint32_t bit = 1u << track;
+        if (m_muteMask & bit) {
+            m_muteMask &= ~bit;
+            emit muteMaskChanged(m_muteMask);
+        }
+        if (m_soloMask & bit) {
+            m_soloMask &= ~bit;
+            emit soloMaskChanged(m_soloMask);
+        }
+        m_emptyLanes.erase(std::remove_if(m_emptyLanes.begin(), m_emptyLanes.end(),
+                                          [track](const std::pair<int, uint8_t> &lane) {
+                                              return lane.first == track;
+                                          }),
+                           m_emptyLanes.end());
+    }
+    m_document->deleteTrack(track); // rebuilds via documentChanged
+    announce(tr("Deleted track %1").arg(track + 1));
 }
 
 void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,

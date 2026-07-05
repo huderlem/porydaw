@@ -144,6 +144,13 @@ public:
     // first program change), inserting one at tick 0 if the track has none.
     void editTrackVoice(int track);
 
+    // Track create/delete (header-panel entry points; both undoable through
+    // the document). addTrack picks the new track's voice first, then selects
+    // the created track; deleteTrack shifts the view's per-track state
+    // (mute/solo, empty lanes, selection) over the removed engine slot.
+    void addTrack();
+    void deleteTrack(int track);
+
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber) for every beat, honoring the song's time signature changes.
     void forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,

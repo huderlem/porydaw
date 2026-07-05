@@ -242,6 +242,57 @@ int runEditCheck(const QString &projectRoot)
             }
         }
 
+        // Track ops: create a track (seeded with its voice), edit on it,
+        // delete it again.
+        if (ok && doc.canAddTrack()) {
+            const int newTrack = doc.addTrack(7);
+            if (newTrack < 0) {
+                fail("addTrack returned no track with canAddTrack true");
+                ok = false;
+            } else {
+                mutateAndCheck("events unsorted after addTrack");
+                const auto seed = doc.lanePoints(newTrack, DOC_CC_VOICE);
+                if (ok && (seed.empty() || seed.front().tick != 0 || seed.front().value != 7)) {
+                    fail("new track missing its seed voice");
+                    ok = false;
+                }
+                DocNote note;
+                if (ok) {
+                    doc.addNote(newTrack, base, 72, step * 4, 100);
+                    if (!doc.findNote(newTrack, base, 72, &note)) {
+                        fail("note on new track not found");
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    doc.deleteTrack(newTrack);
+                    mutateAndCheck("events unsorted after deleteTrack");
+                    if (doc.findNote(newTrack, base, 72, &note)) {
+                        fail("deleted track still has its note");
+                        ok = false;
+                    }
+                }
+            }
+        }
+
+        // Deleting an original track must not lose the loop markers, even
+        // when they live in the removed chunk (they get rescued into the seq
+        // chunk). Undone right away so the loop/cfg script below still runs
+        // against the full song.
+        if (ok && track >= 0) {
+            const uint64_t loopStartBefore = doc.loopTick(false);
+            const uint64_t loopEndBefore = doc.loopTick(true);
+            doc.deleteTrack(track);
+            mutateAndCheck("events unsorted after deleteTrack of a song track");
+            if (ok
+                && (doc.loopTick(false) != loopStartBefore
+                    || doc.loopTick(true) != loopEndBefore)) {
+                fail("deleteTrack lost the loop markers");
+                ok = false;
+            }
+            doc.undoStack()->undo();
+        }
+
         // Loop markers: move an existing one / create where absent, and cfg.
         const uint64_t loopStart = doc.loopTick(false);
         doc.setLoopTick(false, loopStart == UINT64_MAX ? 0 : int64_t(loopStart + step));
