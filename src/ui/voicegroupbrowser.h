@@ -17,8 +17,9 @@ class QSpinBox;
 
 // The voicegroup dock (SPEC §6.1): the current song's 128 voicegroup entries
 // with press-and-hold audition, plus an editor panel for the selected voice.
-// Basic voice types (sample/square/wave/noise) are editable when a source
-// file was located; keysplit/drumkit/cry voices stay read-only.
+// Basic voice types (sample/square/wave/noise) plus keysplit and drumkit
+// voices are editable when a source file was located; cry voices stay
+// read-only.
 class VoicegroupBrowser : public QWidget
 {
     Q_OBJECT
@@ -32,11 +33,12 @@ public:
 
     // The editable source model behind the displayed voicegroup, or nullptr
     // when none could be located (editor shows why). Not owned; clear before
-    // the source is destroyed. The symbol lists feed the sample/wave combos;
-    // keysplit instruments appear at the top of the sample list.
+    // the source is destroyed. The symbol lists feed the sample/wave/drumkit
+    // combos; keysplit instruments appear at the top of the sample list.
     void setSource(VoicegroupSource *source, const QStringList &sampleSymbols,
                    const QStringList &waveSymbols,
-                   const QList<QPair<QString, QString>> &keysplits);
+                   const QList<QPair<QString, QString>> &keysplits,
+                   const QStringList &drumkits);
 
     int currentSlot() const;
     void selectSlot(int slot);
@@ -72,6 +74,7 @@ private:
     VoicegroupSource *m_source = nullptr;
     QStringList m_sampleChoices; // keysplits, then samples, then phonemes
     QStringList m_waveSymbols;
+    QStringList m_drumkitChoices; // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
     bool m_updating = false;
 

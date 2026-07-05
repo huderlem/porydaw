@@ -11,9 +11,9 @@ extern "C" {
 }
 
 // The editable voice macros: the five basic families and their variants,
-// plus voice_keysplit (whose sub-voicegroup/table pair is swappable).
-// Drumkit (keysplit_all) and cry voices stay read-only and round-trip
-// verbatim.
+// plus voice_keysplit (whose sub-voicegroup/table pair is swappable) and
+// voice_keysplit_all (drumkit; its sub-voicegroup is swappable). Cry voices
+// stay read-only and round-trip verbatim.
 enum class VgMacro {
     DirectSound,
     DirectSoundNoResample,
@@ -27,6 +27,7 @@ enum class VgMacro {
     Noise,
     NoiseAlt,
     Keysplit,
+    KeysplitAll,
 };
 
 QString vgMacroName(VgMacro macro);        // the .inc macro word
@@ -42,7 +43,7 @@ struct VgVoice {
     VgMacro macro = VgMacro::DirectSound;
     int key = 60;
     int pan = 0;
-    QString symbol; // DirectSound sample / programmable-wave / keysplit sub-voicegroup
+    QString symbol; // DirectSound sample / programmable-wave / keysplit or drumkit sub-voicegroup
     QString keysplitTable; // keysplit only
     int sweep = 0;  // square_1 only
     int duty = 2;   // square_1/2 only
@@ -72,7 +73,7 @@ enum class VgLineKind {
     Other,         // comment / label / directive — verbatim
     Header,        // voice_group NAME[, startingNote]
     Editable,      // one of the VgMacro macros, args parsed OK
-    ReadOnlyVoice, // keysplit / keysplit_all / cry / cry_reverse
+    ReadOnlyVoice, // cry / cry_reverse
     Broken,        // recognized macro prefix but unparseable args — verbatim
 };
 
@@ -126,6 +127,9 @@ public:
     // Keysplit instruments observed across the project's voicegroups:
     // sub-voicegroup symbol -> its paired keysplit table symbol.
     static QList<QPair<QString, QString>> keysplitInstruments(const QString &projectRoot);
+    // Drumkit sub-voicegroups observed across the project's voicegroups
+    // (voice_keysplit_all targets), sorted.
+    static QStringList drumkitInstruments(const QString &projectRoot);
 
     // Writes sound/voicegroups/<name>.inc matching the siblings' header style
     // and line endings. copyFromFile/copySectionLabel name an existing

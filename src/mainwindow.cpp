@@ -630,7 +630,8 @@ void MainWindow::updateVoicegroupBrowser()
     m_vgBrowser->setSource(m_vgSource.get(),
                            VoicegroupSource::directSoundSymbols(m_project.root()),
                            VoicegroupSource::progWaveSymbols(m_project.root()),
-                           VoicegroupSource::keysplitInstruments(m_project.root()));
+                           VoicegroupSource::keysplitInstruments(m_project.root()),
+                           VoicegroupSource::drumkitInstruments(m_project.root()));
     updateVgDockTitle();
 }
 
@@ -1035,7 +1036,13 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         int dsSlot = -1, donorSlot = -1;
         for (int i = 0; i < VOICEGROUP_SIZE; i++) {
             const VgVoice *v = m_vgSource->voiceAt(i);
-            if (!v || vgMacroIsCgb(v->macro))
+            // DirectSound family only: keysplit/drumkit voices are non-CGB
+            // too, but have no scalar fields and take sub-voicegroup symbols,
+            // not samples.
+            if (!v
+                || (v->macro != VgMacro::DirectSound
+                    && v->macro != VgMacro::DirectSoundNoResample
+                    && v->macro != VgMacro::DirectSoundAlt))
                 continue;
             if (dsSlot < 0)
                 dsSlot = i;

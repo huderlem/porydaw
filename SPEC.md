@@ -307,8 +307,10 @@ mid-playback via a hot track-instrument refresh; keysplit voices swappable
 (the Sample list offers the project's keysplit instruments first, each paired
 with its table); byte-conservative dirty-line-only writes behind a first-save
 confirmation (§5.3); create-voicegroup (copy of an existing one or the dummy
-template); `--vgcheck` harness. Drumset (keysplit_all) and cry voices stay
-read-only and round-trip verbatim; keysplit *tables* are not editable.
+template); `--vgcheck` harness; drumset (keysplit_all) voices selectable and
+swappable like keysplits (the Drumkit list offers the project's observed
+drumkit sub-voicegroups). Cry voices stay read-only and round-trip verbatim;
+keysplit *tables* are not editable.
 
 **Later / opt-in ideas (explicitly out of scope for v1):**
 keysplit table *editing*, sample import (wav2agb semantics), full project

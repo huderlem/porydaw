@@ -64,6 +64,21 @@ VoiceSnap snapVoice(const LoadedVoiceGroup *vg, int i)
     return s;
 }
 
+// The display name the loader derives from a symbol (vg_set_voice_name):
+// known prefixes stripped, truncated to the fixed-size name buffer.
+QByteArray loaderVoiceName(const QString &symbol)
+{
+    QByteArray name = symbol.toUtf8();
+    for (const char *prefix : {"DirectSoundWaveData_", "ProgrammableWaveData_",
+                               "voicegroup_"}) {
+        if (name.startsWith(prefix) && name.size() > int(qstrlen(prefix))) {
+            name = name.mid(int(qstrlen(prefix)));
+            break;
+        }
+    }
+    return name.left(VG_VOICE_NAME_LEN - 1);
+}
+
 bool isDirectSound(VgMacro m)
 {
     return m == VgMacro::DirectSound || m == VgMacro::DirectSoundNoResample
@@ -258,6 +273,54 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
         std::printf("vgcheck: edited Keysplit slot %d (sub-vg/table from slot %d)\n",
                     ksSlot, ksDonor);
     }
+    // Drumkit swap: point one keysplit_all voice at a different observed
+    // drumkit sub-voicegroup, and convert a spare basic voice into a drumkit.
+    const QStringList drumkits = VoicegroupSource::drumkitInstruments(projectRoot);
+    int dkSlot = -1;
+    QString dkDonor;
+    for (int i = 0; i < VOICEGROUP_SIZE && dkSlot < 0; i++) {
+        const VgVoice *v = src.voiceAt(i);
+        if (v && v->macro == VgMacro::KeysplitAll)
+            dkSlot = i;
+    }
+    if (dkSlot >= 0) {
+        for (const QString &symbol : drumkits) {
+            if (symbol != src.voiceAt(dkSlot)->symbol) {
+                dkDonor = symbol;
+                break;
+            }
+        }
+    }
+    if (dkSlot >= 0 && !dkDonor.isEmpty()) {
+        VgVoice v = *src.voiceAt(dkSlot);
+        v.symbol = dkDonor;
+        src.setVoice(dkSlot, v);
+        editedLines++;
+        editedSlots.append(dkSlot);
+        expected.append(expectedSnap(src, dkSlot, loaderVoiceName(dkDonor)));
+        std::printf("vgcheck: edited Drumkit slot %d (sub-vg %s)\n", dkSlot,
+                    qUtf8Printable(dkDonor));
+    }
+    int dkConvSlot = -1;
+    if (!drumkits.isEmpty()) {
+        for (int i = 0; i < VOICEGROUP_SIZE && dkConvSlot < 0; i++) {
+            const VgVoice *v = src.voiceAt(i);
+            if (v && !editedSlots.contains(i) && v->macro != VgMacro::Keysplit
+                && v->macro != VgMacro::KeysplitAll)
+                dkConvSlot = i;
+        }
+    }
+    if (dkConvSlot >= 0) {
+        VgVoice v; // fresh-parse form of a drumkit line: defaults + symbol
+        v.macro = VgMacro::KeysplitAll;
+        v.symbol = drumkits.first();
+        src.setVoice(dkConvSlot, v);
+        editedLines++;
+        editedSlots.append(dkConvSlot);
+        expected.append(expectedSnap(src, dkConvSlot, loaderVoiceName(drumkits.first())));
+        std::printf("vgcheck: converted slot %d to Drumkit (%s)\n", dkConvSlot,
+                    qUtf8Printable(drumkits.first()));
+    }
     if (!src.dirty()) {
         std::fprintf(stderr, "vgcheck: FAIL: source not dirty after edits\n");
         voicegroup_free(baseline);
@@ -350,6 +413,14 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                          "vgcheck: FAIL: swapped keysplit slot %d has no sub-voicegroup\n",
                          ksSlot);
             failures++;
+        }
+        for (int slot : {dkSlot >= 0 && !dkDonor.isEmpty() ? dkSlot : -1, dkConvSlot}) {
+            if (slot >= 0 && !reloaded->voices[slot].subGroup) {
+                std::fprintf(stderr,
+                             "vgcheck: FAIL: drumkit slot %d has no sub-voicegroup\n",
+                             slot);
+                failures++;
+            }
         }
         int preserved = 0;
         for (int i = 0; i < VOICEGROUP_SIZE; i++) {

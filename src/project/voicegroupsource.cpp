@@ -44,19 +44,20 @@ const MacroDef kEditableMacros[] = {
     {VgMacro::ProgWave, "voice_programmable_wave", false},
     {VgMacro::NoiseAlt, "voice_noise_alt", true},
     {VgMacro::Noise, "voice_noise", true},
-    // The required trailing space keeps voice_keysplit_all lines (read-only
-    // drumkits) from matching this entry.
+    // keysplit_all before keysplit, matching the loader's dispatch order.
+    {VgMacro::KeysplitAll, "voice_keysplit_all", true},
     {VgMacro::Keysplit, "voice_keysplit", true},
 };
 
 const char *const kReadOnlyPrefixes[] = {
-    "voice_keysplit_all ",
     "cry_reverse ",
     "cry ",
 };
 
 int macroArgCount(VgMacro macro)
 {
+    if (macro == VgMacro::KeysplitAll)
+        return 1;
     if (macro == VgMacro::Keysplit)
         return 2;
     return macro == VgMacro::Square1 || macro == VgMacro::Square1Alt ? 8 : 7;
@@ -65,8 +66,8 @@ int macroArgCount(VgMacro macro)
 // Whether argument index a of the macro is a symbol (vs. an integer).
 bool macroArgIsSymbol(VgMacro macro, int a)
 {
-    if (macro == VgMacro::Keysplit)
-        return true; // sub-voicegroup, keysplit table
+    if (macro == VgMacro::Keysplit || macro == VgMacro::KeysplitAll)
+        return true; // sub-voicegroup (and keysplit table)
     return vgMacroHasSymbol(macro) && a == 2;
 }
 
@@ -252,6 +253,7 @@ QString vgMacroDisplayName(VgMacro macro)
     case VgMacro::Noise: return QStringLiteral("Noise");
     case VgMacro::NoiseAlt: return QStringLiteral("Noise (alt)");
     case VgMacro::Keysplit: return QStringLiteral("Keysplit");
+    case VgMacro::KeysplitAll: return QStringLiteral("Drumkit");
     }
     return QString();
 }
@@ -271,6 +273,7 @@ uint8_t vgMacroVoiceType(VgMacro macro)
     case VgMacro::Noise: return VOICE_NOISE;
     case VgMacro::NoiseAlt: return VOICE_NOISE_ALT;
     case VgMacro::Keysplit: return VOICE_KEYSPLIT;
+    case VgMacro::KeysplitAll: return VOICE_KEYSPLIT_ALL;
     }
     return VOICE_DIRECTSOUND;
 }
@@ -284,6 +287,7 @@ bool vgMacroHasSymbol(VgMacro macro)
     case VgMacro::ProgWave:
     case VgMacro::ProgWaveAlt:
     case VgMacro::Keysplit:
+    case VgMacro::KeysplitAll:
         return true;
     default:
         return false;
@@ -297,6 +301,7 @@ bool vgMacroIsCgb(VgMacro macro)
     case VgMacro::DirectSoundNoResample:
     case VgMacro::DirectSoundAlt:
     case VgMacro::Keysplit:
+    case VgMacro::KeysplitAll:
         return false;
     default:
         return true;
@@ -490,7 +495,9 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
                     line.kind = VgLineKind::Editable;
                     VgVoice &v = line.voice;
                     v.macro = matched->macro;
-                    if (v.macro == VgMacro::Keysplit) {
+                    if (v.macro == VgMacro::KeysplitAll) {
+                        v.symbol = QString::fromUtf8(values[0]);
+                    } else if (v.macro == VgMacro::Keysplit) {
                         v.symbol = QString::fromUtf8(values[0]);
                         v.keysplitTable = QString::fromUtf8(values[1]);
                     } else {
@@ -560,7 +567,9 @@ void VoicegroupSource::renderLine(Line &line) const
 {
     const VgVoice &v = line.voice;
     QVector<QByteArray> values;
-    if (v.macro == VgMacro::Keysplit) {
+    if (v.macro == VgMacro::KeysplitAll) {
+        values << v.symbol.toUtf8();
+    } else if (v.macro == VgMacro::Keysplit) {
         values << v.symbol.toUtf8() << v.keysplitTable.toUtf8();
     } else {
         values << QByteArray::number(v.key) << QByteArray::number(v.pan);
@@ -656,7 +665,7 @@ bool VoicegroupSource::applyScalarsToToneData(int slot, ToneData *td) const
     const VgVoice *v = voiceAt(slot);
     if (!v || !td || td->type != vgMacroVoiceType(v->macro))
         return false;
-    if (v->macro == VgMacro::Keysplit)
+    if (v->macro == VgMacro::Keysplit || v->macro == VgMacro::KeysplitAll)
         return true; // no scalar fields; any change is structural
     // Field packing per parse_voicegroup_file (voicegroup_loader.c:1738+).
     td->key = uint8_t(v->key);
@@ -728,6 +737,27 @@ QList<QPair<QString, QString>> VoicegroupSource::keysplitInstruments(
     for (auto it = pairs.constBegin(); it != pairs.constEnd(); ++it)
         result.append({it.key(), it.value()});
     return result;
+}
+
+QStringList VoicegroupSource::drumkitInstruments(const QString &projectRoot)
+{
+    static const QRegularExpression drumkitRe(
+        QStringLiteral(R"(^\s*voice_keysplit_all\s+(\w+))"));
+    QStringList symbols;
+    for (const QString &path : voicegroupFiles(projectRoot)) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+            continue;
+        while (!file.atEnd()) {
+            const QRegularExpressionMatch m =
+                drumkitRe.match(QString::fromUtf8(file.readLine()));
+            if (m.hasMatch())
+                symbols.append(m.captured(1));
+        }
+    }
+    symbols.removeDuplicates();
+    std::sort(symbols.begin(), symbols.end());
+    return symbols;
 }
 
 QStringList VoicegroupSource::progWaveSymbols(const QString &projectRoot)

@@ -26,14 +26,25 @@ constexpr int kAuditionVelocity = 112;
 const VgMacro kSelectableMacros[] = {
     VgMacro::DirectSound,   VgMacro::DirectSoundNoResample,
     VgMacro::DirectSoundAlt, VgMacro::Keysplit,
-    VgMacro::Square1,        VgMacro::Square2,
-    VgMacro::ProgWave,       VgMacro::Noise,
+    VgMacro::KeysplitAll,    VgMacro::Square1,
+    VgMacro::Square2,        VgMacro::ProgWave,
+    VgMacro::Noise,
 };
+
+bool macroIsDrumkit(VgMacro m)
+{
+    return m == VgMacro::KeysplitAll;
+}
+
+bool macroIsWave(VgMacro m)
+{
+    return m == VgMacro::ProgWave || m == VgMacro::ProgWaveAlt;
+}
 
 bool macroUsesSampleList(VgMacro m)
 {
     return m == VgMacro::Keysplit
-        || (vgMacroHasSymbol(m) && m != VgMacro::ProgWave && m != VgMacro::ProgWaveAlt);
+        || (vgMacroHasSymbol(m) && !macroIsWave(m) && !macroIsDrumkit(m));
 }
 
 bool macroIsSquare1(VgMacro m)
@@ -53,7 +64,7 @@ bool macroIsNoise(VgMacro m)
 // are masked on load), matching what setVoicegroup renders from ToneData.
 QString adsrText(const VgVoice &v)
 {
-    if (v.macro == VgMacro::Keysplit)
+    if (v.macro == VgMacro::Keysplit || v.macro == VgMacro::KeysplitAll)
         return QString();
     if (vgMacroIsCgb(v.macro))
         return QStringLiteral("%1 %2 %3 %4")
@@ -240,10 +251,12 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
 void VoicegroupBrowser::setSource(VoicegroupSource *source,
                                   const QStringList &sampleSymbols,
                                   const QStringList &waveSymbols,
-                                  const QList<QPair<QString, QString>> &keysplits)
+                                  const QList<QPair<QString, QString>> &keysplits,
+                                  const QStringList &drumkits)
 {
     m_source = source;
     m_waveSymbols = waveSymbols;
+    m_drumkitChoices = drumkits;
     m_keysplitTables.clear();
     m_sampleChoices.clear();
     for (const auto &pair : keysplits) {
@@ -315,7 +328,8 @@ void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool visible)
     showRow(m_dutyLabel, m_dutyCombo,
             visible && (macroIsSquare1(macro) || macroIsSquare2(macro)));
     showRow(m_periodLabel, m_periodCombo, visible && macroIsNoise(macro));
-    showRow(m_adsrLabel, m_adsrRow, visible && macro != VgMacro::Keysplit);
+    showRow(m_adsrLabel, m_adsrRow,
+            visible && macro != VgMacro::Keysplit && !macroIsDrumkit(macro));
 }
 
 void VoicegroupBrowser::populateEditor()
@@ -338,7 +352,7 @@ void VoicegroupBrowser::populateEditor()
         else {
             switch (m_source->kindAt(slot)) {
             case VgLineKind::ReadOnlyVoice:
-                notice = tr("Keysplit, drumkit, and cry voices are read-only.");
+                notice = tr("Cry voices are read-only.");
                 break;
             case VgLineKind::Broken:
                 notice = tr("This voice line couldn't be parsed; it is kept as-is.");
@@ -375,11 +389,13 @@ void VoicegroupBrowser::populateEditor()
     m_releaseSpin->setRange(0, cgb ? 7 : 255);
 
     if (vgMacroHasSymbol(voice->macro)) {
-        const bool wave = voice->macro == VgMacro::ProgWave
-            || voice->macro == VgMacro::ProgWaveAlt;
-        m_symbolLabel->setText(wave ? tr("Wave") : tr("Sample"));
+        const bool wave = macroIsWave(voice->macro);
+        const bool drumkit = macroIsDrumkit(voice->macro);
+        m_symbolLabel->setText(wave ? tr("Wave")
+                                    : drumkit ? tr("Drumkit") : tr("Sample"));
         m_symbolCombo->clear();
-        m_symbolCombo->addItems(wave ? m_waveSymbols : m_sampleChoices);
+        m_symbolCombo->addItems(wave ? m_waveSymbols
+                                     : drumkit ? m_drumkitChoices : m_sampleChoices);
         m_symbolCombo->setCurrentText(voice->symbol);
     }
     m_sweepSpin->setValue(voice->sweep);
@@ -410,18 +426,19 @@ void VoicegroupBrowser::commitEdit()
     // Resolve the instrument symbol first: for sample-list types the chosen
     // symbol decides between a keysplit and a plain sample voice.
     if (vgMacroHasSymbol(v.macro)) {
-        const bool wave = v.macro == VgMacro::ProgWave || v.macro == VgMacro::ProgWaveAlt;
-        const bool curWave =
-            cur->macro == VgMacro::ProgWave || cur->macro == VgMacro::ProgWaveAlt;
+        const bool wave = macroIsWave(v.macro);
+        const bool drumkit = macroIsDrumkit(v.macro);
         // The combo only holds this family's list when the current voice
-        // shares it (samples and keysplits share one list).
-        const bool comboShowsThisList =
-            wave ? curWave : macroUsesSampleList(cur->macro);
+        // shares it (samples and keysplits share one list; waves and
+        // drumkits each have their own).
+        const bool comboShowsThisList = wave
+            ? macroIsWave(cur->macro)
+            : drumkit ? macroIsDrumkit(cur->macro) : macroUsesSampleList(cur->macro);
         QString symbol =
             comboShowsThisList ? m_symbolCombo->currentText().trimmed() : QString();
         // A deliberate Type change between Keysplit and the sample types
         // overrides the stale symbol shown in the combo.
-        if (!wave && typeChanged) {
+        if (!wave && !drumkit && typeChanged) {
             const bool symbolIsKeysplit = m_keysplitTables.contains(symbol);
             if (symbolIsKeysplit != (v.macro == VgMacro::Keysplit))
                 symbol.clear();
@@ -429,6 +446,8 @@ void VoicegroupBrowser::commitEdit()
         if (symbol.isEmpty()) {
             if (wave)
                 symbol = m_waveSymbols.value(0);
+            else if (drumkit)
+                symbol = m_drumkitChoices.value(0);
             else if (v.macro == VgMacro::Keysplit)
                 symbol = m_sampleChoices.value(0); // keysplits sort first
             else
@@ -439,7 +458,7 @@ void VoicegroupBrowser::commitEdit()
             return;
         }
         v.symbol = symbol;
-        if (!wave && m_keysplitTables.contains(symbol)) {
+        if (!wave && !drumkit && m_keysplitTables.contains(symbol)) {
             v.macro = VgMacro::Keysplit;
             v.keysplitTable = m_keysplitTables.value(symbol);
         } else {
@@ -452,10 +471,10 @@ void VoicegroupBrowser::commitEdit()
         v.keysplitTable.clear();
     }
 
-    if (v.macro != VgMacro::Keysplit) {
-        if (cur->macro == VgMacro::Keysplit) {
-            // Leaving keysplit: its scalar fields are all zero — start from
-            // the plain full-sustain envelope instead of a silent one.
+    if (v.macro != VgMacro::Keysplit && !macroIsDrumkit(v.macro)) {
+        if (cur->macro == VgMacro::Keysplit || macroIsDrumkit(cur->macro)) {
+            // Leaving keysplit/drumkit: their scalar fields are all zero —
+            // start from the plain full-sustain envelope instead of a silent one.
             v.attack = 255;
             v.decay = 0;
             v.sustain = 255;
@@ -477,6 +496,10 @@ void VoicegroupBrowser::commitEdit()
             v.sustain = std::min(v.sustain, 15);
             v.release = std::min(v.release, 7);
         }
+    } else if (v.macro != cur->macro) {
+        // Entering keysplit/drumkit: the line carries no scalar args, so
+        // match what a fresh parse of it would produce.
+        v = VgVoice{v.macro, 60, 0, v.symbol, v.keysplitTable};
     }
 
     if (v == *cur)
