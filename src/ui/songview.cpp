@@ -1308,7 +1308,8 @@ protected:
             const int x = tickX(m_dragTick);
             const int y = valueY(m_dragValue);
             p.drawEllipse(QPoint(x, y), 3, 3);
-            p.drawText(QPoint(x + 6, y - 4), QString::number(m_dragValue));
+            p.drawText(QPoint(x + 6, y - 4),
+                       formatRowValue(m_rows[m_dragRow], m_dragValue));
             p.setClipping(false);
         }
     }
@@ -1401,7 +1402,7 @@ protected:
             return;
         m_dragRow = ri;
         const bool fine = event->modifiers() & Qt::AltModifier;
-        updateDrag(event->pos(), fine);
+        updateDrag(event->pos(), fine, event->modifiers() & Qt::ControlModifier);
         const LanePoint *grab = grabPoint(row, ri, event->pos());
         if (event->modifiers() & Qt::ShiftModifier) {
             // Line ramp: the press anchors one end, release commits the
@@ -1416,6 +1417,11 @@ protected:
             // cell's point — sweeping overwrites them instead.
             m_gesture = Gesture::Point;
             m_dragOrigTick = int64_t(grab->tick);
+            // Start from the point's exact position, not the pixel-derived
+            // one: a no-motion click (or the first half of a double-click)
+            // must not quantize the value to the pixel grid.
+            m_dragTick = grab->tick;
+            m_dragValue = grab->value;
         } else {
             // Freehand sweep; a no-motion click degenerates to a single
             // point (overwriting any point already on that tick).
@@ -1458,7 +1464,7 @@ protected:
             return;
         }
         const bool fine = event->modifiers() & Qt::AltModifier;
-        updateDrag(event->pos(), fine);
+        updateDrag(event->pos(), fine, event->modifiers() & Qt::ControlModifier);
         if (m_gesture == Gesture::Sweep)
             extendSweep(event->pos(), fine);
         update();
@@ -1493,7 +1499,10 @@ protected:
             if (m_dragOrigTick < 0)
                 return;
             DocLanePoint pt;
-            if (doc->findLanePoint(track, cc, uint64_t(m_dragOrigTick), &pt))
+            // Skip the no-op commit: a plain click on a point (including the
+            // first half of a double-click) must not touch the document.
+            if (doc->findLanePoint(track, cc, uint64_t(m_dragOrigTick), &pt)
+                && (pt.tick != m_dragTick || pt.value != m_dragValue))
                 doc->moveLanePoint(track, cc, pt, m_dragTick, m_dragValue);
         } else if (gesture == Gesture::Sweep) {
             // writeLanePoints even for a plain click: it overwrites any
@@ -1524,6 +1533,52 @@ protected:
             pts.push_back({b, vb});
             doc->writeLanePoints(track, cc, a, b, pts);
         }
+    }
+
+    // Double-click: type-in for the exact value the pixel grid can't hit
+    // (e.g. pan dead-center). The first click of the pair already ran as a
+    // normal click, so on empty space a point exists at the snapped tick by
+    // now — either way this edits the point on that tick via an overwriting
+    // single-point write.
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc || event->button() != Qt::LeftButton
+            || event->pos().x() < kGutterW)
+            return;
+        const int ri = rowIndexAt(event->pos().y());
+        if (ri < 0)
+            return;
+        const Row &row = m_rows[ri];
+        uint8_t cc;
+        int track;
+        if (!rowTarget(row, &cc, &track))
+            return;
+        // The double-click replaced this pair's second press; drop any
+        // half-open gesture so its release is a no-op.
+        m_gesture = Gesture::None;
+        m_dragRow = -1;
+        m_sweep.clear();
+        update();
+
+        uint64_t tick;
+        int value;
+        if (const LanePoint *nearPt = nearestPoint(row, event->pos().x())) {
+            tick = nearPt->tick;
+            value = nearPt->value;
+        } else {
+            // The click's point can sit farther than nearestPoint's radius
+            // when the snap grid is coarse; re-derive its tick the same way.
+            tick = m_sv->snapTick(rawTickAt(event->pos().x()),
+                                  event->modifiers() & Qt::AltModifier);
+            DocLanePoint pt;
+            value = doc->findLanePoint(track, cc, tick, &pt)
+                        ? pt.value
+                        : valueAtY(row, ri, event->pos().y());
+        }
+        if (!editValue(row, &value))
+            return;
+        doc->writeLanePoints(track, cc, tick, tick, {{tick, value}});
     }
 
 private:
@@ -1790,6 +1845,83 @@ private:
         }
     }
 
+    QString rowTitle(const Row &row) const
+    {
+        switch (row.kind) {
+        case Row::Tempo:
+            return SongView::tr("Tempo (BPM)");
+        case Row::Voice:
+            return SongView::tr("Voice");
+        case Row::Lane: {
+            if (row.lane->cc == LANE_CC_BEND)
+                return SongView::tr("Pitch bend (BEND)");
+            const M4aCcInfo info = m4aClassifyCc(row.lane->cc);
+            return QStringLiteral("%1 (%2)").arg(row.lane->name,
+                                                 QLatin1String(info.name));
+        }
+        }
+        return QString();
+    }
+
+    // The m4a display convention used elsewhere in the app (PAN/TUNE as
+    // c_v±, bend signed): a raw "64" for pan hides that it IS center.
+    QString formatRowValue(const Row &row, int v) const
+    {
+        if (row.kind == Row::Lane) {
+            if (row.lane->cc == LANE_CC_BEND)
+                return m4aFormatBend(v);
+            return m4aFormatCcValue(row.lane->cc, uint8_t(v));
+        }
+        return QString::number(v);
+    }
+
+    // Neutral value a Ctrl-drag magnetizes to; only lanes where "centered"
+    // is meaningful and hard to hit by eye.
+    bool rowDetent(const Row &row, int *value) const
+    {
+        if (row.kind != Row::Lane)
+            return false;
+        if (row.lane->cc == 0x0A || row.lane->cc == 0x18) { // PAN/TUNE: c_v 0
+            *value = 64;
+            return true;
+        }
+        if (row.lane->cc == LANE_CC_BEND) {
+            *value = 0;
+            return true;
+        }
+        return false;
+    }
+
+    // Type-in editor: the only way to hit an arbitrary exact value, since a
+    // pixel spans several value units at normal lane heights. Input uses the
+    // display convention; PAN/TUNE entry is c_v (stored value minus 64).
+    bool editValue(const Row &row, int *value)
+    {
+        int minShown = 0, maxShown = 127, offset = 0; // stored = shown + offset
+        QString label = SongView::tr("Value:");
+        if (row.kind == Row::Tempo) {
+            minShown = 1;
+            maxShown = 999;
+            label = SongView::tr("BPM:");
+        } else if (row.lane->cc == LANE_CC_BEND) {
+            minShown = -8192;
+            maxShown = 8191;
+            label = SongView::tr("Bend (0 = none):");
+        } else if (row.lane->cc == 0x0A || row.lane->cc == 0x18) {
+            minShown = -64;
+            maxShown = 63;
+            offset = 64;
+            label = SongView::tr("c_v value (0 = center):");
+        }
+        bool ok = false;
+        const int shown = QInputDialog::getInt(this, rowTitle(row), label,
+                                               *value - offset, minShown,
+                                               maxShown, 1, &ok);
+        if (ok)
+            *value = shown + offset;
+        return ok;
+    }
+
     const LanePoint *nearestPoint(const Row &row, int x) const
     {
         const std::vector<LanePoint> *points = rowPoints(row);
@@ -1844,20 +1976,35 @@ private:
         return std::max(0.0, m_sv->tickAtContentX(std::max(kGutterW, x) - kGutterW));
     }
 
-    void updateDrag(QPoint pos, bool fine)
+    // Invert paintCurve's valueY mapping; ri indexes the row for geometry.
+    int valueAtY(const Row &row, int ri, int yPos) const
+    {
+        int minV, maxV;
+        rowRange(row, &minV, &maxV);
+        const int top = rowTop(ri) + 5;
+        const int bottom = rowBottom(ri) - 1 - 4;
+        const int y = std::clamp(yPos, top, bottom);
+        return minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
+    }
+
+    void updateDrag(QPoint pos, bool fine, bool detent)
     {
         if (m_dragRow < 0 || m_dragRow >= int(m_rows.size()))
             return;
         const Row &row = m_rows[m_dragRow];
-        int minV, maxV;
-        rowRange(row, &minV, &maxV);
-        // Invert paintCurve's valueY mapping.
-        const int top = rowTop(m_dragRow) + 5;
-        const int bottom = rowBottom(m_dragRow) - 1 - 4;
-        const int y = std::clamp(pos.y(), top, bottom);
-        m_dragValue = minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
+        m_dragValue = valueAtY(row, m_dragRow, pos.y());
         if (row.kind == Row::Tempo)
             m_dragValue = std::max(1, m_dragValue);
+        // Ctrl detent: magnetize to the lane's neutral value within ~8 px,
+        // so dead-center doesn't require pixel-perfect aim.
+        int neutral;
+        if (detent && rowDetent(row, &neutral)) {
+            int minV, maxV;
+            rowRange(row, &minV, &maxV);
+            const int plotH = std::max(1, rowHeight(row) - 10); // bottom - top
+            if (std::abs(m_dragValue - neutral) <= (maxV - minV) * 8 / plotH)
+                m_dragValue = neutral;
+        }
         m_dragTick = m_sv->snapTick(rawTickAt(pos.x()), fine);
     }
 
@@ -1914,31 +2061,22 @@ private:
         p.drawLine(r.left(), r.bottom(), r.right(), r.bottom());
 
         // Gutter label.
-        QString name;
-        QString range;
+        const QString name = rowTitle(row);
         int minV = 0, maxV = 127;
         const std::vector<LanePoint> *points = nullptr;
         QColor curve = palette().color(QPalette::Highlight);
         rowRange(row, &minV, &maxV);
         switch (row.kind) {
         case Row::Tempo:
-            name = SongView::tr("Tempo (BPM)");
             points = &m_sv->model().tempoLane;
             curve = QColor(0xb0, 0x60, 0xd0);
             break;
         case Row::Voice:
-            name = SongView::tr("Voice");
             break;
-        case Row::Lane: {
-            const M4aCcInfo info = m4aClassifyCc(row.lane->cc);
-            name = row.lane->cc == LANE_CC_BEND
-                       ? SongView::tr("Pitch bend (BEND)")
-                       : QStringLiteral("%1 (%2)").arg(row.lane->name,
-                                                       QLatin1String(info.name));
+        case Row::Lane:
             points = &row.lane->points;
             curve = SongView::trackColor(row.lane->track);
             break;
-        }
         }
 
         p.setPen(palette().color(QPalette::WindowText));
@@ -2048,7 +2186,9 @@ private:
     // Left-drag gestures: Point moves an existing point (press landed near
     // one), Sweep freehand-draws a stream of points, Line (Shift) commits an
     // interpolated ramp between press and release. Alt snaps to the clock
-    // grid instead of the visible grid throughout.
+    // grid instead of the visible grid throughout; Ctrl magnetizes the value
+    // to the lane's neutral (pan/tune center, zero bend); double-click opens
+    // a type-in for the exact value.
     enum class Gesture { None, Point, Sweep, Line };
 
     SongView *m_sv;
