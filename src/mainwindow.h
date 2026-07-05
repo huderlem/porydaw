@@ -63,8 +63,10 @@ private:
     void saveViewState();
     LoadedVoiceGroup *loadVoicegroupFor(const SongCfg &cfg, QString *tried);
     // Starts (or resumes) playback; from Stopped, seeks to the edit cursor
-    // first so playback begins there.
-    void startPlayback();
+    // first so playback begins there. fromEditCursor forces that seek even
+    // out of Paused — the Space binding (Reaper-style restart), while the
+    // Play button resumes from the pause point.
+    void startPlayback(bool fromEditCursor = false);
     void updateTransportActions();
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
@@ -85,6 +87,7 @@ private:
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_checklistAction = nullptr;
+    QAction *m_goToStartAction = nullptr;
     QAction *m_playAction = nullptr;
     QAction *m_playPauseAction = nullptr;
     QAction *m_pauseAction = nullptr;

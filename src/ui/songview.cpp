@@ -2713,6 +2713,12 @@ void SongView::commitEditCursor(uint64_t tick)
     emit editCursorMoved(tick);
 }
 
+void SongView::goToStart()
+{
+    setHScroll(0);
+    commitEditCursor(0);
+}
+
 double SongView::pxPerBeat() const
 {
     return m_timeline ? m_pxPerTick * m_timeline->ticksPerBeat : m_pxPerTick * 24.0;

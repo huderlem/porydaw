@@ -105,19 +105,28 @@ void MainWindow::buildUi()
     QToolBar *transport = addToolBar(tr("Transport"));
     transport->setMovable(false);
 
+    m_goToStartAction = new QAction(style()->standardIcon(QStyle::SP_MediaSkipBackward),
+                                    tr("Go to Start"), this);
+    m_goToStartAction->setShortcut(Qt::Key_Home);
+    connect(m_goToStartAction, &QAction::triggered, this,
+            [this] { m_songView->goToStart(); });
+    transport->addAction(m_goToStartAction);
+
     m_playAction = new QAction(style()->standardIcon(QStyle::SP_MediaPlay), tr("Play"), this);
-    connect(m_playAction, &QAction::triggered, this, &MainWindow::startPlayback);
+    connect(m_playAction, &QAction::triggered, this, [this] { startPlayback(); });
     transport->addAction(m_playAction);
 
     // Space toggles play/pause (Reaper-style); a window-level action so it
-    // works wherever focus is, like the old Space=Play binding did.
+    // works wherever focus is, like the old Space=Play binding did. Starting
+    // (or unpausing) with Space always restarts from the edit cursor; the
+    // Play button is the resume-from-pause path.
     m_playPauseAction = new QAction(tr("Play/Pause"), this);
     m_playPauseAction->setShortcut(Qt::Key_Space);
     connect(m_playPauseAction, &QAction::triggered, this, [this] {
         if (m_audio.transport() == Transport::Playing)
             m_audio.pause();
         else
-            startPlayback();
+            startPlayback(/*fromEditCursor=*/true);
     });
     addAction(m_playPauseAction);
 
@@ -610,11 +619,11 @@ void MainWindow::uiTick()
     updateTransportActions();
 }
 
-void MainWindow::startPlayback()
+void MainWindow::startPlayback(bool fromEditCursor)
 {
     if (!m_audioOk || !m_audio.songLoaded())
         return;
-    if (m_audio.transport() == Transport::Stopped)
+    if (fromEditCursor || m_audio.transport() == Transport::Stopped)
         m_audio.seek(m_audio.timeline()->sampleForTick(m_songView->editCursorTick()));
     m_audio.play();
 }
@@ -623,6 +632,7 @@ void MainWindow::updateTransportActions()
 {
     const bool loaded = m_audioOk && m_audio.songLoaded();
     const Transport t = m_audio.transport();
+    m_goToStartAction->setEnabled(loaded);
     m_playAction->setEnabled(loaded && t != Transport::Playing);
     m_playPauseAction->setEnabled(loaded);
     m_pauseAction->setEnabled(loaded && t == Transport::Playing);
@@ -736,7 +746,6 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         const uint64_t afterRestart = m_audio.playheadSamples();
         ok = afterSeek >= seekSample && m_audio.transport() == Transport::Playing
             && afterRestart >= seekSample;
-        m_audio.setLoopEnabled(true);
         if (ok)
             qInfo("selftest: edit-cursor seek + play-from-cursor OK (cursor %.2fs)",
                   double(seekSample) / m_audio.sampleRate());
@@ -746,6 +755,35 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                      double(seekSample) / m_audio.sampleRate(),
                      double(afterSeek) / m_audio.sampleRate(),
                      double(afterRestart) / m_audio.sampleRate());
+
+        // M2 polish: Space out of Paused restarts at the edit cursor rather
+        // than resuming from the pause point (the Play button resumes). The
+        // playhead had ~300ms past the cursor before the pause; a 150ms
+        // check after the restart must land back inside that window.
+        if (ok) {
+            m_audio.pause();
+            QTimer::singleShot(200, &loop, &QEventLoop::quit);
+            loop.exec();
+            const uint64_t pausedAt = m_audio.playheadSamples();
+            startPlayback(/*fromEditCursor=*/true); // the Space binding's path
+            QTimer::singleShot(150, &loop, &QEventLoop::quit);
+            loop.exec();
+            const uint64_t afterSpace = m_audio.playheadSamples();
+            ok = m_audio.transport() == Transport::Playing && afterSpace >= seekSample
+                && afterSpace < pausedAt;
+            if (ok)
+                qInfo("selftest: Space-from-pause restarted at edit cursor OK "
+                      "(paused %.2fs, restarted to %.2fs)",
+                      double(pausedAt) / m_audio.sampleRate(),
+                      double(afterSpace) / m_audio.sampleRate());
+            else
+                qWarning("selftest: Space-from-pause FAILED (cursor %.2fs, paused "
+                         "%.2fs, playhead %.2fs after restart)",
+                         double(seekSample) / m_audio.sampleRate(),
+                         double(pausedAt) / m_audio.sampleRate(),
+                         double(afterSpace) / m_audio.sampleRate());
+        }
+        m_audio.setLoopEnabled(true);
     }
     // M2 polish: sidecar view-state round trip (SPEC §4.4). Save the live
     // view, mutate it, then confirm applying the loaded state restores it —

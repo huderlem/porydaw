@@ -123,6 +123,8 @@ public:
     // editCursorMoved so playback can follow.
     void setEditCursorTick(uint64_t tick);
     void commitEditCursor(uint64_t tick);
+    // Transport "go to start": edit cursor to tick 0 and scroll home.
+    void goToStart();
 
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
