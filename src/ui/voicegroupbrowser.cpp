@@ -505,6 +505,18 @@ void VoicegroupBrowser::commitEdit()
             v.decay = m_decaySpin->value();
             v.sustain = m_sustainSpin->value();
             v.release = m_releaseSpin->value();
+            // An untouched envelope follows the instrument: when the values
+            // are exactly what adoption chose for the old symbol (the user
+            // never tuned them), a symbol change re-adopts for the new one.
+            if (vgMacroHasSymbol(v.macro) && v.symbol != cur->symbol
+                && VgAdsr{v.attack, v.decay, v.sustain, v.release}
+                       == vgDefaultAdsr(m_adsrDefaults, cur->macro, cur->symbol)) {
+                const VgAdsr fresh = vgDefaultAdsr(m_adsrDefaults, v.macro, v.symbol);
+                v.attack = fresh.attack;
+                v.decay = fresh.decay;
+                v.sustain = fresh.sustain;
+                v.release = fresh.release;
+            }
         }
         v.sweep = m_sweepSpin->value();
         v.duty = m_dutyCombo->currentIndex();

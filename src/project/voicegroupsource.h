@@ -71,6 +71,13 @@ struct VgAdsr {
     int decay = 0;
     int sustain = 0;
     int release = 0;
+
+    bool operator==(const VgAdsr &o) const
+    {
+        return attack == o.attack && decay == o.decay && sustain == o.sustain
+            && release == o.release;
+    }
+    bool operator!=(const VgAdsr &o) const { return !(*this == o); }
 };
 
 // The envelope family a macro's ADSR values belong to: the _alt/no_resample
@@ -87,8 +94,9 @@ struct VgAdsrDefaults {
 };
 
 // The envelope a voice should adopt when it switches into a new envelope
-// family: the project-typical envelope for its instrument symbol, then for
-// its family, then a full-sustain fallback with a short release tail (an
+// family, or picks a new instrument symbol while its envelope is untouched:
+// the project-typical envelope for its instrument symbol, then for its
+// family, then a full-sustain fallback with a short release tail (an
 // instant release-0 cutoff clicks audibly).
 VgAdsr vgDefaultAdsr(const VgAdsrDefaults &defaults, VgMacro macro,
                      const QString &symbol);
