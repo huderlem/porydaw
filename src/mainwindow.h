@@ -44,7 +44,7 @@ private slots:
     void openEngineSettings();
     void newSong();
     void importMidi();
-    void openRegistrationChecklist();
+    void registerLoadedSong();
     void onDocumentChanged();
     void uiTick();
     void onVoiceEdited(int slot, bool structural);
@@ -57,12 +57,13 @@ private:
     void populateSongList();
     void loadSong(const SongInfo &song);
     void loadSongByLabel(const QString &label);
-    // Shared New Song / Import finish: writes the .mid + midi.cfg line and
-    // the registration sidecar, reloads the project, loads the song, and
-    // opens the registration checklist.
+    // Shared New Song / Import finish: creates the new voicegroup when the
+    // wizard asked for one, writes the .mid + midi.cfg line, registers the
+    // song in the three registration files, reloads the project, and loads
+    // the song.
     void finishCreateSong(const SmfFile &smf, const QString &label,
                           const QString &constant, const QString &player,
-                          const SongCfg &cfg);
+                          const SongCfg &cfg, const QString &newVoicegroup);
     void reloadProject();
     void updateVoicegroupBrowser();
     // Prompts to save a dirty document; false = user cancelled the action.
@@ -80,7 +81,7 @@ private:
     // Swaps in a freshly loaded voicegroup, reattaching the views around it.
     void swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot);
     // One-time (per "don't ask again") confirmation that porydaw may write
-    // voicegroup files — the opt-in extension of the songs-only policy.
+    // voicegroup files (SPEC §5.3).
     bool confirmVoicegroupWrite();
     void cleanupVgPreview();
     void updateVgDockTitle();
@@ -119,7 +120,7 @@ private:
     QDockWidget *m_vgDock = nullptr;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
-    QAction *m_checklistAction = nullptr;
+    QAction *m_registerAction = nullptr;
     QAction *m_goToStartAction = nullptr;
     QAction *m_playAction = nullptr;
     QAction *m_playPauseAction = nullptr;

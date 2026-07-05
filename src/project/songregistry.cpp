@@ -39,6 +39,72 @@ QString sidecarPath(const QString &projectRoot, const QString &label)
     return projectRoot + QStringLiteral("/.porydaw/") + label + QStringLiteral(".json");
 }
 
+// Raw-byte line model for the registration files, so an edit touches only
+// the song's own line: every other line keeps its exact bytes (including
+// any CR — these files are normally LF, but a CRLF checkout stays CRLF).
+struct RawLines {
+    QList<QByteArray> lines;
+    bool endsWithNewline = true;
+    bool crlf = false;
+    bool loaded = false;
+    bool dirty = false;
+
+    QString text(int i) const
+    {
+        const QByteArray &line = lines.at(i);
+        return QString::fromUtf8(line.endsWith('\r') ? line.chopped(1) : line);
+    }
+    void insert(int at, const QString &text)
+    {
+        QByteArray line = text.toUtf8();
+        if (crlf)
+            line += '\r';
+        lines.insert(at, line);
+        dirty = true;
+    }
+    void replace(int at, const QString &text)
+    {
+        QByteArray line = text.toUtf8();
+        if (lines.at(at).endsWith('\r'))
+            line += '\r';
+        lines[at] = line;
+        dirty = true;
+    }
+};
+
+RawLines readRawLines(const QString &path)
+{
+    RawLines f;
+    QFile in(path);
+    if (!in.open(QIODevice::ReadOnly))
+        return f;
+    const QByteArray content = in.readAll();
+    f.loaded = true;
+    f.endsWithNewline = content.isEmpty() || content.endsWith('\n');
+    f.crlf = content.contains("\r\n");
+    f.lines = content.split('\n');
+    if (f.endsWithNewline && !f.lines.isEmpty())
+        f.lines.removeLast(); // the empty piece after the final newline
+    return f;
+}
+
+bool writeRawLines(const QString &path, const RawLines &f, QString *error)
+{
+    if (!f.dirty)
+        return true;
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = QStringLiteral("Cannot write %1").arg(path);
+        return false;
+    }
+    QByteArray joined = f.lines.join('\n');
+    if (f.endsWithNewline)
+        joined += '\n';
+    out.write(joined);
+    return true;
+}
+
 } // namespace
 
 namespace SongRegistry {
@@ -115,9 +181,9 @@ RegistrationPlan makePlan(const QString &projectRoot, const QString &label,
     plan.player = player;
 
     // song_table.inc: match the existing entries' indentation; the third
-    // argument mirrors the player's .equiv number. Once the user has pasted
-    // the table entry, the proposed ID is its actual index rather than the
-    // append position.
+    // argument mirrors the player's .equiv number. Once the table entry
+    // exists, the proposed ID is its actual index rather than the append
+    // position.
     QString indent = QStringLiteral("\t");
     int songCount = 0;
     int existingIndex = -1;
@@ -138,7 +204,7 @@ RegistrationPlan makePlan(const QString &projectRoot, const QString &label,
         if (p.name == player)
             playerNum = p.number;
     }
-    plan.songTableSnippet =
+    plan.songTableLine =
         QStringLiteral("%1song %2, %3, %4").arg(indent, label, player).arg(playerNum);
 
     // songs.h: pad the constant to the file's existing value column.
@@ -154,7 +220,7 @@ RegistrationPlan makePlan(const QString &projectRoot, const QString &label,
     QString define = QStringLiteral("#define ") + constant;
     const int pad = valueColumn - define.size();
     define += QString(std::max(1, pad), QLatin1Char(' '));
-    plan.songsHSnippet = define + QString::number(plan.songId);
+    plan.songsHLine = define + QString::number(plan.songId);
 
     // ld_script.ld: one line in the song_data section. A project whose ld
     // script never references per-song objects (modern-only forks) skips
@@ -170,9 +236,122 @@ RegistrationPlan makePlan(const QString &projectRoot, const QString &label,
         ldIndent = line.left(at);
     }
     if (plan.ldApplicable)
-        plan.ldSnippet =
+        plan.ldLine =
             QStringLiteral("%1sound/songs/midi/%2.o(.rodata);").arg(ldIndent, label);
     return plan;
+}
+
+bool registerSong(const QString &projectRoot, const QString &label,
+                  const QString &constant, const QString &player, QString *error,
+                  int *songId)
+{
+    const RegistrationPlan plan = makePlan(projectRoot, label, constant, player);
+    if (songId)
+        *songId = plan.songId;
+
+    // song_table.inc: insert after the last song entry, which makes the new
+    // entry's index exactly plan.songId.
+    {
+        const QString path = projectRoot + QStringLiteral("/sound/song_table.inc");
+        RawLines f = readRawLines(path);
+        if (!f.loaded) {
+            if (error)
+                *error = QStringLiteral("Cannot read %1").arg(path);
+            return false;
+        }
+        int lastSong = -1;
+        bool present = false;
+        for (int i = 0; i < f.lines.size(); i++) {
+            const QRegularExpressionMatch m = songLineRe().match(f.text(i));
+            if (!m.hasMatch())
+                continue;
+            lastSong = i;
+            if (m.captured(2) == label)
+                present = true;
+        }
+        if (!present) {
+            if (lastSong < 0) {
+                if (error)
+                    *error = QStringLiteral("%1 has no song entries").arg(path);
+                return false;
+            }
+            f.insert(lastSong + 1, plan.songTableLine);
+        }
+        if (!writeRawLines(path, f, error))
+            return false;
+    }
+
+    // songs.h: insert the define after the file's last numeric define, or
+    // correct an existing define whose value drifted from the table index.
+    {
+        const QString path = projectRoot + QStringLiteral("/include/constants/songs.h");
+        RawLines f = readRawLines(path);
+        if (!f.loaded) {
+            if (error)
+                *error = QStringLiteral("Cannot read %1").arg(path);
+            return false;
+        }
+        const QRegularExpression ownRe(
+            QStringLiteral(R"(^(\s*#define\s+%1\s+)(\d+)(.*)$)").arg(constant));
+        static const QRegularExpression anyDefineRe(
+            QStringLiteral(R"(^\s*#define\s+\w+\s+\d)"));
+        static const QRegularExpression endifRe(QStringLiteral(R"(^\s*#endif\b)"));
+        int own = -1, lastDefine = -1, firstEndif = -1;
+        QRegularExpressionMatch ownMatch;
+        for (int i = 0; i < f.lines.size(); i++) {
+            const QString text = f.text(i);
+            const QRegularExpressionMatch m = ownRe.match(text);
+            if (m.hasMatch() && own < 0) {
+                own = i;
+                ownMatch = m;
+            }
+            if (anyDefineRe.match(text).hasMatch())
+                lastDefine = i;
+            if (firstEndif < 0 && endifRe.match(text).hasMatch())
+                firstEndif = i;
+        }
+        if (own >= 0) {
+            if (ownMatch.captured(2).toInt() != plan.songId)
+                f.replace(own, ownMatch.captured(1) + QString::number(plan.songId)
+                                   + ownMatch.captured(3));
+        } else if (lastDefine >= 0) {
+            f.insert(lastDefine + 1, plan.songsHLine);
+        } else if (firstEndif >= 0) {
+            f.insert(firstEndif, plan.songsHLine);
+        } else {
+            f.insert(f.lines.size(), plan.songsHLine);
+        }
+        if (!writeRawLines(path, f, error))
+            return false;
+    }
+
+    // ld_script.ld: one object line after the last per-song line. Projects
+    // whose linker script has no per-song lines skip this file.
+    if (plan.ldApplicable) {
+        const QString path = projectRoot + QStringLiteral("/ld_script.ld");
+        RawLines f = readRawLines(path);
+        if (!f.loaded) {
+            if (error)
+                *error = QStringLiteral("Cannot read %1").arg(path);
+            return false;
+        }
+        const QString needle = QStringLiteral("sound/songs/midi/%1.o").arg(label);
+        int lastObject = -1;
+        bool present = false;
+        for (int i = 0; i < f.lines.size(); i++) {
+            const QString text = f.text(i);
+            if (!text.contains(QStringLiteral("sound/songs/midi/")))
+                continue;
+            lastObject = i;
+            if (text.contains(needle))
+                present = true;
+        }
+        if (!present)
+            f.insert(lastObject + 1, plan.ldLine);
+        if (!writeRawLines(path, f, error))
+            return false;
+    }
+    return true;
 }
 
 RegistrationStatus checkRegistration(const QString &projectRoot, const QString &label,

@@ -120,10 +120,11 @@ void DecompProject::parseSongConstants()
 
 void DecompProject::discoverUnregisteredSongs()
 {
-    // .mid files with no song_table.inc entry: songs mid-onboarding. Listing
-    // them keeps a half-registered song (and its checklist badge) visible
-    // across project reopens. Identity chosen in the wizard comes back from
-    // the sidecar; the constant falls back to the label-derived default.
+    // .mid files with no song_table.inc entry: songs whose registration
+    // never ran (dropped-in files) or failed. Listing them keeps the badge
+    // visible across project reopens so Register Song can finish the job.
+    // Identity chosen in the wizard comes back from the sidecar; the
+    // constant falls back to the label-derived default.
     QSet<QString> known;
     for (const SongInfo &song : m_songs)
         known.insert(song.label);

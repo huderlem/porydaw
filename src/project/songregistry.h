@@ -9,10 +9,10 @@
 struct SmfFile;
 
 // The onboarding backend (SPEC.md §6.3): everything the New Song / Import
-// wizards need to create a song and walk the user through registering it.
-// porydaw itself writes only the .mid and the midi.cfg line; the three
-// registration files get copy-paste snippets plus a live "recheck" that
-// re-parses them from disk.
+// wizards need to create a song and register it. porydaw writes the .mid,
+// the midi.cfg line, and the three registration files (song_table.inc,
+// songs.h, ld_script.ld) directly — inserting or correcting only the song's
+// own lines, byte-conservative for everything else.
 
 struct MusicPlayer {
     QString name;  // e.g. "MUSIC_PLAYER_BGM"
@@ -25,9 +25,9 @@ struct RegistrationPlan {
     QString player;   // e.g. "MUSIC_PLAYER_BGM"
     int songId = -1;  // proposed ID = current count of song-table entries
 
-    QString songTableSnippet; // "\tsong mus_foo, MUSIC_PLAYER_BGM, 0"
-    QString songsHSnippet;    // "#define MUS_FOO 610 // MUS_FOO"
-    QString ldSnippet;        // "        sound/songs/midi/mus_foo.o(.rodata);"
+    QString songTableLine;    // "\tsong mus_foo, MUSIC_PLAYER_BGM, 0"
+    QString songsHLine;       // "#define MUS_FOO 610"
+    QString ldLine;           // "        sound/songs/midi/mus_foo.o(.rodata);"
     bool ldApplicable = true; // false when ld_script.ld has no per-song lines
 };
 
@@ -57,10 +57,20 @@ QVector<MusicPlayer> musicPlayers(const QString &projectRoot);
 // Default constant for a label: "mus_foo" -> "MUS_FOO".
 QString constantForLabel(const QString &label);
 
-// Computes the three snippets against the files as they are on disk right
-// now, matching each file's existing indentation/alignment.
+// Computes the three registration lines against the files as they are on
+// disk right now, matching each file's existing indentation/alignment.
 RegistrationPlan makePlan(const QString &projectRoot, const QString &label,
                           const QString &constant, const QString &player);
+
+// Writes the song into all three registration files: appends the
+// song_table.inc entry, the songs.h #define, and the ld_script.ld object
+// line (when applicable). Idempotent — entries that already exist are left
+// byte-identical, except a songs.h define whose ID no longer matches the
+// song's table index, which is corrected in place. Only the song's own
+// lines change. On success *songId carries the song's table index.
+bool registerSong(const QString &projectRoot, const QString &label,
+                  const QString &constant, const QString &player, QString *error,
+                  int *songId = nullptr);
 
 // Re-parses the three files from disk. The songs.h item additionally
 // requires the define's value to match the label's actual song-table index
@@ -82,8 +92,9 @@ bool writeMidiCfgLine(const QString &midiDir, const QString &label,
 // spanning one bar.
 SmfFile blankSong();
 
-// Pending-registration metadata in the sidecar (.porydaw/<label>.json), so a
-// half-registered song's checklist survives a project reopen (SPEC §6.3).
+// Pending-registration metadata in the sidecar (.porydaw/<label>.json), so
+// an unregistered song's chosen constant/player survive a project reopen
+// when registerSong could not complete (SPEC §6.3).
 bool saveRegistrationMeta(const QString &projectRoot, const QString &label,
                           const QString &constant, const QString &player);
 bool loadRegistrationMeta(const QString &projectRoot, const QString &label,

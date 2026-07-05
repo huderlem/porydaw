@@ -2,12 +2,14 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
@@ -100,7 +102,8 @@ private:
 class SoundPage : public QWizardPage
 {
 public:
-    explicit SoundPage(DecompProject *project)
+    SoundPage(DecompProject *project, const IdentityPage *identity)
+        : m_project(project), m_identity(identity)
     {
         setTitle(tr("Sound settings"));
         setSubTitle(tr("The song's voicegroup and mid2agb flags — its line in "
@@ -110,7 +113,16 @@ public:
         auto *form = new QFormLayout(this);
         m_voicegroup = new QComboBox(this);
         m_voicegroup->setEditable(true);
+        // Creating per-file voicegroups needs the sound/voicegroups/ layout
+        // (same constraint as the Voicegroup dock's New button).
+        m_canCreateVoicegroup =
+            QDir(project->root() + QStringLiteral("/sound/voicegroups")).exists();
+        if (m_canCreateVoicegroup)
+            m_voicegroup->addItem(newVoicegroupText());
         m_voicegroup->addItems(SongRegistry::voicegroupArgs(project->root()));
+        // Default to the first existing voicegroup, not the create entry.
+        if (m_canCreateVoicegroup && m_voicegroup->count() > 1)
+            m_voicegroup->setCurrentIndex(1);
         m_voicegroup->setToolTip(
             tr("mid2agb -G: appended to \"voicegroup\" to form the symbol."));
         form->addRow(tr("&Voicegroup (-G):"), m_voicegroup);
@@ -144,10 +156,34 @@ public:
         form->addRow(QString(), m_noCompression);
     }
 
+    // The new voicegroup is named after the song: sound/voicegroups/<label>.inc,
+    // symbol voicegroup_<label>, -G arg "_<label>".
+    bool newVoicegroupSelected() const
+    {
+        return m_canCreateVoicegroup && m_voicegroup->currentText() == newVoicegroupText();
+    }
+
+    bool validatePage() override
+    {
+        if (newVoicegroupSelected()
+            && SongRegistry::voicegroupArgs(m_project->root())
+                   .contains(QStringLiteral("_") + m_identity->label())) {
+            QMessageBox::warning(
+                this, tr("New Voicegroup"),
+                tr("A voicegroup named voicegroup_%1 already exists — pick it "
+                   "from the list instead.")
+                    .arg(m_identity->label()));
+            return false;
+        }
+        return true;
+    }
+
     SongCfg cfg() const
     {
         SongCfg cfg;
-        cfg.voicegroupArg = m_voicegroup->currentText().trimmed();
+        cfg.voicegroupArg = newVoicegroupSelected()
+                                ? QStringLiteral("_") + m_identity->label()
+                                : m_voicegroup->currentText().trimmed();
         cfg.masterVolume = m_volume->value();
         cfg.reverb = m_reverbOn->isChecked() ? m_reverb->value() : -1;
         cfg.priority = m_priority->value();
@@ -159,6 +195,14 @@ public:
     }
 
 private:
+    static QString newVoicegroupText()
+    {
+        return tr("(create a new voicegroup for this song)");
+    }
+
+    DecompProject *m_project;
+    const IdentityPage *m_identity;
+    bool m_canCreateVoicegroup = false;
     QComboBox *m_voicegroup;
     QSpinBox *m_volume;
     QCheckBox *m_reverbOn;
@@ -255,16 +299,24 @@ public:
         m_tree->clear();
 
         const SongCfg cfg = m_sound->cfg();
-        const QByteArray root = m_project->root().toLocal8Bit();
-        for (const QString &name : DecompProject::voicegroupCandidates(cfg)) {
-            m_vg = voicegroup_load(root.constData(), name.toLocal8Bit().constData(),
-                                   nullptr);
-            if (m_vg)
-                break;
+        if (!m_sound->newVoicegroupSelected()) {
+            const QByteArray root = m_project->root().toLocal8Bit();
+            for (const QString &name : DecompProject::voicegroupCandidates(cfg)) {
+                m_vg = voicegroup_load(root.constData(), name.toLocal8Bit().constData(),
+                                       nullptr);
+                if (m_vg)
+                    break;
+            }
         }
         if (m_vg) {
             m_audio->setPreviewVoicegroup(m_vg);
             m_vgLabel->setText(tr("Voicegroup <b>voicegroup%1</b>:").arg(cfg.voicegroupArg));
+        } else if (m_sound->newVoicegroupSelected()) {
+            m_vgLabel->setText(
+                tr("A new voicegroup <b>voicegroup%1</b> is created with the song — "
+                   "programs are kept as-is; configure its voices in the Voicegroup "
+                   "dock afterwards.")
+                    .arg(cfg.voicegroupArg));
         } else {
             m_vgLabel->setText(
                 tr("⚠ Voicegroup \"voicegroup%1\" could not be loaded — voice names "
@@ -405,7 +457,7 @@ void NewSongWizard::buildPages(const QString &sourcePath)
 
     m_identity = new IdentityPage(m_project, suggested);
     addPage(m_identity);
-    m_sound = new SoundPage(m_project);
+    m_sound = new SoundPage(m_project, m_identity);
     addPage(m_sound);
 
     if (m_importMode) {
@@ -439,6 +491,11 @@ QString NewSongWizard::player() const
 SongCfg NewSongWizard::cfg() const
 {
     return m_sound->cfg();
+}
+
+QString NewSongWizard::newVoicegroupName() const
+{
+    return m_sound->newVoicegroupSelected() ? m_identity->label() : QString();
 }
 
 SmfFile NewSongWizard::songFile() const

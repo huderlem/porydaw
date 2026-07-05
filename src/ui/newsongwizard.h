@@ -19,8 +19,8 @@ class MappingPage;
 //   import: Analysis -> Identity -> Sound -> Mapping
 //
 // The wizard only collects choices (and remaps programs on the imported
-// file); MainWindow writes the .mid + midi.cfg line and then shows the
-// registration checklist.
+// file); MainWindow writes the .mid + midi.cfg line and registers the song
+// in the three registration files.
 class NewSongWizard : public QWizard
 {
     Q_OBJECT
@@ -40,6 +40,10 @@ public:
     SongCfg cfg() const;
     // The song to write: the blank template, or the import with remaps applied.
     SmfFile songFile() const;
+    // Non-empty when the user chose "(create a new voicegroup for this song)"
+    // on the Sound page: the voicegroup to create (named after the song; cfg()
+    // already carries its -G arg). Empty for an existing voicegroup.
+    QString newVoicegroupName() const;
 
 private:
     void buildPages(const QString &sourcePath);

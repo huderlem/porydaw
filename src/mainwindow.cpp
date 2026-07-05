@@ -34,7 +34,6 @@
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
-#include "ui/registrationdialog.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
 #include "ui/viewsidecar.h"
@@ -88,9 +87,9 @@ void MainWindow::buildUi()
     m_saveAction = fileMenu->addAction(tr("&Save Song"), this, &MainWindow::saveSong);
     m_saveAction->setShortcut(QKeySequence::Save);
     m_saveAction->setEnabled(false);
-    m_checklistAction = fileMenu->addAction(tr("Registration Chec&klist..."), this,
-                                            &MainWindow::openRegistrationChecklist);
-    m_checklistAction->setEnabled(false);
+    m_registerAction = fileMenu->addAction(tr("Re&gister Song"), this,
+                                           &MainWindow::registerLoadedSong);
+    m_registerAction->setEnabled(false);
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(tr("&Quit"), this, &QWidget::close);
     quitAction->setShortcut(QKeySequence::Quit);
@@ -262,7 +261,7 @@ void MainWindow::openProject()
     m_songLabel->clear();
     m_saveAction->setEnabled(false);
     m_settingsAction->setEnabled(false);
-    m_checklistAction->setEnabled(false);
+    m_registerAction->setEnabled(false);
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
     updateWindowTitle();
@@ -297,8 +296,7 @@ void MainWindow::populateSongList()
         if (!song.registered) {
             item->setForeground(QColor(0xc0, 0x80, 0x30));
             item->setToolTip(tr("This song's .mid exists but song_table.inc has no "
-                                "entry. Open it and use File → Registration "
-                                "Checklist to finish."));
+                                "entry. Open it and use File → Register Song."));
         }
     }
 }
@@ -377,7 +375,7 @@ void MainWindow::loadSong(const SongInfo &song)
     updateVoicegroupBrowser();
     m_saveAction->setEnabled(true);
     m_settingsAction->setEnabled(true);
-    m_checklistAction->setEnabled(!song.registered);
+    m_registerAction->setEnabled(!song.registered);
     updateWindowTitle();
     m_songLabel->setText(QStringLiteral("  %1").arg(song.label));
 
@@ -489,7 +487,7 @@ void MainWindow::newSong()
     if (wizard.exec() != QDialog::Accepted)
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
-                     wizard.player(), wizard.cfg());
+                     wizard.player(), wizard.cfg(), wizard.newVoicegroupName());
 }
 
 void MainWindow::importMidi()
@@ -515,50 +513,86 @@ void MainWindow::importMidi()
     if (wizard.exec() != QDialog::Accepted)
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
-                     wizard.player(), wizard.cfg());
+                     wizard.player(), wizard.cfg(), wizard.newVoicegroupName());
 }
 
 void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
                                   const QString &constant, const QString &player,
-                                  const SongCfg &cfg)
+                                  const SongCfg &cfg, const QString &newVoicegroup)
 {
     if (!maybeSaveSong() || !maybeSaveVoicegroup())
         return;
 
-    const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
     QString error;
+    // The voicegroup first: the song's -G already points at it, so nothing
+    // else may be written if it can't exist. Starts as the dummy template —
+    // the user configures it in the Voicegroup dock.
+    if (!newVoicegroup.isEmpty()) {
+        if (!confirmVoicegroupWrite())
+            return;
+        if (!VoicegroupSource::createVoicegroup(m_project.root(), newVoicegroup,
+                                                QString(), QString(), &error)
+            || !VoicegroupSource::appendIncludeLine(m_project.root(), newVoicegroup,
+                                                    &error)) {
+            QMessageBox::warning(this, tr("New Song"), error);
+            return;
+        }
+    }
+
+    const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
     if (!smf.writeFile(midiDir + QStringLiteral("/%1.mid").arg(label), &error)
         || !SongRegistry::writeMidiCfgLine(midiDir, label,
                                            SongRegistry::mergeCfgFlags(cfg), &error)) {
         QMessageBox::warning(this, tr("New Song"), error);
         return;
     }
-    SongRegistry::saveRegistrationMeta(m_project.root(), label, constant, player);
+    int songId = -1;
+    if (!SongRegistry::registerSong(m_project.root(), label, constant, player, &error,
+                                    &songId)) {
+        // Keep the chosen constant/player so Register Song can retry later;
+        // the song shows a badge in the browser until then.
+        SongRegistry::saveRegistrationMeta(m_project.root(), label, constant, player);
+        QMessageBox::warning(this, tr("New Song"),
+                             tr("Wrote %1/%2.mid, but registering it failed: %3\n"
+                                "Use File → Register Song to retry.")
+                                 .arg(midiDir, label, error));
+    } else {
+        SongRegistry::clearRegistrationMeta(m_project.root(), label);
+        QString message = tr("Created and registered %1 as %2 (song ID %3)")
+                              .arg(label, constant)
+                              .arg(songId);
+        if (!newVoicegroup.isEmpty())
+            message += tr(" — configure its new voicegroup in the Voicegroup dock");
+        statusBar()->showMessage(message, 8000);
+    }
 
     reloadProject();
     loadSongByLabel(label);
-    statusBar()->showMessage(tr("Created %1/%2.mid").arg(midiDir, label), 8000);
-
-    RegistrationDialog checklist(m_project.root(), label, constant, player, this);
-    checklist.exec();
-    if (checklist.registrationComplete()) {
-        reloadProject();
-        loadSongByLabel(label);
-    }
 }
 
-void MainWindow::openRegistrationChecklist()
+void MainWindow::registerLoadedSong()
 {
     if (m_loadedSongId < 0 || m_loadedSongId >= m_project.songs().size())
         return;
     const SongInfo song = m_project.songs().at(m_loadedSongId);
-    RegistrationDialog checklist(m_project.root(), song.label, song.constant,
-                                 song.player, this);
-    checklist.exec();
-    if (checklist.registrationComplete()) {
-        reloadProject();
-        loadSongByLabel(song.label);
+    const QString constant = song.constant.isEmpty()
+                                 ? SongRegistry::constantForLabel(song.label)
+                                 : song.constant;
+    const QString player = song.player.isEmpty() ? QStringLiteral("MUSIC_PLAYER_BGM")
+                                                 : song.player;
+    QString error;
+    int songId = -1;
+    if (!SongRegistry::registerSong(m_project.root(), song.label, constant, player,
+                                    &error, &songId)) {
+        QMessageBox::warning(this, tr("Register Song"), error);
+        return;
     }
+    SongRegistry::clearRegistrationMeta(m_project.root(), song.label);
+    statusBar()->showMessage(
+        tr("Registered %1 as %2 (song ID %3)").arg(song.label, constant).arg(songId),
+        8000);
+    reloadProject();
+    loadSongByLabel(song.label);
 }
 
 void MainWindow::reloadProject()
@@ -1080,15 +1114,12 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     }
 
     // M3: the onboarding UI must at least construct against a live project
-    // (wizard pages enumerate voicegroups/players; the checklist rechecks).
+    // (wizard pages enumerate voicegroups/players). Registration itself is
+    // write-through now, exercised by --onboardcheck against a scratch copy.
     {
         NewSongWizard wizard(&m_project, &m_audio, this);
-        RegistrationDialog checklist(m_project.root(), QStringLiteral("mus_selftest"),
-                                     QStringLiteral("MUS_SELFTEST"),
-                                     QStringLiteral("MUSIC_PLAYER_BGM"), this);
         EngineSettingsDialog engineDialog(m_engineSettings, this);
-        qInfo("selftest: New Song wizard + registration checklist + engine "
-              "settings dialog constructed");
+        qInfo("selftest: New Song wizard + engine settings dialog constructed");
     }
 
     const double playedSeconds = double(m_audio.playheadSamples()) / m_audio.sampleRate();

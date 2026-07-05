@@ -64,8 +64,6 @@ qt_add_executable(porydaw
     src/ui/m4asemantics.h
     src/ui/newsongwizard.cpp
     src/ui/newsongwizard.h
-    src/ui/registrationdialog.cpp
-    src/ui/registrationdialog.h
     src/ui/voicegroupbrowser.cpp
     src/ui/voicegroupbrowser.h
     src/ui/enginesettingsdialog.cpp

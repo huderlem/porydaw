@@ -26,7 +26,7 @@ struct SongInfo {
     bool hasMid = false;
     bool hasCfg = false;
     // false: the .mid exists in sound/songs/midi/ but song_table.inc has no
-    // entry yet — a song mid-onboarding, pending its registration checklist.
+    // entry yet — registerSong hasn't run (or failed) for it.
     bool registered = true;
     SongCfg cfg;
 
@@ -56,8 +56,8 @@ public:
     // Refreshes a song's cached cfg after porydaw writes its midi.cfg line.
     void setSongCfg(int id, const SongCfg &cfg);
 
-    // Re-reads the project's music data (after the wizard creates a song or
-    // the user pastes registration snippets). Song ids are reassigned.
+    // Re-reads the project's music data (after the wizard creates and
+    // registers a song). Song ids are reassigned.
     bool reload(QString *error);
 
 private:

@@ -3,7 +3,6 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QString>
-#include <QTextStream>
 #include <cstdio>
 
 #include "core/midiimport.h"
@@ -15,9 +14,10 @@
 // --onboardcheck <projectRoot> [mid2agbPath]: M3 onboarding check. Exercises
 // the New Song and Import backends headlessly against a scratch copy of a
 // project — it writes into it. Creates a song, verifies its files and sidecar,
-// applies the registration snippets the way a user would paste them, rechecks
-// to completion, and runs an external-MIDI import (analysis + program remap),
-// compiling both songs through the project's real mid2agb.
+// registers it (porydaw writes song_table.inc / songs.h / ld_script.ld
+// directly), verifies idempotency and stale-ID correction, and runs an
+// external-MIDI import (analysis + program remap), compiling both songs
+// through the project's real mid2agb.
 
 namespace {
 
@@ -31,49 +31,12 @@ void check(bool ok, const char *what)
     }
 }
 
-QStringList readAllLines(const QString &path)
+QByteArray readAllBytes(const QString &path)
 {
     QFile f(path);
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+    if (!f.open(QIODevice::ReadOnly))
         return {};
-    QStringList lines;
-    QTextStream in(&f);
-    while (!in.atEnd())
-        lines.append(in.readLine());
-    return lines;
-}
-
-bool writeAllLines(const QString &path, const QStringList &lines)
-{
-    QFile f(path);
-    if (!f.open(QIODevice::WriteOnly | QIODevice::Text))
-        return false;
-    QTextStream out(&f);
-    for (const QString &line : lines)
-        out << line << '\n';
-    return true;
-}
-
-// Pastes a snippet the way the checklist asks the user to: song_table after
-// the last song line, songs.h before the closing #endif, ld_script.ld after
-// the last per-song object line.
-bool pasteSnippet(const QString &path, const QString &snippet, const QString &afterMatch,
-                  bool beforeMatch = false)
-{
-    QStringList lines = readAllLines(path);
-    if (lines.isEmpty())
-        return false;
-    int at = -1;
-    for (int i = 0; i < lines.size(); i++) {
-        if (lines[i].contains(afterMatch))
-            at = i;
-        if (beforeMatch && at >= 0)
-            break; // first match when inserting before
-    }
-    if (at < 0)
-        return false;
-    lines.insert(beforeMatch ? at : at + 1, snippet);
-    return writeAllLines(path, lines);
+    return f.readAll();
 }
 
 bool compilesThroughMid2agb(const QString &mid2agb, const QString &midPath,
@@ -222,37 +185,75 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
     check(!status.inSongTable && !status.inSongsH && !status.complete(),
           "fresh song already looks registered");
 
-    // Paste the snippets exactly as the checklist proposes them.
     RegistrationPlan plan = SongRegistry::makePlan(projectRoot, label, constant,
                                                    QStringLiteral("MUSIC_PLAYER_BGM"));
     check(plan.songId == registeredCount, "proposed song ID != registered song count");
-    check(plan.songTableSnippet.contains(QStringLiteral("song mus_onboardcheck, MUSIC_PLAYER_BGM, 0")),
-          "song_table snippet malformed");
-    check(plan.songsHSnippet.startsWith(QStringLiteral("#define MUS_ONBOARDCHECK"))
-              && plan.songsHSnippet.endsWith(QString::number(plan.songId)),
-          "songs.h snippet malformed");
+    check(plan.songTableLine.contains(QStringLiteral("song mus_onboardcheck, MUSIC_PLAYER_BGM, 0")),
+          "song_table line malformed");
+    check(plan.songsHLine.startsWith(QStringLiteral("#define MUS_ONBOARDCHECK"))
+              && plan.songsHLine.endsWith(QString::number(plan.songId)),
+          "songs.h line malformed");
 
-    check(pasteSnippet(projectRoot + QStringLiteral("/sound/song_table.inc"),
-                       plan.songTableSnippet, QStringLiteral("\tsong ")),
-          "paste song_table snippet");
+    // porydaw writes the registration files itself.
+    QString regError;
+    int songId = -1;
+    check(SongRegistry::registerSong(projectRoot, label, constant,
+                                     QStringLiteral("MUSIC_PLAYER_BGM"), &regError,
+                                     &songId),
+          "registerSong failed");
+    if (!regError.isEmpty())
+        std::fprintf(stderr, "onboardcheck: registerSong: %s\n", qUtf8Printable(regError));
+    check(songId == registeredCount, "registered song ID != registered song count");
+
     status = SongRegistry::checkRegistration(projectRoot, label, constant);
-    check(status.inSongTable && !status.complete(), "partial registration state wrong");
+    check(status.complete(), "registration incomplete after registerSong");
 
-    check(pasteSnippet(projectRoot + QStringLiteral("/include/constants/songs.h"),
-                       plan.songsHSnippet, QStringLiteral("#endif"), true),
-          "paste songs.h snippet");
+    const QString tablePath = projectRoot + QStringLiteral("/sound/song_table.inc");
+    const QString songsHPath = projectRoot + QStringLiteral("/include/constants/songs.h");
+    const QString ldPath = projectRoot + QStringLiteral("/ld_script.ld");
     if (plan.ldApplicable)
-        check(pasteSnippet(projectRoot + QStringLiteral("/ld_script.ld"), plan.ldSnippet,
-                           QStringLiteral("sound/songs/midi/")),
-              "paste ld_script snippet");
+        check(readAllBytes(ldPath).contains(
+                  QStringLiteral("sound/songs/midi/%1.o").arg(label).toUtf8()),
+              "ld_script.ld missing the song's object line");
 
-    status = SongRegistry::checkRegistration(projectRoot, label, constant);
-    check(status.complete(), "registration incomplete after pasting all snippets");
+    // Registering again must be a byte-level no-op.
+    const QByteArray tableBefore = readAllBytes(tablePath);
+    const QByteArray songsHBefore = readAllBytes(songsHPath);
+    const QByteArray ldBefore = readAllBytes(ldPath);
+    check(SongRegistry::registerSong(projectRoot, label, constant,
+                                     QStringLiteral("MUSIC_PLAYER_BGM"), &regError,
+                                     &songId),
+          "second registerSong failed");
+    check(songId == registeredCount, "song ID drifted on re-register");
+    check(readAllBytes(tablePath) == tableBefore
+              && readAllBytes(songsHPath) == songsHBefore
+              && readAllBytes(ldPath) == ldBefore,
+          "re-register was not byte-identical");
 
-    // Replanning after registration must keep the now-real ID stable.
-    plan = SongRegistry::makePlan(projectRoot, label, constant,
-                                  QStringLiteral("MUSIC_PLAYER_BGM"));
-    check(plan.songId == registeredCount, "song ID drifted after registration");
+    // A songs.h define whose ID drifted from the table index gets corrected.
+    {
+        QByteArray tampered = songsHBefore;
+        const QByteArray goodDefine =
+            QStringLiteral("#define %1").arg(constant).toUtf8();
+        const int at = tampered.indexOf(goodDefine);
+        check(at >= 0, "tamper: define not found");
+        int digits = tampered.indexOf('\n', at);
+        QByteArray line = tampered.mid(at, digits - at);
+        line.replace(QByteArray::number(songId), QByteArray::number(songId + 500));
+        tampered.replace(at, digits - at, line);
+        QFile out(songsHPath);
+        check(out.open(QIODevice::WriteOnly) && out.write(tampered) == tampered.size(),
+              "tamper: rewrite songs.h");
+        out.close();
+
+        status = SongRegistry::checkRegistration(projectRoot, label, constant);
+        check(!status.inSongsH, "stale define not detected");
+        check(SongRegistry::registerSong(projectRoot, label, constant,
+                                         QStringLiteral("MUSIC_PLAYER_BGM"), &regError,
+                                         &songId),
+              "registerSong after tamper failed");
+        check(readAllBytes(songsHPath) == songsHBefore, "stale define not corrected");
+    }
 
     check(project.reload(&error), "project reload after registration");
     const SongInfo *registered = nullptr;
@@ -260,7 +261,7 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
         if (s.label == label)
             registered = &s;
     }
-    check(registered && registered->registered, "song not registered after paste");
+    check(registered && registered->registered, "song not registered after registerSong");
     check(registered && registered->id == registeredCount, "registered song ID wrong");
     check(registered && registered->constant == constant,
           "constant not matched from songs.h");
