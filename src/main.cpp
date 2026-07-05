@@ -14,6 +14,8 @@ int runSaveCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &mid2agbPath = QString());
 // onboardcheck.cpp; M3 New Song + import check (writes into the project: use a copy).
 int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath = QString());
+// vgcheck.cpp; voicegroup edit/save/create check (writes into the project: use a copy).
+int runVgCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -39,6 +41,9 @@ int main(int argc, char *argv[])
             onboardCheck + 2 < args.size() ? args[onboardCheck + 2] : QString();
         return runOnboardCheck(args[onboardCheck + 1], mid2agb);
     }
+    const int vgCheck = args.indexOf(QStringLiteral("--vgcheck"));
+    if (vgCheck >= 0 && vgCheck + 2 < args.size())
+        return runVgCheck(args[vgCheck + 1], args[vgCheck + 2]);
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);

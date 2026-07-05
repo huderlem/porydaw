@@ -38,6 +38,7 @@ qt_add_executable(porydaw
     src/editcheck.cpp
     src/savecheck.cpp
     src/onboardcheck.cpp
+    src/vgcheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
@@ -57,6 +58,8 @@ qt_add_executable(porydaw
     src/project/decompproject.h
     src/project/songregistry.cpp
     src/project/songregistry.h
+    src/project/voicegroupsource.cpp
+    src/project/voicegroupsource.h
     src/ui/m4asemantics.cpp
     src/ui/m4asemantics.h
     src/ui/newsongwizard.cpp

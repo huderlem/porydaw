@@ -86,6 +86,11 @@ public:
     // change never disturbs playback track state. velocity 0 releases.
     void previewVoice(uint8_t voice, uint8_t key, uint8_t velocity);
 
+    // Hot: re-copy every track's cached instrument from the voicegroup, so a
+    // voice edit made through voiceForEdit is heard by already-playing tracks
+    // from the next note on (applied at the next callback boundary).
+    void refreshVoices() { m_refreshVoicesCmd.fetch_add(1); }
+
     // Cold: point voice previews at a different voicegroup (the import
     // wizard's mapping page). NOT owned — the caller must call this again
     // with nullptr (restoring the song's voicegroup) before freeing it.
@@ -94,6 +99,17 @@ public:
     bool songLoaded() const { return m_timeline != nullptr; }
     const MidiTimeline *timeline() const { return m_timeline.get(); }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
+
+    // Hot-safe for scalar field pokes only (byte-sized stores the audio
+    // thread re-reads per event; both engine instances share this array).
+    // Pointer fields must never be swapped through this — structural voice
+    // changes go through updateVoicegroup.
+    ToneData *voiceForEdit(int voice)
+    {
+        if (!m_voicegroup || voice < 0 || voice >= VOICEGROUP_SIZE)
+            return nullptr;
+        return &m_voicegroup->voices[voice];
+    }
 
     // Hot transport controls.
     void play();
@@ -151,6 +167,8 @@ private:
     // Voice-preview command: generation<<32 | voice<<16 | key<<8 | velocity.
     std::atomic<uint64_t> m_previewVoiceCmd{0};
     uint8_t m_previewVoiceGen = 0; // UI thread only
+    // Refresh-voices command: bumped by the UI, applied at callback boundary.
+    std::atomic<uint32_t> m_refreshVoicesCmd{0};
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -165,6 +183,7 @@ private:
     int m_previewKey = -1;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
+    uint32_t m_appliedRefreshVoices = 0;
     TimelinePlayer m_player;
 
     // Scratch deinterleave buffers (allocated in init)

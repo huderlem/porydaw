@@ -1,8 +1,16 @@
 #include "mainwindow.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QDockWidget>
+#include <QFormLayout>
+#include <QLineEdit>
+#include <QRegularExpressionValidator>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -21,6 +29,7 @@
 #include <QCloseEvent>
 
 #include <algorithm>
+#include <cstring>
 
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
@@ -165,17 +174,26 @@ void MainWindow::buildUi()
     addDockWidget(Qt::LeftDockWidgetArea, dock);
 
     // Voicegroup browser dock (SPEC §6.1): the current song's instruments,
-    // click-and-hold to audition through the preview engine instance.
-    auto *vgDock = new QDockWidget(tr("Voicegroup"), this);
-    vgDock->setFeatures(QDockWidget::DockWidgetMovable);
-    m_vgBrowser = new VoicegroupBrowser(vgDock);
+    // click-and-hold to audition through the preview engine instance, with
+    // an editor panel for the selected voice.
+    m_vgDock = new QDockWidget(tr("Voicegroup"), this);
+    m_vgDock->setFeatures(QDockWidget::DockWidgetMovable);
+    m_vgBrowser = new VoicegroupBrowser(m_vgDock);
     connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
             [this](int voice, int key, int velocity) {
                 if (m_audioOk)
                     m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
             });
-    vgDock->setWidget(m_vgBrowser);
-    addDockWidget(Qt::LeftDockWidgetArea, vgDock);
+    connect(m_vgBrowser, &VoicegroupBrowser::voiceEdited, this,
+            &MainWindow::onVoiceEdited);
+    connect(m_vgBrowser, &VoicegroupBrowser::saveRequested, this,
+            &MainWindow::saveVoicegroup);
+    connect(m_vgBrowser, &VoicegroupBrowser::revertRequested, this,
+            &MainWindow::revertVoicegroup);
+    connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
+            &MainWindow::newVoicegroup);
+    m_vgDock->setWidget(m_vgBrowser);
+    addDockWidget(Qt::LeftDockWidgetArea, m_vgDock);
 
     // Song viewer: piano roll, automation lanes, other-events strip.
     m_songView = new SongView(this);
@@ -221,9 +239,11 @@ void MainWindow::openProject()
     QElapsedTimer timer;
     timer.start();
 
-    if (!maybeSaveSong())
+    if (!maybeSaveSong() || !maybeSaveVoicegroup())
         return;
     saveViewState(); // against the old project root, before open() swaps it
+    cleanupVgPreview();
+    m_vgSource.reset();
 
     QString error;
     if (!m_project.open(dir, &error)) {
@@ -236,6 +256,7 @@ void MainWindow::openProject()
     m_songView->setSong(nullptr, nullptr);
     m_vgBrowser->setVoicegroup(nullptr);
     m_audio.unloadSong();
+    updateVgDockTitle();
     m_doc.undoStack()->clear();
     m_loadedSongId = -1;
     m_songLabel->clear();
@@ -309,9 +330,10 @@ void MainWindow::loadSong(const SongInfo &song)
 {
     if (!m_audioOk)
         return;
-    if (!maybeSaveSong())
+    if (!maybeSaveSong() || !maybeSaveVoicegroup())
         return;
     saveViewState(); // the outgoing song's, while its view is still up
+    cleanupVgPreview();
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
     QElapsedTimer timer;
@@ -341,6 +363,7 @@ void MainWindow::loadSong(const SongInfo &song)
     m_songView->setSong(nullptr, nullptr);
     m_vgBrowser->setVoicegroup(nullptr);
     m_audio.loadSong(std::move(timeline), vg, currentSongSettings());
+    openVoicegroupSource(song.cfg);
     m_loadedSongId = song.id;
     m_appliedVoicegroupArg = song.cfg.voicegroupArg;
     m_appliedVolume = song.cfg.masterVolume;
@@ -380,11 +403,16 @@ void MainWindow::onDocumentChanged()
 
     const SongCfg &cfg = m_doc.cfg();
     if (cfg.voicegroupArg != m_appliedVoicegroupArg) {
+        // The -G switch replaces the edited voicegroup; the change can't be
+        // blocked here, so the prompt offers Save/Discard only.
+        maybeSaveVoicegroup(/*allowCancel=*/false);
+        cleanupVgPreview();
         QString tried;
         if (LoadedVoiceGroup *vg = loadVoicegroupFor(cfg, &tried)) {
             m_songView->setVoicegroup(nullptr);
             m_vgBrowser->setVoicegroup(nullptr);
             m_audio.updateVoicegroup(vg);
+            openVoicegroupSource(cfg);
             m_songView->setVoicegroup(m_audio.voicegroup());
             updateVoicegroupBrowser();
             m_appliedVoicegroupArg = cfg.voicegroupArg;
@@ -494,7 +522,7 @@ void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
                                   const QString &constant, const QString &player,
                                   const SongCfg &cfg)
 {
-    if (!maybeSaveSong())
+    if (!maybeSaveSong() || !maybeSaveVoicegroup())
         return;
 
     const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
@@ -557,6 +585,7 @@ void MainWindow::updateVoicegroupBrowser()
 {
     if (!m_audio.voicegroup()) {
         m_vgBrowser->setVoicegroup(nullptr);
+        updateVgDockTitle();
         return;
     }
     const QString arg = m_doc.cfg().voicegroupArg.isEmpty()
@@ -564,6 +593,242 @@ void MainWindow::updateVoicegroupBrowser()
                             : m_doc.cfg().voicegroupArg;
     m_vgBrowser->setVoicegroup(m_audio.voicegroup(),
                                QStringLiteral("voicegroup%1").arg(arg));
+    m_vgBrowser->setSource(m_vgSource.get(),
+                           VoicegroupSource::directSoundSymbols(m_project.root()),
+                           VoicegroupSource::progWaveSymbols(m_project.root()),
+                           VoicegroupSource::keysplitInstruments(m_project.root()));
+    updateVgDockTitle();
+}
+
+void MainWindow::openVoicegroupSource(const SongCfg &cfg)
+{
+    m_vgSource = std::make_unique<VoicegroupSource>();
+    QString error;
+    if (!m_vgSource->open(m_project.root(), cfg.voicegroupArg, &error)) {
+        m_vgSource.reset();
+        statusBar()->showMessage(
+            tr("Voicegroup editing unavailable: %1").arg(error), 8000);
+    }
+}
+
+void MainWindow::onVoiceEdited(int slot, bool structural)
+{
+    if (!m_vgSource)
+        return;
+    if (structural) {
+        reloadVoicegroupPreview(slot);
+    } else {
+        m_vgSource->applyScalarsToToneData(slot, m_audio.voiceForEdit(slot));
+        // Playing tracks hold a copy of their instrument; refresh so the
+        // edit is heard from the next note without a pause/play cycle.
+        m_audio.refreshVoices();
+    }
+    updateVgDockTitle();
+}
+
+void MainWindow::reloadVoicegroupPreview(int keepSlot)
+{
+    const QString previewDir =
+        m_project.root() + QStringLiteral("/.porydaw/vgpreview");
+    QDir().mkpath(previewDir);
+    {
+        QFile out(previewDir + QLatin1Char('/') + m_vgSource->loadName()
+                  + QStringLiteral(".inc"));
+        if (!out.open(QIODevice::WriteOnly)) {
+            statusBar()->showMessage(tr("Cannot write voicegroup preview file."), 8000);
+            return;
+        }
+        out.write(m_vgSource->renderPreview());
+    }
+    // The config's voicegroup paths are searched before the project's own
+    // (voicegroup_loader.c discovery), so the preview file shadows the real
+    // one while samples and keysplits still resolve from the project.
+    VoicegroupLoaderConfig config;
+    std::memset(&config, 0, sizeof(config));
+    std::strncpy(config.voicegroupPaths[0], ".porydaw/vgpreview", VG_MAX_PATH_LEN - 1);
+    config.voicegroupPathCount = 1;
+    LoadedVoiceGroup *vg =
+        voicegroup_load(m_project.root().toLocal8Bit().constData(),
+                        m_vgSource->loadName().toLocal8Bit().constData(), &config);
+    if (!vg) {
+        statusBar()->showMessage(
+            tr("Edited voicegroup failed to load — keeping the previous sound."), 8000);
+        return;
+    }
+    swapVoicegroup(vg, keepSlot);
+}
+
+void MainWindow::swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot)
+{
+    m_songView->setVoicegroup(nullptr);
+    m_vgBrowser->setVoicegroup(nullptr);
+    m_audio.updateVoicegroup(vg);
+    m_songView->setVoicegroup(m_audio.voicegroup());
+    updateVoicegroupBrowser();
+    m_vgBrowser->selectSlot(keepSlot);
+}
+
+void MainWindow::saveVoicegroup()
+{
+    if (!m_vgSource || !m_vgSource->dirty())
+        return;
+    if (!confirmVoicegroupWrite())
+        return;
+    QString error;
+    if (!m_vgSource->save(&error)) {
+        QMessageBox::warning(this, tr("Save Voicegroup"), error);
+        return;
+    }
+    cleanupVgPreview();
+    // Reload from the project: verifies the saved file parses and replaces
+    // any preview-loaded state.
+    const int slot = m_vgBrowser->currentSlot();
+    QString tried;
+    if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_doc.cfg(), &tried))
+        swapVoicegroup(vg, slot);
+    statusBar()->showMessage(tr("Saved %1").arg(m_vgSource->filePath()), 5000);
+    updateVgDockTitle();
+}
+
+void MainWindow::revertVoicegroup()
+{
+    if (!m_vgSource)
+        return;
+    QString error;
+    if (!m_vgSource->reload(&error)) {
+        QMessageBox::warning(this, tr("Revert Voicegroup"), error);
+        return;
+    }
+    cleanupVgPreview();
+    const int slot = m_vgBrowser->currentSlot();
+    QString tried;
+    if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_doc.cfg(), &tried))
+        swapVoicegroup(vg, slot);
+    updateVgDockTitle();
+}
+
+bool MainWindow::maybeSaveVoicegroup(bool allowCancel)
+{
+    if (!m_vgSource || !m_vgSource->dirty())
+        return true;
+    QMessageBox::StandardButtons buttons = QMessageBox::Save | QMessageBox::Discard;
+    if (allowCancel)
+        buttons |= QMessageBox::Cancel;
+    const auto choice = QMessageBox::question(
+        this, tr("Unsaved Voicegroup Changes"),
+        tr("The voicegroup %1 has unsaved voice edits. Save them?")
+            .arg(QFileInfo(m_vgSource->filePath()).fileName()),
+        buttons, QMessageBox::Save);
+    if (choice == QMessageBox::Cancel)
+        return false;
+    if (choice == QMessageBox::Save) {
+        if (!confirmVoicegroupWrite())
+            return false;
+        QString error;
+        if (!m_vgSource->save(&error)) {
+            QMessageBox::warning(this, tr("Save Voicegroup"), error);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool MainWindow::confirmVoicegroupWrite()
+{
+    QSettings settings;
+    const QString key = QStringLiteral("allowVoicegroupWrites");
+    if (settings.value(key, false).toBool())
+        return true;
+    QMessageBox box(QMessageBox::Question, tr("Edit Voicegroup Files?"),
+                    tr("porydaw will rewrite only the edited voice lines of the "
+                       "voicegroup file — every other byte is preserved.\n\n"
+                       "Allow porydaw to edit voicegroup files in this project?"),
+                    QMessageBox::Yes | QMessageBox::No, this);
+    auto *dontAsk = new QCheckBox(tr("Don't ask again"), &box);
+    box.setCheckBox(dontAsk);
+    if (box.exec() != QMessageBox::Yes)
+        return false;
+    if (dontAsk->isChecked())
+        settings.setValue(key, true);
+    return true;
+}
+
+void MainWindow::cleanupVgPreview()
+{
+    if (!m_project.isOpen())
+        return;
+    QDir(m_project.root() + QStringLiteral("/.porydaw/vgpreview")).removeRecursively();
+}
+
+void MainWindow::updateVgDockTitle()
+{
+    const bool dirty = m_vgSource && m_vgSource->dirty();
+    m_vgDock->setWindowTitle(dirty ? tr("Voicegroup*") : tr("Voicegroup"));
+}
+
+void MainWindow::newVoicegroup()
+{
+    if (!m_project.isOpen())
+        return;
+    if (!QDir(m_project.root() + QStringLiteral("/sound/voicegroups")).exists()) {
+        QMessageBox::information(
+            this, tr("New Voicegroup"),
+            tr("This project keeps all voicegroups in one file; creating new "
+               "per-file voicegroups isn't supported for that layout."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("New Voicegroup"));
+    auto *form = new QFormLayout(&dialog);
+    auto *nameEdit = new QLineEdit(&dialog);
+    nameEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral("[A-Za-z][A-Za-z0-9_]*")), nameEdit));
+    form->addRow(tr("Name"), nameEdit);
+    auto *sourceCombo = new QComboBox(&dialog);
+    if (m_vgSource)
+        sourceCombo->addItem(tr("Copy of %1")
+                                 .arg(QFileInfo(m_vgSource->filePath()).fileName()),
+                             m_vgSource->filePath());
+    sourceCombo->addItem(tr("Empty (dummy template)"), QString());
+    form->addRow(tr("Start from"), sourceCombo);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const QString name = nameEdit->text().trimmed();
+    if (name.isEmpty())
+        return;
+    if (SongRegistry::voicegroupArgs(m_project.root())
+            .contains(QStringLiteral("_") + name)) {
+        QMessageBox::warning(this, tr("New Voicegroup"),
+                             tr("A voicegroup named %1 already exists.").arg(name));
+        return;
+    }
+    if (!confirmVoicegroupWrite())
+        return;
+
+    const QString copyFrom = sourceCombo->currentData().toString();
+    const QString sectionLabel =
+        (!copyFrom.isEmpty() && m_vgSource && copyFrom == m_vgSource->filePath())
+        ? m_vgSource->sectionLabel()
+        : QString();
+    QString error;
+    if (!VoicegroupSource::createVoicegroup(m_project.root(), name, copyFrom,
+                                            sectionLabel, &error)
+        || !VoicegroupSource::appendIncludeLine(m_project.root(), name, &error)) {
+        QMessageBox::warning(this, tr("New Voicegroup"), error);
+        return;
+    }
+    statusBar()->showMessage(
+        tr("Created sound/voicegroups/%1.inc — assign it to a song in Song "
+           "Settings (voicegroup _%1).")
+            .arg(name),
+        10000);
 }
 
 bool MainWindow::maybeSaveSong()
@@ -607,8 +872,9 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSaveSong()) {
+    if (maybeSaveSong() && maybeSaveVoicegroup()) {
         saveViewState();
+        cleanupVgPreview();
         event->accept();
     } else {
         event->ignore();
@@ -727,6 +993,67 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     m_audio.previewVoice(0, 60, 0);
     qInfo("selftest: voice audition through the preview engine OK");
 
+    // Voicegroup editing: a scalar edit pokes the live ToneData, a sample
+    // swap goes through the .porydaw/vgpreview shadow reload, and Revert
+    // restores the on-disk state — all without changing project files.
+    bool vgEditOk = true;
+    if (m_vgSource) {
+        int dsSlot = -1, donorSlot = -1;
+        for (int i = 0; i < VOICEGROUP_SIZE; i++) {
+            const VgVoice *v = m_vgSource->voiceAt(i);
+            if (!v || vgMacroIsCgb(v->macro))
+                continue;
+            if (dsSlot < 0)
+                dsSlot = i;
+            else if (donorSlot < 0 && v->symbol != m_vgSource->voiceAt(dsSlot)->symbol)
+                donorSlot = i;
+        }
+        if (dsSlot >= 0) {
+            m_vgBrowser->selectSlot(dsSlot); // exercises the editor panel too
+            QByteArray fileBefore;
+            {
+                QFile in(m_vgSource->filePath());
+                in.open(QIODevice::ReadOnly);
+                fileBefore = in.readAll();
+            }
+            VgVoice v = *m_vgSource->voiceAt(dsSlot);
+            v.release = v.release == 25 ? 26 : 25;
+            m_vgSource->setVoice(dsSlot, v);
+            onVoiceEdited(dsSlot, false);
+            vgEditOk = m_vgSource->dirty()
+                && m_audio.voicegroup()->voices[dsSlot].release == uint8_t(v.release);
+            if (donorSlot >= 0) {
+                const QByteArray donorName(m_audio.voicegroup()->voiceNames[donorSlot]);
+                v.symbol = m_vgSource->voiceAt(donorSlot)->symbol;
+                m_vgSource->setVoice(dsSlot, v);
+                onVoiceEdited(dsSlot, true);
+                vgEditOk = vgEditOk
+                    && QByteArray(m_audio.voicegroup()->voiceNames[dsSlot]) == donorName
+                    && m_audio.transport() == Transport::Playing;
+            }
+            revertVoicegroup();
+            QByteArray fileAfter;
+            {
+                QFile in(m_vgSource->filePath());
+                in.open(QIODevice::ReadOnly);
+                fileAfter = in.readAll();
+            }
+            vgEditOk = vgEditOk && !m_vgSource->dirty() && fileAfter == fileBefore
+                && !QDir(m_project.root() + QStringLiteral("/.porydaw/vgpreview")).exists();
+            if (vgEditOk)
+                qInfo("selftest: voicegroup edit + preview reload + revert OK "
+                      "(slot %d, donor %d)",
+                      dsSlot, donorSlot);
+            else
+                qWarning("selftest: voicegroup edit FAILED (slot %d, donor %d)", dsSlot,
+                         donorSlot);
+        } else {
+            qInfo("selftest: voicegroup edit skipped (no sample voices)");
+        }
+    } else {
+        qInfo("selftest: voicegroup edit skipped (no editable source)");
+    }
+
     // App settings: the global engine knobs (SPEC §7) re-applied mid-playback
     // through updateSettings — polyphony clamp, mix-rate rebuild (reverb delay
     // line resize), analog filter — must keep the transport running.
@@ -770,7 +1097,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
           m_audio.maxPcmChannels());
 
     bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0
-        && m_audio.playheadSamples() >= posBeforeEdit;
+        && m_audio.playheadSamples() >= posBeforeEdit && vgEditOk;
 
     // M2 polish: edit-cursor seek mid-playback, then play-from-cursor out of
     // Stopped (both go through AudioEngine::seek + chase). Loop disabled so

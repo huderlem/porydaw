@@ -238,6 +238,10 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
         voicegroup_free(m_voicegroup);
     m_voicegroup = voicegroup;
     m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
+    // Re-latch program changes: the tracks' instrument state still points
+    // into the freed voices array until the chase reapplies it.
+    if (m_timeline)
+        TimelinePlayer::chase(m_engine.get(), m_timeline.get(), m_playhead.load());
     resetPreviewEngine();
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -445,6 +449,14 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyMuteTransition();
     applyPreviewNote();
     applyPreviewVoice();
+
+    // Voice edits: tracks hold a ToneData copy taken at program change, so a
+    // scalar edit isn't heard until the copies are refreshed.
+    const uint32_t refreshGen = m_refreshVoicesCmd.load();
+    if (refreshGen != m_appliedRefreshVoices) {
+        m_appliedRefreshVoices = refreshGen;
+        m4a_engine_refresh_voices(m_engine.get());
+    }
 
     M4AEngine *engine = m_engine.get();
     uint32_t done = 0;

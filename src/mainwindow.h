@@ -2,12 +2,16 @@
 
 #include <QMainWindow>
 
+#include <memory>
+
 #include "audio/audioengine.h"
 #include "core/songdocument.h"
 #include "project/decompproject.h"
+#include "project/voicegroupsource.h"
 #include "ui/enginesettingsdialog.h"
 
 class QAction;
+class QDockWidget;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -43,6 +47,10 @@ private slots:
     void openRegistrationChecklist();
     void onDocumentChanged();
     void uiTick();
+    void onVoiceEdited(int slot, bool structural);
+    void saveVoicegroup();
+    void revertVoicegroup();
+    void newVoicegroup();
 
 private:
     void buildUi();
@@ -59,6 +67,23 @@ private:
     void updateVoicegroupBrowser();
     // Prompts to save a dirty document; false = user cancelled the action.
     bool maybeSaveSong();
+    // Same for unsaved voicegroup edits. allowCancel=false (the in-document
+    // -G switch, which can't be blocked) prompts Save/Discard only.
+    bool maybeSaveVoicegroup(bool allowCancel = true);
+    // Locates + parses the source behind the loaded voicegroup (nullptr on
+    // exotic layouts — the editor degrades to read-only).
+    void openVoicegroupSource(const SongCfg &cfg);
+    // Auditions unsaved structural edits: renders the edited source into
+    // .porydaw/vgpreview/ and reloads through the loader's config override,
+    // which shadows the real file without touching it.
+    void reloadVoicegroupPreview(int keepSlot);
+    // Swaps in a freshly loaded voicegroup, reattaching the views around it.
+    void swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot);
+    // One-time (per "don't ask again") confirmation that porydaw may write
+    // voicegroup files — the opt-in extension of the songs-only policy.
+    bool confirmVoicegroupWrite();
+    void cleanupVgPreview();
+    void updateVgDockTitle();
     // Sidecar view state (SPEC §4.4): written whenever the loaded song is
     // let go (song switch, project switch, app close). Cosmetic; silent on
     // failure.
@@ -81,6 +106,7 @@ private:
     EngineSettings m_engineSettings;
     DecompProject m_project;
     SongDocument m_doc;
+    std::unique_ptr<VoicegroupSource> m_vgSource;
     int m_loadedSongId = -1;
     // Engine-applied cfg values, to react only to real changes on edits.
     QString m_appliedVoicegroupArg;
@@ -90,6 +116,7 @@ private:
     QListWidget *m_songList = nullptr;
     SongView *m_songView = nullptr;
     VoicegroupBrowser *m_vgBrowser = nullptr;
+    QDockWidget *m_vgDock = nullptr;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_checklistAction = nullptr;
