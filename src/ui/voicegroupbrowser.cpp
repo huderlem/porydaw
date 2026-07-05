@@ -252,9 +252,13 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
                                   const QStringList &sampleSymbols,
                                   const QStringList &waveSymbols,
                                   const QList<QPair<QString, QString>> &keysplits,
-                                  const QStringList &drumkits)
+                                  const QStringList &drumkits,
+                                  const VgAdsrDefaults &adsrDefaults)
 {
+    if (source != m_source)
+        m_adsrHistory.clear();
     m_source = source;
+    m_adsrDefaults = adsrDefaults;
     m_waveSymbols = waveSymbols;
     m_drumkitChoices = drumkits;
     m_keysplitTables.clear();
@@ -471,14 +475,31 @@ void VoicegroupBrowser::commitEdit()
         v.keysplitTable.clear();
     }
 
+    // Crossing between envelope families whose numbers mean different things
+    // (a CGB attack of 0 is instant; a DirectSound attack of 0 is silence) or
+    // leaving an envelope-less keysplit/drumkit: carrying the digits across
+    // gives a nonsense envelope, so remember the outgoing family's values for
+    // this slot and adopt the incoming family's remembered or project-typical
+    // ones instead.
+    const int oldFamily = vgAdsrFamily(cur->macro);
+    const int newFamily = vgAdsrFamily(v.macro);
+    const bool crossedFamily = newFamily != oldFamily
+        && (oldFamily < 0 || newFamily < 0
+            || vgMacroIsCgb(v.macro) != vgMacroIsCgb(cur->macro));
+    if (crossedFamily && oldFamily >= 0)
+        m_adsrHistory[slot][oldFamily] =
+            VgAdsr{cur->attack, cur->decay, cur->sustain, cur->release};
+
     if (v.macro != VgMacro::Keysplit && !macroIsDrumkit(v.macro)) {
-        if (cur->macro == VgMacro::Keysplit || macroIsDrumkit(cur->macro)) {
-            // Leaving keysplit/drumkit: their scalar fields are all zero —
-            // start from the plain full-sustain envelope instead of a silent one.
-            v.attack = 255;
-            v.decay = 0;
-            v.sustain = 255;
-            v.release = 0;
+        if (crossedFamily) {
+            const QHash<int, VgAdsr> remembered = m_adsrHistory.value(slot);
+            const VgAdsr adopted = remembered.contains(newFamily)
+                ? remembered.value(newFamily)
+                : vgDefaultAdsr(m_adsrDefaults, v.macro, v.symbol);
+            v.attack = adopted.attack;
+            v.decay = adopted.decay;
+            v.sustain = adopted.sustain;
+            v.release = adopted.release;
         } else {
             v.attack = m_attackSpin->value();
             v.decay = m_decaySpin->value();
@@ -489,8 +510,8 @@ void VoicegroupBrowser::commitEdit()
         v.duty = m_dutyCombo->currentIndex();
         v.period = m_periodCombo->currentIndex();
         if (vgMacroIsCgb(v.macro)) {
-            // A type change can carry DirectSound-range ADSR; the spin
-            // ranges only narrow when the editor repopulates.
+            // A remembered envelope can hold a file value outside the CGB
+            // ranges (the file is parsed raw; only the spin ranges narrow).
             v.attack = std::min(v.attack, 7);
             v.decay = std::min(v.decay, 7);
             v.sustain = std::min(v.sustain, 15);

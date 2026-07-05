@@ -511,6 +511,128 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
         std::printf("vgcheck: skipping create check (no sound/voicegroups/ dir)\n");
     }
 
+    // ---- typical-ADSR scan: deterministic modes from a synthetic mini-project ----
+    {
+        const int before = failures;
+        const QString fakeRoot = projectRoot + QStringLiteral("/.porydaw/adsrcheck");
+        QDir().mkpath(fakeRoot + QStringLiteral("/sound/voicegroups"));
+        QFile out(fakeRoot + QStringLiteral("/sound/voicegroups/adsrcheck.inc"));
+        if (!out.open(QIODevice::WriteOnly)) {
+            std::fprintf(stderr, "vgcheck: cannot write adsrcheck voicegroup\n");
+            failures++;
+        } else {
+            out.write(
+                "voicegroup_adsrcheck::\n"
+                "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0 @ filler: release 0\n"
+                "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0\n"
+                "\tvoice_square_1 60, 0, 0, 2, 1, 2, 10, 3\n"
+                "\tvoice_square_1 60, 0, 0, 2, 1, 2, 10, 3\n"
+                "\tvoice_square_1 60, 0, 0, 2, 2, 0, 12, 1\n"
+                "\tvoice_square_2 60, 0, 2, 9, 2, 20, 11 @ masks to 1 2 4 3\n"
+                "\tvoice_directsound 60, 0, AdsrCheckA, 255, 0, 255, 165\n"
+                "\tvoice_directsound_no_resample 60, 0, AdsrCheckA, 255, 0, 255, 165\n"
+                "\tvoice_directsound 60, 0, AdsrCheckA, 200, 100, 128, 216\n"
+                "\tvoice_directsound 60, 0, AdsrCheckB, 0, 0, 255, 165 @ silent: attack 0\n"
+                "\tvoice_noise 60, 0, 0, 1, 0, 13, 2\n");
+            out.close();
+            const VgAdsrDefaults defaults = VoicegroupSource::typicalAdsr(fakeRoot);
+            const auto expectAdsr = [&failures](const char *what, bool present,
+                                                const VgAdsr &got, int a, int d, int s,
+                                                int r) {
+                if (!present || got.attack != a || got.decay != d || got.sustain != s
+                    || got.release != r) {
+                    std::fprintf(stderr,
+                                 "vgcheck: FAIL: typicalAdsr %s = %d %d %d %d "
+                                 "(present %d), expected %d %d %d %d\n",
+                                 what, got.attack, got.decay, got.sustain, got.release,
+                                 int(present), a, d, s, r);
+                    failures++;
+                }
+            };
+            const int sq1 = vgAdsrFamily(VgMacro::Square1);
+            const int sq2 = vgAdsrFamily(VgMacro::Square2Alt); // variants collapse
+            const int ds = vgAdsrFamily(VgMacro::DirectSoundNoResample);
+            const int noise = vgAdsrFamily(VgMacro::Noise);
+            expectAdsr("Square1 family", defaults.byFamily.contains(sq1),
+                       defaults.byFamily.value(sq1), 1, 2, 10, 3);
+            expectAdsr("Square2 family", defaults.byFamily.contains(sq2),
+                       defaults.byFamily.value(sq2), 1, 2, 4, 3);
+            expectAdsr("DirectSound family", defaults.byFamily.contains(ds),
+                       defaults.byFamily.value(ds), 255, 0, 255, 165);
+            expectAdsr("Noise family", defaults.byFamily.contains(noise),
+                       defaults.byFamily.value(noise), 1, 0, 13, 2);
+            expectAdsr("symbol AdsrCheckA",
+                       defaults.bySymbol.contains(QStringLiteral("AdsrCheckA")),
+                       defaults.bySymbol.value(QStringLiteral("AdsrCheckA")),
+                       255, 0, 255, 165);
+            if (defaults.bySymbol.contains(QStringLiteral("AdsrCheckB"))) {
+                std::fprintf(stderr,
+                             "vgcheck: FAIL: silent AdsrCheckB envelope not excluded\n");
+                failures++;
+            }
+            // Adoption order: symbol beats family beats the built-in fallback.
+            expectAdsr("adopt via symbol", true,
+                       vgDefaultAdsr(defaults, VgMacro::DirectSound,
+                                     QStringLiteral("AdsrCheckA")),
+                       255, 0, 255, 165);
+            expectAdsr("adopt via family", true,
+                       vgDefaultAdsr(defaults, VgMacro::Square1Alt, QString()),
+                       1, 2, 10, 3);
+            expectAdsr("adopt CGB fallback", true,
+                       vgDefaultAdsr(defaults, VgMacro::ProgWave,
+                                     QStringLiteral("NoSuchWave")),
+                       0, 0, 15, 3);
+            expectAdsr("adopt DirectSound fallback", true,
+                       vgDefaultAdsr(VgAdsrDefaults(), VgMacro::DirectSound, QString()),
+                       255, 0, 255, 165);
+            if (failures == before)
+                std::printf("vgcheck: typical-ADSR synthetic scan OK\n");
+        }
+        QDir(fakeRoot).removeRecursively();
+    }
+
+    // ---- typical-ADSR scan over the real project: every suggestion audible ----
+    {
+        const int before = failures;
+        const VgAdsrDefaults defaults = VoicegroupSource::typicalAdsr(projectRoot);
+        for (auto it = defaults.byFamily.constBegin(); it != defaults.byFamily.constEnd();
+             ++it) {
+            const bool cgb = it.key() != vgAdsrFamily(VgMacro::DirectSound);
+            const VgAdsr &a = it.value();
+            const int maxAdr = cgb ? 7 : 255;
+            if (a.release <= 0 || a.release > maxAdr || a.attack < 0 || a.attack > maxAdr
+                || a.decay < 0 || a.decay > maxAdr || a.sustain < 0
+                || a.sustain > (cgb ? 15 : 255) || (!cgb && a.attack == 0)) {
+                std::fprintf(stderr,
+                             "vgcheck: FAIL: project typical ADSR for %s unusable: "
+                             "%d %d %d %d\n",
+                             qUtf8Printable(vgMacroDisplayName(VgMacro(it.key()))),
+                             a.attack, a.decay, a.sustain, a.release);
+                failures++;
+            } else {
+                std::printf("vgcheck: typical %s ADSR: %d %d %d %d\n",
+                            qUtf8Printable(vgMacroDisplayName(VgMacro(it.key()))),
+                            a.attack, a.decay, a.sustain, a.release);
+            }
+        }
+        for (auto it = defaults.bySymbol.constBegin(); it != defaults.bySymbol.constEnd();
+             ++it) {
+            const VgAdsr &a = it.value();
+            if (a.release <= 0 || a.release > 255 || a.attack < 0 || a.attack > 255
+                || a.decay < 0 || a.decay > 255 || a.sustain < 0 || a.sustain > 255) {
+                std::fprintf(stderr,
+                             "vgcheck: FAIL: project typical ADSR for symbol %s "
+                             "unusable: %d %d %d %d\n",
+                             qUtf8Printable(it.key()), a.attack, a.decay, a.sustain,
+                             a.release);
+                failures++;
+            }
+        }
+        if (failures == before)
+            std::printf("vgcheck: project typical-ADSR scan OK (%d symbols)\n",
+                        int(defaults.bySymbol.size()));
+    }
+
     voicegroup_free(baseline);
     std::printf("vgcheck: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

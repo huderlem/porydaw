@@ -785,7 +785,8 @@ void MainWindow::updateVoicegroupBrowser()
                            VoicegroupSource::directSoundSymbols(m_project.root()),
                            VoicegroupSource::progWaveSymbols(m_project.root()),
                            VoicegroupSource::keysplitInstruments(m_project.root()),
-                           VoicegroupSource::drumkitInstruments(m_project.root()));
+                           VoicegroupSource::drumkitInstruments(m_project.root()),
+                           VoicegroupSource::typicalAdsr(m_project.root()));
     updateVgDockTitle();
 }
 

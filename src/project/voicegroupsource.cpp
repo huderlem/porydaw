@@ -308,6 +308,43 @@ bool vgMacroIsCgb(VgMacro macro)
     }
 }
 
+int vgAdsrFamily(VgMacro macro)
+{
+    switch (macro) {
+    case VgMacro::DirectSound:
+    case VgMacro::DirectSoundNoResample:
+    case VgMacro::DirectSoundAlt:
+        return int(VgMacro::DirectSound);
+    case VgMacro::Square1:
+    case VgMacro::Square1Alt:
+        return int(VgMacro::Square1);
+    case VgMacro::Square2:
+    case VgMacro::Square2Alt:
+        return int(VgMacro::Square2);
+    case VgMacro::ProgWave:
+    case VgMacro::ProgWaveAlt:
+        return int(VgMacro::ProgWave);
+    case VgMacro::Noise:
+    case VgMacro::NoiseAlt:
+        return int(VgMacro::Noise);
+    case VgMacro::Keysplit:
+    case VgMacro::KeysplitAll:
+        return -1;
+    }
+    return -1;
+}
+
+VgAdsr vgDefaultAdsr(const VgAdsrDefaults &defaults, VgMacro macro,
+                     const QString &symbol)
+{
+    if (!symbol.isEmpty() && defaults.bySymbol.contains(symbol))
+        return defaults.bySymbol.value(symbol);
+    const int family = vgAdsrFamily(macro);
+    if (defaults.byFamily.contains(family))
+        return defaults.byFamily.value(family);
+    return vgMacroIsCgb(macro) ? VgAdsr{0, 0, 15, 3} : VgAdsr{255, 0, 255, 165};
+}
+
 bool vgVoiceStructuralChange(const VgVoice &before, const VgVoice &after)
 {
     return before.macro != after.macro || before.symbol != after.symbol
@@ -763,6 +800,103 @@ QStringList VoicegroupSource::drumkitInstruments(const QString &projectRoot)
 QStringList VoicegroupSource::progWaveSymbols(const QString &projectRoot)
 {
     return symbolsFromFiles({projectRoot + QStringLiteral("/sound/programmable_wave_data.inc")});
+}
+
+namespace {
+
+// Envelopes are counted encoded (attack<<24 | decay<<16 | sustain<<8 |
+// release); the mode tie-breaks on the smaller code so the result doesn't
+// depend on directory iteration order.
+VgAdsr decodeAdsr(quint32 code)
+{
+    return VgAdsr{int(code >> 24), int((code >> 16) & 0xFF),
+                  int((code >> 8) & 0xFF), int(code & 0xFF)};
+}
+
+quint32 adsrModeCode(const QHash<quint32, int> &counts)
+{
+    quint32 best = 0;
+    int bestCount = 0;
+    for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
+        if (it.value() > bestCount || (it.value() == bestCount && it.key() < best)) {
+            best = it.key();
+            bestCount = it.value();
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+VgAdsrDefaults VoicegroupSource::typicalAdsr(const QString &projectRoot)
+{
+    QHash<int, QHash<quint32, int>> familyCounts;
+    QHash<QString, QHash<quint32, int>> symbolCounts;
+    for (const QString &path : voicegroupFiles(projectRoot)) {
+        bool ok = false;
+        const QByteArray content = readAllBytes(path, &ok);
+        if (!ok)
+            continue;
+        bool endsWithNewline = false;
+        for (const QByteArray &raw : splitLines(content, &endsWithNewline)) {
+            int contentStart = 0, contentEnd = 0;
+            contentBounds(raw, &contentStart, &contentEnd);
+            const QByteArray text = raw.mid(contentStart, contentEnd - contentStart);
+            const MacroDef *matched = nullptr;
+            for (const MacroDef &def : kEditableMacros) {
+                const int wordLen = int(qstrlen(def.word));
+                if (def.requireSpace
+                        ? (text.startsWith(def.word) && text.size() > wordLen
+                           && text[wordLen] == ' ')
+                        : text.startsWith(def.word)) {
+                    matched = &def;
+                    break;
+                }
+            }
+            if (!matched || vgAdsrFamily(matched->macro) < 0)
+                continue;
+            const QList<QByteArray> args =
+                text.mid(int(qstrlen(matched->word))).split(',');
+            if (args.size() != macroArgCount(matched->macro))
+                continue;
+            int values[4];
+            bool valid = true;
+            for (int i = 0; i < 4 && valid; i++) {
+                const QByteArray piece = args.at(args.size() - 4 + i).trimmed();
+                valid = isIntArg(piece);
+                values[i] = piece.toInt();
+            }
+            if (!valid)
+                continue;
+            // Count the values the engine would see (the loader's packing:
+            // CGB fields masked, DirectSound fields truncated to a byte).
+            const bool cgb = vgMacroIsCgb(matched->macro);
+            const int attack = cgb ? values[0] & 0x07 : uint8_t(values[0]);
+            const int decay = cgb ? values[1] & 0x07 : uint8_t(values[1]);
+            const int sustain = cgb ? values[2] & 0x0F : uint8_t(values[2]);
+            const int release = cgb ? values[3] & 0x07 : uint8_t(values[3]);
+            // Only envelopes worth suggesting count: release 0 cuts off with
+            // a click and a DirectSound attack of 0 never sounds at all.
+            // This also drops the release-0 filler squares padding unused
+            // slots, which would otherwise be the runaway Square 1 mode.
+            if (release == 0 || (!cgb && attack == 0))
+                continue;
+            const quint32 code = quint32(attack) << 24 | quint32(decay) << 16
+                | quint32(sustain) << 8 | quint32(release);
+            familyCounts[vgAdsrFamily(matched->macro)][code]++;
+            if (vgMacroHasSymbol(matched->macro)) {
+                const QByteArray symbol = args.at(2).trimmed();
+                if (!symbol.isEmpty())
+                    symbolCounts[QString::fromUtf8(symbol)][code]++;
+            }
+        }
+    }
+    VgAdsrDefaults defaults;
+    for (auto it = familyCounts.constBegin(); it != familyCounts.constEnd(); ++it)
+        defaults.byFamily.insert(it.key(), decodeAdsr(adsrModeCode(it.value())));
+    for (auto it = symbolCounts.constBegin(); it != symbolCounts.constEnd(); ++it)
+        defaults.bySymbol.insert(it.key(), decodeAdsr(adsrModeCode(it.value())));
+    return defaults;
 }
 
 bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QString &name,

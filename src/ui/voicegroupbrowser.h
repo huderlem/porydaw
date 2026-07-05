@@ -35,10 +35,13 @@ public:
     // when none could be located (editor shows why). Not owned; clear before
     // the source is destroyed. The symbol lists feed the sample/wave/drumkit
     // combos; keysplit instruments appear at the top of the sample list.
+    // adsrDefaults seeds the envelope a voice adopts on a family-crossing
+    // type change (project-typical values; see VoicegroupSource::typicalAdsr).
     void setSource(VoicegroupSource *source, const QStringList &sampleSymbols,
                    const QStringList &waveSymbols,
                    const QList<QPair<QString, QString>> &keysplits,
-                   const QStringList &drumkits);
+                   const QStringList &drumkits,
+                   const VgAdsrDefaults &adsrDefaults = VgAdsrDefaults());
 
     int currentSlot() const;
     void selectSlot(int slot);
@@ -76,6 +79,12 @@ private:
     QStringList m_waveSymbols;
     QStringList m_drumkitChoices; // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
+    VgAdsrDefaults m_adsrDefaults;
+    // The envelope each slot last had in each family, so switching a voice's
+    // type away and back restores it. Keyed slot -> vgAdsrFamily(); survives
+    // the setSource() that follows every structural edit and resets when the
+    // source object changes (a different voicegroup/song was loaded).
+    QHash<int, QHash<int, VgAdsr>> m_adsrHistory;
     bool m_updating = false;
 
     QWidget *m_editor = nullptr;

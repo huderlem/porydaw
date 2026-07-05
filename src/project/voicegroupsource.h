@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QPair>
 #include <QString>
 #include <QStringList>
@@ -62,6 +63,35 @@ struct VgVoice {
     }
     bool operator!=(const VgVoice &o) const { return !(*this == o); }
 };
+
+// One ADSR envelope, in the raw macro-argument scale of its voice family
+// (CGB: A/D/R 0-7, S 0-15; DirectSound: 0-255 each).
+struct VgAdsr {
+    int attack = 0;
+    int decay = 0;
+    int sustain = 0;
+    int release = 0;
+};
+
+// The envelope family a macro's ADSR values belong to: the _alt/no_resample
+// variants collapse onto their base macro (identical envelope semantics).
+// -1 for keysplit/drumkit voices, which carry no envelope of their own.
+int vgAdsrFamily(VgMacro macro);
+
+// The most common envelopes observed across a project's voicegroups, keyed
+// by instrument symbol and by envelope family. Silent or clicking envelopes
+// never qualify (see typicalAdsr), so a hit is always audible.
+struct VgAdsrDefaults {
+    QHash<QString, VgAdsr> bySymbol; // DirectSound sample / prog-wave symbol
+    QHash<int, VgAdsr> byFamily;     // vgAdsrFamily() key
+};
+
+// The envelope a voice should adopt when it switches into a new envelope
+// family: the project-typical envelope for its instrument symbol, then for
+// its family, then a full-sustain fallback with a short release tail (an
+// instant release-0 cutoff clicks audibly).
+VgAdsr vgDefaultAdsr(const VgAdsrDefaults &defaults, VgMacro macro,
+                     const QString &symbol);
 
 // A voice edit is "structural" when audio can't be updated by poking scalar
 // ToneData fields: the macro (voice type) or a sample/wave symbol changed, so
@@ -130,6 +160,11 @@ public:
     // Drumkit sub-voicegroups observed across the project's voicegroups
     // (voice_keysplit_all targets), sorted.
     static QStringList drumkitInstruments(const QString &projectRoot);
+    // Scans every voicegroup for the most common ADSR per symbol and per
+    // family, skipping envelopes that click (release 0) or never sound
+    // (DirectSound attack 0) — which also excludes the release-0 filler
+    // squares that pad unused slots and would otherwise dominate the counts.
+    static VgAdsrDefaults typicalAdsr(const QString &projectRoot);
 
     // Writes sound/voicegroups/<name>.inc matching the siblings' header style
     // and line endings. copyFromFile/copySectionLabel name an existing
