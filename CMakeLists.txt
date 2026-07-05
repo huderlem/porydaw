@@ -92,6 +92,11 @@ endif()
 
 if(WIN32)
     set_target_properties(porydaw PROPERTIES WIN32_EXECUTABLE TRUE)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        # MinGW: statically link libgcc/libstdc++/winpthread so the exe
+        # doesn't depend on libgcc_s_seh-1.dll etc. at runtime.
+        target_link_options(porydaw PRIVATE -static)
+    endif()
 endif()
 if(APPLE)
     set_target_properties(porydaw PROPERTIES MACOSX_BUNDLE TRUE)
@@ -106,3 +111,6 @@ add_executable(porydaw_render_cli
 )
 target_include_directories(porydaw_render_cli PRIVATE src)
 target_link_libraries(porydaw_render_cli PRIVATE Qt6::Core poryaaaa_engine)
+if(WIN32 AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_link_options(porydaw_render_cli PRIVATE -static)
+endif()
