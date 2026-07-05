@@ -557,26 +557,12 @@ protected:
             auditionKey(hit->key, hit->velocity);
             m_auditioned = true;
         } else if (doc) {
-            // Empty space: draw a note (FL/Reaper pencil style). It starts
-            // at the grid cell under the cursor and sounds while the button
-            // is held; dragging right before release sets its duration. The
-            // document note is committed on release (one undo entry).
-            const double grid = double(m_sv->gridTicks());
-            m_drawTick =
-                uint64_t(std::floor(std::max(0.0, m_pressTick) / grid) * grid);
-            m_drawDur = int64_t(m_sv->gridTicks());
-            m_drawKey = m_pressKey;
-            m_drag = Drag::Draw;
+            // Empty space: deferred, Reaper-style. A horizontal drag from
+            // here draws a note (resolved in mouseMoveEvent); releasing in
+            // place parks the edit cursor at the click instead. A
+            // double-click draws immediately (mouseDoubleClickEvent).
+            m_leftPress = true;
             m_sv->clearSelection();
-            ViewNote pending{};
-            pending.startTick = uint32_t(m_drawTick);
-            pending.endTick = uint32_t(m_drawTick + uint64_t(m_drawDur));
-            pending.key = uint8_t(m_drawKey);
-            pending.velocity = m_lastVelocity;
-            pending.track = uint8_t(m_sv->selectedTrack());
-            m_sv->announceNote(pending);
-            auditionKey(m_drawKey, m_lastVelocity);
-            m_auditioned = true;
         } else {
             // Read-only (no document): park the edit cursor at the click,
             // like the ruler; playback follows when running.
@@ -587,8 +573,19 @@ protected:
 
     void mouseDoubleClickEvent(QMouseEvent *event) override
     {
-        // A fast click-click should behave as two presses (draw, then grab
-        // the drawn note) — Qt replaces the second press with this event.
+        // Double-click on empty space drops a grid-sized note (committed on
+        // release; dragging before release still sizes it). Anywhere else a
+        // fast click-click behaves as two presses — Qt replaces the second
+        // press with this event.
+        if (event->button() == Qt::LeftButton && m_sv->document()
+            && event->pos().x() >= kKeyboardW && !hitNote(event->pos())) {
+            setFocus();
+            m_pressPos = m_curPos = event->pos();
+            m_pressTick = m_sv->tickAtContentX(event->pos().x() - kKeyboardW);
+            m_pressKey = yToKey(event->pos().y());
+            beginDraw();
+            return;
+        }
         mousePressEvent(event);
     }
 
@@ -617,6 +614,12 @@ protected:
             && (event->pos() - m_pressPos).manhattanLength()
                    >= QApplication::startDragDistance()) {
             m_drag = Drag::Band;
+        }
+        if (m_leftPress && m_drag == Drag::None
+            && std::abs(event->pos().x() - m_pressPos.x())
+                   >= QApplication::startDragDistance()) {
+            // The deferred empty-space press turns out to be a draw gesture.
+            beginDraw();
         }
         if (m_drag == Drag::None) {
             // Hover cursor: resize handle at note left/right edges, velocity
@@ -685,14 +688,26 @@ protected:
                 update();
             }
         } else if (m_drag == Drag::Draw) {
-            // The note's right edge follows the cursor, rounded up to the
-            // next grid line (never shorter than one grid cell), and its key
-            // follows the cursor vertically — a slight misclick on mouse-down
-            // is fixable mid-gesture, with the new pitch auditioned.
-            const int64_t past = int64_t(std::llround(tick)) - int64_t(m_drawTick);
-            const int64_t dur = std::max(grid, (past + grid - 1) / grid * grid);
+            // The edge under the cursor follows it: right of the anchor cell
+            // the end grows (rounded up to the next grid line, never shorter
+            // than one cell); left of it the start moves back (snapped down)
+            // with the end pinned to the anchor cell. The key follows the
+            // cursor vertically — a slight misclick on mouse-down is fixable
+            // mid-gesture, with the new pitch auditioned.
+            const int64_t cur = int64_t(std::llround(tick));
+            const int64_t anchor = int64_t(m_drawAnchor);
+            uint64_t start = m_drawAnchor;
+            int64_t dur;
+            if (cur >= anchor) {
+                dur = std::max(grid, (cur - anchor + grid - 1) / grid * grid);
+            } else {
+                start = uint64_t(
+                    std::floor(std::max(0.0, tick) / double(grid)) * double(grid));
+                dur = anchor + grid - int64_t(start);
+            }
             const int key = yToKey(event->pos().y());
-            if (dur != m_drawDur || key != m_drawKey) {
+            if (start != m_drawTick || dur != m_drawDur || key != m_drawKey) {
+                m_drawTick = start;
                 m_drawDur = dur;
                 if (key != m_drawKey) {
                     m_drawKey = key;
@@ -739,6 +754,16 @@ protected:
             }
             update();
             return;
+        }
+        if (event->button() == Qt::LeftButton && m_leftPress) {
+            m_leftPress = false;
+            if (m_drag == Drag::None) {
+                // Click without a drag: park the edit cursor at the click,
+                // like the ruler; playback follows when running.
+                m_sv->commitEditCursor(m_sv->snapTick(m_pressTick));
+                update();
+                return;
+            }
         }
         if (event->button() != Qt::LeftButton || m_drag == Drag::None)
             return;
@@ -824,6 +849,7 @@ protected:
         }
         if (event->key() == Qt::Key_Escape) {
             m_drag = Drag::None;
+            m_leftPress = false;
             m_rightPress = false;
             m_sv->clearSelection();
             update();
@@ -856,6 +882,31 @@ private:
             m_soundingKey = sounding;
             update(0, 0, kKeyboardW, height());
         }
+    }
+
+    // Begin the pencil gesture: a pending grid-cell note at the press
+    // position that sounds while the button is held; the document note is
+    // committed on release (one undo entry).
+    void beginDraw()
+    {
+        const double grid = double(m_sv->gridTicks());
+        m_drawAnchor =
+            uint64_t(std::floor(std::max(0.0, m_pressTick) / grid) * grid);
+        m_drawTick = m_drawAnchor;
+        m_drawDur = int64_t(m_sv->gridTicks());
+        m_drawKey = m_pressKey;
+        m_drag = Drag::Draw;
+        m_sv->clearSelection();
+        ViewNote pending{};
+        pending.startTick = uint32_t(m_drawTick);
+        pending.endTick = uint32_t(m_drawTick + uint64_t(m_drawDur));
+        pending.key = uint8_t(m_drawKey);
+        pending.velocity = m_lastVelocity;
+        pending.track = uint8_t(m_sv->selectedTrack());
+        m_sv->announceNote(pending);
+        auditionKey(m_drawKey, m_lastVelocity);
+        m_auditioned = true;
+        update();
     }
 
     QRect noteRect(const ViewNote &note) const
@@ -1182,6 +1233,9 @@ private:
     uint64_t m_drawTick = 0;   // pending note of a draw gesture
     int64_t m_drawDur = 0;
     int m_drawKey = 0;         // follows the cursor vertically mid-draw
+    uint64_t m_drawAnchor = 0; // grid cell pressed; drags pivot around it
+    bool m_leftPress = false;  // left button held on empty space; cursor
+                               // move vs. draw undecided
     bool m_rightPress = false; // right button held; band vs. menu undecided
     bool m_rightHit = false;   // that press landed on a note…
     SongView::NoteId m_rightHitId{}; // …this one
