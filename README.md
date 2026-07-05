@@ -1,19 +1,12 @@
-# porydaw
+# Porydaw
 
-A simple, cross-platform DAW for Gen 3 Pokémon decompilation projects
-(pokeemerald, pokefirered, pokeruby, and their forks).
+It's like [Porymap](https://github.com/huderlem/porymap), but for music.  An easy-to-use DAW for Gen 3 Pokémon decompilation projects ([pokeemerald][pokeemerald], [pokefirered][pokefirered], and [pokeruby][pokeruby]).
 
-Point porydaw at your decomp project directory and it loads your voicegroups,
-samples, and songs; plays them back GBA-accurately using the embedded
-[poryaaaa](https://github.com/huderlem/pory4a) synthesizer engine; and saves
-drop-in `.mid` files that your project's existing `mid2agb` build pipeline
-consumes unchanged.
+In Porydaw, load your decomp project directory to load the music-related project data. Then, play, edit, and create music. It sounds just like it does in-game.  When saving, Porydaw writes and creates the necessary files directly into the decomp project.  It also supports importing MIDI files, making it easy to whip up songs and voicegroups for brand new songs.
 
-porydaw is designed for ROM hackers who aren't DAW power users. If you love
-your existing DAW, keep it — the poryaaaa CLAP plugin serves that workflow.
+Porydaw is designed for people who *aren't* DAW power users--maybe they've used tools like Sappy and Anvil Studio for their music needs. If you love
+your existing DAW (FL Studio, Reaper, etc.), keep using it--the [poryaaaa CLAP plugin](https://github.com/huderlem/poryaaaa) serves that power-user workflow.
 
-**Status:** early development. See [SPEC.md](SPEC.md) for the full design
-specification and roadmap.
 
 ## Building
 
@@ -32,3 +25,7 @@ If you cloned without `--recursive`, run `git submodule update --init` first.
 
 porydaw is licensed under [GPL-3.0](LICENSE). The embedded poryaaaa engine is
 licensed under MIT.
+
+[pokeruby]: https://github.com/pret/pokeruby
+[pokeemerald]: https://github.com/pret/pokeemerald
+[pokefirered]: https://github.com/pret/pokefirered
