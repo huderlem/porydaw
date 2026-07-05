@@ -39,9 +39,12 @@ qt_add_executable(porydaw
     src/savecheck.cpp
     src/onboardcheck.cpp
     src/vgcheck.cpp
+    src/exportcheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/miniaudio_impl.c
+    src/audio/wavexport.cpp
+    src/audio/wavexport.h
     src/core/mid2agbtables.cpp
     src/core/mid2agbtables.h
     src/core/miditimeline.cpp

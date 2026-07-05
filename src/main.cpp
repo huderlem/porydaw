@@ -16,6 +16,8 @@ int runSaveCheck(const QString &projectRoot, const QString &songLabel,
 int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath = QString());
 // vgcheck.cpp; voicegroup edit/save/create check (writes into the project: use a copy).
 int runVgCheck(const QString &projectRoot, const QString &songLabel);
+// exportcheck.cpp; WAV export check (writes a .wav into the project: use a copy).
+int runExportCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -44,6 +46,9 @@ int main(int argc, char *argv[])
     const int vgCheck = args.indexOf(QStringLiteral("--vgcheck"));
     if (vgCheck >= 0 && vgCheck + 2 < args.size())
         return runVgCheck(args[vgCheck + 1], args[vgCheck + 2]);
+    const int exportCheck = args.indexOf(QStringLiteral("--exportcheck"));
+    if (exportCheck >= 0 && exportCheck + 2 < args.size())
+        return runExportCheck(args[exportCheck + 1], args[exportCheck + 2]);
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);

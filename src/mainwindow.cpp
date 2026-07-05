@@ -20,7 +20,9 @@
 #include <QListWidget>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QSettings>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTimer>
@@ -31,6 +33,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "audio/wavexport.h"
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
@@ -90,6 +93,10 @@ void MainWindow::buildUi()
     m_registerAction = fileMenu->addAction(tr("Re&gister Song"), this,
                                            &MainWindow::registerLoadedSong);
     m_registerAction->setEnabled(false);
+    fileMenu->addSeparator();
+    m_exportWavAction = fileMenu->addAction(tr("Export &WAV..."), this,
+                                            &MainWindow::exportWav);
+    m_exportWavAction->setEnabled(false);
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(tr("&Quit"), this, &QWidget::close);
     quitAction->setShortcut(QKeySequence::Quit);
@@ -260,6 +267,7 @@ void MainWindow::openProject()
     m_loadedSongId = -1;
     m_songLabel->clear();
     m_saveAction->setEnabled(false);
+    m_exportWavAction->setEnabled(false);
     m_settingsAction->setEnabled(false);
     m_registerAction->setEnabled(false);
     m_newSongAction->setEnabled(true);
@@ -374,6 +382,7 @@ void MainWindow::loadSong(const SongInfo &song)
         m_songView->applyViewState(viewState);
     updateVoicegroupBrowser();
     m_saveAction->setEnabled(true);
+    m_exportWavAction->setEnabled(true);
     m_settingsAction->setEnabled(true);
     m_registerAction->setEnabled(!song.registered);
     updateWindowTitle();
@@ -444,6 +453,151 @@ void MainWindow::saveSong()
     m_project.setSongCfg(m_loadedSongId, m_doc.cfg());
     statusBar()->showMessage(tr("Saved %1").arg(m_doc.midPath()), 5000);
     updateWindowTitle();
+}
+
+void MainWindow::exportWav()
+{
+    if (m_loadedSongId < 0 || !m_audio.songLoaded())
+        return;
+    const bool hasLoop = m_audio.timeline()->hasLoop();
+
+    // Options: loop count + fadeout for looping songs, ring-out tail
+    // otherwise (SPEC §7 — poryaaaa_render parity), with a live duration
+    // preview. The timeline is rebuilt per rate change only for that
+    // preview math; the real render builds its own below.
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Export WAV"));
+    auto *form = new QFormLayout(&dialog);
+
+    auto *rateBox = new QComboBox(&dialog);
+    for (int rate : {32000, 44100, 48000})
+        rateBox->addItem(tr("%1 Hz").arg(rate), rate);
+    rateBox->setCurrentIndex(2);
+    form->addRow(tr("Sample rate:"), rateBox);
+
+    QSpinBox *loopCountBox = nullptr;
+    QDoubleSpinBox *fadeoutBox = nullptr;
+    QDoubleSpinBox *tailBox = nullptr;
+    if (hasLoop) {
+        loopCountBox = new QSpinBox(&dialog);
+        loopCountBox->setRange(1, 99);
+        loopCountBox->setValue(2);
+        form->addRow(tr("Loop count:"), loopCountBox);
+        fadeoutBox = new QDoubleSpinBox(&dialog);
+        fadeoutBox->setRange(0.0, 60.0);
+        fadeoutBox->setDecimals(1);
+        fadeoutBox->setValue(5.0);
+        fadeoutBox->setSuffix(tr(" s"));
+        form->addRow(tr("Fadeout:"), fadeoutBox);
+    } else {
+        tailBox = new QDoubleSpinBox(&dialog);
+        tailBox->setRange(0.0, 60.0);
+        tailBox->setDecimals(1);
+        tailBox->setValue(3.0);
+        tailBox->setSuffix(tr(" s"));
+        form->addRow(tr("Tail (no loop markers):"), tailBox);
+    }
+
+    auto *durationLabel = new QLabel(&dialog);
+    form->addRow(tr("Duration:"), durationLabel);
+
+    auto currentOptions = [&] {
+        WavExportOptions opts;
+        opts.sampleRate = rateBox->currentData().toInt();
+        if (loopCountBox)
+            opts.loopCount = loopCountBox->value();
+        if (fadeoutBox)
+            opts.fadeoutSeconds = fadeoutBox->value();
+        if (tailBox)
+            opts.tailSeconds = tailBox->value();
+        return opts;
+    };
+    auto updateDuration = [&] {
+        const WavExportOptions opts = currentOptions();
+        // Loop/length sample positions scale exactly with the rate, so the
+        // loaded timeline's positions can be rescaled for the preview
+        // instead of rebuilding the timeline on every spin.
+        const double scale = double(opts.sampleRate) / m_audio.timeline()->sampleRate;
+        MidiTimeline scaled;
+        scaled.lengthSamples = uint64_t(double(m_audio.timeline()->lengthSamples) * scale);
+        if (hasLoop) {
+            scaled.loopStartSample =
+                uint64_t(double(m_audio.timeline()->loopStartSample) * scale);
+            scaled.loopEndSample =
+                uint64_t(double(m_audio.timeline()->loopEndSample) * scale);
+        }
+        const uint64_t total = wavExportTotals(scaled, opts).totalSamples;
+        const int seconds = int(double(total) / opts.sampleRate + 0.5);
+        durationLabel->setText(
+            QStringLiteral("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10,
+                                                          QLatin1Char('0')));
+    };
+    connect(rateBox, &QComboBox::currentIndexChanged, &dialog, updateDuration);
+    if (loopCountBox)
+        connect(loopCountBox, &QSpinBox::valueChanged, &dialog, updateDuration);
+    if (fadeoutBox)
+        connect(fadeoutBox, &QDoubleSpinBox::valueChanged, &dialog, updateDuration);
+    if (tailBox)
+        connect(tailBox, &QDoubleSpinBox::valueChanged, &dialog, updateDuration);
+    updateDuration();
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    const WavExportOptions opts = currentOptions();
+
+    QSettings appSettings;
+    const QString startDir = appSettings
+                                 .value(QStringLiteral("lastWavExportDir"),
+                                        QFileInfo(m_doc.midPath()).path())
+                                 .toString();
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export WAV"), startDir + QLatin1Char('/') + m_doc.label() + ".wav",
+        tr("WAV files (*.wav)"));
+    if (path.isEmpty())
+        return;
+    appSettings.setValue(QStringLiteral("lastWavExportDir"), QFileInfo(path).path());
+
+    m_audio.stop();
+
+    QProgressDialog progress(tr("Rendering %1...").arg(m_doc.label()), tr("Cancel"), 0,
+                             1000, this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+
+    // The render reads the same voicegroup the audio engine holds (the
+    // engine only reads it too), against a fresh timeline at the export
+    // rate — so unsaved document and voice edits export as heard.
+    auto timeline = m_doc.buildTimeline(double(opts.sampleRate));
+    QString error;
+    const bool ok = ::exportWav(path, *timeline, m_audio.voicegroup(),
+                                currentSongSettings(), opts,
+                              [&](double fraction) {
+                                  progress.setValue(int(fraction * 1000));
+                                  return !progress.wasCanceled();
+                              },
+                              &error);
+    progress.setValue(1000);
+    if (!ok) {
+        if (!error.isEmpty())
+            QMessageBox::warning(this, tr("Export WAV"), error);
+        else
+            statusBar()->showMessage(tr("Export cancelled."), 5000);
+        return;
+    }
+    const uint64_t total = wavExportTotals(*timeline, opts).totalSamples;
+    statusBar()->showMessage(tr("Exported %1 (%2 @ %3 Hz)")
+                                 .arg(path,
+                                      QStringLiteral("%1:%2")
+                                          .arg(int(total / uint64_t(opts.sampleRate)) / 60)
+                                          .arg(int(total / uint64_t(opts.sampleRate)) % 60,
+                                               2, 10, QLatin1Char('0')))
+                                 .arg(opts.sampleRate),
+                             8000);
 }
 
 void MainWindow::openSongSettings()

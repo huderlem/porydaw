@@ -40,6 +40,7 @@ private slots:
     void openProject();
     void songActivated(QListWidgetItem *item);
     void saveSong();
+    void exportWav();
     void openSongSettings();
     void openEngineSettings();
     void newSong();
@@ -128,6 +129,7 @@ private:
     QAction *m_stopAction = nullptr;
     QAction *m_loopAction = nullptr;
     QAction *m_saveAction = nullptr;
+    QAction *m_exportWavAction = nullptr;
     QAction *m_settingsAction = nullptr;
     QLabel *m_timeLabel = nullptr;
     QLabel *m_songLabel = nullptr;

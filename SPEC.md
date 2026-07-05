@@ -312,6 +312,12 @@ swappable like keysplits (the Drumkit list offers the project's observed
 drumkit sub-voicegroups). Cry voices stay read-only and round-trip verbatim;
 keysplit *tables* are not editable.
 
+**WAV export (shipped after M3, from M4):**
+File → Export WAV renders the loaded song (including unsaved edits) offline
+through a private engine instance with §7 semantics — loop count + fadeout
+for looping songs, ring-out tail otherwise, selectable sample rate, streamed
+16-bit stereo output with progress/cancel; `--exportcheck` harness.
+
 **Later / opt-in ideas (explicitly out of scope for v1):**
 keysplit table *editing*, sample import (wav2agb semantics), full project
 write-back behind a "let porydaw edit project files" setting, pokeruby profile
