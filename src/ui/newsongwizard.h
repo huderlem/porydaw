@@ -29,7 +29,8 @@ public:
     // Blank new song.
     NewSongWizard(DecompProject *project, AudioEngine *audio, QWidget *parent = nullptr);
     // Import: `imported` is the parsed external file (kept as-is apart from
-    // the mapping page's program remaps).
+    // the mapping page's program remaps and the analysis page's optional
+    // division rescale).
     NewSongWizard(DecompProject *project, AudioEngine *audio, SmfFile imported,
                   const QString &sourcePath, QWidget *parent = nullptr);
     ~NewSongWizard() override;
@@ -38,7 +39,8 @@ public:
     QString constant() const;
     QString player() const;
     SongCfg cfg() const;
-    // The song to write: the blank template, or the import with remaps applied.
+    // The song to write: the blank template, or the import with remaps and
+    // the optional division rescale applied.
     SmfFile songFile() const;
     // Non-empty when the user chose "(create a new voicegroup for this song)"
     // on the Sound page: the voicegroup to create (named after the song; cfg()

@@ -1,3 +1,4 @@
+#include <QCheckBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -5,19 +6,21 @@
 #include <QString>
 #include <cstdio>
 
+#include "audio/audioengine.h"
 #include "core/midiimport.h"
 #include "core/smf.h"
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 #include "project/songregistry.h"
+#include "ui/newsongwizard.h"
 
 // --onboardcheck <projectRoot> [mid2agbPath]: M3 onboarding check. Exercises
 // the New Song and Import backends headlessly against a scratch copy of a
 // project — it writes into it. Creates a song, verifies its files and sidecar,
 // registers it (porydaw writes song_table.inc / songs.h / ld_script.ld
 // directly), verifies idempotency and stale-ID correction, and runs an
-// external-MIDI import (analysis + program remap), compiling both songs
-// through the project's real mid2agb.
+// external-MIDI import (analysis + program remap + division rescale),
+// compiling both songs through the project's real mid2agb.
 
 namespace {
 
@@ -310,6 +313,42 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
     // The untouched track keeps its programs.
     check(imported.tracks[2].events[0].data0 == 20, "import: remap bled across tracks");
 
+    // Division rescale onto the 24-clock grid (the wizard's default for a
+    // non-multiple-of-24 file). Floor arithmetic matches mid2agb, so the
+    // chord's onset lands where an as-is import would have played it:
+    // 480 * 24 / 400 = 28.8 -> 28, offs 960 -> 57, EOT 3840 -> 230.
+    rescaleDivision(&imported, 24);
+    check(imported.division == 24, "rescale: division not rewritten");
+    check(imported.tracks[1].events[4].tick == 28, "rescale: note-on tick");
+    check(imported.tracks[1].events[11].tick == 57, "rescale: note-off tick");
+    check(imported.tracks[1].endTick == 230, "rescale: end-of-track tick");
+    check(imported.tracks[2].events[0].tick == 0, "rescale: tick-0 event moved");
+    for (const SmfTrack &track : imported.tracks) {
+        uint64_t prev = 0;
+        for (const SmfEvent &ev : track.events) {
+            check(ev.tick >= prev, "rescale: tick order regressed");
+            prev = ev.tick;
+        }
+    }
+
+    // The wizard end of the same option: the analysis page offers the rescale
+    // (default on) and songFile() applies it with the Sound page's clock base.
+    {
+        AudioEngine audio; // never init()ed — the wizard only touches audio in
+                           // the mapping page's preview, which stays unentered
+        NewSongWizard wizard(&project, &audio, external, QStringLiteral("ext.mid"));
+        auto *rescale = wizard.page(0)->findChild<QCheckBox *>();
+        check(rescale && rescale->isChecked(),
+              "wizard: rescale checkbox missing or off for division 400");
+        check(wizard.songFile().division == 24,
+              "wizard: songFile() not rescaled by default");
+        if (rescale) {
+            rescale->setChecked(false);
+            check(wizard.songFile().division == 400,
+                  "wizard: opting out of the rescale still rescaled");
+        }
+    }
+
     const QString importLabel = QStringLiteral("mus_onboardcheck_import");
     const QString importMid = midiDir + QStringLiteral("/%1.mid").arg(importLabel);
     check(imported.writeFile(importMid, &error), "write imported .mid");
@@ -318,7 +357,8 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
 
     SmfFile reread;
     check(SmfFile::readFile(importMid, &reread, &error)
-              && reread.tracks.size() == imported.tracks.size(),
+              && reread.tracks.size() == imported.tracks.size()
+              && reread.division == 24,
           "imported .mid does not re-read cleanly");
 
     check(project.reload(&error), "project reload after import");

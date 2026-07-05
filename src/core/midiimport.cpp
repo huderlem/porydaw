@@ -166,6 +166,21 @@ ImportAnalysis analyzeForImport(const SmfFile &smf)
     return a;
 }
 
+void rescaleDivision(SmfFile *smf, uint16_t newDivision)
+{
+    if (newDivision == 0 || smf->division == 0 || smf->division == newDivision)
+        return;
+    // Floor scaling is monotonic, so each track's non-decreasing tick order
+    // (and same-tick event order) survives the rescale.
+    const uint64_t oldDivision = smf->division;
+    for (SmfTrack &track : smf->tracks) {
+        for (SmfEvent &ev : track.events)
+            ev.tick = ev.tick * newDivision / oldDivision;
+        track.endTick = track.endTick * newDivision / oldDivision;
+    }
+    smf->division = newDivision;
+}
+
 void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps)
 {
     for (const ProgramRemap &r : remaps) {

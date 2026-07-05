@@ -10,9 +10,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 - **Import wizard: per-note voice-type polyphony estimate.** The peak-notes
   warning counts all notes; CGB-voiced notes don't consume PCM channels, and
   with the voicegroup + program map known the estimate could be exact.
-- **Import wizard: division rescale option.** Files whose division isn't a
-  multiple of 24 are imported as-is (mid2agb quantizes); an optional rescale
-  to 24/48 clocks would make the editor grid exact for them.
 
 ## General things
 

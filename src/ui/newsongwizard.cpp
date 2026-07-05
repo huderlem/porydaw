@@ -243,6 +243,19 @@ public:
             layout->addWidget(w);
         }
 
+        if (a.division % 24 != 0) {
+            m_rescale = new QCheckBox(
+                tr("Rescale timing to the m4a clock grid (24 clocks per beat, "
+                   "48 with -X)"),
+                this);
+            m_rescale->setChecked(true);
+            m_rescale->setToolTip(
+                tr("Rewrites every event tick with the same rounding mid2agb "
+                   "applies, so the editor grid matches playback exactly. "
+                   "Uncheck to keep the file's original ticks."));
+            layout->addWidget(m_rescale);
+        }
+
         auto *tree = new QTreeWidget(this);
         tree->setColumnCount(3);
         tree->setHeaderLabels({tr("Controller"), tr("m4a meaning"), tr("Events")});
@@ -261,6 +274,11 @@ public:
         layout->addWidget(new QLabel(tr("Controllers used:"), this));
         layout->addWidget(tree, 1);
     }
+
+    bool rescaleSelected() const { return m_rescale && m_rescale->isChecked(); }
+
+private:
+    QCheckBox *m_rescale = nullptr;
 };
 
 // ---- Mapping: programs vs. the chosen voicegroup ---------------------------
@@ -504,5 +522,7 @@ SmfFile NewSongWizard::songFile() const
         return SongRegistry::blankSong();
     SmfFile smf = m_imported;
     applyProgramRemaps(&smf, m_mapping->remaps());
+    if (m_analysisPage->rescaleSelected())
+        rescaleDivision(&smf, m_sound->cfg().extendedClocks ? 48 : 24);
     return smf;
 }

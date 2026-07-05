@@ -10,8 +10,9 @@
 // External-MIDI import analysis (SPEC.md §6.2): everything the guided mapping
 // pass shows about an arbitrary .mid before it becomes a project song. The
 // file's bytes are kept as-is on import — mid2agb rescales the division and
-// ignores CCs outside its vocabulary — so the pass is a lens plus one
-// optional transform (program remapping against the chosen voicegroup).
+// ignores CCs outside its vocabulary — so the pass is a lens plus two
+// optional transforms: program remapping against the chosen voicegroup, and
+// a division rescale onto the m4a clock grid.
 
 struct ImportTrackInfo {
     int smfTrack = -1;      // chunk index (format 1) or 0 (format 0)
@@ -55,3 +56,13 @@ struct ProgramRemap {
 };
 
 void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps);
+
+// Rescale every event tick (and each track's end-of-track tick) onto a new
+// division, using the same floor arithmetic as mid2agb's event conversion
+// (`24 * clocksPerBeat * time / division`, tools/mid2agb/midi.cpp). With
+// newDivision equal to the song's clocks per beat (24, or 48 under -X), every
+// onset lands on the exact tick mid2agb would have played it at, and the
+// editor grid becomes exact. Note durations may still differ from an as-is
+// import by one clock, because mid2agb floors onset and duration
+// independently while a tick rescale floors onset and note-off.
+void rescaleDivision(SmfFile *smf, uint16_t newDivision);
