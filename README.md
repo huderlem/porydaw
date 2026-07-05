@@ -23,8 +23,12 @@ If you cloned without `--recursive`, run `git submodule update --init` first.
 
 ## License
 
-porydaw is licensed under [GPL-3.0](LICENSE). The embedded poryaaaa engine is
+Porydaw is licensed under [GPL-3.0](LICENSE). The embedded poryaaaa engine is
 licensed under MIT.
+
+## AI Disclaimer
+
+Porydaw's code has been built with heavy usage of Claude Code--bootstrapped with the Fable model.
 
 [pokeruby]: https://github.com/pret/pokeruby
 [pokeemerald]: https://github.com/pret/pokeemerald

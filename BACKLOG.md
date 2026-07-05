@@ -14,6 +14,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   multiple of 24 are imported as-is (mid2agb quantizes); an optional rescale
   to 24/48 clocks would make the editor grid exact for them.
 
+## General things
+
+- **Info Window** an "About porydaw" file menu item should show the user
+  general info, such as the porydaw version, the link to GitHub, the version/commit
+  of poryaaaa that it's using. Any other pertinent info.
+
 ## App settings
 
 - **Audio device selection page** (SPEC §7: "device output via miniaudio
@@ -28,8 +34,5 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 - **GitHub Actions CI** for Win/macOS/Linux builds (SPEC §8 M0 mentions it;
   deliberately deferred — repo is private and CI is unverifiable from WSL).
-- **poryaaaa LICENSE file** — release blocker (SPEC §9); porydaw links the
-  engine statically and cannot ship a release until poryaaaa declares a
-  license upstream.
 - **Upstream `voicegroup_loader_set_log_path()` fix** (SPEC §9): it's
   process-global; should be per-config for a multi-project host.
