@@ -19,6 +19,12 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 - **Info Window** an "About porydaw" file menu item should show the user
   general info, such as the porydaw version, the link to GitHub, the version/commit
   of poryaaaa that it's using. Any other pertinent info.
+- **ADSR annoyance** when switching between voice types, the ADSR envelope doesn't change.
+  This is pretty annoying, especially in the flow where the user is creating or heavily
+  modifying voice group. For example, all of the voices currently default to Square. When
+  switching from Square to Sample, the ADSR stays at the Square's values. But Sample's ADSR
+  values tend to be drastically different--even worse, the default Square ADSR values result
+  in no audible sound when applied to a Sample voice type.
 
 ## App settings
 
