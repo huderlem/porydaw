@@ -21,6 +21,7 @@ struct SongSettings {
     uint8_t reverb = 0;         // mid2agb -R (0-127)
     uint8_t maxPcmChannels = 5; // pokeemerald m4aSoundInit default
     float pcmMixRate = 13379.0f; // GBA-accurate DirectSound mix rate
+    bool analogFilter = true;   // GBA analog output low-pass (SPEC §7)
 };
 
 enum class Transport : int {

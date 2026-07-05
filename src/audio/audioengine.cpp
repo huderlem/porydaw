@@ -150,6 +150,7 @@ void AudioEngine::loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGr
     m4a_engine_set_song_volume(m_engine.get(), m_settings.songVolume);
     m4a_reverb_set_amount(&m_engine->reverb, m_settings.reverb);
     m_engine->maxPcmChannels = m_settings.maxPcmChannels;
+    m_engine->analogFilter = m_settings.analogFilter;
     m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
     resetPreviewEngine();
 
@@ -220,6 +221,7 @@ void AudioEngine::updateSettings(const SongSettings &settings)
     m4a_engine_set_song_volume(m_engine.get(), m_settings.songVolume);
     m4a_reverb_set_amount(&m_engine->reverb, m_settings.reverb);
     m_engine->maxPcmChannels = m_settings.maxPcmChannels;
+    m_engine->analogFilter = m_settings.analogFilter;
     if (mixRateChanged)
         m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
     resetPreviewEngine();
@@ -270,6 +272,7 @@ void AudioEngine::resetPreviewEngine()
     m4a_engine_set_song_volume(m_previewEngine.get(), m_settings.songVolume);
     m4a_reverb_set_amount(&m_previewEngine->reverb, m_settings.reverb);
     m_previewEngine->maxPcmChannels = m_settings.maxPcmChannels;
+    m_previewEngine->analogFilter = m_settings.analogFilter;
     m4a_engine_set_pcm_mix_rate(m_previewEngine.get(), m_settings.pcmMixRate);
     m_previewVoiceKey = -1;
 }

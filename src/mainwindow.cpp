@@ -36,6 +36,7 @@ MainWindow::MainWindow(QWidget *parent)
 {
     setWindowTitle(QStringLiteral("porydaw"));
     resize(1100, 680);
+    m_engineSettings = EngineSettings::load();
     buildUi();
 
     QString audioError;
@@ -96,6 +97,9 @@ void MainWindow::buildUi()
     m_settingsAction = editMenu->addAction(tr("Song Se&ttings..."), this,
                                            &MainWindow::openSongSettings);
     m_settingsAction->setEnabled(false);
+    // Global GBA-accuracy knobs (SPEC §7); not song-scoped, so always enabled.
+    editMenu->addAction(tr("&Engine Settings..."), this,
+                        &MainWindow::openEngineSettings);
 
     connect(&m_doc, &SongDocument::documentChanged, this, &MainWindow::onDocumentChanged);
     connect(m_doc.undoStack(), &QUndoStack::cleanChanged, this,
@@ -331,15 +335,12 @@ void MainWindow::loadSong(const SongInfo &song)
         return;
     }
 
-    SongSettings settings;
-    settings.songVolume = uint8_t(song.cfg.masterVolume);
-    settings.reverb = uint8_t(song.cfg.reverb > 0 ? song.cfg.reverb : 0);
     // The views must let go of the old timeline/voicegroup before loadSong
     // frees them.
     m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
     m_vgBrowser->setVoicegroup(nullptr);
-    m_audio.loadSong(std::move(timeline), vg, settings);
+    m_audio.loadSong(std::move(timeline), vg, currentSongSettings());
     m_loadedSongId = song.id;
     m_appliedVoicegroupArg = song.cfg.voicegroupArg;
     m_appliedVolume = song.cfg.masterVolume;
@@ -395,10 +396,7 @@ void MainWindow::onDocumentChanged()
         }
     }
     if (cfg.masterVolume != m_appliedVolume || cfg.reverb != m_appliedReverb) {
-        SongSettings settings;
-        settings.songVolume = uint8_t(cfg.masterVolume);
-        settings.reverb = uint8_t(cfg.reverb > 0 ? cfg.reverb : 0);
-        m_audio.updateSettings(settings);
+        m_audio.updateSettings(currentSongSettings());
         m_appliedVolume = cfg.masterVolume;
         m_appliedReverb = cfg.reverb;
     }
@@ -430,6 +428,29 @@ void MainWindow::openSongSettings()
                               SongRegistry::voicegroupArgs(m_project.root()), this);
     if (dialog.exec() == QDialog::Accepted)
         m_doc.setCfg(dialog.cfg());
+}
+
+void MainWindow::openEngineSettings()
+{
+    EngineSettingsDialog dialog(m_engineSettings, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_engineSettings = dialog.settings();
+    m_engineSettings.save();
+    if (m_audioOk && m_audio.songLoaded())
+        m_audio.updateSettings(currentSongSettings());
+}
+
+SongSettings MainWindow::currentSongSettings() const
+{
+    const SongCfg &cfg = m_doc.cfg();
+    SongSettings settings;
+    settings.songVolume = uint8_t(cfg.masterVolume);
+    settings.reverb = uint8_t(cfg.reverb > 0 ? cfg.reverb : 0);
+    settings.maxPcmChannels = uint8_t(m_engineSettings.maxPcmChannels);
+    settings.pcmMixRate = m_engineSettings.pcmMixRate;
+    settings.analogFilter = m_engineSettings.analogFilter;
+    return settings;
 }
 
 void MainWindow::newSong()
@@ -706,6 +727,31 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     m_audio.previewVoice(0, 60, 0);
     qInfo("selftest: voice audition through the preview engine OK");
 
+    // App settings: the global engine knobs (SPEC §7) re-applied mid-playback
+    // through updateSettings — polyphony clamp, mix-rate rebuild (reverb delay
+    // line resize), analog filter — must keep the transport running.
+    {
+        SongSettings tweaked = currentSongSettings();
+        tweaked.maxPcmChannels = 8;
+        tweaked.pcmMixRate = 21024.0f;
+        tweaked.analogFilter = !tweaked.analogFilter;
+        m_audio.updateSettings(tweaked);
+        const uint64_t before = m_audio.playheadSamples();
+        QTimer::singleShot(300, &loop, &QEventLoop::quit);
+        loop.exec();
+        const bool engineOk = m_audio.maxPcmChannels() == 8
+            && m_audio.playheadSamples() != before
+            && m_audio.transport() == Transport::Playing;
+        m_audio.updateSettings(currentSongSettings());
+        if (!engineOk) {
+            qWarning("selftest: engine-settings update mid-playback FAILED "
+                     "(maxPcm %d, transport %d)",
+                     m_audio.maxPcmChannels(), int(m_audio.transport()));
+            return false;
+        }
+        qInfo("selftest: engine-settings update mid-playback OK");
+    }
+
     // M3: the onboarding UI must at least construct against a live project
     // (wizard pages enumerate voicegroups/players; the checklist rechecks).
     {
@@ -713,7 +759,9 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         RegistrationDialog checklist(m_project.root(), QStringLiteral("mus_selftest"),
                                      QStringLiteral("MUS_SELFTEST"),
                                      QStringLiteral("MUSIC_PLAYER_BGM"), this);
-        qInfo("selftest: New Song wizard + registration checklist constructed");
+        EngineSettingsDialog engineDialog(m_engineSettings, this);
+        qInfo("selftest: New Song wizard + registration checklist + engine "
+              "settings dialog constructed");
     }
 
     const double playedSeconds = double(m_audio.playheadSamples()) / m_audio.sampleRate();

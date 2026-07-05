@@ -65,6 +65,8 @@ qt_add_executable(porydaw
     src/ui/registrationdialog.h
     src/ui/voicegroupbrowser.cpp
     src/ui/voicegroupbrowser.h
+    src/ui/enginesettingsdialog.cpp
+    src/ui/enginesettingsdialog.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
     src/ui/songviewmodel.cpp

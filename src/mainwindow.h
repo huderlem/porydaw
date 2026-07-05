@@ -5,6 +5,7 @@
 #include "audio/audioengine.h"
 #include "core/songdocument.h"
 #include "project/decompproject.h"
+#include "ui/enginesettingsdialog.h"
 
 class QAction;
 class QLabel;
@@ -36,6 +37,7 @@ private slots:
     void songActivated(QListWidgetItem *item);
     void saveSong();
     void openSongSettings();
+    void openEngineSettings();
     void newSong();
     void importMidi();
     void openRegistrationChecklist();
@@ -67,12 +69,16 @@ private:
     // out of Paused — the Space binding (Reaper-style restart), while the
     // Play button resumes from the pause point.
     void startPlayback(bool fromEditCursor = false);
+    // The loaded document's cfg (volume/reverb) merged with the global
+    // engine knobs — everything AudioEngine::updateSettings applies.
+    SongSettings currentSongSettings() const;
     void updateTransportActions();
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
 
     AudioEngine m_audio;
     bool m_audioOk = false;
+    EngineSettings m_engineSettings;
     DecompProject m_project;
     SongDocument m_doc;
     int m_loadedSongId = -1;
