@@ -69,7 +69,7 @@ QString keyName(int key)
     return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
 }
 
-QColor loopFill() { return QColor(255, 200, 60, 34); }
+QColor loopFill() { return QColor(255, 200, 60, 16); }
 QColor loopEdge() { return QColor(224, 168, 0); }
 QColor playheadColor() { return QColor(226, 66, 66); }
 
