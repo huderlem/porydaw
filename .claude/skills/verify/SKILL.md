@@ -16,17 +16,31 @@ cmake --build build -j"$(nproc)"
 Model/engine changes are covered by `--*check` flags on the main binary
 (see `src/main.cpp` for the full list and required args — every flag needs
 ALL of its args). They write into the project, so always run against a
-**fresh scratch copy** of a decomp project:
+**fresh scratch copy** of a decomp project.
+
+Find a decomp project to copy, in this order:
+
+1. `$PORYDAW_TEST_PROJECT` if set.
+2. An existing checkout of pokeemerald/pokefirered/pokeruby near this repo
+   (check siblings of the repo and `~`; it's a decomp project if it has
+   `sound/song_table.inc`). Prefer a vanilla checkout over forks/hacks
+   unless the change under test targets a specific fork.
+3. Otherwise shallow-clone one:
+   `git clone --depth 1 https://github.com/pret/pokeemerald "$(mktemp -d)/pokeemerald"`
+   (no ROM build needed — the harnesses only read the source tree).
 
 ```bash
 SCRATCH=$(mktemp -d)/scratch
-cp -r /home/huderlem/pokeemerald/. "$SCRATCH"
+cp -r "$DECOMP_PROJECT/." "$SCRATCH"
 QT_QPA_PLATFORM=offscreen ./build/porydaw --vgcheck "$SCRATCH" mus_abandoned_ship
 ```
 
-`QT_QPA_PLATFORM=offscreen` is required (headless WSL). Song labels come
-from `sound/song_table.inc`. `sound/songs/midi/midi.cfg` is CRLF — keep
-byte-conservative edits.
+`QT_QPA_PLATFORM=offscreen` is required when there's no display
+(WSL/CI/headless); it's harmless otherwise. Song labels come from
+`sound/song_table.inc`. `sound/songs/midi/midi.cfg` is CRLF — keep
+byte-conservative edits. (`mus_abandoned_ship` is a vanilla pokeemerald
+label — pick a label from the project's own `song_table.inc` if using a
+different project.)
 
 ## Driving a widget the harnesses don't cover
 
