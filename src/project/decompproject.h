@@ -4,9 +4,10 @@
 #include <QStringList>
 #include <QVector>
 
-// Per-song mid2agb options from the song's line in sound/songs/midi/midi.cfg.
+// Per-song mid2agb options from the song's line in sound/songs/midi/midi.cfg
+// (or, in projects predating midi.cfg, its songs.mk rule).
 struct SongCfg {
-    QStringList rawFlags;    // the flags exactly as written in midi.cfg
+    QStringList rawFlags;    // the flags as written ($(VAR) refs pre-expanded)
     QString voicegroupArg;   // -G value, e.g. "_abandoned_ship" (mid2agb default: "_dummy")
     int masterVolume = 127;  // -V (0-127)
     int reverb = -1;         // -R, -1 = flag absent (no reverb override)
@@ -35,8 +36,9 @@ struct SongInfo {
 
 // Read-only view of a Gen 3 decomp project's music data: the song list
 // assembled from sound/song_table.inc, include/constants/songs.h, and
-// sound/songs/midi/midi.cfg. Voicegroups/samples are loaded separately via
-// poryaaaa's voicegroup_loader.
+// sound/songs/midi/midi.cfg (falling back to songs.mk rules when midi.cfg
+// does not exist). Voicegroups/samples are loaded separately via poryaaaa's
+// voicegroup_loader.
 class DecompProject
 {
 public:
@@ -53,7 +55,7 @@ public:
     static QStringList voicegroupCandidates(const SongInfo &song);
     static QStringList voicegroupCandidates(const SongCfg &cfg);
 
-    // Refreshes a song's cached cfg after porydaw writes its midi.cfg line.
+    // Refreshes a song's cached cfg after porydaw writes its flags back.
     void setSongCfg(int id, const SongCfg &cfg);
 
     // Re-reads the project's music data (after the wizard creates and
@@ -63,7 +65,8 @@ public:
 private:
     bool parseSongTable(QString *error);
     void parseSongConstants();
-    void parseMidiCfg();
+    bool parseMidiCfg(); // false if midi.cfg does not exist (or can't open)
+    void parseSongsMk();
     void discoverUnregisteredSongs();
 
     QString m_root;

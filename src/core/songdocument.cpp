@@ -118,8 +118,8 @@ bool SongDocument::save(QString *error)
     if (!cfgSemanticEqual(m_cfg, m_savedCfg) || !m_hadCfgLine) {
         const QStringList flags = SongRegistry::mergeCfgFlags(m_cfg);
         m_cfg.rawFlags = flags;
-        if (!SongRegistry::writeMidiCfgLine(QFileInfo(m_midPath).path(), m_label, flags,
-                                            error))
+        if (!SongRegistry::writeSongFlags(QFileInfo(m_midPath).path(), m_label, flags,
+                                          error))
             return false;
         m_savedCfg = m_cfg;
         m_hadCfgLine = true;

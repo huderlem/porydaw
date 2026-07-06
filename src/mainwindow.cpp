@@ -695,8 +695,8 @@ void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
 
     const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
     if (!smf.writeFile(midiDir + QStringLiteral("/%1.mid").arg(label), &error)
-        || !SongRegistry::writeMidiCfgLine(midiDir, label,
-                                           SongRegistry::mergeCfgFlags(cfg), &error)) {
+        || !SongRegistry::writeSongFlags(midiDir, label,
+                                         SongRegistry::mergeCfgFlags(cfg), &error)) {
         QMessageBox::warning(this, tr("New Song"), error);
         return;
     }

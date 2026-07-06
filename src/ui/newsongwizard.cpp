@@ -106,8 +106,8 @@ public:
         : m_project(project), m_identity(identity)
     {
         setTitle(tr("Sound settings"));
-        setSubTitle(tr("The song's voicegroup and mid2agb flags — its line in "
-                       "sound/songs/midi/midi.cfg. All of this can be changed later "
+        setSubTitle(tr("The song's voicegroup and mid2agb flags — its entry in "
+                       "midi.cfg (or songs.mk). All of this can be changed later "
                        "in Song Settings."));
 
         auto *form = new QFormLayout(this);

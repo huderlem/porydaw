@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "core/smf.h"
+#include "project/songsmk.h"
 
 namespace {
 
@@ -485,6 +486,18 @@ bool writeMidiCfgLine(const QString &midiDir, const QString &label,
         joined += '\n';
     out.write(joined);
     return true;
+}
+
+bool writeSongFlags(const QString &midiDir, const QString &label,
+                    const QStringList &flags, QString *error)
+{
+    if (!QFile::exists(QDir(midiDir).filePath(QStringLiteral("midi.cfg")))) {
+        const QString mkPath =
+            SongsMk::path(QDir::cleanPath(midiDir + QStringLiteral("/../../..")));
+        if (QFile::exists(mkPath))
+            return SongsMk::writeRule(mkPath, label, flags, error);
+    }
+    return writeMidiCfgLine(midiDir, label, flags, error);
 }
 
 SmfFile blankSong()

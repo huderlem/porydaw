@@ -19,6 +19,9 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath = QSt
 int runVgCheck(const QString &projectRoot, const QString &songLabel);
 // exportcheck.cpp; WAV export check (writes a .wav into the project: use a copy).
 int runExportCheck(const QString &projectRoot, const QString &songLabel);
+// mkcheck.cpp; songs.mk-fallback parse/write check for projects with no
+// midi.cfg (writes into the project: use a copy).
+int runMkCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -55,6 +58,9 @@ int main(int argc, char *argv[])
     const int exportCheck = args.indexOf(QStringLiteral("--exportcheck"));
     if (exportCheck >= 0 && exportCheck + 2 < args.size())
         return runExportCheck(args[exportCheck + 1], args[exportCheck + 2]);
+    const int mkCheck = args.indexOf(QStringLiteral("--mkcheck"));
+    if (mkCheck >= 0 && mkCheck + 2 < args.size())
+        return runMkCheck(args[mkCheck + 1], args[mkCheck + 2]);
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);

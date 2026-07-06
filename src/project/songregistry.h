@@ -87,6 +87,12 @@ QStringList mergeCfgFlags(const SongCfg &cfg);
 bool writeMidiCfgLine(const QString &midiDir, const QString &label,
                       const QStringList &flags, QString *error);
 
+// Persists a song's flags wherever the project stores them: its midi.cfg
+// line when <midiDir>/midi.cfg exists, its songs.mk rule for projects
+// predating midi.cfg, and a fresh midi.cfg when the project has neither.
+bool writeSongFlags(const QString &midiDir, const QString &label,
+                    const QStringList &flags, QString *error);
+
 // A minimal editable song: format 1, division 24 (vanilla), a seq track with
 // tempo 120 + 4/4 time signature, and one instrument track (voice 0, VOL 100)
 // spanning one bar.

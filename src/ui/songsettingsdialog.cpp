@@ -74,7 +74,7 @@ SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLa
     layout->addWidget(m_noCompression);
 
     auto *note = new QLabel(
-        tr("Saved to this song's line in sound/songs/midi/midi.cfg."), this);
+        tr("Saved to this song's mid2agb flags (midi.cfg or songs.mk)."), this);
     note->setStyleSheet(QStringLiteral("color: gray;"));
     layout->addWidget(note);
 

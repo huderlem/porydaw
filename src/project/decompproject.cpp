@@ -8,6 +8,7 @@
 #include <QTextStream>
 
 #include "project/songregistry.h"
+#include "project/songsmk.h"
 
 bool DecompProject::open(const QString &rootDir, QString *error)
 {
@@ -27,7 +28,8 @@ bool DecompProject::open(const QString &rootDir, QString *error)
     }
     parseSongConstants();
     discoverUnregisteredSongs();
-    parseMidiCfg();
+    if (!parseMidiCfg())
+        parseSongsMk();
     return true;
 }
 
@@ -155,11 +157,50 @@ void DecompProject::discoverUnregisteredSongs()
     }
 }
 
-void DecompProject::parseMidiCfg()
+// mid2agb parses option letters case-insensitively (-v080 == -V080).
+static SongCfg cfgFromFlags(const QStringList &flags)
+{
+    SongCfg cfg;
+    cfg.rawFlags = flags;
+    for (const QString &flag : flags) {
+        if (flag.size() < 2 || flag[0] != QLatin1Char('-'))
+            continue;
+        const QChar opt = flag[1].toUpper();
+        const QString arg = flag.mid(2);
+        switch (opt.toLatin1()) {
+        case 'G':
+            cfg.voicegroupArg = arg;
+            break;
+        case 'V':
+            cfg.masterVolume = qBound(0, arg.toInt(), 127);
+            break;
+        case 'R':
+            cfg.reverb = qBound(0, arg.toInt(), 127);
+            break;
+        case 'P':
+            cfg.priority = arg.toInt();
+            break;
+        case 'E':
+            cfg.exactGate = true;
+            break;
+        case 'X':
+            cfg.extendedClocks = true;
+            break;
+        case 'N':
+            cfg.noCompression = true;
+            break;
+        default:
+            break; // -L and unknown flags: irrelevant for playback
+        }
+    }
+    return cfg;
+}
+
+bool DecompProject::parseMidiCfg()
 {
     QFile file(m_root + QStringLiteral("/sound/songs/midi/midi.cfg"));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return;
+        return false;
 
     // e.g. "mus_abandoned_ship.mid: -E -R50 -G_abandoned_ship -V080"
     QHash<QString, SongCfg> byLabel;
@@ -177,42 +218,8 @@ void DecompProject::parseMidiCfg()
         if (name.endsWith(QStringLiteral(".mid"), Qt::CaseInsensitive))
             name.chop(4);
 
-        SongCfg cfg;
-        const QStringList flags =
-            line.mid(colon + 1).split(QLatin1Char(' '), Qt::SkipEmptyParts);
-        cfg.rawFlags = flags;
-        for (const QString &flag : flags) {
-            if (flag.size() < 2 || flag[0] != QLatin1Char('-'))
-                continue;
-            const QChar opt = flag[1];
-            const QString arg = flag.mid(2);
-            switch (opt.toLatin1()) {
-            case 'G':
-                cfg.voicegroupArg = arg;
-                break;
-            case 'V':
-                cfg.masterVolume = qBound(0, arg.toInt(), 127);
-                break;
-            case 'R':
-                cfg.reverb = qBound(0, arg.toInt(), 127);
-                break;
-            case 'P':
-                cfg.priority = arg.toInt();
-                break;
-            case 'E':
-                cfg.exactGate = true;
-                break;
-            case 'X':
-                cfg.extendedClocks = true;
-                break;
-            case 'N':
-                cfg.noCompression = true;
-                break;
-            default:
-                break; // -L and unknown flags: irrelevant for playback
-            }
-        }
-        byLabel.insert(name, cfg);
+        byLabel.insert(name, cfgFromFlags(line.mid(colon + 1).split(
+                                 QLatin1Char(' '), Qt::SkipEmptyParts)));
     }
 
     for (SongInfo &song : m_songs) {
@@ -220,6 +227,21 @@ void DecompProject::parseMidiCfg()
         if (it != byLabel.constEnd()) {
             song.hasCfg = true;
             song.cfg = it.value();
+        }
+    }
+    return true;
+}
+
+void DecompProject::parseSongsMk()
+{
+    // Pre-midi.cfg projects: per-song make rules in <root>/songs.mk.
+    const QHash<QString, QStringList> byLabel =
+        SongsMk::parseFlags(SongsMk::path(m_root));
+    for (SongInfo &song : m_songs) {
+        const auto it = byLabel.constFind(song.label);
+        if (it != byLabel.constEnd()) {
+            song.hasCfg = true;
+            song.cfg = cfgFromFlags(it.value());
         }
     }
 }
