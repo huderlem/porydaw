@@ -87,6 +87,42 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
             image.save(screenshotPath);
             std::printf("viewcheck: wrote %s\n", qUtf8Printable(screenshotPath));
         }
+
+        if (checked == 0) {
+            // Snap-grid semantics on the first song: at a fixed 64 px/beat
+            // zoom the grid must follow the feel's subdivision ladder and
+            // the minimum-subdivision floor. No document is attached, so
+            // the clock floor is 1 tick.
+            SongView::ViewState zoom;
+            zoom.valid = true;
+            zoom.pxPerBeat = 64.0;
+            view.applyViewState(zoom);
+            const uint64_t tpb = std::max<uint32_t>(1, tl->ticksPerBeat);
+            const auto expectGrid = [&](const char *what, uint64_t expected) {
+                if (view.gridTicks() != expected) {
+                    std::fprintf(stderr,
+                                 "viewcheck: FAIL %s: %s grid = %llu ticks, "
+                                 "expected %llu\n",
+                                 qUtf8Printable(song.label), what,
+                                 (unsigned long long)view.gridTicks(),
+                                 (unsigned long long)expected);
+                    failures++;
+                }
+            };
+            expectGrid("straight auto", std::max<uint64_t>(1, tpb / 8));
+            view.setGridFeel(SongView::GridFeel::Triplet);
+            expectGrid("triplet auto", std::max<uint64_t>(1, tpb / 6));
+            view.setGridMinDenom(8);
+            expectGrid("triplet 1/8", std::max<uint64_t>(1, tpb / 3));
+            view.setGridFeel(SongView::GridFeel::Straight);
+            view.setGridMinDenom(16);
+            expectGrid("straight 1/16", std::max<uint64_t>(1, tpb / 4));
+            view.setGridMinDenom(4);
+            expectGrid("straight 1/4", tpb);
+            view.setGridMinDenom(0);
+            std::printf("viewcheck: snap-grid semantics checked on %s\n",
+                        qUtf8Printable(song.label));
+        }
         view.setSong(nullptr, nullptr);
 
         checked++;

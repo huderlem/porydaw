@@ -38,6 +38,8 @@ bool load(const QString &projectRoot, const QString &songLabel,
     loaded.editCursorTick =
         uint64_t(std::max(0.0, obj.value(QLatin1String("editCursorTick")).toDouble(0)));
     loaded.laneHeight = obj.value(QLatin1String("laneHeight")).toInt(loaded.laneHeight);
+    loaded.gridMinDenom = obj.value(QLatin1String("gridMinDenom")).toInt(0);
+    loaded.gridTriplet = obj.value(QLatin1String("gridTriplet")).toBool(false);
     const QJsonObject lanes = obj.value(QLatin1String("laneHeights")).toObject();
     for (auto it = lanes.begin(); it != lanes.end(); ++it)
         loaded.laneHeights.insert(it.key(), it.value().toInt());
@@ -77,6 +79,8 @@ bool save(const QString &projectRoot, const QString &songLabel,
     obj.insert(QLatin1String("selectedTrack"), state.selectedTrack);
     obj.insert(QLatin1String("editCursorTick"), double(state.editCursorTick));
     obj.insert(QLatin1String("laneHeight"), state.laneHeight);
+    obj.insert(QLatin1String("gridMinDenom"), state.gridMinDenom);
+    obj.insert(QLatin1String("gridTriplet"), state.gridTriplet);
     if (!state.laneHeights.isEmpty()) {
         QJsonObject lanes;
         for (auto it = state.laneHeights.begin(); it != state.laneHeights.end(); ++it)

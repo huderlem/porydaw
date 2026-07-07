@@ -89,6 +89,9 @@ public:
         QHash<QString, int> laneHeights; // per-row overrides (AutomationArea keys)
         QList<int> splitterSizes; // roll pane, lanes pane
         std::vector<std::pair<int, uint8_t>> emptyLanes; // (track, cc)
+        int gridMinDenom = 0;     // snap-grid floor as a note denominator
+                                  // (4/8/16/32); 0 = down to the clock grid
+        bool gridTriplet = false; // triplet vs straight beat subdivisions
     };
     ViewState viewState() const;
     // Call after setSong (and setDocument); a default-constructed (invalid)
@@ -166,8 +169,20 @@ public:
                          const std::function<void(uint64_t, bool, int)> &fn) const;
 
     // --- editing support for the child widgets ---
-    // Snap grid in ticks: the visible beat subdivision, never finer than the
-    // song's mid2agb clock base.
+    // Snap-grid feel and floor (the ruler's grid controls): the zoom-adaptive
+    // grid subdivides beats by powers of two (straight) or by threes
+    // (triplet), and the minimum subdivision — a note denominator, quarter =
+    // one beat — stops it from refining past the note value the user cares
+    // about. 0 keeps the default clock-grid floor. Per-song view state.
+    enum class GridFeel { Straight, Triplet };
+    GridFeel gridFeel() const { return m_gridFeel; }
+    void setGridFeel(GridFeel feel);
+    int gridMinDenom() const { return m_gridMinDenom; }
+    void setGridMinDenom(int denom); // 4/8/16/32; anything else means 0
+
+    // Snap grid in ticks: the visible beat subdivision at the current feel,
+    // floored at the minimum subdivision and never finer than the song's
+    // mid2agb clock base.
     uint64_t gridTicks() const;
     // Fine placement (Alt-drag in the lanes): the mid2agb clock grid — the
     // document's real resolution — regardless of the zoom-dependent grid.
@@ -339,6 +354,8 @@ private:
     TimeSelection m_timeSel;
     Clip m_clip;
     uint32_t m_trackSelMask = 0; // header multi-selection (see trackSelectionMask)
+    GridFeel m_gridFeel = GridFeel::Straight;
+    int m_gridMinDenom = 0; // note denominator; 0 = clock-grid floor
     std::vector<std::pair<int, uint8_t>> m_emptyLanes; // (track, cc), unsorted
 
     songview::TimeRuler *m_ruler = nullptr;

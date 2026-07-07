@@ -1481,9 +1481,13 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         SongRegistry::saveRegistrationMeta(m_project.root(), target->label,
                                            QStringLiteral("MUS_SELFTEST"),
                                            QStringLiteral("MUSIC_PLAYER_BGM"));
+        m_songView->setGridMinDenom(8); // non-default grid must round-trip too
+        m_songView->setGridFeel(SongView::GridFeel::Triplet);
         const SongView::ViewState saved = m_songView->viewState();
         ok = ViewSidecar::save(m_project.root(), target->label, saved);
         m_songView->zoomAroundContentX(2.0, 0); // knock the view off the state
+        m_songView->setGridMinDenom(0);
+        m_songView->setGridFeel(SongView::GridFeel::Straight);
         SongView::ViewState loaded;
         ok = ok && ViewSidecar::load(m_project.root(), target->label, &loaded);
         if (ok) {
@@ -1496,11 +1500,15 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                 && restored.selectedTrack == saved.selectedTrack
                 && restored.editCursorTick == saved.editCursorTick
                 && restored.laneHeight == saved.laneHeight
+                && restored.gridMinDenom == 8
+                && restored.gridTriplet
                 && SongRegistry::loadRegistrationMeta(m_project.root(), target->label,
                                                       &constant, &player)
                 && constant == QLatin1String("MUS_SELFTEST");
         }
         QFile::remove(ViewSidecar::pathFor(m_project.root(), target->label));
+        m_songView->setGridMinDenom(0); // don't leak the test grid into a
+        m_songView->setGridFeel(SongView::GridFeel::Straight); // shutdown save
         if (ok)
             qInfo("selftest: sidecar view-state round trip OK");
         else

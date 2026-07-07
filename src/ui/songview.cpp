@@ -173,13 +173,14 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin
     }
 }
 
-// Subdivision level of a sub-beat grid tick: 1 = half beat, 2 = quarter
-// beat, 3 = finer. Cosmetic only (drives the line fade).
-int subGridLevel(uint64_t tick, uint64_t tpb)
+// Subdivision level of a sub-beat grid tick: 1 = the beat's first split
+// (half beat, or a third in triplet feel), 2 = the next, 3 = finer.
+// Cosmetic only (drives the line fade).
+int subGridLevel(uint64_t tick, uint64_t tpb, bool triplet)
 {
-    if (tick % std::max<uint64_t>(1, tpb / 2) == 0)
+    if (tick % std::max<uint64_t>(1, tpb / (triplet ? 3 : 2)) == 0)
         return 1;
-    if (tick % std::max<uint64_t>(1, tpb / 4) == 0)
+    if (tick % std::max<uint64_t>(1, tpb / (triplet ? 6 : 4)) == 0)
         return 2;
     return 3;
 }
@@ -195,11 +196,12 @@ void forEachSubGridLine(const SongView *sv, double t0, double t1,
     const uint64_t g = sv->gridTicks();
     if (g == 0 || g >= tpb || sv->pxPerBeat() < 10.0)
         return;
+    const bool triplet = sv->gridFeel() == SongView::GridFeel::Triplet;
     for (uint64_t tick = uint64_t(std::max(0.0, t0) / double(g)) * g;
          tick < uint64_t(t1); tick += g) {
         if (tick % tpb == 0)
             continue; // beat/bar lines are drawn separately
-        fn(tick, subGridLevel(tick, tpb));
+        fn(tick, subGridLevel(tick, tpb, triplet));
     }
 }
 
@@ -246,6 +248,50 @@ public:
     {
         setFixedHeight(kRulerH);
         setMouseTracking(true);
+
+        // Snap-grid controls in the gutter left of the timeline: minimum
+        // subdivision (Auto = zoom-adaptive down to the clock grid) and
+        // straight-vs-triplet feel. NoFocus for the same reason the scroll
+        // areas have it: keyboard editing must stay in the roll.
+        auto *gridBox = new QWidget(this);
+        gridBox->setGeometry(0, 0, kGutterW - 4, kRulerH - 2);
+        auto *row = new QHBoxLayout(gridBox);
+        row->setContentsMargins(8, 0, 0, 0);
+        row->setSpacing(4);
+        row->addWidget(new QLabel(SongView::tr("Grid"), gridBox));
+        m_divCombo = new QComboBox(gridBox);
+        m_divCombo->addItem(SongView::tr("Auto"), 0);
+        for (int denom : {4, 8, 16, 32})
+            m_divCombo->addItem(QStringLiteral("1/%1").arg(denom), denom);
+        m_divCombo->setToolTip(
+            SongView::tr("Finest snap subdivision. Auto follows the zoom down to "
+                         "the mid2agb clock grid; 1/4 never snaps finer than beats."));
+        m_feelCombo = new QComboBox(gridBox);
+        m_feelCombo->addItem(SongView::tr("Straight"));
+        m_feelCombo->addItem(SongView::tr("Triplet"));
+        m_feelCombo->setToolTip(SongView::tr("Straight or triplet beat subdivisions."));
+        for (QComboBox *combo : {m_divCombo, m_feelCombo}) {
+            combo->setFocusPolicy(Qt::NoFocus);
+            row->addWidget(combo);
+        }
+        row->addStretch(1);
+        QObject::connect(m_divCombo, &QComboBox::activated, m_sv, [this](int index) {
+            m_sv->setGridMinDenom(m_divCombo->itemData(index).toInt());
+        });
+        QObject::connect(m_feelCombo, &QComboBox::activated, m_sv, [this](int index) {
+            m_sv->setGridFeel(index == 1 ? SongView::GridFeel::Triplet
+                                         : SongView::GridFeel::Straight);
+        });
+    }
+
+    // Combo state from the view (setters, setSong reset, sidecar apply);
+    // setCurrentIndex is safe because the handlers hang off activated(),
+    // which only fires on user picks.
+    void syncGridControls()
+    {
+        m_divCombo->setCurrentIndex(std::max(0, m_divCombo->findData(m_sv->gridMinDenom())));
+        m_feelCombo->setCurrentIndex(m_sv->gridFeel() == SongView::GridFeel::Triplet ? 1
+                                                                                     : 0);
     }
 
 protected:
@@ -739,6 +785,8 @@ private:
     QPoint m_rightPressPos;
     uint64_t m_selAnchor = 0;   // snapped tick of the right press
     int m_dragSelEdge = -1;     // selection edge being left-dragged (0/1)
+    QComboBox *m_divCombo = nullptr;  // minimum snap subdivision (gutter)
+    QComboBox *m_feelCombo = nullptr; // straight / triplet
 };
 
 // ---------------------------------------------------------------- PianoRoll
@@ -3358,9 +3406,12 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_editCursorTick = 0;
     m_playing = false;
     m_scrollPx = 0;
-    // Lane heights are per-song view state; back to defaults until a
-    // sidecar (applyViewState) says otherwise.
+    // Lane heights and the snap grid are per-song view state; back to
+    // defaults until a sidecar (applyViewState) says otherwise.
     m_lanes->setViewHeights(0, {});
+    m_gridFeel = GridFeel::Straight;
+    m_gridMinDenom = 0;
+    m_ruler->syncGridControls();
 
     m_selectedTrack = 0;
     if (timeline) {
@@ -3513,6 +3564,8 @@ SongView::ViewState SongView::viewState() const
     state.laneHeights = m_lanes->rowHeightOverrides();
     state.splitterSizes = m_splitter->sizes();
     state.emptyLanes = m_emptyLanes;
+    state.gridMinDenom = m_gridMinDenom;
+    state.gridTriplet = m_gridFeel == GridFeel::Triplet;
     return state;
 }
 
@@ -3523,6 +3576,8 @@ void SongView::applyViewState(const ViewState &state)
     const double tpb = double(m_timeline->ticksPerBeat);
     m_pxPerTick = std::clamp(state.pxPerBeat, kMinPxPerBeat, kMaxPxPerBeat) / tpb;
     m_keyHeight = std::clamp(state.keyHeight, kMinKeyHeight, kMaxKeyHeight);
+    setGridMinDenom(state.gridMinDenom); // setter validates the denominator
+    setGridFeel(state.gridTriplet ? GridFeel::Triplet : GridFeel::Straight);
     m_editCursorTick = std::min<uint64_t>(state.editCursorTick, m_timeline->lengthTicks);
     for (const std::pair<int, uint8_t> &lane : state.emptyLanes)
         if (lane.first >= 0 && lane.first < 16
@@ -3554,16 +3609,46 @@ void SongView::setVoicegroup(const LoadedVoiceGroup *voicegroup)
     refreshTimelineViews();
 }
 
+void SongView::setGridFeel(GridFeel feel)
+{
+    if (m_gridFeel == feel)
+        return;
+    m_gridFeel = feel;
+    m_ruler->syncGridControls();
+    refreshTimelineViews();
+}
+
+void SongView::setGridMinDenom(int denom)
+{
+    if (denom != 4 && denom != 8 && denom != 16 && denom != 32)
+        denom = 0;
+    if (m_gridMinDenom == denom)
+        return;
+    m_gridMinDenom = denom;
+    m_ruler->syncGridControls();
+    refreshTimelineViews();
+}
+
 uint64_t SongView::gridTicks() const
 {
     if (!m_timeline)
         return 24;
     const uint64_t tpb = std::max<uint32_t>(1, m_timeline->ticksPerBeat);
     const uint64_t clock = m_document ? m_document->ticksPerClock() : 1;
-    // Finest visible beat subdivision at least ~8 px wide, floored at the
-    // mid2agb clock grid (divisions 24/48 reach it exactly at deep zoom).
-    for (uint64_t div : {uint64_t(48), uint64_t(32), uint64_t(24), uint64_t(16),
-                         uint64_t(8), uint64_t(4), uint64_t(2), uint64_t(1)}) {
+    // Finest visible subdivision at least ~8 px wide from the feel's ladder
+    // (divisions per beat), floored at the mid2agb clock grid and at the
+    // user's minimum note value. A quarter note is one division per beat;
+    // triplet feel fits three notes where straight fits two, so the same
+    // denominator allows 3/2 the divisions.
+    static constexpr uint64_t kStraight[] = {32, 16, 8, 4, 2, 1};
+    static constexpr uint64_t kTriplet[] = {48, 24, 12, 6, 3, 1};
+    const bool triplet = m_gridFeel == GridFeel::Triplet;
+    const uint64_t maxDiv = m_gridMinDenom == 0
+        ? UINT64_MAX
+        : std::max<uint64_t>(1, uint64_t(m_gridMinDenom) * (triplet ? 3 : 2) / 8);
+    for (uint64_t div : triplet ? kTriplet : kStraight) {
+        if (div > maxDiv)
+            continue;
         if (pxPerBeat() / double(div) >= 8.0)
             return std::max(std::max<uint64_t>(1, tpb / div), clock);
     }
