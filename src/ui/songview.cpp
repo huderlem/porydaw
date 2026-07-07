@@ -1195,6 +1195,7 @@ private:
         }
         doc->addNotes(m_sv->selectedTrack(), notes);
         m_sv->setSelection(std::move(ids));
+        m_sv->ensureTickVisible(base);
         m_sv->announce(SongView::tr("Pasted %n note(s)", nullptr, int(notes.size())));
     }
 
@@ -3556,6 +3557,9 @@ void SongView::pasteRangeAtEditCursor()
     // cleared so its band doesn't sit in the way of the next ruler click.
     clearTimeSelection();
     commitEditCursor(e);
+    // Anchor on the start of the pasted span, not the advanced cursor:
+    // seeing the content that just landed is what confirms the paste.
+    ensureTickVisible(s);
     announce(tr("Pasted range · edit cursor moved to its end — paste again to repeat"));
 }
 
@@ -3995,6 +3999,15 @@ void SongView::setHScroll(int px)
     m_hbar->setValue(px);
     m_hbar->blockSignals(false);
     refreshTimelineViews();
+}
+
+void SongView::ensureTickVisible(uint64_t tick)
+{
+    const int x = contentX(double(tick));
+    const int vw = viewportWidth();
+    if (x >= 0 && x < vw)
+        return;
+    setHScroll(int(double(tick) * m_pxPerTick) - vw / 3);
 }
 
 int SongView::viewportWidth() const

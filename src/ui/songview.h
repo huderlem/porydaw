@@ -283,6 +283,11 @@ public:
     void zoomKeyHeight(int wheelDelta, int anchorY);
     void scrollByPx(int dx);
     void scrollRollBy(int dy);
+    // Scrolls horizontally so the tick sits a third of the way into the
+    // viewport if it is currently off-screen; on-screen ticks are left
+    // alone. Pastes anchor at the edit cursor, which can be scrolled out
+    // of view — without this the paste looks like a no-op.
+    void ensureTickVisible(uint64_t tick);
     void refreshTimelineViews();
 
 signals:
