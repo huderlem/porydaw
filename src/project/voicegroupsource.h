@@ -193,7 +193,9 @@ private:
         VgLineKind kind = VgLineKind::Other;
         int slot = -1;
         VgVoice voice;            // valid when kind == Editable
-        bool dirty = false;
+        // raw as of open/reload or the last save; a line is dirty while raw
+        // differs, so an edit undone back to the on-disk value counts clean.
+        QByteArray pristine;
         // Editable-line formatting, captured for faithful re-rendering:
         QByteArray indent;        // leading whitespace
         QByteArray macroText;     // macro word incl. any trailing space

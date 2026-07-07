@@ -187,10 +187,13 @@ porydaw writes exactly three things into the project:
 3. Voicegroup `.inc` files — opt-in (confirmed on first save, "don't ask
    again" persists): the voicegroup editor rewrites only the edited `voice_*`
    macro lines, preserving every other byte (comments, keysplit lines, labels,
-   line endings). Creating a voicegroup adds `sound/voicegroups/<name>.inc`
-   and appends its `.include` line to `sound/voice_groups.inc`. Pre-save
-   auditioning never touches project files — edits are rendered to
-   `.porydaw/vgpreview/` and loaded through the loader's search-path override.
+   line endings). Saving is unified with the song: to the user the song and
+   its voicegroup are one document, so Save Song writes 1–3 together (there
+   is no separate voicegroup save). Creating a voicegroup adds
+   `sound/voicegroups/<name>.inc` and appends its `.include` line to
+   `sound/voice_groups.inc`. Pre-save auditioning never touches project
+   files — edits are rendered to `.porydaw/vgpreview/` and loaded through
+   the loader's search-path override.
 
 It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 `ld_script_modern.ld`, or samples.
@@ -219,7 +222,9 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 - Note draw/move/resize/velocity with snapping to the song's clock base; the effective
   quantized velocity/length shown inline (§4.3).
 - Live audition: notes sound (through the correct voice) while being drawn or dragged.
-- Undo/redo across all document mutations, including `midi.cfg` property changes.
+- Undo/redo across all document mutations, including `midi.cfg` property
+  changes and voicegroup voice edits — song and voicegroup share one undo
+  stack and one dirty/save state (they are one document to the user).
 - MIDI file import: open an arbitrary external `.mid`, get a guided mapping pass —
   channels → tracks (warn > 16 or > polyphony budget), unmapped CCs flagged, program
   numbers mapped against the chosen voicegroup, then saved into the project as a new
@@ -310,7 +315,10 @@ confirmation (§5.3); create-voicegroup (copy of an existing one or the dummy
 template); `--vgcheck` harness; drumset (keysplit_all) voices selectable and
 swappable like keysplits (the Drumkit list offers the project's observed
 drumkit sub-voicegroups). Cry voices stay read-only and round-trip verbatim;
-keysplit *tables* are not editable.
+keysplit *tables* are not editable. Voice edits ride the song's undo stack
+and save with Save Song (no separate save/revert; a `-G` voicegroup switch
+keeps unsaved voice edits in the undo history and replays them when the
+switch is undone); `--vgsavecheck` harness covers the unified pipeline.
 
 **WAV export (shipped after M3, from M4):**
 File → Export WAV renders the loaded song (including unsaved edits) offline

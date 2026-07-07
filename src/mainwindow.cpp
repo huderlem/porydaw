@@ -42,6 +42,87 @@
 #include "ui/viewsidecar.h"
 #include "ui/voicegroupbrowser.h"
 
+#include <QUndoCommand>
+
+namespace {
+constexpr int kVoiceEditCommandId = 0x7661; // 'va': voice-edit merge id
+} // namespace
+
+// A voicegroup voice edit, on the song's undo stack: song and voicegroup
+// share one undo/save pipeline, so Ctrl+Z walks both kinds of edit in order.
+// Value-based (before/after per slot): it applies through whichever source
+// is open, which keeps undo/redo correct even after a -G voicegroup switch
+// reopened the file from disk (see MainWindow::replayVoiceEdits).
+class VoiceEditCommand : public QUndoCommand
+{
+public:
+    VoiceEditCommand(MainWindow *window, const QString &loadName, int slot,
+                     const VgVoice &before, const VgVoice &after, bool structural)
+        : QUndoCommand(QObject::tr("edit voice %1").arg(slot)), m_window(window),
+          m_loadName(loadName), m_slot(slot), m_before(before), m_after(after),
+          m_structural(structural)
+    {
+    }
+
+    const QString &loadName() const { return m_loadName; }
+    int slot() const { return m_slot; }
+    const VgVoice &after() const { return m_after; }
+
+    int id() const override { return kVoiceEditCommandId; }
+
+    // Spin boxes commit every step of a click-and-hold gesture; steps that
+    // keep changing the same fields of the same voice collapse into one undo
+    // entry. A run that lands back on its starting value vanishes entirely.
+    bool mergeWith(const QUndoCommand *other) override
+    {
+        auto *o = static_cast<const VoiceEditCommand *>(other);
+        if (o->m_loadName != m_loadName || o->m_slot != m_slot || m_structural
+            || o->m_structural
+            || changedFields(o->m_before, o->m_after)
+                != changedFields(m_before, m_after))
+            return false;
+        m_after = o->m_after;
+        if (m_after == m_before)
+            setObsolete(true);
+        return true;
+    }
+
+    void redo() override
+    {
+        m_window->applyVoiceEdit(m_loadName, m_slot, m_after, m_structural);
+    }
+    void undo() override
+    {
+        m_window->applyVoiceEdit(m_loadName, m_slot, m_before, m_structural);
+    }
+
+private:
+    static uint changedFields(const VgVoice &a, const VgVoice &b)
+    {
+        uint mask = 0;
+        mask |= uint(a.macro != b.macro) << 0;
+        mask |= uint(a.key != b.key) << 1;
+        mask |= uint(a.pan != b.pan) << 2;
+        mask |= uint(a.symbol != b.symbol) << 3;
+        mask |= uint(a.keysplitTable != b.keysplitTable) << 4;
+        mask |= uint(a.sweep != b.sweep) << 5;
+        mask |= uint(a.duty != b.duty) << 6;
+        mask |= uint(a.period != b.period) << 7;
+        mask |= uint(a.attack != b.attack) << 8;
+        mask |= uint(a.decay != b.decay) << 9;
+        mask |= uint(a.sustain != b.sustain) << 10;
+        mask |= uint(a.release != b.release) << 11;
+        return mask;
+    }
+
+    MainWindow *m_window;
+    QString m_loadName;
+    int m_slot;
+    VgVoice m_before;
+    VgVoice m_after;
+    bool m_structural;
+};
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -204,12 +285,8 @@ void MainWindow::buildUi()
                 if (m_audioOk)
                     m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
             });
-    connect(m_vgBrowser, &VoicegroupBrowser::voiceEdited, this,
-            &MainWindow::onVoiceEdited);
-    connect(m_vgBrowser, &VoicegroupBrowser::saveRequested, this,
-            &MainWindow::saveVoicegroup);
-    connect(m_vgBrowser, &VoicegroupBrowser::revertRequested, this,
-            &MainWindow::revertVoicegroup);
+    connect(m_vgBrowser, &VoicegroupBrowser::voiceEditRequested, this,
+            &MainWindow::onVoiceEditRequested);
     connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
             &MainWindow::newVoicegroup);
     m_vgDock->setWidget(m_vgBrowser);
@@ -283,7 +360,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     QElapsedTimer timer;
     timer.start();
 
-    if (!maybeSaveSong() || !maybeSaveVoicegroup())
+    if (!maybeSaveSong())
         return false;
     saveViewState(); // against the old project root, before open() swaps it
     cleanupVgPreview();
@@ -366,7 +443,7 @@ void MainWindow::loadSong(const SongInfo &song)
 {
     if (!m_audioOk)
         return;
-    if (!maybeSaveSong() || !maybeSaveVoicegroup())
+    if (!maybeSaveSong())
         return;
     saveViewState(); // the outgoing song's, while its view is still up
     cleanupVgPreview();
@@ -443,9 +520,10 @@ void MainWindow::onDocumentChanged()
 
     const SongCfg &cfg = m_doc.cfg();
     if (cfg.voicegroupArg != m_appliedVoicegroupArg) {
-        // The -G switch replaces the edited voicegroup; the change can't be
-        // blocked here, so the prompt offers Save/Discard only.
-        maybeSaveVoicegroup(/*allowCancel=*/false);
+        // The -G switch (or its undo/redo) swaps the voicegroup. Unsaved
+        // voice edits need no prompt: they live in the undo history, and
+        // replayVoiceEdits restores them whenever their voicegroup is the
+        // open one again.
         cleanupVgPreview();
         QString tried;
         if (LoadedVoiceGroup *vg = loadVoicegroupFor(cfg, &tried)) {
@@ -453,9 +531,14 @@ void MainWindow::onDocumentChanged()
             m_vgBrowser->setVoicegroup(nullptr);
             m_audio.updateVoicegroup(vg);
             openVoicegroupSource(cfg);
+            replayVoiceEdits();
             m_songView->setVoicegroup(m_audio.voicegroup());
             updateVoicegroupBrowser();
             m_appliedVoicegroupArg = cfg.voicegroupArg;
+            // Replayed edits aren't in the disk file just loaded; audition
+            // them through the preview shadow like any unsaved edit.
+            if (m_vgSource && m_vgSource->dirty())
+                reloadVoicegroupPreview(m_vgBrowser->currentSlot());
         } else {
             statusBar()->showMessage(
                 tr("Voicegroup not found (tried: %1) — keeping the previous one until save.")
@@ -476,16 +559,49 @@ void MainWindow::onDocumentChanged()
 
 void MainWindow::saveSong()
 {
+    saveLoadedSong();
+}
+
+bool MainWindow::saveLoadedSong()
+{
     if (m_loadedSongId < 0)
-        return;
+        return false;
+
+    // The voicegroup first: its write is permission-gated, and the document
+    // save below marks the undo stack clean — a refused or failed voicegroup
+    // write must leave the session dirty so the user can retry.
+    const bool vgWasDirty = m_vgSource && m_vgSource->dirty();
+    if (vgWasDirty) {
+        if (!confirmVoicegroupWrite())
+            return false;
+        QString error;
+        if (!m_vgSource->save(&error)) {
+            QMessageBox::warning(this, tr("Save Voicegroup"), error);
+            return false;
+        }
+        cleanupVgPreview();
+        // Reload from the project: verifies the saved file parses and
+        // replaces any preview-loaded state.
+        const int slot = m_vgBrowser->currentSlot();
+        QString tried;
+        if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_doc.cfg(), &tried))
+            swapVoicegroup(vg, slot);
+        updateVgDockTitle();
+    }
+
     QString error;
     if (!m_doc.save(&error)) {
         QMessageBox::warning(this, tr("Save Song"), error);
-        return;
+        return false;
     }
     m_project.setSongCfg(m_loadedSongId, m_doc.cfg());
-    statusBar()->showMessage(tr("Saved %1").arg(m_doc.midPath()), 5000);
+    statusBar()->showMessage(vgWasDirty
+                                 ? tr("Saved %1 and %2")
+                                       .arg(m_doc.midPath(), m_vgSource->filePath())
+                                 : tr("Saved %1").arg(m_doc.midPath()),
+                             5000);
     updateWindowTitle();
+    return true;
 }
 
 void MainWindow::exportWav()
@@ -707,7 +823,7 @@ void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
                                   const QString &constant, const QString &player,
                                   const SongCfg &cfg, const QString &newVoicegroup)
 {
-    if (!maybeSaveSong() || !maybeSaveVoicegroup())
+    if (!maybeSaveSong())
         return;
 
     QString error;
@@ -834,6 +950,49 @@ void MainWindow::openVoicegroupSource(const SongCfg &cfg)
     }
 }
 
+void MainWindow::onVoiceEditRequested(int slot, const VgVoice &voice, bool structural)
+{
+    if (!m_vgSource)
+        return;
+    const VgVoice *before = m_vgSource->voiceAt(slot);
+    if (!before || *before == voice)
+        return;
+    // push() applies the edit (redo) via applyVoiceEdit.
+    m_doc.undoStack()->push(new VoiceEditCommand(this, m_vgSource->loadName(), slot,
+                                                 *before, voice, structural));
+}
+
+void MainWindow::applyVoiceEdit(const QString &loadName, int slot, const VgVoice &voice,
+                                bool structural)
+{
+    if (!m_vgSource || m_vgSource->loadName() != loadName)
+        return; // stale target; replayVoiceEdits re-syncs when it reopens
+    m_vgSource->setVoice(slot, voice);
+    onVoiceEdited(slot, structural);
+    if (!structural)
+        m_vgBrowser->voiceChanged(slot);
+    updateWindowTitle();
+}
+
+void MainWindow::replayVoiceEdits()
+{
+    if (!m_vgSource)
+        return;
+    // Every command below the current index is applied; poke the ones that
+    // target the just-reopened voicegroup back into it. Called from inside a
+    // cfg command's undo()/redo(), where QUndoStack::index() still counts
+    // that cfg command as applied — it isn't a voice edit, so it's skipped.
+    const QUndoStack *stack = m_doc.undoStack();
+    for (int i = 0; i < stack->index(); i++) {
+        const QUndoCommand *cmd = stack->command(i);
+        if (cmd->id() != kVoiceEditCommandId)
+            continue;
+        auto *edit = static_cast<const VoiceEditCommand *>(cmd);
+        if (edit->loadName() == m_vgSource->loadName())
+            m_vgSource->setVoice(edit->slot(), edit->after());
+    }
+}
+
 void MainWindow::onVoiceEdited(int slot, bool structural)
 {
     if (!m_vgSource)
@@ -889,71 +1048,6 @@ void MainWindow::swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot)
     m_songView->setVoicegroup(m_audio.voicegroup());
     updateVoicegroupBrowser();
     m_vgBrowser->selectSlot(keepSlot);
-}
-
-void MainWindow::saveVoicegroup()
-{
-    if (!m_vgSource || !m_vgSource->dirty())
-        return;
-    if (!confirmVoicegroupWrite())
-        return;
-    QString error;
-    if (!m_vgSource->save(&error)) {
-        QMessageBox::warning(this, tr("Save Voicegroup"), error);
-        return;
-    }
-    cleanupVgPreview();
-    // Reload from the project: verifies the saved file parses and replaces
-    // any preview-loaded state.
-    const int slot = m_vgBrowser->currentSlot();
-    QString tried;
-    if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_doc.cfg(), &tried))
-        swapVoicegroup(vg, slot);
-    statusBar()->showMessage(tr("Saved %1").arg(m_vgSource->filePath()), 5000);
-    updateVgDockTitle();
-}
-
-void MainWindow::revertVoicegroup()
-{
-    if (!m_vgSource)
-        return;
-    QString error;
-    if (!m_vgSource->reload(&error)) {
-        QMessageBox::warning(this, tr("Revert Voicegroup"), error);
-        return;
-    }
-    cleanupVgPreview();
-    const int slot = m_vgBrowser->currentSlot();
-    QString tried;
-    if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_doc.cfg(), &tried))
-        swapVoicegroup(vg, slot);
-    updateVgDockTitle();
-}
-
-bool MainWindow::maybeSaveVoicegroup(bool allowCancel)
-{
-    if (!m_vgSource || !m_vgSource->dirty())
-        return true;
-    QMessageBox::StandardButtons buttons = QMessageBox::Save | QMessageBox::Discard;
-    if (allowCancel)
-        buttons |= QMessageBox::Cancel;
-    const auto choice = QMessageBox::question(
-        this, tr("Unsaved Voicegroup Changes"),
-        tr("The voicegroup %1 has unsaved voice edits. Save them?")
-            .arg(QFileInfo(m_vgSource->filePath()).fileName()),
-        buttons, QMessageBox::Save);
-    if (choice == QMessageBox::Cancel)
-        return false;
-    if (choice == QMessageBox::Save) {
-        if (!confirmVoicegroupWrite())
-            return false;
-        QString error;
-        if (!m_vgSource->save(&error)) {
-            QMessageBox::warning(this, tr("Save Voicegroup"), error);
-            return false;
-        }
-    }
-    return true;
 }
 
 bool MainWindow::confirmVoicegroupWrite()
@@ -1056,22 +1150,22 @@ void MainWindow::newVoicegroup()
 
 bool MainWindow::maybeSaveSong()
 {
-    if (m_loadedSongId < 0 || !m_doc.isDirty())
+    // Voicegroup edits count as the song's unsaved changes: to the user the
+    // song and its voicegroup are one document (a normally-clean undo stack
+    // can still leave the voicegroup dirty when a save was refused mid-way).
+    const bool vgDirty = m_vgSource && m_vgSource->dirty();
+    if (m_loadedSongId < 0 || (!m_doc.isDirty() && !vgDirty))
         return true;
     const auto choice = QMessageBox::question(
         this, tr("Unsaved Changes"),
-        tr("%1 has unsaved changes. Save them?").arg(m_doc.label()),
+        vgDirty ? tr("%1 has unsaved changes (including voicegroup edits). Save them?")
+                      .arg(m_doc.label())
+                : tr("%1 has unsaved changes. Save them?").arg(m_doc.label()),
         QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
     if (choice == QMessageBox::Cancel)
         return false;
-    if (choice == QMessageBox::Save) {
-        QString error;
-        if (!m_doc.save(&error)) {
-            QMessageBox::warning(this, tr("Save Song"), error);
-            return false;
-        }
-        m_project.setSongCfg(m_loadedSongId, m_doc.cfg());
-    }
+    if (choice == QMessageBox::Save)
+        return saveLoadedSong();
     return true;
 }
 
@@ -1089,7 +1183,7 @@ void MainWindow::updateWindowTitle()
     if (m_loadedSongId >= 0) {
         setWindowTitle(
             QStringLiteral("%1[*] — %2 — porydaw").arg(m_doc.label(), project));
-        setWindowModified(m_doc.isDirty());
+        setWindowModified(m_doc.isDirty() || (m_vgSource && m_vgSource->dirty()));
     } else {
         setWindowTitle(project.isEmpty()
                            ? QStringLiteral("porydaw")
@@ -1100,7 +1194,7 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    if (maybeSaveSong() && maybeSaveVoicegroup()) {
+    if (maybeSaveSong()) {
         saveViewState();
         cleanupVgPreview();
         if (m_persistSession) {
@@ -1227,8 +1321,9 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     m_audio.previewVoice(0, 60, 0);
     qInfo("selftest: voice audition through the preview engine OK");
 
-    // Voicegroup editing: a scalar edit pokes the live ToneData, a sample
-    // swap goes through the .porydaw/vgpreview shadow reload, and Revert
+    // Voicegroup editing through the unified pipeline: a scalar edit pokes
+    // the live ToneData, a sample swap goes through the .porydaw/vgpreview
+    // shadow reload — both land on the song's undo stack, and undoing them
     // restores the on-disk state — all without changing project files.
     bool vgEditOk = true;
     if (m_vgSource) {
@@ -1256,32 +1351,41 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                 in.open(QIODevice::ReadOnly);
                 fileBefore = in.readAll();
             }
-            VgVoice v = *m_vgSource->voiceAt(dsSlot);
+            const VgVoice original = *m_vgSource->voiceAt(dsSlot);
+            const QByteArray originalName(m_audio.voicegroup()->voiceNames[dsSlot]);
+            int undosNeeded = 1;
+            VgVoice v = original;
             v.release = v.release == 25 ? 26 : 25;
-            m_vgSource->setVoice(dsSlot, v);
-            onVoiceEdited(dsSlot, false);
-            vgEditOk = m_vgSource->dirty()
+            onVoiceEditRequested(dsSlot, v, false);
+            vgEditOk = m_vgSource->dirty() && m_doc.isDirty()
                 && m_audio.voicegroup()->voices[dsSlot].release == uint8_t(v.release);
             if (donorSlot >= 0) {
+                undosNeeded = 2; // structural edits never merge with scalar ones
                 const QByteArray donorName(m_audio.voicegroup()->voiceNames[donorSlot]);
                 v.symbol = m_vgSource->voiceAt(donorSlot)->symbol;
-                m_vgSource->setVoice(dsSlot, v);
-                onVoiceEdited(dsSlot, true);
+                onVoiceEditRequested(dsSlot, v, true);
                 vgEditOk = vgEditOk
                     && QByteArray(m_audio.voicegroup()->voiceNames[dsSlot]) == donorName
                     && m_audio.transport() == Transport::Playing;
             }
-            revertVoicegroup();
+            // Voice edits ride the song's undo stack; undoing them all must
+            // land back on the exact on-disk state (clean, nothing written).
+            for (int i = 0; i < undosNeeded; i++)
+                m_doc.undoStack()->undo();
             QByteArray fileAfter;
             {
                 QFile in(m_vgSource->filePath());
                 in.open(QIODevice::ReadOnly);
                 fileAfter = in.readAll();
             }
-            vgEditOk = vgEditOk && !m_vgSource->dirty() && fileAfter == fileBefore
-                && !QDir(m_project.root() + QStringLiteral("/.porydaw/vgpreview")).exists();
+            vgEditOk = vgEditOk && !m_vgSource->dirty() && !m_doc.isDirty()
+                && fileAfter == fileBefore
+                && *m_vgSource->voiceAt(dsSlot) == original
+                && m_audio.voicegroup()->voices[dsSlot].release
+                    == uint8_t(original.release)
+                && QByteArray(m_audio.voicegroup()->voiceNames[dsSlot]) == originalName;
             if (vgEditOk)
-                qInfo("selftest: voicegroup edit + preview reload + revert OK "
+                qInfo("selftest: voicegroup edit + preview reload + undo OK "
                       "(slot %d, donor %d)",
                       dsSlot, donorSlot);
             else

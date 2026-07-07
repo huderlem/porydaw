@@ -45,16 +45,20 @@ public:
 
     int currentSlot() const;
     void selectSlot(int slot);
+    // The source's voice at slot changed outside the editor (an undo/redo,
+    // or the owner applying a requested edit): refresh the slot's row, and
+    // the editor panel when it currently shows that slot.
+    void voiceChanged(int slot);
 
 signals:
     // velocity 0 releases. Routed to AudioEngine::previewVoice.
     void auditionVoice(int voice, int key, int velocity);
-    // The selected voice's fields changed in the source model. structural
+    // The user edited the selected voice. The browser does not touch the
+    // source itself: the owner applies the edit (as a song undo command) and
+    // reflects it back via voiceChanged / a full setVoicegroup. structural
     // means scalar ToneData pokes aren't enough (type or symbol changed) and
     // the voicegroup needs a reload from rendered source to audition.
-    void voiceEdited(int slot, bool structural);
-    void saveRequested();
-    void revertRequested();
+    void voiceEditRequested(int slot, const VgVoice &voice, bool structural);
     void newVoicegroupRequested();
 
 protected:
@@ -66,7 +70,6 @@ private:
     void populateEditor();
     void commitEdit();
     void updateRow(int slot);
-    void refreshButtons();
     void setEditorRowsVisible(VgMacro macro, bool visible);
 
     QLabel *m_title = nullptr;
@@ -108,7 +111,5 @@ private:
     QLabel *m_periodLabel = nullptr;
     QLabel *m_adsrLabel = nullptr;
     QWidget *m_adsrRow = nullptr;
-    QPushButton *m_saveButton = nullptr;
-    QPushButton *m_revertButton = nullptr;
     QPushButton *m_newButton = nullptr;
 };

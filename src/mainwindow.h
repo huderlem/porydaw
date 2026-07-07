@@ -23,6 +23,8 @@ class MainWindow : public QMainWindow
 {
     Q_OBJECT
 
+    friend class VoiceEditCommand; // calls applyVoiceEdit from undo/redo
+
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
@@ -31,6 +33,11 @@ public:
     // project, loads the song, plays ~3 seconds through the real audio path,
     // and reports whether the playhead advanced.
     bool runSelfTest(const QString &projectRoot, const QString &songLabel);
+
+    // Unified song+voicegroup undo/save check (--vgsavecheck; vgsavecheck.cpp).
+    // Writes into the project: run against a scratch copy, with QSettings
+    // already redirected by the caller.
+    bool runVgSaveCheck(const QString &projectRoot, const QString &songLabel);
 
     // Reopens the last session's project and song, if they still exist.
     // Called after show() on interactive launches only, so the harnesses
@@ -52,9 +59,8 @@ private slots:
     void registerLoadedSong();
     void onDocumentChanged();
     void uiTick();
+    void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural);
     void onVoiceEdited(int slot, bool structural);
-    void saveVoicegroup();
-    void revertVoicegroup();
     void newVoicegroup();
 
 private:
@@ -74,14 +80,26 @@ private:
                           const SongCfg &cfg, const QString &newVoicegroup);
     void reloadProject();
     void updateVoicegroupBrowser();
-    // Prompts to save a dirty document; false = user cancelled the action.
+    // Saves the loaded song AND its dirty voicegroup — the two are one
+    // document to the user. The voicegroup goes first (its write is
+    // permission-gated), so a refused or failed write leaves the session
+    // dirty. false = nothing was marked clean.
+    bool saveLoadedSong();
+    // Prompts to save unsaved changes (song edits and voicegroup edits
+    // alike); false = user cancelled the action.
     bool maybeSaveSong();
-    // Same for unsaved voicegroup edits. allowCancel=false (the in-document
-    // -G switch, which can't be blocked) prompts Save/Discard only.
-    bool maybeSaveVoicegroup(bool allowCancel = true);
     // Locates + parses the source behind the loaded voicegroup (nullptr on
     // exotic layouts — the editor degrades to read-only).
     void openVoicegroupSource(const SongCfg &cfg);
+    // Applies a voice-edit undo command: pokes the edit into the open source
+    // and refreshes audio + views. No-op when the command's voicegroup isn't
+    // the loaded one (stale target; replayVoiceEdits re-syncs it later).
+    void applyVoiceEdit(const QString &loadName, int slot, const VgVoice &voice,
+                        bool structural);
+    // After a voicegroup switch reopens a source from disk, reapplies every
+    // applied (below the undo index) voice-edit command targeting it, so
+    // undoing back across a -G change restores unsaved voice edits too.
+    void replayVoiceEdits();
     // Auditions unsaved structural edits: renders the edited source into
     // .porydaw/vgpreview/ and reloads through the loader's config override,
     // which shadows the real file without touching it.

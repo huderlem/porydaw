@@ -188,32 +188,25 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_releaseSpin->setToolTip(tr("Release"));
     addRow(tr("ADSR"), m_adsrRow, &m_adsrLabel);
 
+    // Voice edits save with the song (Ctrl+S) and undo through the song's
+    // undo stack, so the only button here is New…
     auto *buttons = new QWidget(m_editor);
     auto *buttonLayout = new QHBoxLayout(buttons);
     buttonLayout->setContentsMargins(0, 2, 0, 0);
-    m_saveButton = new QPushButton(tr("Save"), buttons);
-    m_revertButton = new QPushButton(tr("Revert"), buttons);
     m_newButton = new QPushButton(tr("New…"), buttons);
     m_newButton->setToolTip(tr("Create a new voicegroup file."));
-    buttonLayout->addWidget(m_saveButton);
-    buttonLayout->addWidget(m_revertButton);
     buttonLayout->addWidget(m_newButton);
     buttonLayout->addStretch(1);
     form->addRow(buttons);
-    connect(m_saveButton, &QPushButton::clicked, this,
-            &VoicegroupBrowser::saveRequested);
-    connect(m_revertButton, &QPushButton::clicked, this,
-            &VoicegroupBrowser::revertRequested);
     connect(m_newButton, &QPushButton::clicked, this,
             &VoicegroupBrowser::newVoicegroupRequested);
     layout->addWidget(m_editor);
 
     // Space stays the transport toggle even while an editor field has focus:
     // text inputs claim plain printable keys via ShortcutOverride, so the
-    // filter refuses Space on their behalf (see eventFilter). The buttons are
-    // mouse targets — keyboard focus on them would also swallow Space.
-    for (QPushButton *button : {m_saveButton, m_revertButton, m_newButton})
-        button->setFocusPolicy(Qt::NoFocus);
+    // filter refuses Space on their behalf (see eventFilter). The button is
+    // a mouse target — keyboard focus on it would also swallow Space.
+    m_newButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_sweepTimeSpin, m_sweepDirCombo, m_sweepShiftSpin, m_attackSpin,
@@ -247,7 +240,6 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
     if (!vg) {
         m_title->setText(tr("No song loaded"));
         populateEditor();
-        refreshButtons();
         return;
     }
     m_title->setText(title.isEmpty() ? tr("Voicegroup") : title);
@@ -269,7 +261,6 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
         item->setData(0, Qt::UserRole, i);
     }
     populateEditor();
-    refreshButtons();
 }
 
 void VoicegroupBrowser::setSource(VoicegroupSource *source,
@@ -293,7 +284,6 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
     }
     m_sampleChoices += sampleSymbols; // already sorted, phonemes last
     populateEditor();
-    refreshButtons();
 }
 
 int VoicegroupBrowser::currentSlot() const
@@ -566,13 +556,17 @@ void VoicegroupBrowser::commitEdit()
 
     if (v == *cur)
         return;
-    const bool structural = vgVoiceStructuralChange(*cur, v);
-    m_source->setVoice(slot, v);
+    // The owner applies the edit (through the song's undo stack) and echoes
+    // it back: voiceChanged for a scalar poke, a full voicegroup swap for a
+    // structural one — either path refreshes the row and this editor.
+    emit voiceEditRequested(slot, v, vgVoiceStructuralChange(*cur, v));
+}
+
+void VoicegroupBrowser::voiceChanged(int slot)
+{
     updateRow(slot);
-    refreshButtons();
-    emit voiceEdited(slot, structural);
-    if (structural)
-        populateEditor(); // field set / symbol list may have changed
+    if (slot == currentSlot())
+        populateEditor();
 }
 
 void VoicegroupBrowser::updateRow(int slot)
@@ -587,11 +581,4 @@ void VoicegroupBrowser::updateRow(int slot)
                          .arg(name.isEmpty() ? type : name));
     item->setText(1, type);
     item->setText(2, adsrText(*voice));
-}
-
-void VoicegroupBrowser::refreshButtons()
-{
-    const bool dirty = m_source && m_source->dirty();
-    m_saveButton->setEnabled(dirty);
-    m_revertButton->setEnabled(dirty);
 }

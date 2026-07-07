@@ -571,6 +571,8 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
                          .arg(m_sectionLabel, m_filePath);
         return false;
     }
+    for (Line &line : m_lines)
+        line.pristine = line.raw;
     Q_UNUSED(error);
     return true;
 }
@@ -595,7 +597,6 @@ bool VoicegroupSource::setVoice(int slot, const VgVoice &voice)
         return false;
     Line &line = m_lines[m_slotToLine[slot]];
     line.voice = voice;
-    line.dirty = true;
     renderLine(line);
     return true;
 }
@@ -652,7 +653,7 @@ void VoicegroupSource::renderLine(Line &line) const
 bool VoicegroupSource::dirty() const
 {
     for (const Line &line : m_lines) {
-        if (line.dirty)
+        if (line.raw != line.pristine)
             return true;
     }
     return false;
@@ -681,7 +682,7 @@ bool VoicegroupSource::save(QString *error)
     }
     out.close();
     for (Line &line : m_lines)
-        line.dirty = false;
+        line.pristine = line.raw;
     return true;
 }
 

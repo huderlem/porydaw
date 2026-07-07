@@ -39,6 +39,7 @@ qt_add_executable(porydaw
     src/savecheck.cpp
     src/onboardcheck.cpp
     src/vgcheck.cpp
+    src/vgsavecheck.cpp
     src/exportcheck.cpp
     src/mkcheck.cpp
     src/sessioncheck.cpp
