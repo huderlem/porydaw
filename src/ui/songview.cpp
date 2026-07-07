@@ -1445,6 +1445,7 @@ public:
     AutomationArea(SongView *sv, QScrollArea *scroll)
         : QWidget(nullptr), m_sv(sv), m_scroll(scroll) // parented by the scroll area
     {
+        setObjectName(QStringLiteral("automationArea")); // findChild for tests
         setMinimumHeight(kLaneH);
         setMouseTracking(true); // divider hover cursor
         // Range shortcuts (copy/cut/delete/paste on the time selection) work
@@ -1476,6 +1477,7 @@ public:
         m_sweep.clear();
         m_rightPress = false;
         m_selSweep = false;
+        m_hoverRow = -1;
         if (m_sv->timeline()) {
             m_rows.push_back({Row::Tempo, nullptr});
             const SongViewModel &model = m_sv->model();
@@ -1559,6 +1561,48 @@ protected:
                        formatRowValue(m_rows[m_dragRow], m_dragValue));
             p.setClipping(false);
         }
+
+        paintHoverReadout(p);
+    }
+
+    // Idle-hover readout: a marker on the curve with the value in effect at
+    // the cursor's tick (the last point at or before it — lanes hold their
+    // value until the next point, so this matches what the curve shows).
+    void paintHoverReadout(QPainter &p)
+    {
+        if (m_dragRow >= 0 || m_selSweep || m_hoverRow < 0
+            || m_hoverRow >= int(m_rows.size()))
+            return;
+        const Row &row = m_rows[m_hoverRow];
+        const std::vector<LanePoint> *points = rowPoints(row);
+        if (!points || points->empty())
+            return;
+        const auto it = std::upper_bound(
+            points->begin(), points->end(), m_hoverTick,
+            [](double t, const LanePoint &pt) { return t < double(pt.tick); });
+        if (it == points->begin())
+            return; // before the first point: no value in effect yet
+        const int value = (it - 1)->value;
+        int minV, maxV;
+        rowRange(row, &minV, &maxV);
+        const int top = rowTop(m_hoverRow) + 5;
+        const int bottom = rowBottom(m_hoverRow) - 1 - 4;
+        const int x = kGutterW + m_sv->contentX(m_hoverTick);
+        const int y =
+            bottom - (value - minV) * (bottom - top) / std::max(1, maxV - minV);
+        p.setClipRect(
+            QRect(kGutterW, rowTop(m_hoverRow), width() - kGutterW, rowHeight(row)));
+        p.setPen(QPen(palette().color(QPalette::WindowText), 1));
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(QPoint(x, y), 3, 3);
+        const QString text = formatRowValue(row, value);
+        // Keep the label inside the row: flip left of the cursor at the right
+        // edge, and keep the baseline below the row top when the curve is high.
+        const int tw = fontMetrics().horizontalAdvance(text);
+        const int tx = x + 6 + tw > width() ? x - 6 - tw : x + 6;
+        const int ty = std::max(y - 4, rowTop(m_hoverRow) + fontMetrics().ascent() + 2);
+        p.drawText(QPoint(tx, ty), text);
+        p.setClipping(false);
     }
 
     void wheelEvent(QWheelEvent *event) override
@@ -1588,6 +1632,9 @@ protected:
 
     void mousePressEvent(QMouseEvent *event) override
     {
+        // Any press starts a gesture (or a menu); the idle readout would
+        // paint stale under it. The next idle move restores it.
+        clearHover();
         if (event->button() == Qt::MiddleButton) {
             // Reaper-style pan: drag scrolls the timeline and the lane list.
             // Tracked in global coords — the vertical scroll moves this
@@ -1721,6 +1768,7 @@ protected:
         if (m_dragRow < 0) {
             setCursor(rowBoundaryAt(event->pos().y()) >= 0 ? Qt::SplitVCursor
                                                            : Qt::ArrowCursor);
+            updateHover(event->pos());
             return;
         }
         const bool fine = event->modifiers() & Qt::AltModifier;
@@ -1867,6 +1915,8 @@ protected:
         }
         QWidget::keyPressEvent(event);
     }
+
+    void leaveEvent(QEvent *) override { clearHover(); }
 
 private:
     struct Row {
@@ -2390,6 +2440,32 @@ private:
         return std::max(0.0, m_sv->tickAtContentX(std::max(kGutterW, x) - kGutterW));
     }
 
+    // Idle cursor position for the hover readout: raw (unsnapped) tick, so
+    // the readout tracks the pixel, not the grid. Rows without a value curve
+    // (the voice row, the gutter) clear it.
+    void updateHover(QPoint pos)
+    {
+        const int ri = pos.x() >= kGutterW ? rowIndexAt(pos.y()) : -1;
+        if (ri < 0 || !rowPoints(m_rows[ri])) {
+            clearHover();
+            return;
+        }
+        const double tick = rawTickAt(pos.x());
+        if (ri == m_hoverRow && tick == m_hoverTick)
+            return;
+        m_hoverRow = ri;
+        m_hoverTick = tick;
+        update();
+    }
+
+    void clearHover()
+    {
+        if (m_hoverRow < 0)
+            return;
+        m_hoverRow = -1;
+        update();
+    }
+
     // Invert paintCurve's valueY mapping; ri indexes the row for geometry.
     int valueAtY(const Row &row, int ri, int yPos) const
     {
@@ -2633,6 +2709,8 @@ private:
     int m_lineStartValue = 0;
     double m_prevTick = 0.0; // last raw (unsnapped) sweep sample
     int m_prevValue = 0;
+    int m_hoverRow = -1;       // row under an idle cursor; -1 = no readout
+    double m_hoverTick = 0.0;  // raw tick under the idle cursor
 };
 
 // ---------------------------------------------------------------- OtherStrip
