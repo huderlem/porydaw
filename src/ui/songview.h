@@ -190,16 +190,18 @@ public:
     void clearSelection();
 
     // Time-range selection: a half-open [startTick, endTick) span with a
-    // scope — whole tracks (ruler sweep, Shift+right-drag in the roll) or
-    // individual automation lanes (right-drag in the lanes area). Mutually
-    // exclusive with the note selection; survives document rebuilds (it is
-    // tick-addressed), cleared on song swap.
+    // scope — the header-selected tracks (ruler sweep and Shift+right-drag
+    // in the roll behave identically; the scope resolves LIVE from
+    // trackSelectionMask(), so Ctrl/Shift-clicking headers re-scopes an
+    // active selection) or individual automation lanes (right-drag in the
+    // lanes area). Mutually exclusive with the note selection; survives
+    // document rebuilds (it is tick-addressed), cleared on song swap and
+    // plain track switches.
     struct TimeSelection {
-        enum Scope { AllTracks, Tracks, Lanes };
+        enum Scope { Tracks, Lanes };
         uint64_t startTick = 0;
         uint64_t endTick = 0; // <= startTick means no selection
-        Scope scope = AllTracks;
-        uint32_t trackMask = 0;                     // Scope::Tracks
+        Scope scope = Tracks;
         std::vector<std::pair<int, uint8_t>> lanes; // Scope::Lanes: (track, cc);
                                                     // track -1 = the tempo row
         bool active() const { return endTick > startTick; }

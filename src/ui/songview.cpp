@@ -364,16 +364,7 @@ protected:
                 SongView::TimeSelection sel;
                 sel.startTick = std::min(m_selAnchor, tick);
                 sel.endTick = std::max(m_selAnchor, tick);
-                // Scope: the header multi-selection when one exists,
-                // otherwise the whole song.
-                const uint32_t mask = m_sv->trackSelectionMask();
-                if (mask & (mask - 1)) {
-                    sel.scope = SongView::TimeSelection::Tracks;
-                    sel.trackMask = mask;
-                } else {
-                    sel.scope = SongView::TimeSelection::AllTracks;
-                }
-                m_sv->setTimeSelection(sel);
+                m_sv->setTimeSelection(sel); // scope: the selected tracks
             }
             return;
         }
@@ -865,14 +856,12 @@ protected:
                 update();
             }
         } else if (m_drag == Drag::TimeSel) {
-            // Full-height sweep: a time selection on the current track
-            // (notes and automation together).
+            // Full-height sweep: a time selection over the selected tracks
+            // (notes and automation together), same scope as a ruler sweep.
             const uint64_t t = m_sv->snapTick(tick);
             SongView::TimeSelection sel;
             sel.startTick = std::min(m_rightAnchorTick, t);
             sel.endTick = std::max(m_rightAnchorTick, t);
-            sel.scope = SongView::TimeSelection::Tracks;
-            sel.trackMask = 1u << m_sv->selectedTrack();
             m_sv->setTimeSelection(sel);
         } else if (m_drag == Drag::Band) {
             update();
@@ -3336,15 +3325,10 @@ bool SongView::timeSelectionCoversTrack(int track) const
 {
     if (!m_timeSel.active() || track < 0 || track > 15)
         return false;
-    switch (m_timeSel.scope) {
-    case TimeSelection::AllTracks:
-        return true;
-    case TimeSelection::Tracks:
-        return m_timeSel.trackMask & (1u << track);
-    case TimeSelection::Lanes:
+    if (m_timeSel.scope == TimeSelection::Lanes)
         return false;
-    }
-    return false;
+    // Track scope is live: it always mirrors the header selection.
+    return trackSelectionMask() & (1u << track);
 }
 
 bool SongView::timeSelectionCoversRow(int track, uint8_t cc) const
@@ -3368,20 +3352,14 @@ void SongView::announceTimeSelection()
     const double beats = double(m_timeSel.endTick - m_timeSel.startTick)
                          / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
     QString scope;
-    switch (m_timeSel.scope) {
-    case TimeSelection::AllTracks:
-        scope = tr("all tracks");
-        break;
-    case TimeSelection::Tracks: {
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        scope = tr("%n lane(s)", nullptr, int(m_timeSel.lanes.size()));
+    } else {
+        const uint32_t mask = trackSelectionMask();
         int n = 0;
         for (int t = 0; t < 16; t++)
-            n += (m_timeSel.trackMask >> t) & 1;
+            n += (mask >> t) & 1;
         scope = tr("%n track(s)", nullptr, n);
-        break;
-    }
-    case TimeSelection::Lanes:
-        scope = tr("%n lane(s)", nullptr, int(m_timeSel.lanes.size()));
-        break;
     }
     emit statusMessage(tr("Time selection: %1 beats · %2 · Ctrl+C/X copies, "
                           "Del clears, Ctrl+V pastes at the edit cursor")
@@ -3394,11 +3372,9 @@ std::vector<int> SongView::timeSelectionTracks() const
     std::vector<int> tracks;
     if (!m_timeline || !m_document)
         return tracks;
+    const uint32_t mask = trackSelectionMask();
     for (int t = 0; t < 16; t++) {
-        if (!m_timeline->tracks[t].used)
-            continue;
-        if (m_timeSel.scope == TimeSelection::Tracks
-            && !(m_timeSel.trackMask & (1u << t)))
+        if (!m_timeline->tracks[t].used || !(mask & (1u << t)))
             continue;
         if (m_document->smfTrackFor(t) < 0)
             continue;
@@ -3734,15 +3710,17 @@ void SongView::trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers)
             return; // the scope can't go empty
         if (!(mask & (1u << m_selectedTrack))) {
             // The primary track was toggled out; hand primary to the lowest
-            // remaining scoped track (selectTrack collapses the mask, so
-            // restore it after).
+            // remaining scoped track. This is a scope adjustment, not a
+            // track switch, so the time selection survives (selectTrack
+            // clears it and collapses the mask — restore both after).
             int next = 0;
             while (!(mask & (1u << next)))
                 next++;
+            const TimeSelection keep = m_timeSel;
             selectTrack(next);
+            m_timeSel = keep;
         }
         m_trackSelMask = mask;
-        m_headers->syncSelection();
     } else if (modifiers & Qt::ShiftModifier) {
         const int lo = std::min(track, m_selectedTrack);
         const int hi = std::max(track, m_selectedTrack);
@@ -3752,12 +3730,13 @@ void SongView::trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers)
                 mask |= 1u << t;
         }
         m_trackSelMask = mask | (1u << m_selectedTrack);
-        m_headers->syncSelection();
     } else {
         selectTrack(track);
         m_trackSelMask = 1u << track; // collapse even when already primary
-        m_headers->syncSelection();
     }
+    m_headers->syncSelection();
+    // The time selection's track scope is live; repaint its bands.
+    refreshTimelineViews();
 }
 
 void SongView::setTrackMute(int track, bool on)
