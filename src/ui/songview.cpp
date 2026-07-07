@@ -274,14 +274,15 @@ protected:
         }
 
         // Time-selection edge handles (the 1px band edges come from
-        // drawOverlays); these are what a left-drag grabs.
+        // drawOverlays); drawn only across the top half, matching their
+        // grab zone — the bottom half stays scrub territory.
         const SongView::TimeSelection &tsel = m_sv->timeSelection();
         if (tsel.active()) {
             p.setPen(QPen(palette().color(QPalette::Highlight), 2));
             const int sx0 = kGutterW + m_sv->contentX(double(tsel.startTick));
             const int sx1 = kGutterW + m_sv->contentX(double(tsel.endTick));
-            p.drawLine(sx0, 0, sx0, height());
-            p.drawLine(sx1, 0, sx1, height());
+            p.drawLine(sx0, 0, sx0, height() / 2);
+            p.drawLine(sx1, 0, sx1, height() / 2);
         }
 
         // Playhead handle.
@@ -333,13 +334,13 @@ protected:
         }
         if (event->button() != Qt::LeftButton)
             return;
-        m_dragMarker = doc ? hitMarker(event->pos().x()) : -1;
+        m_dragMarker = doc ? hitMarker(event->pos()) : -1;
         if (m_dragMarker >= 0) {
             m_dragTick = clickTick;
             update();
             return;
         }
-        m_dragSelEdge = doc ? hitSelEdge(event->pos().x()) : -1;
+        m_dragSelEdge = doc ? hitSelEdge(event->pos()) : -1;
         if (m_dragSelEdge >= 0)
             return;
         // Elsewhere on the ruler: place the edit cursor (drag scrubs it;
@@ -394,8 +395,8 @@ protected:
             return;
         }
         setCursor(m_sv->document()
-                          && (hitMarker(event->pos().x()) >= 0
-                              || hitSelEdge(event->pos().x()) >= 0)
+                          && (hitMarker(event->pos()) >= 0
+                              || hitSelEdge(event->pos()) >= 0)
                       ? Qt::SplitHCursor
                       : Qt::ArrowCursor);
     }
@@ -440,30 +441,37 @@ protected:
     }
 
 private:
-    // 0 = start marker, 1 = end marker, -1 = neither near x.
-    int hitMarker(int x) const
+    // Loop-marker and selection-edge grab zones live in the ruler's TOP
+    // half only — where the bracket glyphs and edge handles are drawn — so
+    // the bottom half (bar numbers, tick marks) always scrubs the edit
+    // cursor even directly on a marker line.
+
+    // 0 = start marker, 1 = end marker, -1 = neither near pos.
+    int hitMarker(QPoint pos) const
     {
         const MidiTimeline *tl = m_sv->timeline();
-        if (!tl)
+        if (!tl || pos.y() >= height() / 2)
             return -1;
         if (tl->loopStartTick != UINT64_MAX
-            && std::abs(kGutterW + m_sv->contentX(double(tl->loopStartTick)) - x) <= 6)
+            && std::abs(kGutterW + m_sv->contentX(double(tl->loopStartTick)) - pos.x())
+                   <= 6)
             return 0;
         if (tl->loopEndTick != UINT64_MAX
-            && std::abs(kGutterW + m_sv->contentX(double(tl->loopEndTick)) - x) <= 6)
+            && std::abs(kGutterW + m_sv->contentX(double(tl->loopEndTick)) - pos.x())
+                   <= 6)
             return 1;
         return -1;
     }
 
-    // 0 = selection start edge, 1 = end edge, -1 = neither near x.
-    int hitSelEdge(int x) const
+    // 0 = selection start edge, 1 = end edge, -1 = neither near pos.
+    int hitSelEdge(QPoint pos) const
     {
         const SongView::TimeSelection &sel = m_sv->timeSelection();
-        if (!sel.active())
+        if (!sel.active() || pos.y() >= height() / 2)
             return -1;
-        if (std::abs(kGutterW + m_sv->contentX(double(sel.startTick)) - x) <= 5)
+        if (std::abs(kGutterW + m_sv->contentX(double(sel.startTick)) - pos.x()) <= 5)
             return 0;
-        if (std::abs(kGutterW + m_sv->contentX(double(sel.endTick)) - x) <= 5)
+        if (std::abs(kGutterW + m_sv->contentX(double(sel.endTick)) - pos.x()) <= 5)
             return 1;
         return -1;
     }
