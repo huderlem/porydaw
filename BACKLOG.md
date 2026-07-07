@@ -3,6 +3,17 @@
 Small deferred items that don't warrant a SPEC.md change. Milestone scope
 lives in SPEC.md §8; this is the loose-ends list between milestones.
 
+## M2 polish
+
+- **time signature** - the user should be able to see and edit the time signature
+  on the timeline. This should exist as some kind of marker in the ruler area, not
+  as an automation lane.
+- **ruler subdivisions** - the user should have greater editing precision by being
+  able to select "triplets" or "straight". The user should also be able to specify
+  the minimum ruler subdivision (1 is the most granular). For example, the user might
+  only care about drawing in quarter notes, so they'd want to select a less-granular
+  sub-division.
+
 ## M3 onboarding polish
 
 - **Voicegroup browser: expand keysplits/drumkits** into per-key sub-entries
