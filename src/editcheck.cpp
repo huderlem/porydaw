@@ -182,6 +182,53 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Range edit: a multi-track/multi-lane batch of removals and
+            // insertions must land as ONE undoable command.
+            if (ok) {
+                doc.addNotes(track, {{base + step * 30, 60, step * 2, 90},
+                                     {base + step * 32, 62, step * 2, 90}});
+                doc.addLanePoint(track, 7, base + step * 30, 80);
+                doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 31, 140);
+                SongDocument::RangeEdit edit;
+                for (const DocNote &n : doc.notesForTrack(track)) {
+                    if (n.tick >= base + step * 30 && n.tick < base + step * 34)
+                        edit.removeNotes.push_back(n);
+                }
+                for (const DocLanePoint &p : doc.lanePoints(track, 7)) {
+                    if (p.tick == base + step * 30)
+                        edit.removePoints.push_back(p);
+                }
+                for (const DocLanePoint &p : doc.lanePoints(track, DOC_CC_TEMPO)) {
+                    if (p.tick == base + step * 31)
+                        edit.removePoints.push_back(p);
+                }
+                edit.addNotes.push_back({track, {{base + step * 40, 65, step * 2, 90}}});
+                edit.addPoints.push_back({track, 7, {{base + step * 40, 70}}});
+                edit.addPoints.push_back({-1, DOC_CC_TEMPO, {{base + step * 41, 155}}});
+                doc.applyRangeEdit(QStringLiteral("range edit"), edit);
+                mutateAndCheck("events unsorted after applyRangeEdit");
+                DocNote n;
+                DocLanePoint p;
+                if (doc.findNote(track, base + step * 30, 60, &n)
+                    || doc.findNote(track, base + step * 32, 62, &n)
+                    || !doc.findNote(track, base + step * 40, 65, &n)
+                    || !doc.findLanePoint(track, 7, base + step * 40, &p) || p.value != 70
+                    || !doc.findLanePoint(track, DOC_CC_TEMPO, base + step * 41, &p)
+                    || p.value != 155) {
+                    fail("range edit produced wrong content");
+                    ok = false;
+                } else {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 30, 60, &n)
+                        || doc.findNote(track, base + step * 40, 65, &n)) {
+                        fail("applyRangeEdit was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
             // Voice ops: add, value-only modify (must not reorder within the
             // tick), move to a new tick, delete.
             if (ok) {

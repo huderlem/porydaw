@@ -16,6 +16,7 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
+class QKeyEvent;
 class QScrollArea;
 class QScrollBar;
 class QSplitter;
@@ -128,6 +129,14 @@ public:
 
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
+    // Multi-track scope for time-range operations: the selected track plus
+    // any Ctrl/Shift-clicked header rows (always contains the selected
+    // track, intersected with used tracks).
+    uint32_t trackSelectionMask() const;
+    // Header-row click with modifiers: plain = select (collapses the multi-
+    // selection), Ctrl = toggle the track in the scope, Shift = contiguous
+    // range from the selected track.
+    void trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers);
     bool trackMuted(int track) const { return m_muteMask & (1u << track); }
     bool trackSoloed(int track) const { return m_soloMask & (1u << track); }
     void setTrackMute(int track, bool on);
@@ -180,8 +189,53 @@ public:
     void setSelection(std::vector<NoteId> ids);
     void clearSelection();
 
-    // App-internal note clipboard (copy/paste in the roll). Ticks are offsets
-    // from the copied block's start so paste can re-anchor at the edit cursor.
+    // Time-range selection: a half-open [startTick, endTick) span with a
+    // scope — whole tracks (ruler sweep, Shift+right-drag in the roll) or
+    // individual automation lanes (right-drag in the lanes area). Mutually
+    // exclusive with the note selection; survives document rebuilds (it is
+    // tick-addressed), cleared on song swap.
+    struct TimeSelection {
+        enum Scope { AllTracks, Tracks, Lanes };
+        uint64_t startTick = 0;
+        uint64_t endTick = 0; // <= startTick means no selection
+        Scope scope = AllTracks;
+        uint32_t trackMask = 0;                     // Scope::Tracks
+        std::vector<std::pair<int, uint8_t>> lanes; // Scope::Lanes: (track, cc);
+                                                    // track -1 = the tempo row
+        bool active() const { return endTick > startTick; }
+    };
+    const TimeSelection &timeSelection() const { return m_timeSel; }
+    void setTimeSelection(const TimeSelection &sel);
+    void clearTimeSelection();
+    bool timeSelectionCoversTrack(int track) const;
+    // Whether a lanes-area row (identified as the lane scope encodes it) is
+    // inside the selection; track scopes cover a track's CC/voice rows but
+    // never the global tempo row.
+    bool timeSelectionCoversRow(int track, uint8_t cc) const;
+    // "Time selection: 8 beats · 3 tracks" status-bar line; children call it
+    // when a selection gesture commits.
+    void announceTimeSelection();
+
+    // Range operations on the time selection. Copy captures notes plus every
+    // editable lane (including voice changes) of the scoped tracks — or just
+    // the scoped lanes — with ticks relative to the range start. Paste
+    // anchors at the edit cursor and REPLACES the covered span: pasted
+    // "silence" clears, and a single-source-track clip retargets to the
+    // selected track. All one undoable command each.
+    void copyTimeSelection();
+    void deleteTimeSelection();
+    void pasteRangeAtEditCursor();
+    // Shared shortcut handling for the roll and the lanes area: range
+    // copy/cut/delete while a time selection is active, paste of range
+    // clips. Returns true when consumed.
+    bool handleEditKey(QKeyEvent *event);
+    // Copy/Cut/Delete/Paste/Clear context menu on the active selection.
+    void showTimeSelectionMenu(const QPoint &globalPos);
+
+    // App-internal clipboard. A plain note copy (roll selection) has span 0
+    // and pastes additively; a range copy carries span > 0 plus lane
+    // segments and pastes with replace semantics. Ticks are offsets from
+    // the copied block's start so paste can re-anchor at the edit cursor.
     // Survives track switches and document rebuilds; cleared on song swap
     // (another song's ticks-per-beat may differ).
     struct ClipNote {
@@ -190,7 +244,23 @@ public:
         uint32_t duration;
         uint8_t velocity;
     };
-    std::vector<ClipNote> &noteClipboard() { return m_noteClipboard; }
+    struct ClipTrack {
+        int track; // source engine track
+        std::vector<ClipNote> notes;
+    };
+    struct ClipLane {
+        int track; // source engine track; -1 = tempo
+        uint8_t cc;
+        std::vector<std::pair<uint32_t, int>> points; // (relTick, value)
+    };
+    struct Clip {
+        uint64_t span = 0; // ticks covered; 0 = plain note clip
+        bool wholeLane = false; // gutter "Copy lane" (paste-lane anchor is 0)
+        std::vector<ClipTrack> tracks;
+        std::vector<ClipLane> lanes;
+        bool empty() const { return tracks.empty() && lanes.empty(); }
+    };
+    Clip &clipboard() { return m_clip; }
 
     // "velocity 93 → plays 96 · length 25 → 24 clocks" for the status bar.
     void announceNote(const ViewNote &note);
@@ -236,6 +306,11 @@ private:
     void updateScrollbars();
     void rebuildAfterSongChange();
     void mergeEmptyLanes();
+    // Engine tracks a track-scoped time selection resolves to (used and
+    // document-mapped), and the copyable lane identities of one track (its
+    // model lanes plus the voice changes).
+    std::vector<int> timeSelectionTracks() const;
+    std::vector<uint8_t> trackCcs(int track) const;
 
     const MidiTimeline *m_timeline = nullptr;
     const LoadedVoiceGroup *m_voicegroup = nullptr;
@@ -254,7 +329,9 @@ private:
     uint32_t m_muteMask = 0;
     uint32_t m_soloMask = 0;
     std::vector<NoteId> m_selection;
-    std::vector<ClipNote> m_noteClipboard;
+    TimeSelection m_timeSel;
+    Clip m_clip;
+    uint32_t m_trackSelMask = 0; // header multi-selection (see trackSelectionMask)
     std::vector<std::pair<int, uint8_t>> m_emptyLanes; // (track, cc), unsorted
 
     songview::TimeRuler *m_ruler = nullptr;

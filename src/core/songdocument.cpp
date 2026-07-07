@@ -658,6 +658,56 @@ void SongDocument::deleteLanePoints(int engineTrack, uint8_t cc,
              std::move(ops));
 }
 
+void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
+{
+    if (edit.empty() || m_smf.tracks.empty())
+        return;
+    std::vector<EditOp> ops;
+
+    // All removals first (per SMF track, descending — appendRemoveOps sorts
+    // and dedups), so every recorded index stays valid at apply time.
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        std::vector<size_t> indices;
+        for (const DocNote &note : edit.removeNotes) {
+            if (note.smfTrack != int(t))
+                continue;
+            indices.push_back(note.onIndex);
+            if (!note.unterminated())
+                indices.push_back(note.endIndex);
+        }
+        for (const DocLanePoint &pt : edit.removePoints) {
+            if (pt.smfTrack == int(t))
+                indices.push_back(pt.index);
+        }
+        appendRemoveOps(ops, int(t), std::move(indices));
+    }
+
+    for (const RangeEdit::TrackNotes &tn : edit.addNotes) {
+        const int smfTrack = smfTrackFor(tn.engineTrack);
+        if (smfTrack < 0)
+            continue;
+        const uint8_t channel = channelFor(tn.engineTrack);
+        for (const NewNote &note : tn.notes)
+            appendNoteInsertOps(ops, smfTrack, channel, note.tick, note.key,
+                                note.duration, note.velocity);
+    }
+    for (const RangeEdit::LaneWrite &lw : edit.addPoints) {
+        const int smfTrack =
+            lw.cc == DOC_CC_TEMPO ? 0 : smfTrackFor(lw.engineTrack);
+        if (smfTrack < 0)
+            continue;
+        const uint8_t channel = channelFor(lw.engineTrack);
+        for (const LanePointValue &pt : lw.points) {
+            EditOp op;
+            op.type = EditOp::InsertEvent;
+            op.smfTrack = smfTrack;
+            op.event = makeLaneEvent(lw.cc, channel, pt.tick, pt.value);
+            ops.push_back(op);
+        }
+    }
+    pushEdit(text, std::move(ops));
+}
+
 void SongDocument::setLoopTick(bool endMarker, int64_t tick)
 {
     if (m_smf.tracks.empty())

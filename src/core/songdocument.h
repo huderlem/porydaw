@@ -125,6 +125,34 @@ public:
     void deleteLanePoints(int engineTrack, uint8_t cc,
                           const std::vector<DocLanePoint> &points);
 
+    // Multi-track range edit (time-selection delete/paste): removals and
+    // insertions across any mix of tracks and lanes, applied as one undoable
+    // command with a single documentChanged emission. Notes/points to remove
+    // must be freshly resolved (their indices are read at push time); an
+    // engineTrack of -1 targets the tempo lane (DOC_CC_TEMPO only).
+    struct RangeEdit {
+        std::vector<DocNote> removeNotes;
+        std::vector<DocLanePoint> removePoints;
+        struct TrackNotes {
+            int engineTrack;
+            std::vector<NewNote> notes;
+        };
+        std::vector<TrackNotes> addNotes;
+        struct LaneWrite {
+            int engineTrack; // -1 = tempo (seq chunk)
+            uint8_t cc;
+            std::vector<LanePointValue> points; // absolute ticks
+        };
+        std::vector<LaneWrite> addPoints;
+
+        bool empty() const
+        {
+            return removeNotes.empty() && removePoints.empty() && addNotes.empty()
+                && addPoints.empty();
+        }
+    };
+    void applyRangeEdit(const QString &text, const RangeEdit &edit);
+
     // Move or create a loop marker; tick == -1 removes it.
     void setLoopTick(bool endMarker, int64_t tick);
 

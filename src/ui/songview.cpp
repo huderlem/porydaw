@@ -75,11 +75,30 @@ QColor playheadColor() { return QColor(226, 66, 66); }
 
 // Draw the loop-region band and the playhead line across rect. x positions
 // are computed with origin = local x of timeline tick 0's content position.
-void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin)
+// timeSelCovered says whether this widget (or row) is inside the active time
+// selection's scope, so the selection band tints exactly the covered content.
+void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin,
+                  bool timeSelCovered)
 {
     const MidiTimeline *tl = sv->timeline();
     if (!tl)
         return;
+
+    const SongView::TimeSelection &tsel = sv->timeSelection();
+    if (timeSelCovered && tsel.active()) {
+        const int x0 = origin + sv->contentX(double(tsel.startTick));
+        const int x1 = origin + sv->contentX(double(tsel.endTick));
+        if (x1 > rect.left() && x0 < rect.right()) {
+            QColor fill = sv->palette().color(QPalette::Highlight);
+            fill.setAlpha(30);
+            p.fillRect(QRect(QPoint(std::max(x0, rect.left()), rect.top()),
+                             QPoint(std::min(x1, rect.right()), rect.bottom())),
+                       fill);
+            p.setPen(QPen(sv->palette().color(QPalette::Highlight), 1));
+            p.drawLine(x0, rect.top(), x0, rect.bottom());
+            p.drawLine(x1, rect.top(), x1, rect.bottom());
+        }
+    }
     if (tl->loopStartTick != UINT64_MAX || tl->loopEndTick != UINT64_MAX) {
         const int x0 = tl->loopStartTick != UINT64_MAX
                            ? origin + sv->contentX(double(tl->loopStartTick))
@@ -207,7 +226,7 @@ protected:
         p.setClipRect(area);
 
         // Loop band across the whole ruler height.
-        drawOverlays(p, m_sv, area, kGutterW);
+        drawOverlays(p, m_sv, area, kGutterW, true);
 
         const double t0 = std::max(0.0, m_sv->tickAtContentX(0));
         const double t1 = m_sv->tickAtContentX(area.width()) + 1;
@@ -254,6 +273,17 @@ protected:
             p.drawLine(x, 0, x, height());
         }
 
+        // Time-selection edge handles (the 1px band edges come from
+        // drawOverlays); these are what a left-drag grabs.
+        const SongView::TimeSelection &tsel = m_sv->timeSelection();
+        if (tsel.active()) {
+            p.setPen(QPen(palette().color(QPalette::Highlight), 2));
+            const int sx0 = kGutterW + m_sv->contentX(double(tsel.startTick));
+            const int sx1 = kGutterW + m_sv->contentX(double(tsel.endTick));
+            p.drawLine(sx0, 0, sx0, height());
+            p.drawLine(sx1, 0, sx1, height());
+        }
+
         // Playhead handle.
         const int px = kGutterW + m_sv->contentX(m_sv->playheadTick());
         if (px >= area.left() && px <= area.right()) {
@@ -291,26 +321,14 @@ protected:
             m_sv->snapTick(m_sv->tickAtContentX(event->pos().x() - kGutterW));
 
         if (event->button() == Qt::RightButton) {
+            // Deferred: a drag from here sweeps out a time selection;
+            // releasing in place opens the loop/selection menu. Resolved in
+            // mouseReleaseEvent.
             if (!doc)
                 return;
-            QMenu menu(this);
-            QAction *setStart = menu.addAction(SongView::tr("Set loop start here"));
-            QAction *setEnd = menu.addAction(SongView::tr("Set loop end here"));
-            QAction *remove = menu.addAction(SongView::tr("Remove loop markers"));
-            remove->setEnabled(tl->loopStartTick != UINT64_MAX
-                               || tl->loopEndTick != UINT64_MAX);
-            QAction *chosen = menu.exec(event->globalPosition().toPoint());
-            if (chosen == setStart) {
-                doc->setLoopTick(false, int64_t(clickTick));
-            } else if (chosen == setEnd) {
-                doc->setLoopTick(true, int64_t(clickTick));
-            } else if (chosen == remove) {
-                // Two commands; undo restores them one at a time.
-                if (tl->loopStartTick != UINT64_MAX)
-                    doc->setLoopTick(false, -1);
-                if (m_sv->timeline()->loopEndTick != UINT64_MAX)
-                    doc->setLoopTick(true, -1);
-            }
+            m_rightPress = true;
+            m_rightPressPos = event->pos();
+            m_selAnchor = clickTick;
             return;
         }
         if (event->button() != Qt::LeftButton)
@@ -321,6 +339,9 @@ protected:
             update();
             return;
         }
+        m_dragSelEdge = doc ? hitSelEdge(event->pos().x()) : -1;
+        if (m_dragSelEdge >= 0)
+            return;
         // Elsewhere on the ruler: place the edit cursor (drag scrubs it;
         // playback follows on release).
         m_placingCursor = true;
@@ -333,26 +354,89 @@ protected:
             return m_sv->snapTick(
                 m_sv->tickAtContentX(std::max(kGutterW, event->pos().x()) - kGutterW));
         };
+        if (m_rightPress) {
+            if (!m_selSweep
+                && (event->pos() - m_rightPressPos).manhattanLength()
+                       >= QApplication::startDragDistance())
+                m_selSweep = true;
+            if (m_selSweep) {
+                const uint64_t tick = dragTick();
+                SongView::TimeSelection sel;
+                sel.startTick = std::min(m_selAnchor, tick);
+                sel.endTick = std::max(m_selAnchor, tick);
+                // Scope: the header multi-selection when one exists,
+                // otherwise the whole song.
+                const uint32_t mask = m_sv->trackSelectionMask();
+                if (mask & (mask - 1)) {
+                    sel.scope = SongView::TimeSelection::Tracks;
+                    sel.trackMask = mask;
+                } else {
+                    sel.scope = SongView::TimeSelection::AllTracks;
+                }
+                m_sv->setTimeSelection(sel);
+            }
+            return;
+        }
         if (m_dragMarker >= 0) {
             m_dragTick = dragTick();
             update();
+            return;
+        }
+        if (m_dragSelEdge >= 0) {
+            // Selection edges move live (view state, unlike the loop
+            // markers' commit-on-release document edit).
+            SongView::TimeSelection sel = m_sv->timeSelection();
+            const uint64_t tick = dragTick();
+            if (m_dragSelEdge == 0)
+                sel.startTick = tick;
+            else
+                sel.endTick = tick;
+            if (sel.startTick > sel.endTick) {
+                std::swap(sel.startTick, sel.endTick);
+                m_dragSelEdge ^= 1;
+            }
+            m_sv->setTimeSelection(sel);
             return;
         }
         if (m_placingCursor) {
             m_sv->setEditCursorTick(dragTick());
             return;
         }
-        setCursor(m_sv->document() && hitMarker(event->pos().x()) >= 0 ? Qt::SplitHCursor
-                                                                       : Qt::ArrowCursor);
+        setCursor(m_sv->document()
+                          && (hitMarker(event->pos().x()) >= 0
+                              || hitSelEdge(event->pos().x()) >= 0)
+                      ? Qt::SplitHCursor
+                      : Qt::ArrowCursor);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
+        if (event->button() == Qt::RightButton && m_rightPress) {
+            m_rightPress = false;
+            if (m_selSweep) {
+                m_selSweep = false;
+                if (m_sv->timeSelection().active())
+                    m_sv->announceTimeSelection();
+                else
+                    m_sv->clearTimeSelection();
+            } else {
+                showRulerMenu(m_selAnchor, event->globalPosition().toPoint());
+            }
+            return;
+        }
         if (event->button() != Qt::LeftButton)
             return;
         if (m_placingCursor) {
             m_placingCursor = false;
             m_sv->commitEditCursor(m_sv->editCursorTick());
+            return;
+        }
+        if (m_dragSelEdge >= 0) {
+            m_dragSelEdge = -1;
+            if (m_sv->timeSelection().active())
+                m_sv->announceTimeSelection();
+            else
+                m_sv->clearTimeSelection(); // edges dragged together
             return;
         }
         if (m_dragMarker < 0)
@@ -380,10 +464,68 @@ private:
         return -1;
     }
 
+    // 0 = selection start edge, 1 = end edge, -1 = neither near x.
+    int hitSelEdge(int x) const
+    {
+        const SongView::TimeSelection &sel = m_sv->timeSelection();
+        if (!sel.active())
+            return -1;
+        if (std::abs(kGutterW + m_sv->contentX(double(sel.startTick)) - x) <= 5)
+            return 0;
+        if (std::abs(kGutterW + m_sv->contentX(double(sel.endTick)) - x) <= 5)
+            return 1;
+        return -1;
+    }
+
+    void showRulerMenu(uint64_t clickTick, const QPoint &globalPos)
+    {
+        SongDocument *doc = m_sv->document();
+        const MidiTimeline *tl = m_sv->timeline();
+        if (!doc || !tl)
+            return;
+        QMenu menu(this);
+        QAction *setStart = menu.addAction(SongView::tr("Set loop start here"));
+        QAction *setEnd = menu.addAction(SongView::tr("Set loop end here"));
+        QAction *remove = menu.addAction(SongView::tr("Remove loop markers"));
+        remove->setEnabled(tl->loopStartTick != UINT64_MAX
+                           || tl->loopEndTick != UINT64_MAX);
+        QAction *loopFromSel = nullptr;
+        QAction *clearSel = nullptr;
+        const SongView::TimeSelection sel = m_sv->timeSelection();
+        if (sel.active()) {
+            menu.addSeparator();
+            loopFromSel = menu.addAction(SongView::tr("Set loop to selection"));
+            clearSel = menu.addAction(SongView::tr("Clear time selection"));
+        }
+        QAction *chosen = menu.exec(globalPos);
+        if (chosen == setStart) {
+            doc->setLoopTick(false, int64_t(clickTick));
+        } else if (chosen == setEnd) {
+            doc->setLoopTick(true, int64_t(clickTick));
+        } else if (chosen == remove) {
+            // Two commands; undo restores them one at a time.
+            if (tl->loopStartTick != UINT64_MAX)
+                doc->setLoopTick(false, -1);
+            if (m_sv->timeline()->loopEndTick != UINT64_MAX)
+                doc->setLoopTick(true, -1);
+        } else if (chosen && chosen == loopFromSel) {
+            // Same two-command shape as "Remove loop markers".
+            doc->setLoopTick(false, int64_t(sel.startTick));
+            doc->setLoopTick(true, int64_t(sel.endTick));
+        } else if (chosen && chosen == clearSel) {
+            m_sv->clearTimeSelection();
+        }
+    }
+
     SongView *m_sv;
     int m_dragMarker = -1;
     uint64_t m_dragTick = 0;
     bool m_placingCursor = false;
+    bool m_rightPress = false;  // right button held; sweep vs. menu undecided
+    bool m_selSweep = false;    // right-drag time-selection sweep is live
+    QPoint m_rightPressPos;
+    uint64_t m_selAnchor = 0;   // snapped tick of the right press
+    int m_dragSelEdge = -1;     // selection edge being left-dragged (0/1)
 };
 
 // ---------------------------------------------------------------- PianoRoll
@@ -449,7 +591,8 @@ protected:
             p.drawRect(band);
         }
 
-        drawOverlays(p, m_sv, grid, kKeyboardW);
+        drawOverlays(p, m_sv, grid, kKeyboardW,
+                     m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()));
 
         p.setClipping(false);
         drawKeyboard(p);
@@ -504,13 +647,18 @@ protected:
         const ViewNote *hit = doc ? hitNote(event->pos()) : nullptr;
 
         if (event->button() == Qt::RightButton) {
-            // Deferred: a drag from here rubber-band-selects; releasing in
-            // place context-acts on the pressed note (or clears the
-            // selection over empty space). Resolved in mouseReleaseEvent.
+            // Deferred: a drag from here rubber-band-selects (with Shift, it
+            // sweeps a full-height time selection instead); releasing in
+            // place context-acts on the pressed note (or on the time
+            // selection under the click, or clears the selections over empty
+            // space). Resolved in mouseReleaseEvent.
             if (!doc)
                 return;
             m_pressPos = m_curPos = event->pos();
             m_rightPress = true;
+            m_rightShift = event->modifiers() & Qt::ShiftModifier;
+            m_rightAnchorTick = m_sv->snapTick(
+                m_sv->tickAtContentX(event->pos().x() - kKeyboardW));
             m_rightHit = hit != nullptr;
             if (hit)
                 m_rightHitId = {hit->startTick, hit->key};
@@ -613,7 +761,7 @@ protected:
         if (m_rightPress && m_drag == Drag::None
             && (event->pos() - m_pressPos).manhattanLength()
                    >= QApplication::startDragDistance()) {
-            m_drag = Drag::Band;
+            m_drag = m_rightShift ? Drag::TimeSel : Drag::Band;
         }
         if (m_leftPress && m_drag == Drag::None
             && std::abs(event->pos().x() - m_pressPos.x())
@@ -716,6 +864,16 @@ protected:
                 }
                 update();
             }
+        } else if (m_drag == Drag::TimeSel) {
+            // Full-height sweep: a time selection on the current track
+            // (notes and automation together).
+            const uint64_t t = m_sv->snapTick(tick);
+            SongView::TimeSelection sel;
+            sel.startTick = std::min(m_rightAnchorTick, t);
+            sel.endTick = std::max(m_rightAnchorTick, t);
+            sel.scope = SongView::TimeSelection::Tracks;
+            sel.trackMask = 1u << m_sv->selectedTrack();
+            m_sv->setTimeSelection(sel);
         } else if (m_drag == Drag::Band) {
             update();
         }
@@ -741,7 +899,12 @@ protected:
             const Drag drag = m_drag;
             m_rightPress = false;
             m_drag = Drag::None;
-            if (drag == Drag::Band) {
+            if (drag == Drag::TimeSel) {
+                if (m_sv->timeSelection().active())
+                    m_sv->announceTimeSelection();
+                else
+                    m_sv->clearTimeSelection();
+            } else if (drag == Drag::Band) {
                 selectBand(QRect(m_pressPos, m_curPos).normalized(),
                            event->modifiers() & Qt::ControlModifier);
             } else if (doc && m_rightHit) {
@@ -749,8 +912,11 @@ protected:
                 if (std::find(sel.begin(), sel.end(), m_rightHitId) == sel.end())
                     m_sv->setSelection({m_rightHitId});
                 showNoteMenu(event->pos());
+            } else if (insideTimeSelection(event->pos())) {
+                m_sv->showTimeSelectionMenu(event->globalPosition().toPoint());
             } else {
                 m_sv->clearSelection();
+                m_sv->clearTimeSelection();
             }
             update();
             return;
@@ -814,6 +980,11 @@ protected:
 
     void keyPressEvent(QKeyEvent *event) override
     {
+        // Time-selection range ops (and range-clip paste) win over the
+        // note-selection shortcuts; the two selections are mutually
+        // exclusive, so there is never a real conflict.
+        if (m_sv->handleEditKey(event))
+            return;
         SongDocument *doc = m_sv->document();
         if (doc
             && (event->matches(QKeySequence::Copy) || event->matches(QKeySequence::Cut))) {
@@ -852,6 +1023,7 @@ protected:
             m_leftPress = false;
             m_rightPress = false;
             m_sv->clearSelection();
+            m_sv->clearTimeSelection();
             update();
             event->accept();
             return;
@@ -860,7 +1032,18 @@ protected:
     }
 
 private:
-    enum class Drag { None, Band, Move, Resize, ResizeLeft, Velocity, Draw };
+    enum class Drag { None, Band, TimeSel, Move, Resize, ResizeLeft, Velocity, Draw };
+
+    // Whether pos falls inside the active time selection's band as this
+    // widget draws it (the selection must cover the shown track).
+    bool insideTimeSelection(QPoint pos) const
+    {
+        const SongView::TimeSelection &sel = m_sv->timeSelection();
+        if (!sel.active() || !m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()))
+            return false;
+        const double tick = m_sv->tickAtContentX(pos.x() - kKeyboardW);
+        return tick >= double(sel.startTick) && tick < double(sel.endTick);
+    }
 
     int keyToY(int key) const
     {
@@ -976,41 +1159,46 @@ private:
         return notes;
     }
 
-    // Fills the clipboard with the notes, ticks relative to the block start.
+    // Fills the clipboard with the notes as a plain note clip (span 0,
+    // additive paste), ticks relative to the block start.
     void copyNotes(const std::vector<DocNote> &notes)
     {
         uint64_t base = UINT64_MAX;
         for (const DocNote &note : notes)
             base = std::min(base, note.tick);
-        std::vector<SongView::ClipNote> &clip = m_sv->noteClipboard();
-        clip.clear();
+        SongView::Clip clip;
+        SongView::ClipTrack ct{m_sv->selectedTrack(), {}};
         for (const DocNote &note : notes)
-            clip.push_back({uint32_t(note.tick - base), note.key,
-                            note.duration ? note.duration
-                                          : uint32_t(m_sv->gridTicks()),
-                            note.velocity});
+            ct.notes.push_back({uint32_t(note.tick - base), note.key,
+                                note.duration ? note.duration
+                                              : uint32_t(m_sv->gridTicks()),
+                                note.velocity});
+        clip.tracks.push_back(std::move(ct));
+        m_sv->clipboard() = std::move(clip);
         m_sv->announce(SongView::tr("Copied %n note(s)", nullptr, int(notes.size())));
     }
 
-    // Pastes the clipboard onto the selected track, anchored at the edit
-    // cursor (snapped to the grid), and selects the pasted notes.
+    // Pastes a plain note clip onto the selected track, anchored at the edit
+    // cursor (snapped to the grid), and selects the pasted notes. Range
+    // clips (span > 0) are handled by SongView::pasteRangeAtEditCursor.
     void pasteAtEditCursor()
     {
         SongDocument *doc = m_sv->document();
-        const std::vector<SongView::ClipNote> &clip = m_sv->noteClipboard();
-        if (!doc || clip.empty())
+        const SongView::Clip &clip = m_sv->clipboard();
+        if (!doc || clip.span != 0 || clip.tracks.empty()
+            || clip.tracks.front().notes.empty())
             return;
         const uint64_t base = m_sv->snapTick(double(m_sv->editCursorTick()));
         std::vector<SongDocument::NewNote> notes;
         std::vector<SongView::NoteId> ids;
-        for (const SongView::ClipNote &cn : clip) {
+        for (const SongView::ClipNote &cn : clip.tracks.front().notes) {
             const uint64_t tick = base + cn.relTick;
             notes.push_back({tick, cn.key, cn.duration, cn.velocity});
             ids.push_back({uint32_t(tick), cn.key});
         }
         doc->addNotes(m_sv->selectedTrack(), notes);
         m_sv->setSelection(std::move(ids));
-        m_sv->announce(SongView::tr("Pasted %n note(s)", nullptr, int(clip.size())));
+        m_sv->announce(SongView::tr("Pasted %n note(s)", nullptr, int(notes.size())));
     }
 
     void selectAllNotes()
@@ -1237,6 +1425,8 @@ private:
     bool m_leftPress = false;  // left button held on empty space; cursor
                                // move vs. draw undecided
     bool m_rightPress = false; // right button held; band vs. menu undecided
+    bool m_rightShift = false; // …with Shift: drag sweeps a time selection
+    uint64_t m_rightAnchorTick = 0; // snapped tick of the right press
     bool m_rightHit = false;   // that press landed on a note…
     SongView::NoteId m_rightHitId{}; // …this one
     ViewNote m_velAnchor{};    // pressed note of a velocity drag (a copy)
@@ -1259,6 +1449,9 @@ public:
     {
         setMinimumHeight(kLaneH);
         setMouseTracking(true); // divider hover cursor
+        // Range shortcuts (copy/cut/delete/paste on the time selection) work
+        // from the lanes area too; a click focuses it, like the roll.
+        setFocusPolicy(Qt::ClickFocus);
     }
 
     // View-state plumbing for the .porydaw sidecar: the shared row height
@@ -1283,6 +1476,8 @@ public:
         m_resizeRow = -1;
         m_gesture = Gesture::None;
         m_sweep.clear();
+        m_rightPress = false;
+        m_selSweep = false;
         if (m_sv->timeline()) {
             m_rows.push_back({Row::Tempo, nullptr});
             const SongViewModel &model = m_sv->model();
@@ -1426,12 +1621,25 @@ protected:
         const int ri = rowIndexAt(event->pos().y());
         if (ri < 0)
             return;
+        setFocus();
         const Row &row = m_rows[ri];
         if (event->pos().x() < kGutterW) {
             if (row.kind == Row::Lane
                 && (event->button() == Qt::LeftButton
                     || event->button() == Qt::RightButton))
                 showLaneMenu(*row.lane, event->globalPosition().toPoint());
+            return;
+        }
+        if (event->button() == Qt::RightButton) {
+            // Deferred: a drag from here sweeps a time selection across the
+            // crossed rows; releasing in place context-acts (menu inside the
+            // selection, point/voice-marker delete elsewhere). Resolved in
+            // mouseReleaseEvent.
+            m_rightPress = true;
+            m_rightPressPos = event->pos();
+            m_rightRow = ri;
+            m_selAnchorTick = m_sv->snapTick(rawTickAt(event->pos().x()),
+                                             event->modifiers() & Qt::AltModifier);
             return;
         }
         if (row.kind == Row::Voice) {
@@ -1443,15 +1651,6 @@ protected:
         if (!rowTarget(row, &cc, &track))
             return;
 
-        const LanePoint *nearPt = nearestPoint(row, event->pos().x());
-        if (event->button() == Qt::RightButton) {
-            if (nearPt) {
-                DocLanePoint pt;
-                if (doc->findLanePoint(track, cc, nearPt->tick, &pt))
-                    doc->deleteLanePoints(track, cc, {pt});
-            }
-            return;
-        }
         if (event->button() != Qt::LeftButton)
             return;
         m_dragRow = ri;
@@ -1512,6 +1711,15 @@ protected:
             }
             return;
         }
+        if (m_rightPress) {
+            if (!m_selSweep
+                && (event->pos() - m_rightPressPos).manhattanLength()
+                       >= QApplication::startDragDistance())
+                m_selSweep = true;
+            if (m_selSweep)
+                updateSelSweep(event);
+            return;
+        }
         if (m_dragRow < 0) {
             setCursor(rowBoundaryAt(event->pos().y()) >= 0 ? Qt::SplitVCursor
                                                            : Qt::ArrowCursor);
@@ -1529,6 +1737,19 @@ protected:
         if (event->button() == Qt::MiddleButton && m_panning) {
             m_panning = false;
             setCursor(Qt::ArrowCursor);
+            return;
+        }
+        if (event->button() == Qt::RightButton && m_rightPress) {
+            m_rightPress = false;
+            if (m_selSweep) {
+                m_selSweep = false;
+                if (m_sv->timeSelection().active())
+                    m_sv->announceTimeSelection();
+                else
+                    m_sv->clearTimeSelection();
+            } else {
+                rightClickInPlace(event);
+            }
             return;
         }
         if (event->button() == Qt::LeftButton && m_resizeRow >= 0) {
@@ -1635,11 +1856,122 @@ protected:
         doc->writeLanePoints(track, cc, tick, tick, {{tick, value}});
     }
 
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (m_sv->handleEditKey(event))
+            return;
+        if (event->key() == Qt::Key_Escape) {
+            m_rightPress = false;
+            m_selSweep = false;
+            m_sv->clearTimeSelection();
+            event->accept();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
 private:
     struct Row {
         enum Kind { Tempo, Voice, Lane } kind;
         const AutoLane *lane;
     };
+
+    // The lane identity a row contributes to a lane-scoped time selection:
+    // (engine track, cc), with the global tempo row as track -1 so it
+    // survives track switches.
+    std::pair<int, uint8_t> rowIdentity(const Row &row) const
+    {
+        switch (row.kind) {
+        case Row::Tempo:
+            return {-1, DOC_CC_TEMPO};
+        case Row::Voice:
+            return {m_sv->selectedTrack(), DOC_CC_VOICE};
+        case Row::Lane:
+            return {row.lane->track, row.lane->cc};
+        }
+        return {-1, 0};
+    }
+
+    // Live update of a right-drag selection sweep: the tick span between the
+    // press anchor and the cursor, across every row the drag crosses.
+    void updateSelSweep(QMouseEvent *event)
+    {
+        if (m_rightRow < 0 || m_rightRow >= int(m_rows.size()))
+            return;
+        const bool fine = event->modifiers() & Qt::AltModifier;
+        const uint64_t tick = m_sv->snapTick(rawTickAt(event->pos().x()), fine);
+        SongView::TimeSelection sel;
+        sel.startTick = std::min(m_selAnchorTick, tick);
+        sel.endTick = std::max(m_selAnchorTick, tick);
+        sel.scope = SongView::TimeSelection::Lanes;
+        int r0 = m_rightRow;
+        int r1 = rowIndexAt(
+            std::clamp(event->pos().y(), 0, rowTop(int(m_rows.size())) - 1));
+        if (r1 < 0)
+            r1 = r0;
+        if (r0 > r1)
+            std::swap(r0, r1);
+        for (int ri = r0; ri <= r1 && ri < int(m_rows.size()); ri++)
+            sel.lanes.push_back(rowIdentity(m_rows[ri]));
+        m_sv->setTimeSelection(sel);
+    }
+
+    // Right release without a drag: menu inside the time selection, voice-
+    // marker or point delete elsewhere, and clearing the selection over
+    // empty space (mirroring the roll).
+    void rightClickInPlace(QMouseEvent *event)
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc || m_rightRow < 0 || m_rightRow >= int(m_rows.size()))
+            return;
+        const Row &row = m_rows[m_rightRow];
+        const std::pair<int, uint8_t> id = rowIdentity(row);
+        const SongView::TimeSelection &sel = m_sv->timeSelection();
+        const double tick = rawTickAt(event->pos().x());
+        if (sel.active() && m_sv->timeSelectionCoversRow(id.first, id.second)
+            && tick >= double(sel.startTick) && tick < double(sel.endTick)) {
+            m_sv->showTimeSelectionMenu(event->globalPosition().toPoint());
+            return;
+        }
+        if (row.kind == Row::Voice) {
+            DocLanePoint hit;
+            if (voiceChangeNear(event->pos().x(), &hit))
+                doc->deleteLanePoints(m_sv->selectedTrack(), DOC_CC_VOICE, {hit});
+            return;
+        }
+        uint8_t cc;
+        int track;
+        if (!rowTarget(row, &cc, &track))
+            return;
+        if (const LanePoint *nearPt = nearestPoint(row, event->pos().x())) {
+            DocLanePoint pt;
+            if (doc->findLanePoint(track, cc, nearPt->tick, &pt))
+                doc->deleteLanePoints(track, cc, {pt});
+            return;
+        }
+        m_sv->clearTimeSelection();
+    }
+
+    // Voice change within the marker hit radius of x, if any.
+    bool voiceChangeNear(int x, DocLanePoint *out) const
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc)
+            return false;
+        bool found = false;
+        int bestDist = 9; // same radius as nearestPoint
+        for (const DocLanePoint &pt :
+             doc->lanePoints(m_sv->selectedTrack(), DOC_CC_VOICE)) {
+            const int dist =
+                std::abs(kGutterW + m_sv->contentX(double(pt.tick)) - x);
+            if (dist < bestDist) {
+                bestDist = dist;
+                *out = pt;
+                found = true;
+            }
+        }
+        return found;
+    }
 
     // Per-row geometry: individually-resized rows (divider drag) override
     // the shared m_laneH. Keys survive track switches, so each lane keeps
@@ -1781,6 +2113,17 @@ private:
         const bool empty = lane.points.empty();
 
         QMenu menu;
+        QAction *copyLane = menu.addAction(SongView::tr("Copy lane"));
+        copyLane->setEnabled(!empty);
+        QAction *pasteLane = menu.addAction(SongView::tr("Paste lane (replace)"));
+        // Only whole-lane clips (their ticks are absolute) paste here; range
+        // clips are anchored at the edit cursor instead.
+        {
+            const SongView::Clip &clip = m_sv->clipboard();
+            pasteLane->setEnabled(clip.wholeLane && clip.lanes.size() == 1
+                                  && !clip.lanes.front().points.empty());
+        }
+        menu.addSeparator();
         QAction *clear = menu.addAction(SongView::tr("Clear events"));
         clear->setEnabled(!empty);
         QAction *del = menu.addAction(empty ? SongView::tr("Remove empty lane")
@@ -1791,6 +2134,37 @@ private:
 
         SongDocument *doc = m_sv->document();
         const std::vector<DocLanePoint> points = doc->lanePoints(track, cc);
+        if (chosen == copyLane) {
+            if (points.empty())
+                return;
+            SongView::Clip clip;
+            clip.wholeLane = true;
+            clip.span = points.back().tick + 1;
+            SongView::ClipLane cl{track, cc, {}};
+            for (const DocLanePoint &pt : points)
+                cl.points.push_back({uint32_t(pt.tick), pt.value});
+            clip.lanes.push_back(std::move(cl));
+            m_sv->clipboard() = std::move(clip);
+            m_sv->announce(SongView::tr("Copied the %1 lane (%n point(s))", nullptr,
+                                        int(points.size()))
+                               .arg(name));
+            return;
+        }
+        if (chosen == pasteLane) {
+            // Replace this lane's whole contents with the clipboard lane at
+            // its original ticks (values clamp to this lane's range), as one
+            // undoable command.
+            SongDocument::RangeEdit edit;
+            edit.removePoints = points;
+            SongDocument::RangeEdit::LaneWrite lw{track, cc, {}};
+            for (const std::pair<uint32_t, int> &pv :
+                 m_sv->clipboard().lanes.front().points)
+                lw.points.push_back({uint64_t(pv.first), pv.second});
+            edit.addPoints.push_back(std::move(lw));
+            doc->applyRangeEdit(SongView::tr("paste lane"), edit);
+            m_sv->announce(SongView::tr("Replaced the %1 lane").arg(name));
+            return;
+        }
         if (chosen == clear) {
             if (points.empty())
                 return;
@@ -1812,40 +2186,28 @@ private:
         }
     }
 
-    // Voice row: left-click a marker re-picks its voice, left-click on empty
-    // space inserts a change at the snapped tick, right-click deletes a
-    // marker. The value axis is meaningless here (a voice is an identity, not
-    // a level), so the picker dialog replaces the lanes' drag editing.
+    // Voice row, left button only (right-button gestures are handled by the
+    // shared deferral): click a marker to re-pick its voice, click empty
+    // space to insert a change at the snapped tick; release-in-place
+    // right-clicks delete a marker via rightClickInPlace. The value axis is
+    // meaningless here (a voice is an identity, not a level), so the picker
+    // dialog replaces the lanes' drag editing.
     void voiceRowPress(QMouseEvent *event)
     {
         SongDocument *doc = m_sv->document();
         const int track = m_sv->selectedTrack();
-        const std::vector<DocLanePoint> changes = doc->lanePoints(track, DOC_CC_VOICE);
-
-        const DocLanePoint *hit = nullptr;
-        int bestDist = 9; // same radius as nearestPoint
-        for (const DocLanePoint &pt : changes) {
-            const int dist =
-                std::abs(kGutterW + m_sv->contentX(double(pt.tick)) - event->pos().x());
-            if (dist < bestDist) {
-                bestDist = dist;
-                hit = &pt;
-            }
-        }
-
-        if (event->button() == Qt::RightButton) {
-            if (hit)
-                doc->deleteLanePoints(track, DOC_CC_VOICE, {*hit});
-            return;
-        }
         if (event->button() != Qt::LeftButton)
             return;
-        if (hit) {
+        DocLanePoint hitPt;
+        if (voiceChangeNear(event->pos().x(), &hitPt)) {
+            const DocLanePoint *hit = &hitPt;
             int voice = hit->value;
             if (m_sv->pickVoice(SongView::tr("Change voice"), hit->value, &voice)
                 && voice != hit->value)
                 doc->moveLanePoint(track, DOC_CC_VOICE, *hit, hit->tick, voice);
         } else {
+            const std::vector<DocLanePoint> changes =
+                doc->lanePoints(track, DOC_CC_VOICE);
             const uint64_t tick = m_sv->snapTick(
                 m_sv->tickAtContentX(std::max(kGutterW, event->pos().x()) - kGutterW));
             // Preselect the voice already sounding at that tick.
@@ -2171,7 +2533,9 @@ private:
             paintCurve(p, plot, *points, minV, maxV, curve,
                        row.kind == Row::Lane && row.lane->cc == LANE_CC_BEND);
 
-        drawOverlays(p, m_sv, plot, kGutterW);
+        const std::pair<int, uint8_t> id = rowIdentity(row);
+        drawOverlays(p, m_sv, plot, kGutterW,
+                     m_sv->timeSelectionCoversRow(id.first, id.second));
         p.setClipping(false);
     }
 
@@ -2256,6 +2620,11 @@ private:
     int m_resizePressY = 0;
     bool m_panning = false;     // middle-drag pan
     QPoint m_panPos;            // last pan sample, global coords
+    bool m_rightPress = false;  // right button held; sweep vs. click undecided
+    bool m_selSweep = false;    // right-drag time-selection sweep is live
+    QPoint m_rightPressPos;
+    int m_rightRow = -1;        // row of the right press
+    uint64_t m_selAnchorTick = 0;
     Gesture m_gesture = Gesture::None;
     int m_dragRow = -1;
     int64_t m_dragOrigTick = -1; // existing point being moved, -1 = new point
@@ -2297,7 +2666,7 @@ protected:
 
         const QRect area(kGutterW, 0, width() - kGutterW, height());
         p.setClipRect(area);
-        drawOverlays(p, m_sv, area, kGutterW);
+        drawOverlays(p, m_sv, area, kGutterW, false);
 
         const int cy = height() / 2;
         for (const StripItem &item : model.strip) {
@@ -2471,6 +2840,12 @@ protected:
             QColor hl = palette().color(QPalette::Highlight);
             hl.setAlpha(50);
             p.fillRect(rect(), hl);
+        } else if (m_sv->trackSelectionMask() & (1u << m_track)) {
+            // Part of the multi-track scope (Ctrl/Shift+click), lighter than
+            // the primary selection.
+            QColor hl = palette().color(QPalette::Highlight);
+            hl.setAlpha(22);
+            p.fillRect(rect(), hl);
         }
         p.fillRect(QRect(0, 0, 4, height()), SongView::trackColor(m_track));
         p.setPen(palette().color(QPalette::Mid));
@@ -2498,7 +2873,10 @@ protected:
                                               Qt::ElideRight, textW));
     }
 
-    void mousePressEvent(QMouseEvent *) override { m_sv->selectTrack(m_track); }
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        m_sv->trackHeaderClicked(m_track, event->modifiers());
+    }
 
     void mouseDoubleClickEvent(QMouseEvent *) override
     {
@@ -2680,7 +3058,8 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
     m_emptyLanes.clear();
     m_selection.clear();
-    m_noteClipboard.clear();
+    m_timeSel = TimeSelection();
+    m_clip = Clip();
     m_muteMask = 0;
     m_soloMask = 0;
     emit muteMaskChanged(0);
@@ -2702,6 +3081,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
             }
         }
     }
+    m_trackSelMask = 1u << m_selectedTrack;
 
     rebuildAfterSongChange();
 }
@@ -2923,6 +3303,10 @@ bool SongView::isSelected(const ViewNote &note) const
 void SongView::setSelection(std::vector<NoteId> ids)
 {
     m_selection = std::move(ids);
+    // The two selection kinds are mutually exclusive, so Ctrl+C is never
+    // ambiguous.
+    if (!m_selection.empty() && m_timeSel.active())
+        clearTimeSelection();
     m_roll->update();
 }
 
@@ -2931,6 +3315,336 @@ void SongView::clearSelection()
     if (!m_selection.empty()) {
         m_selection.clear();
         m_roll->update();
+    }
+}
+
+void SongView::setTimeSelection(const TimeSelection &sel)
+{
+    m_timeSel = sel;
+    if (m_timeSel.active() && !m_selection.empty())
+        m_selection.clear();
+    refreshTimelineViews();
+}
+
+void SongView::clearTimeSelection()
+{
+    m_timeSel = TimeSelection();
+    refreshTimelineViews();
+}
+
+bool SongView::timeSelectionCoversTrack(int track) const
+{
+    if (!m_timeSel.active() || track < 0 || track > 15)
+        return false;
+    switch (m_timeSel.scope) {
+    case TimeSelection::AllTracks:
+        return true;
+    case TimeSelection::Tracks:
+        return m_timeSel.trackMask & (1u << track);
+    case TimeSelection::Lanes:
+        return false;
+    }
+    return false;
+}
+
+bool SongView::timeSelectionCoversRow(int track, uint8_t cc) const
+{
+    if (!m_timeSel.active())
+        return false;
+    if (m_timeSel.scope == TimeSelection::Lanes)
+        return std::find(m_timeSel.lanes.begin(), m_timeSel.lanes.end(),
+                         std::pair<int, uint8_t>(track, cc))
+            != m_timeSel.lanes.end();
+    // Track scopes cover the track's CC/voice rows, never the global tempo.
+    if (cc == DOC_CC_TEMPO)
+        return false;
+    return timeSelectionCoversTrack(track);
+}
+
+void SongView::announceTimeSelection()
+{
+    if (!m_timeSel.active() || !m_timeline)
+        return;
+    const double beats = double(m_timeSel.endTick - m_timeSel.startTick)
+                         / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
+    QString scope;
+    switch (m_timeSel.scope) {
+    case TimeSelection::AllTracks:
+        scope = tr("all tracks");
+        break;
+    case TimeSelection::Tracks: {
+        int n = 0;
+        for (int t = 0; t < 16; t++)
+            n += (m_timeSel.trackMask >> t) & 1;
+        scope = tr("%n track(s)", nullptr, n);
+        break;
+    }
+    case TimeSelection::Lanes:
+        scope = tr("%n lane(s)", nullptr, int(m_timeSel.lanes.size()));
+        break;
+    }
+    emit statusMessage(tr("Time selection: %1 beats · %2 · Ctrl+C/X copies, "
+                          "Del clears, Ctrl+V pastes at the edit cursor")
+                           .arg(beats, 0, 'g', 4)
+                           .arg(scope));
+}
+
+std::vector<int> SongView::timeSelectionTracks() const
+{
+    std::vector<int> tracks;
+    if (!m_timeline || !m_document)
+        return tracks;
+    for (int t = 0; t < 16; t++) {
+        if (!m_timeline->tracks[t].used)
+            continue;
+        if (m_timeSel.scope == TimeSelection::Tracks
+            && !(m_timeSel.trackMask & (1u << t)))
+            continue;
+        if (m_document->smfTrackFor(t) < 0)
+            continue;
+        tracks.push_back(t);
+    }
+    return tracks;
+}
+
+std::vector<uint8_t> SongView::trackCcs(int track) const
+{
+    std::vector<uint8_t> ccs;
+    for (const AutoLane &lane : m_model.lanes)
+        if (lane.track == track)
+            ccs.push_back(lane.cc); // LANE_CC_BEND == DOC_CC_BEND
+    ccs.push_back(DOC_CC_VOICE);
+    return ccs;
+}
+
+void SongView::copyTimeSelection()
+{
+    if (!m_document || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    Clip clip;
+    clip.span = e - s;
+    int noteCount = 0;
+    int pointCount = 0;
+    const auto copyLanePoints = [&](int track, uint8_t cc) {
+        ClipLane lane{track, cc, {}};
+        const int query = track < 0 ? m_selectedTrack : track;
+        for (const DocLanePoint &pt : m_document->lanePoints(query, cc)) {
+            if (pt.tick >= s && pt.tick < e)
+                lane.points.push_back({uint32_t(pt.tick - s), pt.value});
+        }
+        pointCount += int(lane.points.size());
+        // Empty segments are kept: they carry "this span is silent" so paste
+        // clears the destination range.
+        clip.lanes.push_back(std::move(lane));
+    };
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        for (const std::pair<int, uint8_t> &id : m_timeSel.lanes)
+            copyLanePoints(id.first, id.second);
+    } else {
+        for (int t : timeSelectionTracks()) {
+            ClipTrack ct{t, {}};
+            for (const DocNote &note : m_document->notesForTrack(t)) {
+                if (note.tick < s || note.tick >= e)
+                    continue;
+                ct.notes.push_back({uint32_t(note.tick - s), note.key,
+                                    note.duration ? note.duration
+                                                  : uint32_t(gridTicks()),
+                                    note.velocity});
+            }
+            noteCount += int(ct.notes.size());
+            clip.tracks.push_back(std::move(ct));
+            for (uint8_t cc : trackCcs(t))
+                copyLanePoints(t, cc);
+        }
+    }
+    m_clip = std::move(clip);
+    announce(tr("Copied range: %1 note(s), %2 automation point(s)")
+                 .arg(noteCount)
+                 .arg(pointCount));
+}
+
+void SongView::deleteTimeSelection()
+{
+    if (!m_document || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    SongDocument::RangeEdit edit;
+    const auto removeLanePoints = [&](int track, uint8_t cc) {
+        const int query = track < 0 ? m_selectedTrack : track;
+        for (const DocLanePoint &pt : m_document->lanePoints(query, cc)) {
+            if (pt.tick >= s && pt.tick < e)
+                edit.removePoints.push_back(pt);
+        }
+    };
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        for (const std::pair<int, uint8_t> &id : m_timeSel.lanes)
+            removeLanePoints(id.first, id.second);
+    } else {
+        for (int t : timeSelectionTracks()) {
+            for (const DocNote &note : m_document->notesForTrack(t)) {
+                if (note.tick >= s && note.tick < e)
+                    edit.removeNotes.push_back(note);
+            }
+            for (uint8_t cc : trackCcs(t))
+                removeLanePoints(t, cc);
+        }
+    }
+    if (edit.empty()) {
+        announce(tr("Nothing to delete in the time selection"));
+        return;
+    }
+    const int notes = int(edit.removeNotes.size());
+    const int points = int(edit.removePoints.size());
+    m_document->applyRangeEdit(tr("delete range"), edit);
+    announce(tr("Deleted range: %1 note(s), %2 automation point(s)")
+                 .arg(notes)
+                 .arg(points));
+}
+
+void SongView::pasteRangeAtEditCursor()
+{
+    if (!m_document || m_clip.span == 0 || m_clip.empty())
+        return;
+    const uint64_t s = snapTick(double(m_editCursorTick));
+    const uint64_t e = s + m_clip.span;
+
+    // A clip whose content came from one track retargets to the selected
+    // track (cross-track copy); multi-track clips paste back in place.
+    int sole = -2;
+    bool multi = false;
+    const auto consider = [&](int track) {
+        if (track < 0)
+            return; // tempo is global
+        if (sole == -2)
+            sole = track;
+        else if (sole != track)
+            multi = true;
+    };
+    for (const ClipTrack &ct : m_clip.tracks)
+        consider(ct.track);
+    for (const ClipLane &cl : m_clip.lanes)
+        consider(cl.track);
+    const auto mapTrack = [&](int track) {
+        return track < 0 ? -1 : (multi ? track : m_selectedTrack);
+    };
+
+    SongDocument::RangeEdit edit;
+    uint32_t pastedMask = 0;
+    for (const ClipTrack &ct : m_clip.tracks) {
+        const int t = mapTrack(ct.track);
+        if (t < 0 || m_document->smfTrackFor(t) < 0)
+            continue;
+        pastedMask |= 1u << t;
+        // Replace: whatever notes start inside the destination span go away.
+        for (const DocNote &note : m_document->notesForTrack(t)) {
+            if (note.tick >= s && note.tick < e)
+                edit.removeNotes.push_back(note);
+        }
+        if (!ct.notes.empty()) {
+            SongDocument::RangeEdit::TrackNotes tn{t, {}};
+            for (const ClipNote &cn : ct.notes)
+                tn.notes.push_back(
+                    {s + cn.relTick, cn.key, cn.duration, cn.velocity});
+            edit.addNotes.push_back(std::move(tn));
+        }
+    }
+    std::vector<std::pair<int, uint8_t>> pastedLanes;
+    for (const ClipLane &cl : m_clip.lanes) {
+        const int t = mapTrack(cl.track);
+        if (t >= 0 && m_document->smfTrackFor(t) < 0)
+            continue;
+        pastedLanes.push_back({t, cl.cc});
+        const int query = t < 0 ? m_selectedTrack : t;
+        for (const DocLanePoint &pt : m_document->lanePoints(query, cl.cc)) {
+            if (pt.tick >= s && pt.tick < e)
+                edit.removePoints.push_back(pt);
+        }
+        if (!cl.points.empty()) {
+            SongDocument::RangeEdit::LaneWrite lw{t, cl.cc, {}};
+            for (const std::pair<uint32_t, int> &pv : cl.points)
+                lw.points.push_back({s + pv.first, pv.second});
+            edit.addPoints.push_back(std::move(lw));
+        }
+    }
+    if (edit.empty() && m_clip.tracks.empty() && pastedLanes.empty())
+        return;
+    m_document->applyRangeEdit(tr("paste range"), edit);
+
+    // Select the pasted region so it can be immediately re-copied or moved.
+    TimeSelection sel;
+    sel.startTick = s;
+    sel.endTick = e;
+    if (m_clip.tracks.empty()) {
+        sel.scope = TimeSelection::Lanes;
+        sel.lanes = std::move(pastedLanes);
+    } else {
+        sel.scope = TimeSelection::Tracks;
+        sel.trackMask = pastedMask;
+    }
+    setTimeSelection(sel);
+    announce(tr("Pasted range at the edit cursor"));
+}
+
+bool SongView::handleEditKey(QKeyEvent *event)
+{
+    if (!m_document)
+        return false;
+    const bool sel = m_timeSel.active();
+    if (sel && event->matches(QKeySequence::Copy)) {
+        copyTimeSelection();
+        event->accept();
+        return true;
+    }
+    if (sel && event->matches(QKeySequence::Cut)) {
+        copyTimeSelection();
+        deleteTimeSelection();
+        event->accept();
+        return true;
+    }
+    if (sel
+        && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
+        deleteTimeSelection();
+        event->accept();
+        return true;
+    }
+    if (event->matches(QKeySequence::Paste) && m_clip.span > 0 && !m_clip.empty()) {
+        pasteRangeAtEditCursor();
+        event->accept();
+        return true;
+    }
+    return false;
+}
+
+void SongView::showTimeSelectionMenu(const QPoint &globalPos)
+{
+    if (!m_document || !m_timeSel.active())
+        return;
+    QMenu menu(this);
+    QAction *copy = menu.addAction(tr("Copy range"));
+    copy->setShortcut(QKeySequence::Copy);
+    QAction *cut = menu.addAction(tr("Cut range"));
+    cut->setShortcut(QKeySequence::Cut);
+    QAction *del = menu.addAction(tr("Delete range"));
+    QAction *paste = menu.addAction(tr("Paste at edit cursor"));
+    paste->setShortcut(QKeySequence::Paste);
+    paste->setEnabled(m_clip.span > 0 && !m_clip.empty());
+    menu.addSeparator();
+    QAction *clear = menu.addAction(tr("Clear selection"));
+    QAction *chosen = menu.exec(globalPos);
+    if (chosen == copy) {
+        copyTimeSelection();
+    } else if (chosen == cut) {
+        copyTimeSelection();
+        deleteTimeSelection();
+    } else if (chosen == del) {
+        deleteTimeSelection();
+    } else if (chosen == paste) {
+        pasteRangeAtEditCursor();
+    } else if (chosen == clear) {
+        clearTimeSelection();
     }
 }
 
@@ -2995,6 +3709,9 @@ void SongView::selectTrack(int track)
     if (track == m_selectedTrack || track < 0 || track > 15)
         return;
     m_selectedTrack = track;
+    // Programmatic selection collapses the multi-track scope;
+    // trackHeaderClicked restores it for modifier clicks.
+    m_trackSelMask = 1u << track;
     m_selection.clear();
     m_headers->syncSelection();
     m_lanes->rebuildRows();
@@ -3003,6 +3720,54 @@ void SongView::selectTrack(int track)
     m_roll->setFocus();
     m_roll->update();
     emit selectedTrackChanged(track);
+}
+
+uint32_t SongView::trackSelectionMask() const
+{
+    uint32_t used = 0;
+    if (m_timeline) {
+        for (int t = 0; t < 16; t++)
+            if (m_timeline->tracks[t].used)
+                used |= 1u << t;
+    }
+    const uint32_t mask = (m_trackSelMask | (1u << m_selectedTrack)) & used;
+    return mask ? mask : (1u << m_selectedTrack);
+}
+
+void SongView::trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers)
+{
+    if (track < 0 || track > 15)
+        return;
+    if (modifiers & Qt::ControlModifier) {
+        uint32_t mask = trackSelectionMask() ^ (1u << track);
+        if (mask == 0)
+            return; // the scope can't go empty
+        if (!(mask & (1u << m_selectedTrack))) {
+            // The primary track was toggled out; hand primary to the lowest
+            // remaining scoped track (selectTrack collapses the mask, so
+            // restore it after).
+            int next = 0;
+            while (!(mask & (1u << next)))
+                next++;
+            selectTrack(next);
+        }
+        m_trackSelMask = mask;
+        m_headers->syncSelection();
+    } else if (modifiers & Qt::ShiftModifier) {
+        const int lo = std::min(track, m_selectedTrack);
+        const int hi = std::max(track, m_selectedTrack);
+        uint32_t mask = 0;
+        for (int t = lo; t <= hi; t++) {
+            if (m_timeline && m_timeline->tracks[t].used)
+                mask |= 1u << t;
+        }
+        m_trackSelMask = mask | (1u << m_selectedTrack);
+        m_headers->syncSelection();
+    } else {
+        selectTrack(track);
+        m_trackSelMask = 1u << track; // collapse even when already primary
+        m_headers->syncSelection();
+    }
 }
 
 void SongView::setTrackMute(int track, bool on)
@@ -3143,6 +3908,10 @@ void SongView::deleteTrack(int track)
                                           }),
                            m_emptyLanes.end());
     }
+    // Track slots shift (format 1) or empty out (format 0); collapse the
+    // multi-track scope and drop the time selection rather than remap them.
+    m_trackSelMask = 1u << m_selectedTrack;
+    clearTimeSelection();
     m_document->deleteTrack(track); // rebuilds via documentChanged
     announce(tr("Deleted track %1").arg(track + 1));
 }
