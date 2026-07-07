@@ -58,7 +58,8 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
               "restore with a vanished project dir opened something");
     }
 
-    // 3. Project remembered but no song: the project opens, nothing loads.
+    // 3. Project remembered but no song: the project opens (titled after its
+    // directory), nothing loads.
     {
         QSettings settings;
         settings.setValue(QStringLiteral("lastProjectDir"), projectRoot);
@@ -69,8 +70,9 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
         check(window.statusBar()->currentMessage().startsWith(
                   QStringLiteral("Opened")),
               "remembered project did not open");
-        check(window.windowTitle() == QStringLiteral("porydaw"),
-              "a song loaded though none was remembered");
+        check(window.windowTitle()
+                  == QStringLiteral("%1 — porydaw").arg(QDir(projectRoot).dirName()),
+              "title is not the project name (or a song loaded unasked)");
     }
 
     // 4. Project + song remembered: both come back; closing at a distinctive

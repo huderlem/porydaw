@@ -244,6 +244,11 @@ void MainWindow::buildUi()
     // Status bar: polyphony meter
     m_polyLabel = new QLabel(this);
     statusBar()->addPermanentWidget(m_polyLabel);
+
+    // Initial focus goes to the song list (via the panel's focus proxy), not
+    // its filter box — first in tab order, which otherwise wins on show and
+    // swallowed the first keystrokes into the search field.
+    m_songList->setFocus();
 }
 
 void MainWindow::openProject()
@@ -1077,11 +1082,16 @@ void MainWindow::saveViewState()
 
 void MainWindow::updateWindowTitle()
 {
+    const QString project =
+        m_project.isOpen() ? QDir(m_project.root()).dirName() : QString();
     if (m_loadedSongId >= 0) {
-        setWindowTitle(QStringLiteral("%1[*] — porydaw").arg(m_doc.label()));
+        setWindowTitle(
+            QStringLiteral("%1[*] — %2 — porydaw").arg(m_doc.label(), project));
         setWindowModified(m_doc.isDirty());
     } else {
-        setWindowTitle(QStringLiteral("porydaw"));
+        setWindowTitle(project.isEmpty()
+                           ? QStringLiteral("porydaw")
+                           : QStringLiteral("%1 — porydaw").arg(project));
         setWindowModified(false);
     }
 }

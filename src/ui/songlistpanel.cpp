@@ -59,7 +59,6 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     m_search = new QLineEdit(this);
     m_search->setPlaceholderText(tr("Filter songs (Ctrl+F)"));
     m_search->setClearButtonEnabled(true);
-    m_search->installEventFilter(this);
     connect(m_search, &QLineEdit::textChanged, this, &SongListPanel::rebuildList);
     // Enter loads the selected match (or the first one) without leaving the box.
     connect(m_search, &QLineEdit::returnPressed, this, [this] {
@@ -90,6 +89,16 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     m_count = new QLabel(this);
     m_count->setEnabled(false); // dimmed, it's a caption
     layout->addWidget(m_count);
+
+    // Focusing the panel means the list — arrows browse songs right away.
+    setFocusProxy(m_list);
+    // Bare Space stays the window-level play/pause toggle everywhere in the
+    // panel (same convention as the voicegroup editor's inputs — see
+    // eventFilter). Filter queries never need a literal space: labels have
+    // none and the fuzzy fallback covers multi-part queries.
+    for (QWidget *w :
+         std::initializer_list<QWidget *>{m_search, m_category, m_sort, m_list})
+        w->installEventFilter(this);
 }
 
 void SongListPanel::setSongs(const QVector<SongInfo> &songs)
@@ -113,6 +122,16 @@ void SongListPanel::focusSearch()
 // type-arrow-Enter works without a focus dance.
 bool SongListPanel::eventFilter(QObject *watched, QEvent *event)
 {
+    // Leave plain Space unaccepted so the window-level play/pause shortcut
+    // fires instead of the input inserting a space / toggling.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_Space
+            && keyEvent->modifiers() == Qt::NoModifier) {
+            keyEvent->ignore();
+            return true;
+        }
+    }
     if (watched == m_search && event->type() == QEvent::KeyPress) {
         const int key = static_cast<QKeyEvent *>(event)->key();
         if (key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_PageUp
