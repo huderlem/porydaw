@@ -340,6 +340,51 @@ int runEditCheck(const QString &projectRoot)
             doc.undoStack()->undo();
         }
 
+        // Time signatures: create, modify in place, move, delete.
+        if (ok) {
+            auto findSig = [&doc](uint64_t tick, DocTimeSig *out) {
+                for (const DocTimeSig &sig : doc.timeSigs()) {
+                    if (sig.tick == tick) {
+                        *out = sig;
+                        return true;
+                    }
+                }
+                return false;
+            };
+            const size_t sigsBefore = doc.timeSigs().size();
+            doc.setTimeSig(base, 3, 3); // 3/8
+            mutateAndCheck("events unsorted after setTimeSig");
+            DocTimeSig sig;
+            if (ok && (!findSig(base, &sig) || sig.numerator != 3 || sig.denomPow2 != 3)) {
+                fail("time signature not found after set");
+                ok = false;
+            }
+            if (ok) {
+                doc.setTimeSig(base, 7, 2); // 7/4, replacing in place
+                if (!findSig(base, &sig) || sig.numerator != 7 || sig.denomPow2 != 2
+                    || doc.timeSigs().size() != sigsBefore + 1) {
+                    fail("time signature edit did not replace in place");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.moveTimeSig(base, base + step * 4);
+                mutateAndCheck("events unsorted after moveTimeSig");
+                if (findSig(base, &sig) || !findSig(base + step * 4, &sig)
+                    || sig.numerator != 7) {
+                    fail("time signature not moved");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.deleteTimeSig(base + step * 4);
+                if (findSig(base + step * 4, &sig)) {
+                    fail("time signature not deleted");
+                    ok = false;
+                }
+            }
+        }
+
         // Loop markers: move an existing one / create where absent, and cfg.
         const uint64_t loopStart = doc.loopTick(false);
         doc.setLoopTick(false, loopStart == UINT64_MAX ? 0 : int64_t(loopStart + step));

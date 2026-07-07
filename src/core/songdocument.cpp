@@ -22,6 +22,13 @@ bool metaIsLoopMarker(const SmfEvent &ev, char marker)
     return text.size() == 1 && text[0] == QLatin1Char(marker);
 }
 
+// Time-signature metas as MidiTimeline::build reads them: numerator and
+// denominator exponent must both be present.
+bool metaIsTimeSig(const SmfEvent &ev)
+{
+    return ev.isMeta() && ev.metaType == 0x58 && ev.blob.size() >= 2;
+}
+
 bool cfgSemanticEqual(const SongCfg &a, const SongCfg &b)
 {
     return a.voicegroupArg == b.voicegroupArg && a.masterVolume == b.masterVolume
@@ -324,6 +331,23 @@ uint64_t SongDocument::loopTick(bool endMarker) const
     if (!findLoopMarkerEvent(endMarker, &track, &index))
         return UINT64_MAX;
     return m_smf.tracks[track].events[index].tick;
+}
+
+std::vector<DocTimeSig> SongDocument::timeSigs() const
+{
+    std::vector<DocTimeSig> sigs;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        const auto &evs = m_smf.tracks[t].events;
+        for (size_t i = 0; i < evs.size(); i++) {
+            if (metaIsTimeSig(evs[i]))
+                sigs.push_back({int(t), i, evs[i].tick, uint8_t(evs[i].blob[0]),
+                                uint8_t(evs[i].blob[1])});
+        }
+    }
+    std::stable_sort(sigs.begin(), sigs.end(), [](const DocTimeSig &a, const DocTimeSig &b) {
+        return a.tick < b.tick;
+    });
+    return sigs;
 }
 
 SmfEvent SongDocument::makeChannelEvent(uint8_t typeNibble, uint8_t channel, uint64_t tick,
@@ -746,6 +770,95 @@ void SongDocument::setLoopTick(bool endMarker, int64_t tick)
     pushEdit(endMarker ? tr("set loop end") : tr("set loop start"), std::move(ops));
 }
 
+void SongDocument::setTimeSig(uint64_t tick, int numerator, int denomPow2)
+{
+    if (m_smf.tracks.empty())
+        return;
+    const char nn = char(std::clamp(numerator, 1, 64));
+    const char dd = char(std::clamp(denomPow2, 0, 6));
+    // The bar grid honors the last 0x58 at a tick; modify that one in place
+    // so it keeps its chunk, its position within the tick group, and its
+    // metronome/32nds bytes.
+    DocTimeSig target;
+    bool exists = false;
+    for (const DocTimeSig &sig : timeSigs()) {
+        if (sig.tick == tick) {
+            target = sig;
+            exists = true;
+        }
+    }
+    std::vector<EditOp> ops;
+    EditOp op;
+    if (exists) {
+        if (char(target.numerator) == nn && char(target.denomPow2) == dd)
+            return;
+        op.type = EditOp::ModifyEvent;
+        op.smfTrack = target.smfTrack;
+        op.index = target.index;
+        op.event = m_smf.tracks[target.smfTrack].events[target.index];
+    } else {
+        // New signatures go in the first chunk — the seq chunk, where tempo
+        // and new loop markers live — with mid2agb's usual metronome bytes.
+        op.type = EditOp::InsertEvent;
+        op.smfTrack = 0;
+        op.event.tick = tick;
+        op.event.status = 0xFF;
+        op.event.metaType = 0x58;
+        op.event.blob = QByteArray("\x00\x00\x18\x08", 4);
+    }
+    op.event.blob[0] = nn;
+    op.event.blob[1] = dd;
+    ops.push_back(op);
+    pushEdit(tr("set time signature"), std::move(ops));
+}
+
+void SongDocument::moveTimeSig(uint64_t fromTick, uint64_t toTick)
+{
+    if (fromTick == toTick)
+        return;
+    const std::vector<DocTimeSig> sigs = timeSigs();
+    std::vector<EditOp> ops;
+    std::vector<EditOp> inserts;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        std::vector<size_t> indices;
+        for (const DocTimeSig &sig : sigs) {
+            // A signature already at the destination is overwritten.
+            if (sig.smfTrack != int(t) || (sig.tick != fromTick && sig.tick != toTick))
+                continue;
+            indices.push_back(sig.index);
+            if (sig.tick == fromTick) {
+                EditOp insert;
+                insert.type = EditOp::InsertEvent;
+                insert.smfTrack = int(t);
+                insert.event = m_smf.tracks[t].events[sig.index];
+                insert.event.tick = toTick;
+                inserts.push_back(insert);
+            }
+        }
+        appendRemoveOps(ops, int(t), std::move(indices));
+    }
+    if (inserts.empty())
+        return;
+    ops.insert(ops.end(), inserts.begin(), inserts.end());
+    pushEdit(tr("move time signature"), std::move(ops));
+}
+
+void SongDocument::deleteTimeSig(uint64_t tick)
+{
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        std::vector<size_t> indices;
+        for (const DocTimeSig &sig : timeSigs()) {
+            if (sig.smfTrack == int(t) && sig.tick == tick)
+                indices.push_back(sig.index);
+        }
+        appendRemoveOps(ops, int(t), std::move(indices));
+    }
+    if (ops.empty())
+        return;
+    pushEdit(tr("delete time signature"), std::move(ops));
+}
+
 int SongDocument::freeChannel() const
 {
     bool used[16] = {};
@@ -826,6 +939,17 @@ void SongDocument::deleteTrack(int engineTrack)
         }
         appendRemoveOps(ops, smfTrack, std::move(indices));
     } else {
+        // Time signatures in the doomed chunk shape the whole song's bar
+        // grid; move them to chunk 0 so the grid survives.
+        for (const SmfEvent &ev : evs) {
+            if (metaIsTimeSig(ev)) {
+                EditOp rescue;
+                rescue.type = EditOp::InsertEvent;
+                rescue.smfTrack = 0;
+                rescue.event = ev;
+                ops.push_back(rescue);
+            }
+        }
         // If the winning loop marker lives in the doomed chunk, move it to
         // chunk 0 (where setLoopTick puts new ones) so the loop survives.
         for (int endMarker = 0; endMarker <= 1; endMarker++) {

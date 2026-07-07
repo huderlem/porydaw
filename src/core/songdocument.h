@@ -49,6 +49,16 @@ struct DocLanePoint {
     int value = 0; // CC: 0-127; bend: -8192..8191; tempo: BPM; voice: 0-127
 };
 
+// A time-signature event (meta 0x58) located in the SMF model. Same
+// staleness rule as DocNote.
+struct DocTimeSig {
+    int smfTrack = -1;
+    size_t index = 0;
+    uint64_t tick = 0;
+    uint8_t numerator = 4;
+    uint8_t denomPow2 = 2; // denominator = 1 << denomPow2
+};
+
 // The editable song document (SPEC.md §4): a full-fidelity SMF model plus the
 // song's midi.cfg properties, with every mutation undoable. The .mid file is
 // canonical storage; saving writes it plus (when changed) the song's midi.cfg
@@ -87,6 +97,9 @@ public:
     bool findLanePoint(int engineTrack, uint8_t cc, uint64_t tick, DocLanePoint *out) const;
     // Loop markers ('[' / ']' text metas); UINT64_MAX when absent.
     uint64_t loopTick(bool endMarker) const;
+    // Time signatures (meta 0x58), sorted by tick. When several share a tick
+    // the last one is the one the bar grid honors.
+    std::vector<DocTimeSig> timeSigs() const;
 
     // Edits. Each call pushes one undoable command and emits documentChanged.
     void addNote(int engineTrack, uint64_t tick, uint8_t key, uint32_t duration,
@@ -155,6 +168,15 @@ public:
 
     // Move or create a loop marker; tick == -1 removes it.
     void setLoopTick(bool endMarker, int64_t tick);
+
+    // Set the time signature at a tick: modifies the winning 0x58 meta
+    // already there (keeping its chunk and metronome bytes), or inserts a
+    // new one in the seq chunk, like tempo and loop markers. moveTimeSig
+    // relocates every 0x58 at fromTick, overwriting any at toTick;
+    // deleteTimeSig removes every 0x58 at the tick.
+    void setTimeSig(uint64_t tick, int numerator, int denomPow2);
+    void moveTimeSig(uint64_t fromTick, uint64_t toTick);
+    void deleteTimeSig(uint64_t tick);
 
     // Track create/delete. A track needs a channel event to occupy an engine
     // slot (rebuildTrackMap), so a new track is seeded with a program change

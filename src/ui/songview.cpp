@@ -1,6 +1,7 @@
 #include "songview.h"
 
 #include <QApplication>
+#include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -19,6 +20,7 @@
 #include <QPainterPath>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSpinBox>
 #include <QSplitter>
 #include <QToolButton>
 #include <QToolTip>
@@ -67,6 +69,41 @@ QString keyName(int key)
     static const char *const names[] = {"C", "C#", "D", "D#", "E", "F",
                                         "F#", "G", "G#", "A", "A#", "B"};
     return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
+}
+
+QString timeSigLabel(int numerator, int denomPow2)
+{
+    return QStringLiteral("%1/%2").arg(numerator).arg(1 << std::min(denomPow2, 6));
+}
+
+// Modal numerator/denominator editor for a ruler time-signature marker.
+bool askTimeSignature(QWidget *parent, int *numerator, int *denomPow2)
+{
+    QDialog dlg(parent);
+    dlg.setWindowTitle(SongView::tr("Time Signature"));
+    auto *num = new QSpinBox(&dlg);
+    num->setRange(1, 32);
+    num->setValue(std::clamp(*numerator, 1, 32));
+    auto *den = new QComboBox(&dlg);
+    for (int p = 0; p <= 5; p++)
+        den->addItem(QString::number(1 << p), p);
+    den->setCurrentIndex(std::clamp(*denomPow2, 0, 5));
+    auto *row = new QHBoxLayout;
+    row->addWidget(num);
+    row->addWidget(new QLabel(QStringLiteral("/"), &dlg));
+    row->addWidget(den);
+    auto *buttons =
+        new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addLayout(row);
+    layout->addWidget(buttons);
+    if (dlg.exec() != QDialog::Accepted)
+        return false;
+    *numerator = num->value();
+    *denomPow2 = den->currentData().toInt();
+    return true;
 }
 
 QColor loopFill() { return QColor(255, 200, 60, 16); }
@@ -253,12 +290,35 @@ protected:
                                   }
                               });
 
-        // Loop bracket glyphs above the band edges.
         const MidiTimeline *tl = m_sv->timeline();
-        p.setPen(loopEdge());
         QFont f = p.font();
         f.setBold(true);
         p.setFont(f);
+
+        // Time-signature chips along the top edge; a placeholder 4/4 shows
+        // at tick 0 while no 0x58 meta governs the opening bars.
+        const auto drawSig = [&](uint64_t tick, int numerator, int denomPow2,
+                                 bool implicit) {
+            const int x = kGutterW + m_sv->contentX(double(tick));
+            if (x < area.left() - 60 || x > area.right())
+                return;
+            p.setPen(palette().color(implicit ? QPalette::PlaceholderText
+                                              : QPalette::WindowText));
+            p.drawLine(x, 0, x, height() / 2);
+            p.drawText(x + 3, 11, timeSigLabel(numerator, denomPow2));
+        };
+        if (tl->timeSigs.empty() || tl->timeSigs.front().tick != 0)
+            drawSig(0, 4, 2, true);
+        for (size_t i = 0; i < tl->timeSigs.size(); i++) {
+            if (i + 1 < tl->timeSigs.size()
+                && tl->timeSigs[i + 1].tick == tl->timeSigs[i].tick)
+                continue; // shadowed duplicate: the last at a tick wins
+            const TimeSigPoint &ts = tl->timeSigs[i];
+            drawSig(ts.tick, ts.numerator ? ts.numerator : 4, ts.denomPow2, false);
+        }
+
+        // Loop bracket glyphs above the band edges.
+        p.setPen(loopEdge());
         if (tl->loopStartTick != UINT64_MAX)
             p.drawText(kGutterW + m_sv->contentX(double(tl->loopStartTick)) + 2, 11,
                        QStringLiteral("["));
@@ -266,10 +326,12 @@ protected:
             p.drawText(kGutterW + m_sv->contentX(double(tl->loopEndTick)) + 2, 11,
                        QStringLiteral("]"));
 
-        // Marker drag preview.
-        if (m_dragMarker >= 0) {
+        // Marker / time-signature drag preview.
+        if (m_dragMarker >= 0 || m_dragTimeSig) {
             const int x = kGutterW + m_sv->contentX(double(m_dragTick));
-            p.setPen(QPen(loopEdge(), 2));
+            p.setPen(QPen(m_dragMarker >= 0 ? loopEdge()
+                                            : palette().color(QPalette::WindowText),
+                          2));
             p.drawLine(x, 0, x, height());
         }
 
@@ -340,6 +402,19 @@ protected:
             update();
             return;
         }
+        uint64_t sigTick;
+        int sigNum, sigDen;
+        bool sigImplicit;
+        if (doc && hitTimeSigChip(event->pos(), &sigTick, &sigNum, &sigDen, &sigImplicit)
+            && !sigImplicit) {
+            // Drag moves the signature; starting at its own tick keeps a
+            // plain click (and the first half of a double-click) a no-op.
+            m_dragTimeSig = true;
+            m_dragTimeSigFrom = sigTick;
+            m_dragTick = sigTick;
+            update();
+            return;
+        }
         m_dragSelEdge = doc ? hitSelEdge(event->pos()) : -1;
         if (m_dragSelEdge >= 0)
             return;
@@ -369,7 +444,7 @@ protected:
             }
             return;
         }
-        if (m_dragMarker >= 0) {
+        if (m_dragMarker >= 0 || m_dragTimeSig) {
             m_dragTick = dragTick();
             update();
             return;
@@ -394,9 +469,14 @@ protected:
             m_sv->setEditCursorTick(dragTick());
             return;
         }
+        uint64_t sigTick;
+        int sigNum, sigDen;
+        bool sigImplicit;
         setCursor(m_sv->document()
                           && (hitMarker(event->pos()) >= 0
-                              || hitSelEdge(event->pos()) >= 0)
+                              || hitSelEdge(event->pos()) >= 0
+                              || hitTimeSigChip(event->pos(), &sigTick, &sigNum,
+                                                &sigDen, &sigImplicit))
                       ? Qt::SplitHCursor
                       : Qt::ArrowCursor);
     }
@@ -431,12 +511,38 @@ protected:
                 m_sv->clearTimeSelection(); // edges dragged together
             return;
         }
+        if (m_dragTimeSig) {
+            m_dragTimeSig = false;
+            if (SongDocument *doc = m_sv->document())
+                doc->moveTimeSig(m_dragTimeSigFrom, m_dragTick);
+            update();
+            return;
+        }
         if (m_dragMarker < 0)
             return;
         const bool endMarker = m_dragMarker == 1;
         m_dragMarker = -1;
         if (SongDocument *doc = m_sv->document())
             doc->setLoopTick(endMarker, int64_t(m_dragTick));
+        update();
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        SongDocument *doc = m_sv->document();
+        uint64_t sigTick;
+        int numerator, denomPow2;
+        bool implicit;
+        if (event->button() != Qt::LeftButton || !doc
+            || !hitTimeSigChip(event->pos(), &sigTick, &numerator, &denomPow2,
+                               &implicit))
+            return;
+        // The first press of the double-click armed a chip drag or cursor
+        // placement; cancel it before the modal editor swallows the release.
+        m_dragTimeSig = false;
+        m_placingCursor = false;
+        if (askTimeSignature(this, &numerator, &denomPow2))
+            doc->setTimeSig(sigTick, numerator, denomPow2);
         update();
     }
 
@@ -461,6 +567,61 @@ private:
                    <= 6)
             return 1;
         return -1;
+    }
+
+    // Chip hit-test in the ruler's top half, including the placeholder 4/4
+    // at tick 0. Fills the chip's tick and values; implicit means the chip
+    // has no 0x58 meta behind it (editing one creates the event).
+    bool hitTimeSigChip(QPoint pos, uint64_t *tick, int *numerator, int *denomPow2,
+                        bool *implicit) const
+    {
+        const MidiTimeline *tl = m_sv->timeline();
+        if (!tl || pos.y() >= height() / 2)
+            return false;
+        QFont f = font();
+        f.setBold(true);
+        const QFontMetrics fm(f);
+        const auto hits = [&](uint64_t t, int num, int den) {
+            const int x = kGutterW + m_sv->contentX(double(t));
+            return pos.x() >= x - 3
+                && pos.x() <= x + 5 + fm.horizontalAdvance(timeSigLabel(num, den));
+        };
+        // Back to front so the rightmost chip wins where labels overlap.
+        for (int i = int(tl->timeSigs.size()) - 1; i >= 0; i--) {
+            if (i + 1 < int(tl->timeSigs.size())
+                && tl->timeSigs[i + 1].tick == tl->timeSigs[i].tick)
+                continue; // shadowed duplicate (not drawn)
+            const TimeSigPoint &ts = tl->timeSigs[i];
+            const int num = ts.numerator ? ts.numerator : 4;
+            if (hits(ts.tick, num, ts.denomPow2)) {
+                *tick = ts.tick;
+                *numerator = num;
+                *denomPow2 = ts.denomPow2;
+                *implicit = false;
+                return true;
+            }
+        }
+        if ((tl->timeSigs.empty() || tl->timeSigs.front().tick != 0) && hits(0, 4, 2)) {
+            *tick = 0;
+            *numerator = 4;
+            *denomPow2 = 2;
+            *implicit = true;
+            return true;
+        }
+        return false;
+    }
+
+    // Values in effect at tick (4/4 before any 0x58 meta).
+    void sigAtTick(uint64_t tick, int *numerator, int *denomPow2) const
+    {
+        *numerator = 4;
+        *denomPow2 = 2;
+        for (const TimeSigPoint &ts : m_sv->timeline()->timeSigs) {
+            if (ts.tick > tick)
+                break;
+            *numerator = ts.numerator ? ts.numerator : 4;
+            *denomPow2 = ts.denomPow2;
+        }
     }
 
     // 0 = selection start edge, 1 = end edge, -1 = neither near pos.
@@ -496,6 +657,19 @@ private:
             loopFromSel = menu.addAction(SongView::tr("Set loop to selection"));
             clearSel = menu.addAction(SongView::tr("Clear time selection"));
         }
+        menu.addSeparator();
+        uint64_t sigTick = clickTick;
+        int sigNum, sigDen;
+        bool sigImplicit = true;
+        const bool onChip =
+            hitTimeSigChip(m_rightPressPos, &sigTick, &sigNum, &sigDen, &sigImplicit);
+        if (!onChip)
+            sigAtTick(clickTick, &sigNum, &sigDen);
+        QAction *editSig =
+            menu.addAction(onChip ? SongView::tr("Edit time signature…")
+                                  : SongView::tr("Set time signature here…"));
+        QAction *removeSig = menu.addAction(SongView::tr("Remove time signature"));
+        removeSig->setEnabled(onChip && !sigImplicit);
         QAction *chosen = menu.exec(globalPos);
         if (chosen == setStart) {
             doc->setLoopTick(false, int64_t(clickTick));
@@ -513,12 +687,19 @@ private:
             doc->setLoopTick(true, int64_t(sel.endTick));
         } else if (chosen && chosen == clearSel) {
             m_sv->clearTimeSelection();
+        } else if (chosen == editSig) {
+            if (askTimeSignature(this, &sigNum, &sigDen))
+                doc->setTimeSig(sigTick, sigNum, sigDen);
+        } else if (chosen == removeSig) {
+            doc->deleteTimeSig(sigTick);
         }
     }
 
     SongView *m_sv;
     int m_dragMarker = -1;
     uint64_t m_dragTick = 0;
+    bool m_dragTimeSig = false;     // chip drag is live; commits moveTimeSig
+    uint64_t m_dragTimeSigFrom = 0; // the dragged signature's original tick
     bool m_placingCursor = false;
     bool m_rightPress = false;  // right button held; sweep vs. menu undecided
     bool m_selSweep = false;    // right-drag time-selection sweep is live
@@ -3990,7 +4171,7 @@ void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
     std::vector<Seg> segs;
     segs.push_back({0, tpb, 4});
     for (const TimeSigPoint &ts : m_timeline->timeSigs) {
-        uint64_t beatTicks = (uint64_t(tpb) * 4) >> ts.denomPow2;
+        uint64_t beatTicks = (uint64_t(tpb) * 4) >> std::min<int>(ts.denomPow2, 63);
         if (beatTicks < 1)
             beatTicks = 1;
         const Seg seg{ts.tick, beatTicks, ts.numerator ? ts.numerator : 4};

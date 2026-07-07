@@ -5,9 +5,6 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
 
 ## M2 polish
 
-- **time signature** - the user should be able to see and edit the time signature
-  on the timeline. This should exist as some kind of marker in the ruler area, not
-  as an automation lane.
 - **ruler subdivisions** - the user should have greater editing precision by being
   able to select "triplets" or "straight". The user should also be able to specify
   the minimum ruler subdivision (1 is the most granular). For example, the user might
