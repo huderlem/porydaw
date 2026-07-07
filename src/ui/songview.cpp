@@ -3532,12 +3532,10 @@ void SongView::pasteRangeAtEditCursor()
     };
 
     SongDocument::RangeEdit edit;
-    uint32_t pastedMask = 0;
     for (const ClipTrack &ct : m_clip.tracks) {
         const int t = mapTrack(ct.track);
         if (t < 0 || m_document->smfTrackFor(t) < 0)
             continue;
-        pastedMask |= 1u << t;
         // Replace: whatever notes start inside the destination span go away.
         for (const DocNote &note : m_document->notesForTrack(t)) {
             if (note.tick >= s && note.tick < e)
@@ -3551,12 +3549,10 @@ void SongView::pasteRangeAtEditCursor()
             edit.addNotes.push_back(std::move(tn));
         }
     }
-    std::vector<std::pair<int, uint8_t>> pastedLanes;
     for (const ClipLane &cl : m_clip.lanes) {
         const int t = mapTrack(cl.track);
         if (t >= 0 && m_document->smfTrackFor(t) < 0)
             continue;
-        pastedLanes.push_back({t, cl.cc});
         const int query = t < 0 ? m_selectedTrack : t;
         for (const DocLanePoint &pt : m_document->lanePoints(query, cl.cc)) {
             if (pt.tick >= s && pt.tick < e)
@@ -3569,23 +3565,14 @@ void SongView::pasteRangeAtEditCursor()
             edit.addPoints.push_back(std::move(lw));
         }
     }
-    if (edit.empty() && m_clip.tracks.empty() && pastedLanes.empty())
-        return;
     m_document->applyRangeEdit(tr("paste range"), edit);
 
-    // Select the pasted region so it can be immediately re-copied or moved.
-    TimeSelection sel;
-    sel.startTick = s;
-    sel.endTick = e;
-    if (m_clip.tracks.empty()) {
-        sel.scope = TimeSelection::Lanes;
-        sel.lanes = std::move(pastedLanes);
-    } else {
-        sel.scope = TimeSelection::Tracks;
-        sel.trackMask = pastedMask;
-    }
-    setTimeSelection(sel);
-    announce(tr("Pasted range at the edit cursor"));
+    // Set up for tiling: the edit cursor advances to the end of the pasted
+    // span so repeated Ctrl+V lays copies back-to-back, and the selection is
+    // cleared so its band doesn't sit in the way of the next ruler click.
+    clearTimeSelection();
+    commitEditCursor(e);
+    announce(tr("Pasted range · edit cursor moved to its end — paste again to repeat"));
 }
 
 bool SongView::handleEditKey(QKeyEvent *event)
