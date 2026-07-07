@@ -40,7 +40,7 @@ in the UI, not fights against a general-purpose DAW's assumptions.
 | Fork vs. scratch | **Build from scratch** | Existing DAWs (LMMS, Qtractor, Ardour, …) are enormous codebases centered on features we don't need (audio tracks, plugin graphs), while porydaw's value is m4a-native constraints. The hard real-time parts already exist in poryaaaa. |
 | UI stack | **Qt 6 / C++** | Same stack as porymap: proven cross-platform shipping to this exact audience, native menus/dialogs/docking, well-trodden piano-roll territory (LMMS/Qtractor are Qt). |
 | Song source of truth | **The `.mid` file is canonical** | porydaw edits `sound/songs/midi/*.mid` in place, constrained to the mid2agb-compatible subset. Saving *is* exporting. Perfect interop: the same file opens in any DAW; porydaw can never corrupt a build. |
-| Project write-back depth | **All song-related files** *(revised 2026-07-05; originally "songs only" with copy-paste snippets)* | porydaw writes `.mid` files, the song's `midi.cfg` line, and the three registration files (`song_table.inc`, `songs.h`, `ld_script.ld`) directly — inserting or correcting only the song's own lines, byte-conservative for everything else (§6.3). Voicegroup `.inc` files: behind a first-save confirmation, the editor rewrites only the edited voice lines, preserving every other byte (§5.3). Nothing outside this set is ever modified. |
+| Project write-back depth | **All song-related files** *(revised 2026-07-05; originally "songs only" with copy-paste snippets)* | porydaw writes `.mid` files, the song's `midi.cfg` line, and the three registration files (`song_table.inc`, `songs.h`, `ld_script.ld`) directly — inserting or correcting only the song's own lines, byte-conservative for everything else (§6.3). Voicegroup `.inc` files: the editor rewrites only the edited voice lines, preserving every other byte (§5.3). Nothing outside this set is ever modified. |
 | Repo shape | **New repo; poryaaaa as git submodule** | porydaw is its own CMake project consuming poryaaaa's engine sources (`ENGINE_SOURCES` set). Fixes the engine needs (see §9) are upstreamed to poryaaaa so the CLAP plugin benefits too. |
 | Synth | **poryaaaa engine core, statically linked** | `plugin/m4a_engine.{h,c}` + `m4a_channel.c` + `m4a_tables.c` + `m4a_reverb.c` + `voicegroup_loader.c` — a self-contained C11 library with no CLAP/GUI dependency, already proven embeddable by `cmd/poryaaaa_render.c`. |
 
@@ -184,10 +184,11 @@ porydaw writes exactly three things into the project:
 
 1. `sound/songs/midi/<song>.mid`
 2. The song's line in `sound/songs/midi/midi.cfg`
-3. Voicegroup `.inc` files — opt-in (confirmed on first save, "don't ask
-   again" persists): the voicegroup editor rewrites only the edited `voice_*`
-   macro lines, preserving every other byte (comments, keysplit lines, labels,
-   line endings). Saving is unified with the song: to the user the song and
+3. Voicegroup `.inc` files: the voicegroup editor rewrites only the edited
+   `voice_*` macro lines, preserving every other byte (comments, keysplit
+   lines, labels, line endings). *(The first-save permission prompt was
+   removed 2026-07-07 — with saving unified it no longer served a purpose.)*
+   Saving is unified with the song: to the user the song and
    its voicegroup are one document, so Save Song writes 1–3 together (there
    is no separate voicegroup save). Creating a voicegroup adds
    `sound/voicegroups/<name>.inc` and appends its `.include` line to
@@ -237,9 +238,9 @@ flags; writes the `.mid` and the `midi.cfg` line; then **registers the song
 itself**, writing one line into each of the three registration files. The
 voicegroup picker (both blank and import modes) also offers *"create a new
 voicegroup for this song"* on per-file-layout projects: the wizard creates
-`sound/voicegroups/<label>.inc` from the dummy template (behind the §5.3
-voicegroup-write confirmation), points the song's `-G` at it, and the user
-configures its voices in the Voicegroup dock afterwards.
+`sound/voicegroups/<label>.inc` from the dummy template, points the song's
+`-G` at it, and the user configures its voices in the Voicegroup dock
+afterwards.
 
 ```
 sound/song_table.inc      →  song mus_foo, MUSIC_PLAYER_BGM, 0
@@ -310,8 +311,9 @@ basic voice types (DirectSound variants, square 1/2, programmable wave, noise)
 editable in the voicegroup dock with live audition before save — audible
 mid-playback via a hot track-instrument refresh; keysplit voices swappable
 (the Sample list offers the project's keysplit instruments first, each paired
-with its table); byte-conservative dirty-line-only writes behind a first-save
-confirmation (§5.3); create-voicegroup (copy of an existing one or the dummy
+with its table); byte-conservative dirty-line-only writes (§5.3; the
+first-save confirmation prompt was later removed as pointless);
+create-voicegroup (copy of an existing one or the dummy
 template); `--vgcheck` harness; drumset (keysplit_all) voices selectable and
 swappable like keysplits (the Drumkit list offers the project's observed
 drumkit sub-voicegroups). Cry voices stay read-only and round-trip verbatim;

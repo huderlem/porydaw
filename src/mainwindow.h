@@ -81,9 +81,8 @@ private:
     void reloadProject();
     void updateVoicegroupBrowser();
     // Saves the loaded song AND its dirty voicegroup — the two are one
-    // document to the user. The voicegroup goes first (its write is
-    // permission-gated), so a refused or failed write leaves the session
-    // dirty. false = nothing was marked clean.
+    // document to the user. The voicegroup goes first, so a failed write
+    // leaves the session dirty. false = nothing was marked clean.
     bool saveLoadedSong();
     // Prompts to save unsaved changes (song edits and voicegroup edits
     // alike); false = user cancelled the action.
@@ -106,9 +105,6 @@ private:
     void reloadVoicegroupPreview(int keepSlot);
     // Swaps in a freshly loaded voicegroup, reattaching the views around it.
     void swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot);
-    // One-time (per "don't ask again") confirmation that porydaw may write
-    // voicegroup files (SPEC §5.3).
-    bool confirmVoicegroupWrite();
     void cleanupVgPreview();
     void updateVgDockTitle();
     // Sidecar view state (SPEC §4.4): written whenever the loaded song is

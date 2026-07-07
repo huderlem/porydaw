@@ -20,9 +20,8 @@ extern "C" {
 // voicegroup .inc together, and an undone edit saved again round-trips the
 // .inc byte-identically. Also proves a -G voicegroup switch keeps unsaved
 // voice edits in the undo history (undoing the switch replays them).
-// QSettings is redirected into a temp dir (with voicegroup writes
-// pre-allowed, so no dialog blocks a headless run). Writes into the
-// project: run against a scratch copy.
+// QSettings is redirected into a temp dir. Writes into the project: run
+// against a scratch copy.
 
 namespace {
 
@@ -227,9 +226,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
 
 int runVgSaveCheck(const QString &projectRoot, const QString &songLabel)
 {
-    // Redirected settings: the user's real session is never touched, and
-    // voicegroup writes are pre-allowed so no confirmation dialog blocks a
-    // headless run.
+    // Redirected settings: the user's real session is never touched.
     QTemporaryDir settingsDir;
     if (!settingsDir.isValid()) {
         std::fprintf(stderr, "vgsavecheck: no temp dir for settings\n");
@@ -239,7 +236,6 @@ int runVgSaveCheck(const QString &projectRoot, const QString &songLabel)
                        settingsDir.path());
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                        settingsDir.path());
-    QSettings().setValue(QStringLiteral("allowVoicegroupWrites"), true);
 
     MainWindow window;
     return window.runVgSaveCheck(projectRoot, songLabel) ? 0 : 1;

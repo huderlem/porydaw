@@ -1,7 +1,6 @@
 #include "mainwindow.h"
 
 #include <QApplication>
-#include <QCheckBox>
 #include <QColor>
 #include <QComboBox>
 #include <QDialog>
@@ -567,13 +566,11 @@ bool MainWindow::saveLoadedSong()
     if (m_loadedSongId < 0)
         return false;
 
-    // The voicegroup first: its write is permission-gated, and the document
-    // save below marks the undo stack clean — a refused or failed voicegroup
-    // write must leave the session dirty so the user can retry.
+    // The voicegroup first: the document save below marks the undo stack
+    // clean, and a failed voicegroup write must leave the session dirty so
+    // the user can retry.
     const bool vgWasDirty = m_vgSource && m_vgSource->dirty();
     if (vgWasDirty) {
-        if (!confirmVoicegroupWrite())
-            return false;
         QString error;
         if (!m_vgSource->save(&error)) {
             QMessageBox::warning(this, tr("Save Voicegroup"), error);
@@ -831,8 +828,6 @@ void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,
     // else may be written if it can't exist. Starts as the dummy template —
     // the user configures it in the Voicegroup dock.
     if (!newVoicegroup.isEmpty()) {
-        if (!confirmVoicegroupWrite())
-            return;
         if (!VoicegroupSource::createVoicegroup(m_project.root(), newVoicegroup,
                                                 QString(), QString(), &error)
             || !VoicegroupSource::appendIncludeLine(m_project.root(), newVoicegroup,
@@ -1050,26 +1045,6 @@ void MainWindow::swapVoicegroup(LoadedVoiceGroup *vg, int keepSlot)
     m_vgBrowser->selectSlot(keepSlot);
 }
 
-bool MainWindow::confirmVoicegroupWrite()
-{
-    QSettings settings;
-    const QString key = QStringLiteral("allowVoicegroupWrites");
-    if (settings.value(key, false).toBool())
-        return true;
-    QMessageBox box(QMessageBox::Question, tr("Edit Voicegroup Files?"),
-                    tr("porydaw will rewrite only the edited voice lines of the "
-                       "voicegroup file — every other byte is preserved.\n\n"
-                       "Allow porydaw to edit voicegroup files in this project?"),
-                    QMessageBox::Yes | QMessageBox::No, this);
-    auto *dontAsk = new QCheckBox(tr("Don't ask again"), &box);
-    box.setCheckBox(dontAsk);
-    if (box.exec() != QMessageBox::Yes)
-        return false;
-    if (dontAsk->isChecked())
-        settings.setValue(key, true);
-    return true;
-}
-
 void MainWindow::cleanupVgPreview()
 {
     if (!m_project.isOpen())
@@ -1126,8 +1101,6 @@ void MainWindow::newVoicegroup()
                              tr("A voicegroup named %1 already exists.").arg(name));
         return;
     }
-    if (!confirmVoicegroupWrite())
-        return;
 
     const QString copyFrom = sourceCombo->currentData().toString();
     const QString sectionLabel =
