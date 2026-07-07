@@ -3700,6 +3700,9 @@ void SongView::selectTrack(int track)
     // trackHeaderClicked restores it for modifier clicks.
     m_trackSelMask = 1u << track;
     m_selection.clear();
+    // A track-scoped time selection would keep rendering only in the ruler
+    // once the shown track leaves its scope; drop it on any track switch.
+    clearTimeSelection();
     m_headers->syncSelection();
     m_lanes->rebuildRows();
     // Switching tracks readies the roll for keyboard editing (e.g. copy on
