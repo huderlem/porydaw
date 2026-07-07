@@ -50,6 +50,10 @@ MainWindow::MainWindow(QWidget *parent)
     m_engineSettings = EngineSettings::load();
     buildUi();
 
+    QSettings settings;
+    restoreGeometry(settings.value(QStringLiteral("windowGeometry")).toByteArray());
+    restoreState(settings.value(QStringLiteral("windowState")).toByteArray());
+
     QString audioError;
     m_audioOk = m_audio.init(&audioError);
     if (!m_audioOk) {
@@ -122,6 +126,8 @@ void MainWindow::buildUi()
 
     // Transport toolbar
     QToolBar *transport = addToolBar(tr("Transport"));
+    // saveState() persists dock/toolbar layout by objectName only.
+    transport->setObjectName(QStringLiteral("transportToolbar"));
     transport->setMovable(false);
 
     m_goToStartAction = new QAction(style()->standardIcon(QStyle::SP_MediaSkipBackward),
@@ -173,6 +179,7 @@ void MainWindow::buildUi()
 
     // Song browser dock
     auto *dock = new QDockWidget(tr("Songs"), this);
+    dock->setObjectName(QStringLiteral("songsDock"));
     dock->setFeatures(QDockWidget::DockWidgetMovable);
     m_songList = new SongListPanel(dock);
     connect(m_songList, &SongListPanel::songActivated, this, &MainWindow::songActivated);
@@ -189,6 +196,7 @@ void MainWindow::buildUi()
     // click-and-hold to audition through the preview engine instance, with
     // an editor panel for the selected voice.
     m_vgDock = new QDockWidget(tr("Voicegroup"), this);
+    m_vgDock->setObjectName(QStringLiteral("voicegroupDock"));
     m_vgDock->setFeatures(QDockWidget::DockWidgetMovable);
     m_vgBrowser = new VoicegroupBrowser(m_vgDock);
     connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
@@ -247,22 +255,48 @@ void MainWindow::openProject()
         QFileDialog::getExistingDirectory(this, tr("Open Decomp Project"), startDir);
     if (dir.isEmpty())
         return;
+    openProjectDir(dir);
+}
 
+void MainWindow::restoreSession()
+{
+    QSettings settings;
+    const QString dir = settings.value(QStringLiteral("lastProjectDir")).toString();
+    if (dir.isEmpty() || !QDir(dir).exists())
+        return;
+    // Read before openProjectDir clears it for the fresh project.
+    const QString songLabel =
+        settings.value(QStringLiteral("lastSongLabel")).toString();
+    if (!openProjectDir(dir, /*interactive=*/false))
+        return;
+    if (!songLabel.isEmpty())
+        loadSongByLabel(songLabel);
+}
+
+bool MainWindow::openProjectDir(const QString &dir, bool interactive)
+{
     QElapsedTimer timer;
     timer.start();
 
     if (!maybeSaveSong() || !maybeSaveVoicegroup())
-        return;
+        return false;
     saveViewState(); // against the old project root, before open() swaps it
     cleanupVgPreview();
     m_vgSource.reset();
 
     QString error;
     if (!m_project.open(dir, &error)) {
-        QMessageBox::warning(this, tr("Open Project"), error);
-        return;
+        if (interactive)
+            QMessageBox::warning(this, tr("Open Project"), error);
+        else
+            statusBar()->showMessage(
+                tr("Couldn't reopen last project %1: %2").arg(dir, error));
+        return false;
     }
+    QSettings settings;
     settings.setValue(QStringLiteral("lastProjectDir"), dir);
+    // The new project starts with no song loaded; loadSong re-records it.
+    settings.remove(QStringLiteral("lastSongLabel"));
 
     m_songView->setDocument(nullptr);
     m_songView->setSong(nullptr, nullptr);
@@ -292,6 +326,7 @@ void MainWindow::openProject()
                                  .arg(playable)
                                  .arg(timer.elapsed()));
     updateTransportActions();
+    return true;
 }
 
 void MainWindow::populateSongList()
@@ -363,6 +398,8 @@ void MainWindow::loadSong(const SongInfo &song)
     m_appliedVoicegroupArg = song.cfg.voicegroupArg;
     m_appliedVolume = song.cfg.masterVolume;
     m_appliedReverb = song.cfg.reverb;
+    if (m_persistSession)
+        QSettings().setValue(QStringLiteral("lastSongLabel"), song.label);
 
     m_songView->setSong(m_audio.timeline(), m_audio.voicegroup());
     m_songView->setDocument(&m_doc);
@@ -1054,6 +1091,11 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (maybeSaveSong() && maybeSaveVoicegroup()) {
         saveViewState();
         cleanupVgPreview();
+        if (m_persistSession) {
+            QSettings settings;
+            settings.setValue(QStringLiteral("windowGeometry"), saveGeometry());
+            settings.setValue(QStringLiteral("windowState"), saveState());
+        }
         event->accept();
     } else {
         event->ignore();
@@ -1108,6 +1150,7 @@ void MainWindow::updateTransportActions()
 
 bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabel)
 {
+    m_persistSession = false;
     if (!m_audioOk) {
         qWarning("selftest: no audio device available");
         return false;

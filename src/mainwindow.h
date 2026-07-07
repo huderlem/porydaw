@@ -32,6 +32,11 @@ public:
     // and reports whether the playhead advanced.
     bool runSelfTest(const QString &projectRoot, const QString &songLabel);
 
+    // Reopens the last session's project and song, if they still exist.
+    // Called after show() on interactive launches only, so the harnesses
+    // never inherit (or overwrite) the user's session.
+    void restoreSession();
+
 protected:
     void closeEvent(QCloseEvent *event) override;
 
@@ -54,6 +59,9 @@ private slots:
 
 private:
     void buildUi();
+    // The dialog-less half of openProject; also the session-restore entry.
+    // On failure warns via dialog (interactive) or status bar (restore).
+    bool openProjectDir(const QString &dir, bool interactive = true);
     void populateSongList();
     void loadSong(const SongInfo &song);
     void loadSongByLabel(const QString &label);
@@ -104,6 +112,8 @@ private:
 
     AudioEngine m_audio;
     bool m_audioOk = false;
+    // False during --selftest so harness runs don't overwrite the session.
+    bool m_persistSession = true;
     EngineSettings m_engineSettings;
     DecompProject m_project;
     SongDocument m_doc;

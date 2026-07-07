@@ -22,6 +22,9 @@ int runExportCheck(const QString &projectRoot, const QString &songLabel);
 // mkcheck.cpp; songs.mk-fallback parse/write check for projects with no
 // midi.cfg (writes into the project: use a copy).
 int runMkCheck(const QString &projectRoot, const QString &songLabel);
+// sessioncheck.cpp; session restore/persistence check against redirected
+// QSettings (writes view sidecars into the project: use a copy).
+int runSessionCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -61,6 +64,9 @@ int main(int argc, char *argv[])
     const int mkCheck = args.indexOf(QStringLiteral("--mkcheck"));
     if (mkCheck >= 0 && mkCheck + 2 < args.size())
         return runMkCheck(args[mkCheck + 1], args[mkCheck + 2]);
+    const int sessionCheck = args.indexOf(QStringLiteral("--sessioncheck"));
+    if (sessionCheck >= 0 && sessionCheck + 2 < args.size())
+        return runSessionCheck(args[sessionCheck + 1], args[sessionCheck + 2]);
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);
@@ -78,5 +84,6 @@ int main(int argc, char *argv[])
 
     MainWindow window;
     window.show();
+    window.restoreSession();
     return app.exec();
 }
