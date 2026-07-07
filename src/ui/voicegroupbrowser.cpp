@@ -137,10 +137,32 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_symbolCombo->setInsertPolicy(QComboBox::NoInsert);
     addRow(tr("Sample"), m_symbolCombo, &m_symbolLabel);
 
-    m_sweepSpin = new QSpinBox(m_editor);
-    m_sweepSpin->setRange(0, 255);
-    m_sweepSpin->setToolTip(tr("GB sweep register (0 = off)."));
-    addRow(tr("Sweep"), m_sweepSpin, &m_sweepLabel);
+    // The sweep byte is the GB NR10 register: three packed fields, edited
+    // separately (value = 16*time + 8*direction + shift).
+    m_sweepRow = new QWidget(m_editor);
+    auto *sweepLayout = new QHBoxLayout(m_sweepRow);
+    sweepLayout->setContentsMargins(0, 0, 0, 0);
+    sweepLayout->setSpacing(2);
+    m_sweepTimeSpin = new QSpinBox(m_sweepRow);
+    m_sweepTimeSpin->setRange(0, 7);
+    m_sweepTimeSpin->setSpecialValueText(tr("Off"));
+    m_sweepTimeSpin->setToolTip(
+        tr("Speed: 128 Hz clocks between pitch steps (1 = fastest, 7 = "
+           "slowest, Off = no sweep)."));
+    m_sweepDirCombo = new QComboBox(m_sweepRow);
+    m_sweepDirCombo->addItems({tr("Rise"), tr("Fall")});
+    m_sweepDirCombo->setToolTip(
+        tr("Direction. A rising sweep silences the note when it overflows "
+           "the highest pitch."));
+    m_sweepShiftSpin = new QSpinBox(m_sweepRow);
+    m_sweepShiftSpin->setRange(0, 7);
+    m_sweepShiftSpin->setToolTip(
+        tr("Step size: each step moves the frequency by 1/2^n of itself, so "
+           "1 is wild, 7 is subtle, and 0 moves it the whole way at once."));
+    sweepLayout->addWidget(m_sweepTimeSpin);
+    sweepLayout->addWidget(m_sweepDirCombo);
+    sweepLayout->addWidget(m_sweepShiftSpin);
+    addRow(tr("Sweep"), m_sweepRow, &m_sweepLabel);
 
     m_dutyCombo = new QComboBox(m_editor);
     m_dutyCombo->addItems({QStringLiteral("12.5%"), QStringLiteral("25%"),
@@ -194,7 +216,8 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
         button->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
-             m_sweepSpin, m_attackSpin, m_decaySpin, m_sustainSpin, m_releaseSpin}) {
+             m_sweepTimeSpin, m_sweepDirCombo, m_sweepShiftSpin, m_attackSpin,
+             m_decaySpin, m_sustainSpin, m_releaseSpin}) {
         w->installEventFilter(this);
         for (QLineEdit *edit : w->findChildren<QLineEdit *>())
             edit->installEventFilter(this);
@@ -206,8 +229,9 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     connect(m_symbolCombo->lineEdit(), &QLineEdit::editingFinished, this, commit);
     connect(m_dutyCombo, &QComboBox::activated, this, commit);
     connect(m_periodCombo, &QComboBox::activated, this, commit);
-    for (QSpinBox *spin : {m_sweepSpin, m_attackSpin, m_decaySpin, m_sustainSpin,
-                           m_releaseSpin})
+    connect(m_sweepDirCombo, &QComboBox::activated, this, commit);
+    for (QSpinBox *spin : {m_sweepTimeSpin, m_sweepShiftSpin, m_attackSpin,
+                           m_decaySpin, m_sustainSpin, m_releaseSpin})
         connect(spin, &QSpinBox::valueChanged, this, commit);
 
     populateEditor();
@@ -328,7 +352,7 @@ void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool visible)
     };
     showRow(m_typeLabel, m_typeCombo, visible);
     showRow(m_symbolLabel, m_symbolCombo, visible && vgMacroHasSymbol(macro));
-    showRow(m_sweepLabel, m_sweepSpin, visible && macroIsSquare1(macro));
+    showRow(m_sweepLabel, m_sweepRow, visible && macroIsSquare1(macro));
     showRow(m_dutyLabel, m_dutyCombo,
             visible && (macroIsSquare1(macro) || macroIsSquare2(macro)));
     showRow(m_periodLabel, m_periodCombo, visible && macroIsNoise(macro));
@@ -402,7 +426,9 @@ void VoicegroupBrowser::populateEditor()
                                      : drumkit ? m_drumkitChoices : m_sampleChoices);
         m_symbolCombo->setCurrentText(voice->symbol);
     }
-    m_sweepSpin->setValue(voice->sweep);
+    m_sweepTimeSpin->setValue((voice->sweep >> 4) & 7);
+    m_sweepDirCombo->setCurrentIndex((voice->sweep >> 3) & 1);
+    m_sweepShiftSpin->setValue(voice->sweep & 7);
     m_dutyCombo->setCurrentIndex(voice->duty & 3);
     m_periodCombo->setCurrentIndex(voice->period & 1);
     m_attackSpin->setValue(voice->attack);
@@ -518,7 +544,10 @@ void VoicegroupBrowser::commitEdit()
                 v.release = fresh.release;
             }
         }
-        v.sweep = m_sweepSpin->value();
+        // Recompose NR10 from the three fields; bit 7 is unused by the sweep
+        // unit, so keep the file's value for it.
+        v.sweep = (cur->sweep & 0x80) | (m_sweepTimeSpin->value() << 4)
+            | (m_sweepDirCombo->currentIndex() << 3) | m_sweepShiftSpin->value();
         v.duty = m_dutyCombo->currentIndex();
         v.period = m_periodCombo->currentIndex();
         if (vgMacroIsCgb(v.macro)) {

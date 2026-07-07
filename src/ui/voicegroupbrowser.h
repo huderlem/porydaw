@@ -91,7 +91,10 @@ private:
     QLabel *m_notice = nullptr;
     QComboBox *m_typeCombo = nullptr;
     QComboBox *m_symbolCombo = nullptr;
-    QSpinBox *m_sweepSpin = nullptr;
+    QWidget *m_sweepRow = nullptr;
+    QSpinBox *m_sweepTimeSpin = nullptr;
+    QComboBox *m_sweepDirCombo = nullptr;
+    QSpinBox *m_sweepShiftSpin = nullptr;
     QComboBox *m_dutyCombo = nullptr;
     QComboBox *m_periodCombo = nullptr;
     QSpinBox *m_attackSpin = nullptr;
