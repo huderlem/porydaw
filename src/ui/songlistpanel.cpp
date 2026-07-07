@@ -207,8 +207,6 @@ void SongListPanel::rebuildList()
         QString text = song->label;
         if (!song->registered)
             text += tr("  ⚠ not registered");
-        else if (!song->constant.isEmpty())
-            text += QStringLiteral("  (%1)").arg(song->constant);
         auto *item = new QListWidgetItem(text, m_list);
         item->setData(Qt::UserRole, song->id);
         if (!song->registered) {
