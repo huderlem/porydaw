@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QDir>
+#include <QListWidget>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTemporaryDir>
@@ -83,6 +84,11 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
         window.restoreSession();
         check(window.windowTitle().startsWith(songLabel),
               "remembered song did not load");
+        // The song list (the app's only QListWidget) tracks the loaded song.
+        auto *list = window.findChild<QListWidget *>();
+        check(list && list->currentItem()
+                  && list->currentItem()->text().startsWith(songLabel),
+              "restored song is not selected in the song list");
         window.resize(999, 555);
         check(window.close(), "close was refused");
         QSettings settings;

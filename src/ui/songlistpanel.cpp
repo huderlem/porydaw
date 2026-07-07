@@ -118,6 +118,20 @@ void SongListPanel::focusSearch()
     m_search->selectAll();
 }
 
+void SongListPanel::setCurrentSong(int songId)
+{
+    m_currentSongId = songId;
+    for (int i = 0; i < m_list->count(); ++i) {
+        QListWidgetItem *item = m_list->item(i);
+        if (item->data(Qt::UserRole).toInt() == songId) {
+            m_list->setCurrentItem(item);
+            m_list->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+            return;
+        }
+    }
+    m_list->setCurrentItem(nullptr);
+}
+
 // Up/Down (and paging) in the search box steer the list, so
 // type-arrow-Enter works without a focus dance.
 bool SongListPanel::eventFilter(QObject *watched, QEvent *event)
@@ -238,6 +252,17 @@ void SongListPanel::rebuildList()
     m_count->setText(visible.size() == m_songs.size()
                          ? tr("%1 songs").arg(m_songs.size())
                          : tr("%1 of %2 songs").arg(visible.size()).arg(m_songs.size()));
+
+    // Keep the loaded song selected across rebuilds — except mid-search,
+    // where the selection must stay clear so Enter takes the first match.
+    if (m_currentSongId >= 0 && m_search->text().trimmed().isEmpty()) {
+        for (int i = 0; i < m_list->count(); ++i) {
+            if (m_list->item(i)->data(Qt::UserRole).toInt() == m_currentSongId) {
+                m_list->setCurrentItem(m_list->item(i));
+                break;
+            }
+        }
+    }
 }
 
 void SongListPanel::activateItem(QListWidgetItem *item)

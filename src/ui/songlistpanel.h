@@ -26,6 +26,9 @@ public:
     // category selection.
     void setSongs(const QVector<SongInfo> &songs);
     void focusSearch();
+    // Marks the loaded song: selects it, scrolls it into view, and keeps it
+    // selected across list rebuilds. -1 (or a filtered-out id) deselects.
+    void setCurrentSong(int songId);
 
 signals:
     void songActivated(int songId);
@@ -41,6 +44,7 @@ private:
 
     QVector<SongInfo> m_songs;
     QStringList m_knownPrefixes; // categories currently in the combo
+    int m_currentSongId = -1;    // the loaded song, re-selected on rebuilds
     QLineEdit *m_search = nullptr;
     QComboBox *m_category = nullptr;
     QComboBox *m_sort = nullptr;

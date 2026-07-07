@@ -319,6 +319,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     m_importAction->setEnabled(true);
     updateWindowTitle();
     populateSongList();
+    m_songList->setCurrentSong(-1);
 
     int playable = 0;
     for (const SongInfo &song : m_project.songs()) {
@@ -418,6 +419,7 @@ void MainWindow::loadSong(const SongInfo &song)
     m_registerAction->setEnabled(!song.registered);
     updateWindowTitle();
     m_songLabel->setText(QStringLiteral("  %1").arg(song.label));
+    m_songList->setCurrentSong(song.id);
 
     const MidiTimeline *tl = m_audio.timeline();
     QString loopNote = tl->hasLoop() ? tr(", loops") : tr(", no loop markers");
