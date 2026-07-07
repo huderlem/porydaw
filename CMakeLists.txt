@@ -76,6 +76,8 @@ qt_add_executable(porydaw
     src/ui/enginesettingsdialog.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
+    src/ui/songlistpanel.cpp
+    src/ui/songlistpanel.h
     src/ui/songviewmodel.cpp
     src/ui/songviewmodel.h
     src/ui/songview.cpp

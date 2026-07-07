@@ -13,10 +13,9 @@
 class QAction;
 class QDockWidget;
 class QLabel;
-class QListWidget;
-class QListWidgetItem;
 class QTimer;
 class SmfFile;
+class SongListPanel;
 class SongView;
 class VoicegroupBrowser;
 
@@ -38,7 +37,7 @@ protected:
 
 private slots:
     void openProject();
-    void songActivated(QListWidgetItem *item);
+    void songActivated(int songId);
     void saveSong();
     void exportWav();
     void openSongSettings();
@@ -115,7 +114,7 @@ private:
     int m_appliedVolume = 127;
     int m_appliedReverb = -1;
 
-    QListWidget *m_songList = nullptr;
+    SongListPanel *m_songList = nullptr;
     SongView *m_songView = nullptr;
     VoicegroupBrowser *m_vgBrowser = nullptr;
     QDockWidget *m_vgDock = nullptr;

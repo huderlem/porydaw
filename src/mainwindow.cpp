@@ -17,7 +17,6 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
-#include <QListWidget>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressDialog>
@@ -37,6 +36,7 @@
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
 #include "ui/viewsidecar.h"
@@ -174,10 +174,16 @@ void MainWindow::buildUi()
     // Song browser dock
     auto *dock = new QDockWidget(tr("Songs"), this);
     dock->setFeatures(QDockWidget::DockWidgetMovable);
-    m_songList = new QListWidget(dock);
-    connect(m_songList, &QListWidget::itemActivated, this, &MainWindow::songActivated);
+    m_songList = new SongListPanel(dock);
+    connect(m_songList, &SongListPanel::songActivated, this, &MainWindow::songActivated);
     dock->setWidget(m_songList);
     addDockWidget(Qt::LeftDockWidgetArea, dock);
+
+    auto *findAction = new QAction(tr("Find Song"), this);
+    findAction->setShortcut(QKeySequence::Find);
+    connect(findAction, &QAction::triggered, this,
+            [this] { m_songList->focusSearch(); });
+    addAction(findAction);
 
     // Voicegroup browser dock (SPEC §6.1): the current song's instruments,
     // click-and-hold to audition through the preview engine instance, with
@@ -290,28 +296,11 @@ void MainWindow::openProject()
 
 void MainWindow::populateSongList()
 {
-    m_songList->clear();
-    for (const SongInfo &song : m_project.songs()) {
-        if (!song.isPlayable())
-            continue;
-        QString text = song.label;
-        if (!song.registered)
-            text += tr("  ⚠ not registered");
-        else if (!song.constant.isEmpty())
-            text += QStringLiteral("  (%1)").arg(song.constant);
-        auto *item = new QListWidgetItem(text, m_songList);
-        item->setData(Qt::UserRole, song.id);
-        if (!song.registered) {
-            item->setForeground(QColor(0xc0, 0x80, 0x30));
-            item->setToolTip(tr("This song's .mid exists but song_table.inc has no "
-                                "entry. Open it and use File → Register Song."));
-        }
-    }
+    m_songList->setSongs(m_project.songs());
 }
 
-void MainWindow::songActivated(QListWidgetItem *item)
+void MainWindow::songActivated(int songId)
 {
-    const int songId = item->data(Qt::UserRole).toInt();
     if (songId < 0 || songId >= m_project.songs().size())
         return;
     loadSong(m_project.songs().at(songId));
