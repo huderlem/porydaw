@@ -37,7 +37,11 @@ namespace songview {
 
 namespace {
 
-constexpr int kRulerH = 26;
+// The ruler stacks a marker row (time-signature chips, loop brackets,
+// selection handles) above the bar-number/tick row, so marker text never
+// collides with the bar numbers.
+constexpr int kRulerH = 36;
+constexpr int kRulerMarkerH = 14;
 constexpr int kLaneH = 48; // default row height; Ctrl+wheel rescales
 constexpr int kMinLaneH = 28;
 constexpr int kMaxLaneH = 128;
@@ -295,26 +299,17 @@ protected:
         f.setBold(true);
         p.setFont(f);
 
-        // Time-signature chips along the top edge; a placeholder 4/4 shows
+        // Time-signature chips in the marker row; a placeholder 4/4 shows
         // at tick 0 while no 0x58 meta governs the opening bars.
-        const auto drawSig = [&](uint64_t tick, int numerator, int denomPow2,
-                                 bool implicit) {
-            const int x = kGutterW + m_sv->contentX(double(tick));
-            if (x < area.left() - 60 || x > area.right())
-                return;
-            p.setPen(palette().color(implicit ? QPalette::PlaceholderText
-                                              : QPalette::WindowText));
-            p.drawLine(x, 0, x, height() / 2);
-            p.drawText(x + 3, 11, timeSigLabel(numerator, denomPow2));
-        };
-        if (tl->timeSigs.empty() || tl->timeSigs.front().tick != 0)
-            drawSig(0, 4, 2, true);
-        for (size_t i = 0; i < tl->timeSigs.size(); i++) {
-            if (i + 1 < tl->timeSigs.size()
-                && tl->timeSigs[i + 1].tick == tl->timeSigs[i].tick)
-                continue; // shadowed duplicate: the last at a tick wins
-            const TimeSigPoint &ts = tl->timeSigs[i];
-            drawSig(ts.tick, ts.numerator ? ts.numerator : 4, ts.denomPow2, false);
+        for (const SigChip &chip : sigChips()) {
+            if (chip.x > area.right() || chip.labelX + chip.labelW < area.left())
+                continue;
+            p.setPen(palette().color(chip.implicit ? QPalette::PlaceholderText
+                                                   : QPalette::WindowText));
+            p.drawLine(chip.x, 0, chip.x, kRulerMarkerH - 1);
+            if (chip.labelW > 0)
+                p.drawText(chip.labelX, 11,
+                           timeSigLabel(chip.numerator, chip.denomPow2));
         }
 
         // Loop bracket glyphs above the band edges.
@@ -569,44 +564,82 @@ private:
         return -1;
     }
 
-    // Chip hit-test in the ruler's top half, including the placeholder 4/4
-    // at tick 0. Fills the chip's tick and values; implicit means the chip
-    // has no 0x58 meta behind it (editing one creates the event).
-    bool hitTimeSigChip(QPoint pos, uint64_t *tick, int *numerator, int *denomPow2,
-                        bool *implicit) const
+    // One time-signature chip as laid out in the marker row.
+    struct SigChip {
+        uint64_t tick;
+        int numerator;
+        int denomPow2;
+        bool implicit; // no 0x58 meta behind it (editing one creates the event)
+        int x;         // stem position (widget coords)
+        int labelX;    // label left edge, nudged right past a loop bracket
+        int labelW;    // 0: label hidden behind the next chip (stem only)
+    };
+
+    // Chip layout shared by paint and hit-testing: shadowed same-tick
+    // duplicates dropped, labels nudged past a loop bracket glyph sitting on
+    // the same spot, and a label hidden (stem only) when it would run into
+    // the next chip — zooming in separates them again.
+    std::vector<SigChip> sigChips() const
     {
+        std::vector<SigChip> chips;
         const MidiTimeline *tl = m_sv->timeline();
-        if (!tl || pos.y() >= height() / 2)
-            return false;
+        if (!tl)
+            return chips;
         QFont f = font();
         f.setBold(true);
         const QFontMetrics fm(f);
-        const auto hits = [&](uint64_t t, int num, int den) {
-            const int x = kGutterW + m_sv->contentX(double(t));
-            return pos.x() >= x - 3
-                && pos.x() <= x + 5 + fm.horizontalAdvance(timeSigLabel(num, den));
+        const auto add = [&](uint64_t tick, int numerator, int denomPow2,
+                             bool implicit) {
+            const int x = kGutterW + m_sv->contentX(double(tick));
+            chips.push_back({tick, numerator, denomPow2, implicit, x, x + 3,
+                             fm.horizontalAdvance(timeSigLabel(numerator, denomPow2))});
         };
-        // Back to front so the rightmost chip wins where labels overlap.
-        for (int i = int(tl->timeSigs.size()) - 1; i >= 0; i--) {
-            if (i + 1 < int(tl->timeSigs.size())
+        if (tl->timeSigs.empty() || tl->timeSigs.front().tick != 0)
+            add(0, 4, 2, true);
+        for (size_t i = 0; i < tl->timeSigs.size(); i++) {
+            if (i + 1 < tl->timeSigs.size()
                 && tl->timeSigs[i + 1].tick == tl->timeSigs[i].tick)
-                continue; // shadowed duplicate (not drawn)
+                continue; // shadowed duplicate: the last at a tick wins
             const TimeSigPoint &ts = tl->timeSigs[i];
-            const int num = ts.numerator ? ts.numerator : 4;
-            if (hits(ts.tick, num, ts.denomPow2)) {
-                *tick = ts.tick;
-                *numerator = num;
-                *denomPow2 = ts.denomPow2;
-                *implicit = false;
-                return true;
+            add(ts.tick, ts.numerator ? ts.numerator : 4, ts.denomPow2, false);
+        }
+        const uint64_t loops[2] = {tl->loopStartTick, tl->loopEndTick};
+        for (SigChip &chip : chips) {
+            for (uint64_t loopTick : loops) {
+                if (loopTick == UINT64_MAX)
+                    continue;
+                const int bracketRight = kGutterW + m_sv->contentX(double(loopTick)) + 8;
+                if (bracketRight > chip.labelX && bracketRight - 8 < chip.labelX + chip.labelW)
+                    chip.labelX = bracketRight;
             }
         }
-        if ((tl->timeSigs.empty() || tl->timeSigs.front().tick != 0) && hits(0, 4, 2)) {
-            *tick = 0;
-            *numerator = 4;
-            *denomPow2 = 2;
-            *implicit = true;
-            return true;
+        for (size_t i = 0; i + 1 < chips.size(); i++) {
+            if (chips[i].labelX + chips[i].labelW + 2 > chips[i + 1].x)
+                chips[i].labelW = 0;
+        }
+        return chips;
+    }
+
+    // Chip hit-test in the ruler's top half, including the placeholder 4/4
+    // at tick 0. Fills the chip's tick and values.
+    bool hitTimeSigChip(QPoint pos, uint64_t *tick, int *numerator, int *denomPow2,
+                        bool *implicit) const
+    {
+        if (pos.y() >= height() / 2)
+            return false;
+        const std::vector<SigChip> chips = sigChips();
+        // Back to front so the rightmost chip wins where chips crowd.
+        for (auto it = chips.rbegin(); it != chips.rend(); ++it) {
+            const bool onStem = std::abs(it->x - pos.x()) <= 4;
+            const bool onLabel = it->labelW > 0 && pos.x() >= it->labelX - 1
+                && pos.x() <= it->labelX + it->labelW + 2;
+            if (onStem || onLabel) {
+                *tick = it->tick;
+                *numerator = it->numerator;
+                *denomPow2 = it->denomPow2;
+                *implicit = it->implicit;
+                return true;
+            }
         }
         return false;
     }
