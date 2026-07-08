@@ -808,6 +808,7 @@ public:
     explicit PianoRoll(SongView *sv)
         : QWidget(sv), m_sv(sv)
     {
+        setObjectName(QStringLiteral("pianoRoll")); // findChild for tests
         setMinimumHeight(120);
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setMouseTracking(true);
@@ -1460,13 +1461,19 @@ private:
         const uint64_t base = m_sv->snapTick(double(m_sv->editCursorTick()));
         std::vector<SongDocument::NewNote> notes;
         std::vector<SongView::NoteId> ids;
+        uint64_t end = base;
         for (const SongView::ClipNote &cn : clip.tracks.front().notes) {
             const uint64_t tick = base + cn.relTick;
             notes.push_back({tick, cn.key, cn.duration, cn.velocity});
             ids.push_back({uint32_t(tick), cn.key});
+            end = std::max(end, tick + cn.duration);
         }
         doc->addNotes(m_sv->selectedTrack(), notes);
         m_sv->setSelection(std::move(ids));
+        // Like pasteRangeAtEditCursor: advance the edit cursor past the pasted
+        // notes so repeated Ctrl+V lays copies back-to-back, but keep the view
+        // anchored on the content that just landed.
+        m_sv->commitEditCursor(end);
         m_sv->ensureTickVisible(base);
         m_sv->announce(SongView::tr("Pasted %n note(s)", nullptr, int(notes.size())));
     }
