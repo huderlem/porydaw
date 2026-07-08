@@ -166,6 +166,25 @@ public:
     };
     void applyRangeEdit(const QString &text, const RangeEdit &edit);
 
+    // Ripple delete (time-selection "Remove contents"): erases [startTick,
+    // endTick) on the scoped streams and closes the gap — everything at or
+    // after endTick moves left by the span. Value streams (CC, bend, voice,
+    // tempo, time signatures) keep the state the shifted content was
+    // authored under: the last in-range point moves to startTick instead of
+    // vanishing (unless a point shifts onto that seam from endTick anyway).
+    // tracks ripple notes plus every non-note channel event of the track;
+    // wholeSong — the all-tracks cut — ignores tracks/lanes and ripples
+    // every engine track plus the global rows: tempo, time signatures, loop
+    // markers and other metas (moved to the seam, never deleted), and each
+    // chunk's end-of-track tick, so the song itself gets shorter. One
+    // undoable command; returns false when nothing would change.
+    struct RippleScope {
+        std::vector<int> tracks; // engine tracks (ignored when wholeSong)
+        std::vector<std::pair<int, uint8_t>> lanes; // (engineTrack, cc); -1 = tempo
+        bool wholeSong = false;
+    };
+    bool removeTimeRange(uint64_t startTick, uint64_t endTick, const RippleScope &scope);
+
     // Move or create a loop marker; tick == -1 removes it.
     void setLoopTick(bool endMarker, int64_t tick);
 
@@ -212,7 +231,8 @@ private:
             RemoveEvent,
             ModifyEvent,
             InsertTrack, // insert trackData as chunk smfTrack
-            RemoveTrack  // remove chunk smfTrack (contents recorded on apply)
+            RemoveTrack, // remove chunk smfTrack (contents recorded on apply)
+            SetTrackEnd  // set chunk endTick to event.tick (old recorded on apply)
         } type;
         int smfTrack = 0;
         size_t index = 0;   // Remove/Modify: target; Insert: recorded on apply

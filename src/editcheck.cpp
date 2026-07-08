@@ -229,6 +229,98 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Ripple remove (removeTimeRange): in-range content vanishes,
+            // later events shift left by the span, and the last in-range
+            // automation point survives at the seam. ONE undoable command.
+            if (ok) {
+                doc.addNotes(track, {{base + step * 50, 60, step, 90},
+                                     {base + step * 52, 62, step, 90},
+                                     {base + step * 56, 64, step, 90}});
+                doc.addLanePoint(track, 7, base + step * 51, 30);
+                doc.addLanePoint(track, 7, base + step * 52, 40);
+                SongDocument::RippleScope scope;
+                scope.tracks = {track};
+                if (!doc.removeTimeRange(base + step * 51, base + step * 54, scope)) {
+                    fail("removeTimeRange reported nothing to do");
+                    ok = false;
+                }
+                mutateAndCheck("events unsorted after removeTimeRange");
+                DocNote n;
+                DocLanePoint p;
+                if (ok
+                    && (!doc.findNote(track, base + step * 50, 60, &n)
+                        || doc.findNote(track, base + step * 52, 62, &n)
+                        || !doc.findNote(track, base + step * 53, 64, &n)
+                        || !doc.findLanePoint(track, 7, base + step * 51, &p)
+                        || p.value != 40)) {
+                    fail("ripple remove produced wrong content");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 56, 64, &n)
+                        || !doc.findLanePoint(track, 7, base + step * 52, &p)
+                        || p.value != 40) {
+                        fail("removeTimeRange was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
+            // Whole-song ripple: the globals travel too — a time signature
+            // and a tempo change inside the range survive at the seam, later
+            // notes shift, loop markers before the range stay put, and the
+            // end-of-track ticks close the gap so the song gets shorter.
+            if (ok) {
+                const auto maxEnd = [&doc] {
+                    uint64_t end = 0;
+                    for (const SmfTrack &tr : doc.smf().tracks)
+                        end = std::max(end, tr.endTick);
+                    return end;
+                };
+                doc.setTimeSig(base + step * 62, 3, 2);
+                doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 63, 150);
+                doc.addNotes(track, {{base + step * 66, 65, step, 90}});
+                const uint64_t endBefore = maxEnd();
+                const uint64_t loopStartBefore = doc.loopTick(false);
+                SongDocument::RippleScope scope;
+                scope.wholeSong = true;
+                if (!doc.removeTimeRange(base + step * 61, base + step * 65, scope)) {
+                    fail("whole-song removeTimeRange reported nothing to do");
+                    ok = false;
+                }
+                mutateAndCheck("events unsorted after whole-song removeTimeRange");
+                DocNote n;
+                DocLanePoint p;
+                bool sigAtSeam = false;
+                for (const DocTimeSig &sig : doc.timeSigs()) {
+                    if (sig.tick == base + step * 61 && sig.numerator == 3)
+                        sigAtSeam = true;
+                }
+                if (ok
+                    && (!sigAtSeam
+                        || !doc.findLanePoint(track, DOC_CC_TEMPO, base + step * 61, &p)
+                        || p.value != 150
+                        || !doc.findNote(track, base + step * 62, 65, &n)
+                        || maxEnd() != endBefore - step * 4
+                        || doc.loopTick(false) != loopStartBefore)) {
+                    fail("whole-song ripple produced wrong content");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 66, 65, &n)
+                        || maxEnd() != endBefore) {
+                        fail("whole-song removeTimeRange was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
             // Voice ops: add, value-only modify (must not reorder within the
             // tick), move to a new tick, delete.
             if (ok) {

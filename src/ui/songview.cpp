@@ -740,11 +740,14 @@ private:
         remove->setEnabled(tl->loopStartTick != UINT64_MAX
                            || tl->loopEndTick != UINT64_MAX);
         QAction *loopFromSel = nullptr;
+        QAction *removeContents = nullptr;
         QAction *clearSel = nullptr;
         const SongView::TimeSelection sel = m_sv->timeSelection();
         if (sel.active()) {
             menu.addSeparator();
             loopFromSel = menu.addAction(SongView::tr("Set loop to selection"));
+            removeContents =
+                menu.addAction(SongView::tr("Remove selection contents (shift left)"));
             clearSel = menu.addAction(SongView::tr("Clear time selection"));
         }
         menu.addSeparator();
@@ -775,6 +778,8 @@ private:
             // Same two-command shape as "Remove loop markers".
             doc->setLoopTick(false, int64_t(sel.startTick));
             doc->setLoopTick(true, int64_t(sel.endTick));
+        } else if (chosen && chosen == removeContents) {
+            m_sv->removeTimeSelectionContents();
         } else if (chosen && chosen == clearSel) {
             m_sv->clearTimeSelection();
         } else if (chosen == editSig) {
@@ -3931,6 +3936,44 @@ void SongView::deleteTimeSelection()
                  .arg(points));
 }
 
+void SongView::removeTimeSelectionContents()
+{
+    if (!m_document || !m_timeline || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    SongDocument::RippleScope scope;
+    QString scopeText;
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        scope.lanes = m_timeSel.lanes;
+        scopeText = tr("%n lane(s)", nullptr, int(scope.lanes.size()));
+    } else {
+        scope.tracks = timeSelectionTracks();
+        if (scope.tracks.empty())
+            return;
+        int used = 0;
+        for (int t = 0; t < 16; t++)
+            used += m_timeline->tracks[t].used ? 1 : 0;
+        scope.wholeSong = int(scope.tracks.size()) == used;
+        scopeText = scope.wholeSong
+                        ? tr("all tracks")
+                        : tr("%n track(s)", nullptr, int(scope.tracks.size()));
+    }
+    if (!m_document->removeTimeRange(s, e, scope)) {
+        announce(tr("Nothing to remove in the time selection"));
+        return;
+    }
+    // The span is gone and later content now sits under where the selection
+    // was; clear it and park the edit cursor at the seam.
+    clearTimeSelection();
+    commitEditCursor(s);
+    const double beats = double(e - s)
+                         / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
+    announce(tr("Removed %1 beats on %2 — later events shifted left")
+                 .arg(beats, 0, 'g', 4)
+                 .arg(scopeText));
+}
+
 void SongView::pasteRangeAtEditCursor()
 {
     if (!m_document || m_clip.span == 0 || m_clip.empty())
@@ -4045,6 +4088,7 @@ void SongView::showTimeSelectionMenu(const QPoint &globalPos)
     QAction *cut = menu.addAction(tr("Cut range"));
     cut->setShortcut(QKeySequence::Cut);
     QAction *del = menu.addAction(tr("Delete range"));
+    QAction *removeContents = menu.addAction(tr("Remove contents (shift left)"));
     QAction *paste = menu.addAction(tr("Paste at edit cursor"));
     paste->setShortcut(QKeySequence::Paste);
     paste->setEnabled(m_clip.span > 0 && !m_clip.empty());
@@ -4058,6 +4102,8 @@ void SongView::showTimeSelectionMenu(const QPoint &globalPos)
         deleteTimeSelection();
     } else if (chosen == del) {
         deleteTimeSelection();
+    } else if (chosen == removeContents) {
+        removeTimeSelectionContents();
     } else if (chosen == paste) {
         pasteRangeAtEditCursor();
     } else if (chosen == clear) {

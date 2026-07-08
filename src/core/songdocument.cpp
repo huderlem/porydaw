@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <algorithm>
+#include <map>
 
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
@@ -732,6 +733,189 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
     pushEdit(text, std::move(ops));
 }
 
+bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick,
+                                   const RippleScope &scope)
+{
+    if (endTick <= startTick || m_smf.tracks.empty())
+        return false;
+    const uint64_t s = startTick;
+    const uint64_t e = endTick;
+    const uint64_t span = e - s;
+
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<EditOp> inserts;
+    // Every event a pass below decides about gets marked, so overlapping
+    // scopes (or the wholeSong meta catch-all) can't remove or re-insert the
+    // same event twice.
+    std::vector<std::vector<bool>> taken(m_smf.tracks.size());
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        taken[t].assign(m_smf.tracks[t].events.size(), false);
+
+    const auto consume = [&](int smfTrack, size_t index) {
+        if (taken[smfTrack][index])
+            return false;
+        taken[smfTrack][index] = true;
+        return true;
+    };
+    const auto removeEvent = [&](int smfTrack, size_t index) {
+        if (consume(smfTrack, index))
+            removals[smfTrack].push_back(index);
+    };
+    // Raw re-insertion at a new tick, so shifted events keep their exact
+    // bytes (status form, meta payload, metronome bytes, ...).
+    const auto moveEvent = [&](int smfTrack, size_t index, uint64_t newTick) {
+        if (!consume(smfTrack, index))
+            return;
+        const SmfEvent &ev = m_smf.tracks[smfTrack].events[index];
+        if (ev.tick == newTick)
+            return;
+        removals[smfTrack].push_back(index);
+        EditOp op;
+        op.type = EditOp::InsertEvent;
+        op.smfTrack = smfTrack;
+        op.event = ev;
+        op.event.tick = newTick;
+        inserts.push_back(op);
+    };
+
+    // One value stream (a lane, the tempo row, the time signatures), points
+    // in tick order: in-range points vanish — except the last one, which
+    // moves to the seam so the state the shifted content plays under
+    // survives — and points at or past the range end shift left. A point
+    // exactly at the range end lands on the seam itself and overrides a
+    // rescued one there, so the rescue is skipped.
+    struct StreamPt {
+        int smfTrack;
+        size_t index;
+        uint64_t tick;
+    };
+    const auto rippleStream = [&](const std::vector<StreamPt> &pts) {
+        bool seamCovered = false;
+        int winner = -1;
+        for (size_t i = 0; i < pts.size(); i++) {
+            if (pts[i].tick == e)
+                seamCovered = true;
+            if (pts[i].tick >= s && pts[i].tick < e)
+                winner = int(i);
+        }
+        for (size_t i = 0; i < pts.size(); i++) {
+            const StreamPt &pt = pts[i];
+            if (pt.tick < s)
+                taken[pt.smfTrack][pt.index] = true;
+            else if (pt.tick >= e)
+                moveEvent(pt.smfTrack, pt.index, pt.tick - span);
+            else if (int(i) == winner && !seamCovered)
+                moveEvent(pt.smfTrack, pt.index, s);
+            else
+                removeEvent(pt.smfTrack, pt.index);
+        }
+    };
+
+    const auto rippleTrack = [&](int engineTrack) {
+        const int smfTrack = smfTrackFor(engineTrack);
+        if (smfTrack < 0)
+            return;
+        // Notes move as pairs so durations survive the shift.
+        for (const DocNote &note : notesForTrack(engineTrack)) {
+            if (note.tick >= e) {
+                moveEvent(note.smfTrack, note.onIndex, note.tick - span);
+                if (!note.unterminated())
+                    moveEvent(note.smfTrack, note.endIndex,
+                              m_smf.tracks[note.smfTrack].events[note.endIndex].tick
+                                  - span);
+            } else if (note.tick >= s) {
+                removeEvent(note.smfTrack, note.onIndex);
+                if (!note.unterminated())
+                    removeEvent(note.smfTrack, note.endIndex);
+            }
+        }
+        // Every other channel event, one value stream per kind: controllers
+        // and key pressure stream per data0; program, channel pressure, and
+        // bend are one stream each.
+        const uint8_t wantChannel =
+            m_smf.format == 0 ? channelFor(engineTrack) : 0xFF;
+        std::map<uint32_t, std::vector<StreamPt>> streams;
+        const auto &evs = m_smf.tracks[smfTrack].events;
+        for (size_t i = 0; i < evs.size(); i++) {
+            const SmfEvent &ev = evs[i];
+            if (!ev.isChannel() || ev.typeNibble() <= 0x9)
+                continue;
+            if (wantChannel != 0xFF && ev.channel() != wantChannel)
+                continue;
+            const bool perData0 = ev.typeNibble() == 0xB || ev.typeNibble() == 0xA;
+            const uint32_t key =
+                (uint32_t(ev.status) << 8) | (perData0 ? ev.data0 : 0);
+            streams[key].push_back({smfTrack, i, ev.tick});
+        }
+        for (const auto &kv : streams)
+            rippleStream(kv.second);
+    };
+
+    std::vector<EditOp> trackEnds;
+    if (scope.wholeSong) {
+        for (int t = 0; t < engineTrackCount(); t++)
+            rippleTrack(t);
+        // Tempo (chunk 0 metas, like the tempo lane).
+        std::vector<StreamPt> tempo;
+        for (const DocLanePoint &pt : lanePoints(0, DOC_CC_TEMPO))
+            tempo.push_back({pt.smfTrack, pt.index, pt.tick});
+        rippleStream(tempo);
+        // Time signatures: one global stream (the last at a tick wins).
+        std::vector<StreamPt> sigs;
+        for (const DocTimeSig &sig : timeSigs())
+            sigs.push_back({sig.smfTrack, sig.index, sig.tick});
+        rippleStream(sigs);
+        // Every remaining meta and sysex — loop markers, text commands,
+        // markers — is never deleted: inside the range it clamps to the
+        // seam, past it it shifts left.
+        for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+            const auto &evs = m_smf.tracks[t].events;
+            for (size_t i = 0; i < evs.size(); i++) {
+                if (taken[t][i] || evs[i].isChannel())
+                    continue;
+                if (evs[i].tick >= e)
+                    moveEvent(int(t), i, evs[i].tick - span);
+                else if (evs[i].tick > s)
+                    moveEvent(int(t), i, s);
+            }
+        }
+        // The song itself gets shorter: end-of-track ticks close the gap too.
+        for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+            const uint64_t end = m_smf.tracks[t].endTick;
+            const uint64_t newEnd = end >= e ? end - span : (end > s ? s : end);
+            if (newEnd == end)
+                continue;
+            EditOp op;
+            op.type = EditOp::SetTrackEnd;
+            op.smfTrack = int(t);
+            op.event.tick = newEnd;
+            trackEnds.push_back(op);
+        }
+    } else {
+        for (int t : scope.tracks)
+            rippleTrack(t);
+        for (const std::pair<int, uint8_t> &lane : scope.lanes) {
+            if (lane.first < 0 && lane.second != DOC_CC_TEMPO)
+                continue;
+            std::vector<StreamPt> pts;
+            for (const DocLanePoint &pt :
+                 lanePoints(lane.first < 0 ? 0 : lane.first, lane.second))
+                pts.push_back({pt.smfTrack, pt.index, pt.tick});
+            rippleStream(pts);
+        }
+    }
+
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
+    ops.insert(ops.end(), inserts.begin(), inserts.end());
+    ops.insert(ops.end(), trackEnds.begin(), trackEnds.end());
+    if (ops.empty())
+        return false;
+    pushEdit(tr("remove range"), std::move(ops));
+    return true;
+}
+
 void SongDocument::setLoopTick(bool endMarker, int64_t tick)
 {
     if (m_smf.tracks.empty())
@@ -1036,6 +1220,12 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
             op.trackData = m_smf.tracks[op.smfTrack];
             m_smf.tracks.erase(m_smf.tracks.begin() + long(op.smfTrack));
             break;
+        case EditOp::SetTrackEnd: {
+            SmfTrack &track = m_smf.tracks[op.smfTrack];
+            op.oldEndTick = track.endTick;
+            track.endTick = op.event.tick;
+            break;
+        }
         }
     }
     rebuildTrackMap();
@@ -1065,6 +1255,9 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
             break;
         case EditOp::RemoveTrack:
             m_smf.tracks.insert(m_smf.tracks.begin() + long(op.smfTrack), op.trackData);
+            break;
+        case EditOp::SetTrackEnd:
+            m_smf.tracks[op.smfTrack].endTick = op.oldEndTick;
             break;
         }
     }

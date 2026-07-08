@@ -257,6 +257,12 @@ public:
     // selected track. All one undoable command each.
     void copyTimeSelection();
     void deleteTimeSelection();
+    // "Remove contents": ripple delete — the selected span vanishes and
+    // everything after it shifts left to close the gap. Selecting every
+    // track cuts the whole song (tempo, time signatures, loop markers and
+    // track ends ripple too); a partial scope shifts only its own tracks or
+    // lanes so the rest of the song keeps its alignment.
+    void removeTimeSelectionContents();
     void pasteRangeAtEditCursor();
     // Shared shortcut handling for the roll and the lanes area: range
     // copy/cut/delete while a time selection is active, paste of range
