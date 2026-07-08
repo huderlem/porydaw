@@ -22,14 +22,22 @@ constexpr int kAuditionVelocity = 112;
 
 // The Type dropdown offers each voice family once: the _alt CGB variants are
 // engine-identical duplicates, so they parse and display but are never
-// offered as a choice.
+// offered as a choice. Keysplit isn't offered either — keysplit instruments
+// share the Sample dropdown with plain samples, and the chosen symbol alone
+// decides which macro the line gets (see commitEdit).
 const VgMacro kSelectableMacros[] = {
-    VgMacro::DirectSound,   VgMacro::DirectSoundNoResample,
-    VgMacro::DirectSoundAlt, VgMacro::Keysplit,
-    VgMacro::KeysplitAll,    VgMacro::Square1,
-    VgMacro::Square2,        VgMacro::ProgWave,
-    VgMacro::Noise,
+    VgMacro::DirectSound,    VgMacro::DirectSoundNoResample,
+    VgMacro::DirectSoundAlt, VgMacro::KeysplitAll,
+    VgMacro::Square1,        VgMacro::Square2,
+    VgMacro::ProgWave,       VgMacro::Noise,
 };
+
+// The macro the Type dropdown shows for a voice: keysplit voices read as
+// plain "Sample" there.
+VgMacro typeComboMacro(VgMacro m)
+{
+    return m == VgMacro::Keysplit ? VgMacro::DirectSound : m;
+}
 
 bool macroIsDrumkit(VgMacro m)
 {
@@ -391,12 +399,13 @@ void VoicegroupBrowser::populateEditor()
 
     // The selectable types, plus the current one when it's an _alt CGB
     // variant we display but never offer.
+    const VgMacro shownMacro = typeComboMacro(voice->macro);
     m_typeCombo->clear();
     for (VgMacro macro : kSelectableMacros)
         m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
-    if (m_typeCombo->findData(int(voice->macro)) < 0)
-        m_typeCombo->addItem(vgMacroDisplayName(voice->macro), int(voice->macro));
-    m_typeCombo->setCurrentIndex(m_typeCombo->findData(int(voice->macro)));
+    if (m_typeCombo->findData(int(shownMacro)) < 0)
+        m_typeCombo->addItem(vgMacroDisplayName(shownMacro), int(shownMacro));
+    m_typeCombo->setCurrentIndex(m_typeCombo->findData(int(shownMacro)));
 
     // Real GBA ranges; out-of-range file values clamp here (and the engine
     // masks them to the same effect on load anyway).
@@ -440,8 +449,11 @@ void VoicegroupBrowser::commitEdit()
         return;
 
     VgVoice v = *cur; // key & pan carry over: no UI for them
+    // The combo never holds Keysplit (a keysplit voice reads as "Sample"
+    // there), so a keysplit voice's unchanged type comes back as DirectSound;
+    // the symbol check below restores the keysplit macro.
     v.macro = VgMacro(m_typeCombo->currentData().toInt());
-    const bool typeChanged = v.macro != cur->macro;
+    const bool typeChanged = v.macro != typeComboMacro(cur->macro);
 
     // Resolve the instrument symbol first: for sample-list types the chosen
     // symbol decides between a keysplit and a plain sample voice.
@@ -456,20 +468,15 @@ void VoicegroupBrowser::commitEdit()
             : drumkit ? macroIsDrumkit(cur->macro) : macroUsesSampleList(cur->macro);
         QString symbol =
             comboShowsThisList ? m_symbolCombo->currentText().trimmed() : QString();
-        // A deliberate Type change between Keysplit and the sample types
-        // overrides the stale symbol shown in the combo.
-        if (!wave && !drumkit && typeChanged) {
-            const bool symbolIsKeysplit = m_keysplitTables.contains(symbol);
-            if (symbolIsKeysplit != (v.macro == VgMacro::Keysplit))
-                symbol.clear();
-        }
+        // A deliberate Type change away from a keysplit voice overrides the
+        // stale keysplit symbol shown in the combo.
+        if (!wave && !drumkit && typeChanged && m_keysplitTables.contains(symbol))
+            symbol.clear();
         if (symbol.isEmpty()) {
             if (wave)
                 symbol = m_waveSymbols.value(0);
             else if (drumkit)
                 symbol = m_drumkitChoices.value(0);
-            else if (v.macro == VgMacro::Keysplit)
-                symbol = m_sampleChoices.value(0); // keysplits sort first
             else
                 symbol = m_sampleChoices.value(m_keysplitTables.size()); // first sample
         }
@@ -482,8 +489,6 @@ void VoicegroupBrowser::commitEdit()
             v.macro = VgMacro::Keysplit;
             v.keysplitTable = m_keysplitTables.value(symbol);
         } else {
-            if (v.macro == VgMacro::Keysplit)
-                v.macro = VgMacro::DirectSound; // keysplit type, plain sample picked
             v.keysplitTable.clear();
         }
     } else {

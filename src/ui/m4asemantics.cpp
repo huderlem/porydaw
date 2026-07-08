@@ -84,10 +84,11 @@ QString m4aAdvancedCcLabel(uint8_t cc, uint8_t value)
 
 QString m4aVoiceTypeName(uint8_t type)
 {
-    if (type == VOICE_KEYSPLIT)
-        return QObject::tr("Keysplit");
     if (type == VOICE_KEYSPLIT_ALL)
         return QObject::tr("Drumkit");
+    // VOICE_KEYSPLIT deliberately falls through to "Sample": keysplit
+    // instruments live in the Sample dropdown, so the UI never distinguishes
+    // them by type.
     switch (type & VOICE_TYPE_CGB_MASK) {
     case VOICE_SQUARE_1: return QObject::tr("Square 1");
     case VOICE_SQUARE_2: return QObject::tr("Square 2");
