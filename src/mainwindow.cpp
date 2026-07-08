@@ -417,18 +417,24 @@ void MainWindow::destroySession(SongSession *session)
     }
 }
 
-bool MainWindow::closeAllSessions()
+bool MainWindow::promptToSaveAllSessions()
 {
-    // All prompts first, so a Cancel anywhere leaves every tab open.
     for (const auto &session : m_sessions) {
         if (!maybeSaveSession(*session))
             return false;
     }
-    for (const auto &session : m_sessions)
-        saveViewState(*session);
+    return true;
+}
+
+void MainWindow::teardownSessions()
+{
+    m_tearingDown = true;
+    // One engine/dock detach up front; the guarded currentChanged handler
+    // then lets the tabs vanish without rebinding each doomed neighbor.
+    activateSession(nullptr, /*force=*/true);
     while (!m_sessions.empty())
         destroySession(m_sessions.back().get());
-    return true;
+    m_tearingDown = false;
 }
 
 void MainWindow::activateSession(SongSession *session, bool force)
@@ -516,9 +522,36 @@ void MainWindow::maybeRefreshVoicegroup(SongSession &session)
     openVoicegroupSource(session, session.doc.cfg());
 }
 
+void MainWindow::refreshSessionsAfterVgSave(const QString &filePath, SongSession *except)
+{
+    for (const auto &owned : m_sessions) {
+        SongSession *session = owned.get();
+        if (session == except || !session->vgSource
+            || session->vgSource->filePath() != filePath)
+            continue;
+        if (session->vgSource->dirty())
+            continue; // unsaved edits stay; last save wins, as documented
+        QString tried;
+        LoadedVoiceGroup *vg = loadVoicegroupFor(session->doc.cfg(), &tried);
+        if (!vg)
+            continue; // keep the previous sound
+        const int keepSlot =
+            session == m_active ? m_vgBrowser->currentSlot() : 0;
+        swapVoicegroup(*session, vg, keepSlot);
+        // Fresh parse of the saved file (also re-records its mtime), then
+        // re-point the browser at it — swapVoicegroup bound the old one.
+        openVoicegroupSource(*session, session->doc.cfg());
+        if (session == m_active)
+            updateVoicegroupBrowser();
+    }
+}
+
 void MainWindow::persistOpenTabs()
 {
-    if (!m_persistSession || !m_project.isOpen())
+    // Never persist mid-teardown: during a project switch the settings
+    // already point at the NEW project, and the dying tabs' labels would
+    // be recorded against it if a crash landed in this window.
+    if (m_tearingDown || !m_persistSession || !m_project.isOpen())
         return;
     QSettings settings;
     QStringList labels;
@@ -556,14 +589,15 @@ void MainWindow::updateTabTitle(SongSession &session)
     const int index = m_tabs->indexOf(session.view);
     if (index < 0)
         return;
-    const bool dirty =
-        session.doc.isDirty() || (session.vgSource && session.vgSource->dirty());
-    m_tabs->setTabText(index, dirty ? session.doc.label() + QLatin1Char('*')
-                                    : session.doc.label());
+    m_tabs->setTabText(index, session.isDirty()
+                                  ? session.doc.label() + QLatin1Char('*')
+                                  : session.doc.label());
 }
 
 void MainWindow::tabChanged(int index)
 {
+    if (m_tearingDown || m_restoringSession)
+        return;
     activateSession(index >= 0 ? sessionForWidget(m_tabs->widget(index)) : nullptr);
 }
 
@@ -604,11 +638,21 @@ void MainWindow::restoreSession()
         labels << activeLabel; // session recorded before tabs existed
     if (!openProjectDir(dir, /*interactive=*/false))
         return;
+    // Load the tabs without activating each in turn — the per-activation
+    // work (engine rebind, voicegroup-dock rebuild, tab persistence) would
+    // run N times with all but the last discarded. One activation at the
+    // end, for the remembered active tab.
+    m_restoringSession = true;
     for (const QString &label : labels)
         loadSongByLabel(label, /*newTab=*/true);
-    if (!activeLabel.isEmpty()) {
-        if (SongSession *session = sessionForLabel(activeLabel))
-            m_tabs->setCurrentWidget(session->view);
+    m_restoringSession = false;
+    SongSession *toActivate = sessionForLabel(activeLabel);
+    if (!toActivate && m_tabs->count() > 0)
+        toActivate = sessionForWidget(m_tabs->currentWidget());
+    if (toActivate) {
+        m_tabs->setCurrentWidget(toActivate->view);
+        if (m_active != toActivate)
+            activateSession(toActivate);
     }
 }
 
@@ -617,11 +661,11 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     QElapsedTimer timer;
     timer.start();
 
-    // All prompts before anything changes, so a Cancel is a full no-op.
-    for (const auto &session : m_sessions) {
-        if (!maybeSaveSession(*session))
-            return false;
-    }
+    // Every prompt before the project (or any tab) changes: a Cancel
+    // aborts the switch, though Saves answered before it have already
+    // written — standard save-all behavior, not a transaction.
+    if (!promptToSaveAllSessions())
+        return false;
     for (const auto &session : m_sessions)
         saveViewState(*session); // against the old project root
     cleanupVgPreview();
@@ -642,8 +686,8 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     settings.remove(kLastOpenSongsKey);
 
     // Sessions were prompted above; closing them now needs no questions.
-    while (!m_sessions.empty())
-        destroySession(m_sessions.back().get());
+    teardownSessions();
+    invalidateVgCatalog();
 
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
@@ -704,10 +748,15 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
     if (!m_audioOk)
         return;
     // Already open somewhere? Focus that tab: two documents over one .mid
-    // would fight over the file on save.
+    // would fight over the file on save. Except the song already in the
+    // CURRENT tab — re-activating it falls through to an in-place reload
+    // from disk (the pre-tabs behavior, and the only reload path for a
+    // .mid changed externally).
     if (SongSession *open = sessionForLabel(song.label)) {
-        m_tabs->setCurrentWidget(open->view);
-        return;
+        if (newTab || open != m_active) {
+            m_tabs->setCurrentWidget(open->view);
+            return;
+        }
     }
 
     const bool created = newTab || !m_active;
@@ -774,10 +823,12 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
     if (created) {
         const int index = m_tabs->addTab(session->view, song.label);
         m_tabs->setTabToolTip(index, song.midPath);
-        // The first tab activates inside addTab; later ones activate here.
-        m_tabs->setCurrentIndex(index);
-        if (m_active != session)
-            activateSession(session);
+        if (!m_restoringSession) {
+            // The first tab activates inside addTab; later ones here.
+            m_tabs->setCurrentIndex(index);
+            if (m_active != session)
+                activateSession(session);
+        }
     } else {
         const int index = m_tabs->indexOf(session->view);
         m_tabs->setTabText(index, song.label);
@@ -889,11 +940,15 @@ bool MainWindow::saveSession(SongSession &session)
         if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.doc.cfg(), &tried))
             swapVoicegroup(session, vg, slot);
         updateVgDockTitle();
-    }
-    if (session.vgSource) {
-        // Other clean tabs on this voicegroup follow the new file when
-        // they're next activated (maybeRefreshVoicegroup).
+        // Only a real write may refresh the stamp: recording the mtime on a
+        // doc-only save would silently absorb another tab's voicegroup save
+        // and defeat the staleness reload for good.
         session.vgFileTime = QFileInfo(session.vgSource->filePath()).lastModified();
+        invalidateVgCatalog();
+        // Sibling tabs on this voicegroup can't wait for their next
+        // activation: the ACTIVE tab never gets one, and a stale parse
+        // there would revert this save on its own next voicegroup write.
+        refreshSessionsAfterVgSave(session.vgSource->filePath(), &session);
     }
 
     QString error;
@@ -1219,6 +1274,7 @@ void MainWindow::reloadProject()
     }
     populateSongList();
     refreshSessionSongIds();
+    invalidateVgCatalog();
 }
 
 void MainWindow::loadSongByLabel(const QString &label, bool newTab)
@@ -1244,13 +1300,25 @@ void MainWindow::updateVoicegroupBrowser()
                             : session->doc.cfg().voicegroupArg;
     m_vgBrowser->setVoicegroup(session->voicegroup,
                                QStringLiteral("voicegroup%1").arg(arg));
-    m_vgBrowser->setSource(session->vgSource.get(),
-                           VoicegroupSource::directSoundSymbols(m_project.root()),
-                           VoicegroupSource::progWaveSymbols(m_project.root()),
-                           VoicegroupSource::keysplitInstruments(m_project.root()),
-                           VoicegroupSource::drumkitInstruments(m_project.root()),
-                           VoicegroupSource::typicalAdsr(m_project.root()));
+    const VgCatalog &catalog = vgCatalog();
+    m_vgBrowser->setSource(session->vgSource.get(), catalog.directSound,
+                           catalog.progWave, catalog.keysplits, catalog.drumkits,
+                           catalog.typicalAdsr);
     updateVgDockTitle();
+}
+
+const MainWindow::VgCatalog &MainWindow::vgCatalog()
+{
+    if (!m_vgCatalog.valid) {
+        const QString root = m_project.root();
+        m_vgCatalog.directSound = VoicegroupSource::directSoundSymbols(root);
+        m_vgCatalog.progWave = VoicegroupSource::progWaveSymbols(root);
+        m_vgCatalog.keysplits = VoicegroupSource::keysplitInstruments(root);
+        m_vgCatalog.drumkits = VoicegroupSource::drumkitInstruments(root);
+        m_vgCatalog.typicalAdsr = VoicegroupSource::typicalAdsr(root);
+        m_vgCatalog.valid = true;
+    }
+    return m_vgCatalog;
 }
 
 void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)
@@ -1455,6 +1523,7 @@ void MainWindow::newVoicegroup()
         QMessageBox::warning(this, tr("New Voicegroup"), error);
         return;
     }
+    invalidateVgCatalog();
     statusBar()->showMessage(
         tr("Created sound/voicegroups/%1.inc — assign it to a song in Song "
            "Settings (voicegroup _%1).")
@@ -1467,9 +1536,13 @@ bool MainWindow::maybeSaveSession(SongSession &session)
     // Voicegroup edits count as the song's unsaved changes: to the user the
     // song and its voicegroup are one document (a normally-clean undo stack
     // can still leave the voicegroup dirty when a save was refused mid-way).
-    const bool vgDirty = session.vgSource && session.vgSource->dirty();
-    if (!session.doc.isDirty() && !vgDirty)
+    if (!session.isDirty())
         return true;
+    const bool vgDirty = session.vgSource && session.vgSource->dirty();
+    // Show the tab being asked about: Save/Discard for edits the user
+    // can't see is a data-loss trap.
+    if (&session != m_active && m_tabs->indexOf(session.view) >= 0)
+        m_tabs->setCurrentWidget(session.view);
     const auto choice = QMessageBox::question(
         this, tr("Unsaved Changes"),
         vgDirty ? tr("%1 has unsaved changes (including voicegroup edits). Save them?")
@@ -1498,8 +1571,7 @@ void MainWindow::updateWindowTitle()
     if (m_active) {
         setWindowTitle(
             QStringLiteral("%1[*] — %2 — porydaw").arg(m_active->doc.label(), project));
-        setWindowModified(m_active->doc.isDirty()
-                          || (m_active->vgSource && m_active->vgSource->dirty()));
+        setWindowModified(m_active->isDirty());
     } else {
         setWindowTitle(project.isEmpty()
                            ? QStringLiteral("porydaw")
@@ -1510,12 +1582,12 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
-    // All prompts first: a Cancel on any tab keeps the whole window open.
-    for (const auto &session : m_sessions) {
-        if (!maybeSaveSession(*session)) {
-            event->ignore();
-            return;
-        }
+    // Every dirty tab gets its prompt; a Cancel keeps the window open
+    // (Saves answered before it have already written, as with any
+    // save-all).
+    if (!promptToSaveAllSessions()) {
+        event->ignore();
+        return;
     }
     for (const auto &session : m_sessions)
         saveViewState(*session);

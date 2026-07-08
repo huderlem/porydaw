@@ -139,6 +139,21 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA,
     check(m_audio.timeline() == tabB->timeline.get(),
           "engine did not rebind after the in-place replace");
 
+    // 8b. Re-activating the current tab's own song reloads it from disk —
+    // the only reload path for a .mid edited externally. The cleared undo
+    // stack is the observable difference (a plain focus keeps it).
+    uint64_t base2 = 0;
+    for (const SmfTrack &tr : tabB->doc.smf().tracks)
+        base2 = std::max(base2, tr.endTick);
+    tabB->doc.addNote(0, base2 + 96, 72, 24, 93);
+    m_undoGroup->activeStack()->undo();
+    check(!tabB->doc.isDirty() && tabB->doc.undoStack()->count() == 1,
+          "reload precondition: clean doc with undo history");
+    loadSongByLabel(songB);
+    check(m_tabs->count() == 1 && m_active == tabB
+              && tabB->doc.undoStack()->count() == 0,
+          "re-activating the open song did not reload it in place");
+
     // 9. The open-tab set is recorded for restoreSession.
     loadSongByLabel(songA, /*newTab=*/true);
     tabA = m_active;
@@ -150,6 +165,43 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA,
               "lastOpenSongs does not list the open tabs in order");
         check(settings.value(QStringLiteral("lastSongLabel")).toString() == songA,
               "lastSongLabel is not the active tab");
+    }
+
+    // 9b. Saving a voicegroup refreshes every other CLEAN tab on the same
+    // file immediately — waiting for activation would leave a stale parse
+    // whose next save reverts this one. Needs two songs sharing a -G.
+    if (tabA->vgSource && tabB->vgSource
+        && tabA->vgSource->filePath() == tabB->vgSource->filePath()) {
+        int dsSlot = -1;
+        for (int i = 0; i < VOICEGROUP_SIZE && dsSlot < 0; i++) {
+            const VgVoice *v = tabA->vgSource->voiceAt(i);
+            if (v
+                && (v->macro == VgMacro::DirectSound
+                    || v->macro == VgMacro::DirectSoundNoResample
+                    || v->macro == VgMacro::DirectSoundAlt))
+                dsSlot = i;
+        }
+        if (dsSlot >= 0) {
+            VgVoice edited = *tabA->vgSource->voiceAt(dsSlot);
+            edited.release = edited.release == 25 ? 26 : 25;
+            onVoiceEditRequested(dsSlot, edited, false); // active tab = A
+            const LoadedVoiceGroup *bVgBefore = tabB->voicegroup;
+            check(saveSession(*tabA), "shared-voicegroup save failed");
+            check(tabB->voicegroup && tabB->voicegroup != bVgBefore,
+                  "voicegroup save did not refresh the sibling tab's voicegroup");
+            check(tabB->vgSource
+                      && tabB->vgSource->voiceAt(dsSlot)
+                      && tabB->vgSource->voiceAt(dsSlot)->release == edited.release
+                      && !tabB->vgSource->dirty(),
+                  "sibling tab's voicegroup source did not follow the save");
+        } else {
+            std::printf("tabcheck: note: shared voicegroup has no sample "
+                        "voices, save-refresh check skipped\n");
+        }
+    } else {
+        std::printf("tabcheck: note: songs don't share a voicegroup, "
+                    "save-refresh check skipped (use e.g. mus_b_dome + "
+                    "mus_b_dome_lobby)\n");
     }
 
     // 10. A clean background tab follows its voicegroup file when the file

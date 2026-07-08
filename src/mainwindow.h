@@ -100,9 +100,14 @@ private:
     // Removes the session's tab (re-activating a neighbor via currentChanged)
     // and destroys it. The engine is rebound before the data is freed.
     void destroySession(SongSession *session);
-    // Prompt-save every session; false = user cancelled. On success all
-    // sessions are closed (sidecars saved) and the tab bar is empty.
-    bool closeAllSessions();
+    // Prompts to save every dirty session (focusing each tab as it's asked
+    // about); false = user cancelled. Saves answered before a Cancel have
+    // already written, as with any save-all.
+    bool promptToSaveAllSessions();
+    // Destroys every session with no prompting and the engine/docks
+    // detached once up front — currentChanged is suppressed so the doomed
+    // neighbors aren't each rebound and persisted in turn.
+    void teardownSessions();
     // Makes a session the engine-attached, dock-bound one (nullptr = none).
     // Always stops playback first. force re-binds even the already-active
     // session (used after replacing its song in place).
@@ -113,6 +118,11 @@ private:
     // A clean session whose voicegroup file changed on disk (saved from
     // another tab) silently follows the disk on activation.
     void maybeRefreshVoicegroup(SongSession &session);
+    // After a voicegroup save, every OTHER clean session on the same file
+    // reloads immediately — the active tab has no upcoming activation to
+    // catch the change, and its stale parse would revert the save on its
+    // own next voicegroup write.
+    void refreshSessionsAfterVgSave(const QString &filePath, SongSession *except);
     // Records the open tabs + active song in QSettings for restoreSession.
     void persistOpenTabs();
     // Re-resolves each session's songId by label after a project reload.
@@ -168,6 +178,21 @@ private:
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
 
+    // The Voicegroup dock's project-wide symbol/instrument lists: five
+    // full-project .inc scans, far too slow to re-run on every tab switch.
+    // Cached per project root; invalidated on project open/reload and on
+    // any voicegroup write.
+    struct VgCatalog {
+        bool valid = false;
+        QStringList directSound;
+        QStringList progWave;
+        QList<QPair<QString, QString>> keysplits;
+        QStringList drumkits;
+        VgAdsrDefaults typicalAdsr;
+    };
+    const VgCatalog &vgCatalog();
+    void invalidateVgCatalog() { m_vgCatalog.valid = false; }
+
     AudioEngine m_audio;
     bool m_audioOk = false;
     // False during harness runs so they don't overwrite the session.
@@ -176,6 +201,11 @@ private:
     DecompProject m_project;
     std::vector<std::unique_ptr<SongSession>> m_sessions;
     SongSession *m_active = nullptr;
+    // Suppress currentChanged handling (and tab persistence) while tabs are
+    // being torn down or bulk-restored; the caller activates once at the end.
+    bool m_tearingDown = false;
+    bool m_restoringSession = false;
+    VgCatalog m_vgCatalog;
 
     SongListPanel *m_songList = nullptr;
     QTabWidget *m_tabs = nullptr;

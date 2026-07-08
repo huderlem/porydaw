@@ -40,6 +40,11 @@ struct SongSession {
     // the tab is activated.
     QDateTime vgFileTime;
 
+    // The tab's unsaved-changes state: song and voicegroup edits are one
+    // document to the user, so every dirty check (tab title, window title,
+    // close prompts) must combine both.
+    bool isDirty() const { return doc.isDirty() || (vgSource && vgSource->dirty()); }
+
     ~SongSession()
     {
         if (view) {
