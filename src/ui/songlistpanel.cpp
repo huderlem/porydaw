@@ -58,6 +58,7 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     layout->setSpacing(4);
 
     m_search = new QLineEdit(this);
+    m_search->setObjectName(QStringLiteral("songListSearch")); // findChild for tests
     m_search->setPlaceholderText(tr("Filter songs (Ctrl+F)"));
     m_search->setClearButtonEnabled(true);
     connect(m_search, &QLineEdit::textChanged, this, &SongListPanel::rebuildList);
@@ -70,11 +71,13 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     auto *filters = new QHBoxLayout;
     filters->setSpacing(4);
     m_category = new QComboBox(this);
+    m_category->setObjectName(QStringLiteral("songListCategory"));
     m_category->addItem(tr("All"), kAllCategory);
     connect(m_category, &QComboBox::currentIndexChanged, this,
             &SongListPanel::rebuildList);
     filters->addWidget(m_category, 1);
     m_sort = new QComboBox(this);
+    m_sort->setObjectName(QStringLiteral("songListSort"));
     m_sort->addItem(tr("ID order"));
     m_sort->addItem(tr("A–Z"));
     m_sort->setToolTip(tr("Sort by song ID or alphabetically"));
@@ -126,6 +129,34 @@ void SongListPanel::setSongs(const QVector<SongInfo> &songs)
     }
     rebuildCategories();
     rebuildList();
+}
+
+QString SongListPanel::searchText() const
+{
+    return m_search->text();
+}
+
+int SongListPanel::sortIndex() const
+{
+    return m_sort->currentIndex();
+}
+
+QString SongListPanel::categoryPrefix() const
+{
+    // Before any project opened, the restored category is still pending —
+    // report it, not the combo's placeholder All, so a project-less run
+    // doesn't wipe the remembered category.
+    return m_pendingCategory.isEmpty() ? m_category->currentData().toString()
+                                       : m_pendingCategory;
+}
+
+void SongListPanel::restoreFilters(const QString &search, int sortIndex,
+                                   const QString &categoryPrefix)
+{
+    m_pendingCategory = categoryPrefix;
+    if (sortIndex >= 0 && sortIndex < m_sort->count())
+        m_sort->setCurrentIndex(sortIndex);
+    m_search->setText(search);
 }
 
 void SongListPanel::focusSearch()
@@ -196,7 +227,10 @@ void SongListPanel::rebuildCategories()
                   return a < b;
               });
 
-    const QString previous = m_category->currentData().toString();
+    const QString previous = m_pendingCategory.isEmpty()
+                                 ? m_category->currentData().toString()
+                                 : m_pendingCategory;
+    m_pendingCategory.clear(); // one shot: a missing category falls back to All
     QSignalBlocker blocker(m_category); // rebuildList runs once, after
     m_category->clear();
     m_category->addItem(tr("All (%1)").arg(m_songs.size()), kAllCategory);

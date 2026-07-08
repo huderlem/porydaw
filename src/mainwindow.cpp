@@ -143,6 +143,10 @@ MainWindow::MainWindow(QWidget *parent)
     QSettings settings;
     restoreGeometry(settings.value(QStringLiteral("windowGeometry")).toByteArray());
     restoreState(settings.value(QStringLiteral("windowState")).toByteArray());
+    m_songList->restoreFilters(
+        settings.value(QStringLiteral("songFilterText")).toString(),
+        settings.value(QStringLiteral("songFilterSort")).toInt(),
+        settings.value(QStringLiteral("songFilterCategory")).toString());
 
     QString audioError;
     m_audioOk = m_audio.init(&audioError);
@@ -1596,6 +1600,10 @@ void MainWindow::closeEvent(QCloseEvent *event)
         QSettings settings;
         settings.setValue(QStringLiteral("windowGeometry"), saveGeometry());
         settings.setValue(QStringLiteral("windowState"), saveState());
+        settings.setValue(QStringLiteral("songFilterText"), m_songList->searchText());
+        settings.setValue(QStringLiteral("songFilterSort"), m_songList->sortIndex());
+        settings.setValue(QStringLiteral("songFilterCategory"),
+                          m_songList->categoryPrefix());
     }
     event->accept();
 }
