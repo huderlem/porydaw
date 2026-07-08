@@ -180,14 +180,30 @@ public:
     int gridMinDenom() const { return m_gridMinDenom; }
     void setGridMinDenom(int denom); // 4/8/16/32; anything else means 0
 
-    // Snap grid in ticks: the visible beat subdivision at the current feel,
-    // floored at the minimum subdivision and never finer than the song's
-    // mid2agb clock base.
-    uint64_t gridTicks() const;
+    // Time-signature segment governing a tick. The grid — beats, snap
+    // positions, sub-beat lines — restarts at every signature change and
+    // scales the beat by the signature's denominator, exactly like
+    // forEachGridLine; a signature placed mid-measure must still leave the
+    // drawn lines snappable.
+    struct GridSeg {
+        uint64_t start = 0;         // governing signature's tick (0 = song start)
+        uint64_t next = UINT64_MAX; // next signature's tick; the grid restarts there
+        uint64_t beatTicks = 24;    // denominator-scaled beat length in ticks
+    };
+    GridSeg gridSegAt(uint64_t tick) const;
+
+    // Snap grid in ticks at a position: the visible subdivision of the
+    // governing segment's beat at the current feel, floored at the minimum
+    // subdivision (1/4 = one beat of that signature) and never finer than
+    // the song's mid2agb clock base.
+    uint64_t gridTicksAt(uint64_t tick) const;
     // Fine placement (Alt-drag in the lanes): the mid2agb clock grid — the
     // document's real resolution — regardless of the zoom-dependent grid.
     uint64_t fineGridTicks() const;
+    // Nearest / previous grid position, anchored at the governing
+    // time-signature segment (fine snap stays on the absolute clock grid).
     uint64_t snapTick(double tick, bool fine = false) const;
+    uint64_t snapTickDown(double tick) const;
 
     // Note selection on the selected track, identified by (startTick, key) so
     // it survives document rebuilds.
@@ -323,6 +339,7 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 
 private:
+    uint64_t gridTicksIn(const GridSeg &seg) const;
     int viewportWidth() const;
     void setHScroll(int px);
     void updateScrollbars();

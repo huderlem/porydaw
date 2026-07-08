@@ -173,35 +173,46 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin
     }
 }
 
-// Subdivision level of a sub-beat grid tick: 1 = the beat's first split
-// (half beat, or a third in triplet feel), 2 = the next, 3 = finer.
-// Cosmetic only (drives the line fade).
-int subGridLevel(uint64_t tick, uint64_t tpb, bool triplet)
+// Subdivision level of a sub-beat grid tick (relative to its segment's
+// start): 1 = the beat's first split (half beat, or a third in triplet
+// feel), 2 = the next, 3 = finer. Cosmetic only (drives the line fade).
+int subGridLevel(uint64_t relTick, uint64_t beatTicks, bool triplet)
 {
-    if (tick % std::max<uint64_t>(1, tpb / (triplet ? 3 : 2)) == 0)
+    if (relTick % std::max<uint64_t>(1, beatTicks / (triplet ? 3 : 2)) == 0)
         return 1;
-    if (tick % std::max<uint64_t>(1, tpb / (triplet ? 6 : 4)) == 0)
+    if (relTick % std::max<uint64_t>(1, beatTicks / (triplet ? 6 : 4)) == 0)
         return 2;
     return 3;
 }
 
 // Calls fn(tick, level) for every sub-beat snap-grid position in [t0, t1)
 // that is not a beat line, at the current zoom's snap resolution
-// (SongView::gridTicks, which bottoms out at the mid2agb clock grid). No
-// callbacks when the grid is at (or coarser than) whole beats.
+// (SongView::gridTicksAt, which bottoms out at the mid2agb clock grid).
+// Walks time-signature segments so the positions match snapTick and the
+// beat lines. No callbacks in segments whose grid is at (or coarser than)
+// whole beats.
 void forEachSubGridLine(const SongView *sv, double t0, double t1,
                         const std::function<void(uint64_t, int)> &fn)
 {
-    const uint64_t tpb = sv->timeline()->ticksPerBeat;
-    const uint64_t g = sv->gridTicks();
-    if (g == 0 || g >= tpb || sv->pxPerBeat() < 10.0)
-        return;
     const bool triplet = sv->gridFeel() == SongView::GridFeel::Triplet;
-    for (uint64_t tick = uint64_t(std::max(0.0, t0) / double(g)) * g;
-         tick < uint64_t(t1); tick += g) {
-        if (tick % tpb == 0)
-            continue; // beat/bar lines are drawn separately
-        fn(tick, subGridLevel(tick, tpb, triplet));
+    uint64_t at = uint64_t(std::max(0.0, t0));
+    const uint64_t end = t1 <= 0.0 ? 0 : uint64_t(t1);
+    while (at < end) {
+        const SongView::GridSeg seg = sv->gridSegAt(at);
+        const uint64_t segEnd = std::min(seg.next, end);
+        const uint64_t g = sv->gridTicksAt(at);
+        if (g > 0 && g < seg.beatTicks
+            && sv->pxPerTick() * double(seg.beatTicks) >= 10.0) {
+            const uint64_t k = at > seg.start ? (at - seg.start + g - 1) / g : 0;
+            for (uint64_t tick = seg.start + k * g; tick < segEnd; tick += g) {
+                if ((tick - seg.start) % seg.beatTicks == 0)
+                    continue; // beat/bar lines are drawn separately
+                fn(tick, subGridLevel(tick - seg.start, seg.beatTicks, triplet));
+            }
+        }
+        if (seg.next >= end)
+            break;
+        at = seg.next;
     }
 }
 
@@ -1047,7 +1058,8 @@ protected:
         }
 
         const double tick = m_sv->tickAtContentX(event->pos().x() - kKeyboardW);
-        const int64_t grid = int64_t(m_sv->gridTicks());
+        const int64_t grid =
+            int64_t(m_sv->gridTicksAt(uint64_t(std::max(0.0, m_pressTick))));
         const int64_t rawD = int64_t(std::llround(tick - m_pressTick));
         const int64_t snappedD = (rawD >= 0 ? rawD + grid / 2 : rawD - grid / 2) / grid * grid;
 
@@ -1331,11 +1343,9 @@ private:
     // committed on release (one undo entry).
     void beginDraw()
     {
-        const double grid = double(m_sv->gridTicks());
-        m_drawAnchor =
-            uint64_t(std::floor(std::max(0.0, m_pressTick) / grid) * grid);
+        m_drawAnchor = m_sv->snapTickDown(m_pressTick);
         m_drawTick = m_drawAnchor;
-        m_drawDur = int64_t(m_sv->gridTicks());
+        m_drawDur = int64_t(m_sv->gridTicksAt(m_drawAnchor));
         m_drawKey = m_pressKey;
         m_drag = Drag::Draw;
         m_sv->clearSelection();
@@ -1430,7 +1440,7 @@ private:
         for (const DocNote &note : notes)
             ct.notes.push_back({uint32_t(note.tick - base), note.key,
                                 note.duration ? note.duration
-                                              : uint32_t(m_sv->gridTicks()),
+                                              : uint32_t(m_sv->gridTicksAt(note.tick)),
                                 note.velocity});
         clip.tracks.push_back(std::move(ct));
         m_sv->clipboard() = std::move(clip);
@@ -2107,7 +2117,7 @@ protected:
                 return;
             }
             const uint64_t g =
-                std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicks());
+                std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicksAt(a));
             std::vector<SongDocument::LanePointValue> pts;
             for (uint64_t t = a; t < b; t += g)
                 pts.push_back({t, va
@@ -2766,12 +2776,12 @@ private:
     void extendSweep(QPoint pos, bool fine)
     {
         const double rawTick = rawTickAt(pos.x());
-        const uint64_t g =
-            std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicks());
         const double from = m_prevTick;
         const double to = rawTick;
         const uint64_t t0 = m_sv->snapTick(std::min(from, to), fine);
         const uint64_t t1 = m_sv->snapTick(std::max(from, to), fine);
+        const uint64_t g =
+            std::max<uint64_t>(1, fine ? m_sv->fineGridTicks() : m_sv->gridTicksAt(t0));
         for (uint64_t t = t0; t <= t1; t += g) {
             int v = m_dragValue;
             if (to != from) {
@@ -3629,42 +3639,90 @@ void SongView::setGridMinDenom(int denom)
     refreshTimelineViews();
 }
 
-uint64_t SongView::gridTicks() const
+SongView::GridSeg SongView::gridSegAt(uint64_t tick) const
+{
+    GridSeg seg;
+    if (!m_timeline)
+        return seg;
+    const uint64_t tpb = std::max<uint32_t>(1, m_timeline->ticksPerBeat);
+    seg.beatTicks = tpb;
+    for (const TimeSigPoint &ts : m_timeline->timeSigs) { // tick-sorted
+        if (ts.tick > tick) {
+            seg.next = ts.tick;
+            break;
+        }
+        // Same-tick duplicates overwrite: the last at a tick wins, matching
+        // forEachGridLine.
+        seg.start = ts.tick;
+        seg.beatTicks = std::max<uint64_t>(
+            1, (uint64_t(tpb) * 4) >> std::min<int>(ts.denomPow2, 63));
+    }
+    return seg;
+}
+
+uint64_t SongView::gridTicksAt(uint64_t tick) const
 {
     if (!m_timeline)
         return 24;
-    const uint64_t tpb = std::max<uint32_t>(1, m_timeline->ticksPerBeat);
+    return gridTicksIn(gridSegAt(tick));
+}
+
+uint64_t SongView::gridTicksIn(const GridSeg &seg) const
+{
     const uint64_t clock = m_document ? m_document->ticksPerClock() : 1;
     // Finest visible subdivision at least ~8 px wide from the feel's ladder
     // (divisions per beat), floored at the mid2agb clock grid and at the
-    // user's minimum note value. A quarter note is one division per beat;
-    // triplet feel fits three notes where straight fits two, so the same
-    // denominator allows 3/2 the divisions.
+    // user's minimum note value. The floor is one division per beat of the
+    // governing signature (1/4 = the beat); triplet feel fits three notes
+    // where straight fits two, so the same denominator allows 3/2 the
+    // divisions.
     static constexpr uint64_t kStraight[] = {32, 16, 8, 4, 2, 1};
     static constexpr uint64_t kTriplet[] = {48, 24, 12, 6, 3, 1};
     const bool triplet = m_gridFeel == GridFeel::Triplet;
     const uint64_t maxDiv = m_gridMinDenom == 0
         ? UINT64_MAX
         : std::max<uint64_t>(1, uint64_t(m_gridMinDenom) * (triplet ? 3 : 2) / 8);
+    const double pxPerSegBeat = m_pxPerTick * double(seg.beatTicks);
     for (uint64_t div : triplet ? kTriplet : kStraight) {
         if (div > maxDiv)
             continue;
-        if (pxPerBeat() / double(div) >= 8.0)
-            return std::max(std::max<uint64_t>(1, tpb / div), clock);
+        if (pxPerSegBeat / double(div) >= 8.0)
+            return std::max(std::max<uint64_t>(1, seg.beatTicks / div), clock);
     }
-    return std::max(tpb, clock);
+    return std::max(seg.beatTicks, clock);
 }
 
 uint64_t SongView::fineGridTicks() const
 {
     return m_document ? std::max<uint32_t>(1, m_document->ticksPerClock())
-                      : gridTicks();
+                      : gridTicksAt(0);
 }
 
 uint64_t SongView::snapTick(double tick, bool fine) const
 {
-    const double g = double(fine ? fineGridTicks() : gridTicks());
-    return uint64_t(std::round(std::max(0.0, tick) / g) * g);
+    tick = std::max(0.0, tick);
+    if (fine) {
+        // The clock grid is the document's absolute resolution; it does not
+        // restart at time-signature changes.
+        const double g = double(fineGridTicks());
+        return uint64_t(std::round(tick / g) * g);
+    }
+    const GridSeg seg = gridSegAt(uint64_t(tick));
+    const uint64_t g = std::max<uint64_t>(1, gridTicksIn(seg));
+    const uint64_t k = uint64_t((tick - double(seg.start)) / double(g));
+    const uint64_t lo = seg.start + k * g;
+    // The next signature's tick is itself a grid position (the grid
+    // restarts there), so the upper candidate never crosses it.
+    const uint64_t hi = std::min(lo + g, seg.next);
+    return tick - double(lo) <= double(hi) - tick ? lo : hi;
+}
+
+uint64_t SongView::snapTickDown(double tick) const
+{
+    tick = std::max(0.0, tick);
+    const GridSeg seg = gridSegAt(uint64_t(tick));
+    const uint64_t g = std::max<uint64_t>(1, gridTicksIn(seg));
+    return seg.start + uint64_t((tick - double(seg.start)) / double(g)) * g;
 }
 
 bool SongView::isSelected(const ViewNote &note) const
@@ -3812,7 +3870,7 @@ void SongView::copyTimeSelection()
                     continue;
                 ct.notes.push_back({uint32_t(note.tick - s), note.key,
                                     note.duration ? note.duration
-                                                  : uint32_t(gridTicks()),
+                                                  : uint32_t(gridTicksAt(note.tick)),
                                     note.velocity});
             }
             noteCount += int(ct.notes.size());

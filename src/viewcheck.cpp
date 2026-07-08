@@ -32,6 +32,7 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
 
     int checked = 0;
     int failures = 0;
+    bool gridChecked = false;
     size_t totalEvents = 0, totalNotes = 0, totalLanePoints = 0, totalStrip = 0;
     int songsWithUnpaired = 0, songsWithOrphans = 0, songsWithDropped = 0;
 
@@ -88,23 +89,25 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
             std::printf("viewcheck: wrote %s\n", qUtf8Printable(screenshotPath));
         }
 
-        if (checked == 0) {
-            // Snap-grid semantics on the first song: at a fixed 64 px/beat
-            // zoom the grid must follow the feel's subdivision ladder and
-            // the minimum-subdivision floor. No document is attached, so
-            // the clock floor is 1 tick.
+        const uint64_t tpb = std::max<uint32_t>(1, tl->ticksPerBeat);
+        if (!gridChecked && view.gridSegAt(0).beatTicks == tpb) {
+            // Snap-grid semantics on the first song governed by a /4
+            // signature at tick 0: at a fixed 64 px/beat zoom the grid must
+            // follow the feel's subdivision ladder and the minimum-
+            // subdivision floor. No document is attached, so the clock
+            // floor is 1 tick.
+            gridChecked = true;
             SongView::ViewState zoom;
             zoom.valid = true;
             zoom.pxPerBeat = 64.0;
             view.applyViewState(zoom);
-            const uint64_t tpb = std::max<uint32_t>(1, tl->ticksPerBeat);
             const auto expectGrid = [&](const char *what, uint64_t expected) {
-                if (view.gridTicks() != expected) {
+                if (view.gridTicksAt(0) != expected) {
                     std::fprintf(stderr,
                                  "viewcheck: FAIL %s: %s grid = %llu ticks, "
                                  "expected %llu\n",
                                  qUtf8Printable(song.label), what,
-                                 (unsigned long long)view.gridTicks(),
+                                 (unsigned long long)view.gridTicksAt(0),
                                  (unsigned long long)expected);
                     failures++;
                 }
@@ -122,6 +125,28 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
             view.setGridMinDenom(0);
             std::printf("viewcheck: snap-grid semantics checked on %s\n",
                         qUtf8Printable(song.label));
+        }
+
+        // Every drawn beat/bar line must be reachable by snapping, whatever
+        // the song's time-signature changes do (mid-measure signatures
+        // restart the grid; a signature's denominator rescales the beat).
+        // With the 1/4 floor the snap grid IS the beat grid, so each line
+        // must be a snap fixed point.
+        view.setGridMinDenom(4);
+        int badSnaps = 0;
+        uint64_t badTick = 0;
+        view.forEachGridLine(0, tl->lengthTicks, [&](uint64_t t, bool, int) {
+            if (view.snapTick(double(t)) != t && badSnaps++ == 0)
+                badTick = t;
+        });
+        view.setGridMinDenom(0);
+        if (badSnaps) {
+            std::fprintf(stderr,
+                         "viewcheck: FAIL %s: %d grid line(s) not snappable "
+                         "(first at tick %llu)\n",
+                         qUtf8Printable(song.label), badSnaps,
+                         (unsigned long long)badTick);
+            failures++;
         }
         view.setSong(nullptr, nullptr);
 
