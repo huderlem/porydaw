@@ -28,6 +28,10 @@ int runMkCheck(const QString &projectRoot, const QString &songLabel);
 // sessioncheck.cpp; session restore/persistence check against redirected
 // QSettings (writes view sidecars into the project: use a copy).
 int runSessionCheck(const QString &projectRoot, const QString &songLabel);
+// tabcheck.cpp; multi-tab check against redirected QSettings (writes view
+// sidecars into the project: use a copy).
+int runTabCheck(const QString &projectRoot, const QString &songA,
+                const QString &songB);
 
 int main(int argc, char *argv[])
 {
@@ -73,6 +77,10 @@ int main(int argc, char *argv[])
     const int sessionCheck = args.indexOf(QStringLiteral("--sessioncheck"));
     if (sessionCheck >= 0 && sessionCheck + 2 < args.size())
         return runSessionCheck(args[sessionCheck + 1], args[sessionCheck + 2]);
+    const int tabCheck = args.indexOf(QStringLiteral("--tabcheck"));
+    if (tabCheck >= 0 && tabCheck + 3 < args.size())
+        return runTabCheck(args[tabCheck + 1], args[tabCheck + 2],
+                           args[tabCheck + 3]);
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);

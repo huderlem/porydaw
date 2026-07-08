@@ -33,6 +33,8 @@ qt_add_executable(porydaw
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/songsession.h
+    src/tabcheck.cpp
     src/viewcheck.cpp
     src/roundtrip.cpp
     src/editcheck.cpp

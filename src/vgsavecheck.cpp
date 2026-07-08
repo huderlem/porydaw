@@ -58,11 +58,12 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         return false;
     }
     loadSong(*target);
-    if (!m_audio.songLoaded() || m_loadedSongId < 0) {
+    SongSession *tab = activeSession();
+    if (!m_audio.songLoaded() || !tab || tab->songId < 0) {
         std::fprintf(stderr, "vgsavecheck: song failed to load\n");
         return false;
     }
-    if (!m_vgSource) {
+    if (!tab->vgSource) {
         std::fprintf(stderr, "vgsavecheck: no editable voicegroup source\n");
         return false;
     }
@@ -79,7 +80,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
     // A DirectSound-family voice to edit (scalar fields + a sample symbol).
     int dsSlot = -1;
     for (int i = 0; i < VOICEGROUP_SIZE && dsSlot < 0; i++) {
-        const VgVoice *v = m_vgSource->voiceAt(i);
+        const VgVoice *v = tab->vgSource->voiceAt(i);
         if (v
             && (v->macro == VgMacro::DirectSound
                 || v->macro == VgMacro::DirectSoundNoResample
@@ -91,35 +92,35 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         return false;
     }
 
-    const QString vgPath = m_vgSource->filePath();
-    const QString vgLoadName = m_vgSource->loadName();
+    const QString vgPath = tab->vgSource->filePath();
+    const QString vgLoadName = tab->vgSource->loadName();
     const QByteArray vgBytesOriginal = readFileBytes(vgPath);
-    const QByteArray midBytesOriginal = readFileBytes(m_doc.midPath());
-    const VgVoice original = *m_vgSource->voiceAt(dsSlot);
+    const QByteArray midBytesOriginal = readFileBytes(tab->doc.midPath());
+    const VgVoice original = *tab->vgSource->voiceAt(dsSlot);
 
     // 1. A voice edit dirties the (one, unified) session.
     VgVoice edited = original;
     edited.release = original.release == 25 ? 26 : 25;
     onVoiceEditRequested(dsSlot, edited, false);
-    check(m_doc.isDirty(), "voice edit did not dirty the song's undo stack");
-    check(m_vgSource->dirty(), "voice edit did not dirty the source");
+    check(tab->doc.isDirty(), "voice edit did not dirty the song's undo stack");
+    check(tab->vgSource->dirty(), "voice edit did not dirty the source");
     check(isWindowModified(), "voice edit did not mark the window modified");
     check(m_audio.voicegroup()->voices[dsSlot].release == uint8_t(edited.release),
           "voice edit did not reach the audio engine");
 
     // 2. Undo restores the byte-exact on-disk state, nothing written.
-    m_doc.undoStack()->undo();
-    check(!m_doc.isDirty() && !m_vgSource->dirty(),
+    tab->doc.undoStack()->undo();
+    check(!tab->doc.isDirty() && !tab->vgSource->dirty(),
           "undo did not return the session to clean");
     check(!isWindowModified(), "undo left the window marked modified");
     check(readFileBytes(vgPath) == vgBytesOriginal,
           "voicegroup file changed without a save");
 
     // 3. Redo the voice edit, add a note edit, save once: both files written.
-    m_doc.undoStack()->redo();
+    tab->doc.undoStack()->redo();
     int track = -1;
-    for (int t = 0; t < m_doc.engineTrackCount() && track < 0; t++) {
-        if (!m_doc.notesForTrack(t).empty())
+    for (int t = 0; t < tab->doc.engineTrackCount() && track < 0; t++) {
+        if (!tab->doc.notesForTrack(t).empty())
             track = t;
     }
     if (track < 0) {
@@ -127,19 +128,19 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         return false;
     }
     uint64_t base = 0;
-    for (const SmfTrack &tr : m_doc.smf().tracks)
+    for (const SmfTrack &tr : tab->doc.smf().tracks)
         base = std::max(base, tr.endTick);
     base += 96;
-    m_doc.addNote(track, base, 72, 24, 93);
-    check(saveLoadedSong(), "unified save failed");
-    check(!m_doc.isDirty() && !m_vgSource->dirty(), "still dirty after save");
+    tab->doc.addNote(track, base, 72, 24, 93);
+    check(saveSession(*tab), "unified save failed");
+    check(!tab->doc.isDirty() && !tab->vgSource->dirty(), "still dirty after save");
     check(readFileBytes(vgPath) != vgBytesOriginal,
           "save did not write the voicegroup file");
-    check(readFileBytes(m_doc.midPath()) != midBytesOriginal,
+    check(readFileBytes(tab->doc.midPath()) != midBytesOriginal,
           "save did not write the .mid");
     {
         VoicegroupSource fresh;
-        check(fresh.open(projectRoot, m_doc.cfg().voicegroupArg, &error)
+        check(fresh.open(projectRoot, tab->doc.cfg().voicegroupArg, &error)
                   && fresh.voiceAt(dsSlot)
                   && fresh.voiceAt(dsSlot)->release == edited.release,
               "saved voice edit not present in a fresh parse");
@@ -147,11 +148,11 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
 
     // 4. Undo both edits and save again: the voicegroup .inc must come back
     // byte-identical to the original (byte-conservative round trip).
-    m_doc.undoStack()->undo(); // the note
-    m_doc.undoStack()->undo(); // the voice edit
-    check(m_doc.isDirty() && m_vgSource->dirty(),
+    tab->doc.undoStack()->undo(); // the note
+    tab->doc.undoStack()->undo(); // the voice edit
+    check(tab->doc.isDirty() && tab->vgSource->dirty(),
           "undo past the save point did not re-dirty the session");
-    check(saveLoadedSong(), "second unified save failed");
+    check(saveSession(*tab), "second unified save failed");
     check(readFileBytes(vgPath) == vgBytesOriginal,
           "undone voice edit did not round-trip the .inc byte-identically");
 
@@ -159,9 +160,9 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
     // history: undoing the switch replays them into the reopened source.
     QString otherArg;
     for (const QString &arg : SongRegistry::voicegroupArgs(m_project.root())) {
-        if (arg == m_doc.cfg().voicegroupArg)
+        if (arg == tab->doc.cfg().voicegroupArg)
             continue;
-        SongCfg probe = m_doc.cfg();
+        SongCfg probe = tab->doc.cfg();
         probe.voicegroupArg = arg;
         QString tried;
         if (LoadedVoiceGroup *vg = loadVoicegroupFor(probe, &tried)) {
@@ -177,20 +178,20 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         VgVoice edited2 = original;
         edited2.release = original.release == 25 ? 26 : 25;
         onVoiceEditRequested(dsSlot, edited2, false);
-        SongCfg cfg = m_doc.cfg();
+        SongCfg cfg = tab->doc.cfg();
         cfg.voicegroupArg = otherArg;
-        m_doc.setCfg(cfg);
-        check(m_vgSource && m_vgSource->loadName() != vgLoadName,
+        tab->doc.setCfg(cfg);
+        check(tab->vgSource && tab->vgSource->loadName() != vgLoadName,
               "-G switch did not swap the voicegroup source");
-        m_doc.undoStack()->undo(); // the -G switch
-        check(m_vgSource && m_vgSource->loadName() == vgLoadName,
+        tab->doc.undoStack()->undo(); // the -G switch
+        check(tab->vgSource && tab->vgSource->loadName() == vgLoadName,
               "undoing the -G switch did not reopen the old voicegroup");
-        check(m_vgSource && m_vgSource->voiceAt(dsSlot)
-                  && m_vgSource->voiceAt(dsSlot)->release == edited2.release
-                  && m_vgSource->dirty(),
+        check(tab->vgSource && tab->vgSource->voiceAt(dsSlot)
+                  && tab->vgSource->voiceAt(dsSlot)->release == edited2.release
+                  && tab->vgSource->dirty(),
               "undoing the -G switch did not replay the unsaved voice edit");
-        m_doc.undoStack()->undo(); // the voice edit
-        check(m_vgSource && !m_vgSource->dirty() && !m_doc.isDirty(),
+        tab->doc.undoStack()->undo(); // the voice edit
+        check(tab->vgSource && !tab->vgSource->dirty() && !tab->doc.isDirty(),
               "undoing the replayed voice edit did not return to clean");
         check(readFileBytes(vgPath) == vgBytesOriginal,
               "voicegroup file changed during the -G switch round trip");
@@ -209,11 +210,11 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         if (check(releaseSpin != nullptr, "no Release spin box in the editor")) {
             const int uiValue = original.release == 25 ? 26 : 25;
             releaseSpin->setValue(uiValue);
-            check(m_doc.isDirty() && m_vgSource->dirty()
-                      && m_vgSource->voiceAt(dsSlot)->release == uiValue,
+            check(tab->doc.isDirty() && tab->vgSource->dirty()
+                      && tab->vgSource->voiceAt(dsSlot)->release == uiValue,
                   "editing the Release spin box did not push an undo command");
-            m_doc.undoStack()->undo();
-            check(!m_doc.isDirty() && !m_vgSource->dirty()
+            tab->doc.undoStack()->undo();
+            check(!tab->doc.isDirty() && !tab->vgSource->dirty()
                       && releaseSpin->value() == original.release,
                   "undo did not refresh the Release spin box");
         }

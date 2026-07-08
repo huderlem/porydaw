@@ -7,6 +7,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMap>
+#include <QMenu>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -84,6 +85,21 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
 
     m_list = new QListWidget(this);
     connect(m_list, &QListWidget::itemActivated, this, &SongListPanel::activateItem);
+    m_list->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_list, &QListWidget::customContextMenuRequested, this,
+            [this](const QPoint &pos) {
+                QListWidgetItem *item = m_list->itemAt(pos);
+                if (!item)
+                    return;
+                const int songId = item->data(Qt::UserRole).toInt();
+                QMenu menu(this);
+                menu.addAction(tr("Open"), this,
+                               [this, songId] { emit songActivated(songId); });
+                menu.addAction(tr("Open in New Tab"), this, [this, songId] {
+                    emit songOpenInNewTabRequested(songId);
+                });
+                menu.exec(m_list->viewport()->mapToGlobal(pos));
+            });
     layout->addWidget(m_list, 1);
 
     m_count = new QLabel(this);

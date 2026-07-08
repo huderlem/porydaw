@@ -115,11 +115,8 @@ void AudioEngine::shutdown()
         m4a_engine_destroy(m_previewEngine.get());
         m_previewEngine.reset();
     }
-    m_timeline.reset();
-    if (m_voicegroup) {
-        voicegroup_free(m_voicegroup);
-        m_voicegroup = nullptr;
-    }
+    m_timeline = nullptr;
+    m_voicegroup = nullptr;
     if (m_context) {
         if (m_hasContext)
             ma_context_uninit(m_context);
@@ -129,16 +126,14 @@ void AudioEngine::shutdown()
     }
 }
 
-void AudioEngine::loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGroup *voicegroup,
+void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voicegroup,
                            const SongSettings &settings)
 {
     // Cold swap: the audio thread must not be running while pointers change.
     if (m_deviceStarted)
         ma_device_stop(m_device);
 
-    m_timeline = std::move(timeline);
-    if (m_voicegroup)
-        voicegroup_free(m_voicegroup);
+    m_timeline = timeline;
     m_voicegroup = voicegroup;
     m_settings = settings;
 
@@ -168,7 +163,7 @@ void AudioEngine::loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGr
         ma_device_start(m_device);
 }
 
-void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
+void AudioEngine::updateTimeline(const MidiTimeline *timeline)
 {
     if (!m_timeline || !timeline)
         return;
@@ -176,8 +171,8 @@ void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
         ma_device_stop(m_device);
 
     const uint64_t pos = m_player.position();
-    m_timeline = std::move(timeline);
-    m_player.seek(pos, m_timeline.get());
+    m_timeline = timeline;
+    m_player.seek(pos, m_timeline);
     // Release sounding notes: their note-offs may have moved or vanished in
     // the rebuilt timeline. Envelopes fade naturally, so brief edits during
     // playback don't hard-cut the audio.
@@ -186,7 +181,7 @@ void AudioEngine::updateTimeline(std::unique_ptr<MidiTimeline> timeline)
     // Re-latch controller state from the rebuilt timeline: the edit may have
     // deleted or moved the events behind the engine's current bend/CC values
     // (e.g. clearing a lane), which would otherwise stay latched until stop.
-    TimelinePlayer::chase(m_engine.get(), m_timeline.get(), pos);
+    TimelinePlayer::chase(m_engine.get(), m_timeline, pos);
 
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -204,8 +199,8 @@ void AudioEngine::seek(uint64_t samplePos)
     // the landing position.
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
-    m_player.seek(samplePos, m_timeline.get());
-    TimelinePlayer::chase(m_engine.get(), m_timeline.get(), samplePos);
+    m_player.seek(samplePos, m_timeline);
+    TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     m_playhead.store(samplePos);
 
     if (m_deviceStarted)
@@ -234,14 +229,12 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
     if (m_deviceStarted)
         ma_device_stop(m_device);
     m4a_engine_all_sound_off(m_engine.get());
-    if (m_voicegroup)
-        voicegroup_free(m_voicegroup);
     m_voicegroup = voicegroup;
     m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
     // Re-latch program changes: the tracks' instrument state still points
-    // into the freed voices array until the chase reapplies it.
+    // into the old voices array until the chase reapplies it.
     if (m_timeline)
-        TimelinePlayer::chase(m_engine.get(), m_timeline.get(), m_playhead.load());
+        TimelinePlayer::chase(m_engine.get(), m_timeline, m_playhead.load());
     resetPreviewEngine();
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -300,11 +293,8 @@ void AudioEngine::unloadSong()
 {
     if (m_deviceStarted)
         ma_device_stop(m_device);
-    m_timeline.reset();
-    if (m_voicegroup) {
-        voicegroup_free(m_voicegroup);
-        m_voicegroup = nullptr;
-    }
+    m_timeline = nullptr;
+    m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
     resetPreviewEngine();
     m_transport.store(static_cast<int>(Transport::Stopped));
@@ -463,7 +453,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 
     while (done < frameCount) {
         const uint32_t n = std::min(frameCount - done, m_bufCapacity);
-        const MidiTimeline *tl = m_timeline.get();
+        const MidiTimeline *tl = m_timeline;
         const bool playing =
             m_appliedTransport == static_cast<int>(Transport::Playing) && tl != nullptr;
 

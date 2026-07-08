@@ -56,16 +56,19 @@ public:
     void shutdown();
     double sampleRate() const { return m_sampleRate; }
 
-    // Cold: swaps song data with the device stopped. Takes ownership of both
-    // the timeline and the voicegroup (freed with voicegroup_free).
-    void loadSong(std::unique_ptr<MidiTimeline> timeline, LoadedVoiceGroup *voicegroup,
+    // Cold: swaps song data with the device stopped. Borrows both pointers —
+    // the caller (the owning song tab) keeps ownership and must detach the
+    // engine (another load call, or unloadSong) before freeing them.
+    void loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voicegroup,
                   const SongSettings &settings);
     void unloadSong();
 
     // Cold: swaps in a rebuilt timeline after a document edit, preserving
     // transport state and the playhead position. Sounding notes are released
     // (their note-offs may have moved or vanished in the new timeline).
-    void updateTimeline(std::unique_ptr<MidiTimeline> timeline);
+    // Borrowed like loadSong's; the old timeline may be freed once this
+    // returns.
+    void updateTimeline(const MidiTimeline *timeline);
     // Cold: jumps the playhead. Releases sounding notes and chases controller
     // state so CC/program/bend/tempo are exact at the landing position. Works
     // in any transport state; playing from Stopped starts wherever the last
@@ -73,7 +76,8 @@ public:
     void seek(uint64_t samplePos);
     // Cold: re-applies song settings (master volume, reverb) to the engine.
     void updateSettings(const SongSettings &settings);
-    // Cold: swaps the voicegroup (takes ownership); cuts all sound.
+    // Cold: swaps the voicegroup (borrowed, like loadSong's); cuts all
+    // sound. The old voicegroup may be freed once this returns.
     void updateVoicegroup(LoadedVoiceGroup *voicegroup);
 
     // Hot: audition a single note outside the timeline (piano-key click,
@@ -97,7 +101,7 @@ public:
     void setPreviewVoicegroup(LoadedVoiceGroup *voicegroup);
 
     bool songLoaded() const { return m_timeline != nullptr; }
-    const MidiTimeline *timeline() const { return m_timeline.get(); }
+    const MidiTimeline *timeline() const { return m_timeline; }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
 
     // Hot-safe for scalar field pokes only (byte-sized stores the audio
@@ -147,8 +151,8 @@ private:
     bool m_deviceStarted = false;
     double m_sampleRate = 0.0;
     std::unique_ptr<M4AEngine> m_engine;
-    std::unique_ptr<MidiTimeline> m_timeline;
-    LoadedVoiceGroup *m_voicegroup = nullptr;
+    const MidiTimeline *m_timeline = nullptr; // not owned (the active song tab's)
+    LoadedVoiceGroup *m_voicegroup = nullptr; // not owned (the active song tab's)
     SongSettings m_settings;
     // Audition instance: voice previews only, mixed on top of the main engine.
     std::unique_ptr<M4AEngine> m_previewEngine;

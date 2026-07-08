@@ -142,6 +142,9 @@ public:
     void trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers);
     bool trackMuted(int track) const { return m_muteMask & (1u << track); }
     bool trackSoloed(int track) const { return m_soloMask & (1u << track); }
+    // Full masks, for re-applying to the audio engine on a tab switch.
+    uint32_t muteMask() const { return m_muteMask; }
+    uint32_t soloMask() const { return m_soloMask; }
     void setTrackMute(int track, bool on);
     void setTrackSolo(int track, bool on);
 

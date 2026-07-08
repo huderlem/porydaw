@@ -65,6 +65,7 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
         QSettings settings;
         settings.setValue(QStringLiteral("lastProjectDir"), projectRoot);
         settings.remove(QStringLiteral("lastSongLabel"));
+        settings.remove(QStringLiteral("lastOpenSongs"));
         settings.sync();
         MainWindow window;
         window.restoreSession();
@@ -77,7 +78,10 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
     }
 
     // 4. Project + song remembered: both come back; closing at a distinctive
-    // size records the geometry and re-records the session.
+    // size records the geometry and re-records the session. Only
+    // lastSongLabel is set here — the pre-tabs session format — so this
+    // also proves the single-label fallback restores as one tab; the close
+    // then records the tab-list format that block 5 restores from.
     {
         QSettings().setValue(QStringLiteral("lastSongLabel"), songLabel);
         MainWindow window;
@@ -102,6 +106,9 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
         check(settings.value(QStringLiteral("lastSongLabel")).toString()
                   == songLabel,
               "close lost the remembered song");
+        check(settings.value(QStringLiteral("lastOpenSongs")).toStringList()
+                  == QStringList(songLabel),
+              "close did not record the open tab list");
     }
 
     // 5. Relaunch: geometry and session both come back.

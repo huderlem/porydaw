@@ -32,6 +32,9 @@ public:
 
 signals:
     void songActivated(int songId);
+    // Context-menu "Open in New Tab" (plain activation replaces the current
+    // tab's song).
+    void songOpenInNewTabRequested(int songId);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
