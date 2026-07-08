@@ -32,6 +32,11 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel);
 // sidecars into the project: use a copy).
 int runTabCheck(const QString &projectRoot, const QString &songA,
                 const QString &songB);
+// eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
+// the optional song label + path save that song's rendered event list.
+int runEventViewCheck(const QString &projectRoot,
+                      const QString &screenshotSong = QString(),
+                      const QString &screenshotPath = QString());
 
 int main(int argc, char *argv[])
 {
@@ -84,6 +89,14 @@ int main(int argc, char *argv[])
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);
+    const int eventViewCheck = args.indexOf(QStringLiteral("--eventviewcheck"));
+    if (eventViewCheck >= 0 && eventViewCheck + 1 < args.size()) {
+        const QString song =
+            eventViewCheck + 2 < args.size() ? args[eventViewCheck + 2] : QString();
+        const QString path =
+            eventViewCheck + 3 < args.size() ? args[eventViewCheck + 3] : QString();
+        return runEventViewCheck(args[eventViewCheck + 1], song, path);
+    }
     const int roundTrip = args.indexOf(QStringLiteral("--roundtrip"));
     if (roundTrip >= 0 && roundTrip + 1 < args.size()) {
         const QString mid2agb = roundTrip + 2 < args.size() ? args[roundTrip + 2] : QString();

@@ -185,6 +185,21 @@ public:
     };
     bool removeTimeRange(uint64_t startTick, uint64_t endTick, const RippleScope &scope);
 
+    // Raw SMF edits (the MIDI event list view): direct event-level operations
+    // on one chunk, indices being current positions in its event vector.
+    // Insert places the event at its tick's canonical position (setup events
+    // ahead of same-tick notes, like every other edit); a modify that changes
+    // the tick re-inserts so event order stays non-decreasing — re-resolve
+    // indices afterwards. No semantic validation happens here: an orphan
+    // note-on or a bogus meta is the raw editor's prerogative (the SMF still
+    // writes, and the playable projection is built defensively).
+    void insertRawEvent(int smfTrack, const SmfEvent &event);
+    void modifyRawEvent(int smfTrack, size_t index, const SmfEvent &event);
+    void deleteRawEvents(int smfTrack, std::vector<size_t> indices);
+    // Move the chunk's end-of-track marker; clamped so it never precedes the
+    // chunk's last event.
+    void setTrackEndTick(int smfTrack, uint64_t tick);
+
     // Move or create a loop marker; tick == -1 removes it.
     void setLoopTick(bool endMarker, int64_t tick);
 

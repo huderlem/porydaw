@@ -1,0 +1,961 @@
+#include "eventlistview.h"
+
+#include <QAbstractTableModel>
+#include <QComboBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QKeyEvent>
+#include <QLabel>
+#include <QRegularExpression>
+#include <QSpinBox>
+#include <QStyledItemDelegate>
+#include <QTableView>
+#include <QToolButton>
+#include <QVBoxLayout>
+#include <algorithm>
+#include <climits>
+
+#include "core/smf.h"
+#include "core/songdocument.h"
+#include "ui/m4asemantics.h"
+#include "ui/songview.h"
+
+namespace eventlist {
+
+namespace {
+
+// Editable event kinds, in status order. The UI never shows raw status
+// bytes; the kind plus the channel column reconstruct them.
+enum TypeKind {
+    TypeNoteOff,   // 0x8
+    TypeNoteOn,    // 0x9
+    TypePolyTouch, // 0xA
+    TypeCc,        // 0xB
+    TypeProgram,   // 0xC
+    TypeChanTouch, // 0xD
+    TypeBend,      // 0xE
+    TypeSysEx0,    // 0xF0
+    TypeSysEx7,    // 0xF7
+    TypeMeta,      // 0xFF
+    TypeKindCount
+};
+
+int typeKindOf(const SmfEvent &ev)
+{
+    if (ev.isMeta())
+        return TypeMeta;
+    if (ev.status == 0xF0)
+        return TypeSysEx0;
+    if (ev.status == 0xF7)
+        return TypeSysEx7;
+    switch (ev.typeNibble()) {
+    case 0x8: return TypeNoteOff;
+    case 0x9: return TypeNoteOn;
+    case 0xA: return TypePolyTouch;
+    case 0xB: return TypeCc;
+    case 0xC: return TypeProgram;
+    case 0xD: return TypeChanTouch;
+    default:  return TypeBend; // 0xE; the strict parser admits nothing else
+    }
+}
+
+QString typeKindName(int kind)
+{
+    switch (kind) {
+    case TypeNoteOff:   return EventListView::tr("Note off");
+    case TypeNoteOn:    return EventListView::tr("Note on");
+    case TypePolyTouch: return EventListView::tr("Poly aftertouch");
+    case TypeCc:        return EventListView::tr("Control change");
+    case TypeProgram:   return EventListView::tr("Program change");
+    case TypeChanTouch: return EventListView::tr("Channel aftertouch");
+    case TypeBend:      return EventListView::tr("Pitch bend");
+    case TypeSysEx0:    return QStringLiteral("SysEx (F0)");
+    case TypeSysEx7:    return QStringLiteral("SysEx (F7)");
+    default:            return EventListView::tr("Meta");
+    }
+}
+
+// Whether the kind uses the second channel-voice data byte.
+bool hasData2(int kind)
+{
+    switch (kind) {
+    case TypeNoteOff:
+    case TypeNoteOn:
+    case TypePolyTouch:
+    case TypeCc:
+    case TypeBend:
+        return true;
+    default:
+        return false;
+    }
+}
+
+QString keyName(int key)
+{
+    static const char *const names[] = {"C", "C#", "D", "D#", "E", "F",
+                                        "F#", "G", "G#", "A", "A#", "B"};
+    return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
+}
+
+// Blob display: text metas render as quoted text when printable, everything
+// else as spaced hex pairs. parseBlob accepts both forms back.
+QString blobText(const SmfEvent &ev)
+{
+    if (ev.isMeta() && ev.metaType >= 0x01 && ev.metaType <= 0x07 && !ev.blob.isEmpty()) {
+        const bool printable = std::all_of(ev.blob.begin(), ev.blob.end(), [](char c) {
+            return uint8_t(c) >= 0x20 && uint8_t(c) < 0x7F;
+        });
+        if (printable)
+            return QStringLiteral("\"%1\"").arg(QString::fromLatin1(ev.blob));
+    }
+    return QString::fromLatin1(ev.blob.toHex(' ')).toUpper();
+}
+
+bool parseBlob(const QString &input, QByteArray *out)
+{
+    const QString text = input.trimmed();
+    if (text.size() >= 2 && text.startsWith(QLatin1Char('"'))
+        && text.endsWith(QLatin1Char('"'))) {
+        *out = text.mid(1, text.size() - 2).toUtf8();
+        return true;
+    }
+    QString hex = text;
+    hex.remove(QLatin1Char(' '));
+    hex.remove(QLatin1Char(','));
+    static const QRegularExpression hexOnly(QStringLiteral("^([0-9A-Fa-f]{2})*$"));
+    if (!hexOnly.match(hex).hasMatch())
+        return false;
+    *out = QByteArray::fromHex(hex.toLatin1());
+    return true;
+}
+
+QString metaName(uint8_t metaType)
+{
+    switch (metaType) {
+    case 0x00: return EventListView::tr("Sequence number");
+    case 0x01: return EventListView::tr("Text");
+    case 0x02: return EventListView::tr("Copyright");
+    case 0x03: return EventListView::tr("Track name");
+    case 0x04: return EventListView::tr("Instrument");
+    case 0x05: return EventListView::tr("Lyric");
+    case 0x06: return EventListView::tr("Marker");
+    case 0x07: return EventListView::tr("Cue point");
+    case 0x20: return EventListView::tr("Channel prefix");
+    case 0x21: return EventListView::tr("MIDI port");
+    case 0x51: return EventListView::tr("Tempo");
+    case 0x54: return EventListView::tr("SMPTE offset");
+    case 0x58: return EventListView::tr("Time signature");
+    case 0x59: return EventListView::tr("Key signature");
+    case 0x7F: return EventListView::tr("Sequencer-specific");
+    default:
+        return EventListView::tr("Meta 0x%1")
+            .arg(metaType, 2, 16, QLatin1Char('0'));
+    }
+}
+
+QString metaSummary(const SmfEvent &ev)
+{
+    const QString name = metaName(ev.metaType);
+    if (ev.metaType == 0x51 && ev.blob.size() >= 3) {
+        const uint32_t us = (uint8_t(ev.blob[0]) << 16) | (uint8_t(ev.blob[1]) << 8)
+            | uint8_t(ev.blob[2]);
+        if (us > 0)
+            return EventListView::tr("Tempo %1 BPM").arg(qRound(60000000.0 / us));
+    }
+    if (ev.metaType == 0x58 && ev.blob.size() >= 2) {
+        return EventListView::tr("Time signature %1/%2")
+            .arg(uint8_t(ev.blob[0]))
+            .arg(1 << std::min<int>(uint8_t(ev.blob[1]), 6));
+    }
+    if (ev.metaType >= 0x01 && ev.metaType <= 0x07) {
+        QString text = QStringLiteral("%1 %2").arg(name, blobText(ev));
+        // mid2agb's loop markers deserve a callout: they are just Markers.
+        if (ev.metaType == 0x06 && ev.blob == "[")
+            text += EventListView::tr(" — loop start");
+        else if (ev.metaType == 0x06 && ev.blob == "]")
+            text += EventListView::tr(" — loop end");
+        return text;
+    }
+    return name;
+}
+
+QString summaryText(const SmfEvent &ev, SongView *sv)
+{
+    switch (typeKindOf(ev)) {
+    case TypeNoteOn:
+        if (ev.data1 == 0)
+            return EventListView::tr("Note off %1 (velocity-0 note-on)")
+                .arg(keyName(ev.data0));
+        return EventListView::tr("Note on %1, velocity %2")
+            .arg(keyName(ev.data0))
+            .arg(ev.data1);
+    case TypeNoteOff:
+        return EventListView::tr("Note off %1").arg(keyName(ev.data0));
+    case TypePolyTouch:
+        return EventListView::tr("Poly aftertouch %1 = %2")
+            .arg(keyName(ev.data0))
+            .arg(ev.data1);
+    case TypeCc: {
+        const M4aCcInfo info = m4aClassifyCc(ev.data0);
+        return EventListView::tr("CC %1 %2 = %3")
+            .arg(ev.data0)
+            .arg(QLatin1String(info.display), m4aFormatCcValue(ev.data0, ev.data1));
+    }
+    case TypeProgram: {
+        QString name = sv ? sv->voiceShortName(ev.data0) : QString();
+        if (name == SongView::tr("Voice")) // the no-voicegroup placeholder
+            name.clear();
+        return name.isEmpty()
+            ? EventListView::tr("Voice %1").arg(ev.data0)
+            : EventListView::tr("Voice %1 — %2").arg(ev.data0).arg(name);
+    }
+    case TypeChanTouch:
+        return EventListView::tr("Channel aftertouch = %1").arg(ev.data0);
+    case TypeBend:
+        return EventListView::tr("Pitch bend %1")
+            .arg(m4aFormatBend(int((ev.data1 << 7) | ev.data0) - 8192));
+    case TypeSysEx0:
+    case TypeSysEx7:
+        return EventListView::tr("%n payload byte(s)", nullptr, int(ev.blob.size()));
+    default:
+        return metaSummary(ev);
+    }
+}
+
+// Rebuild an event as another kind, keeping whatever carries over (tick
+// always, channel and data bytes between channel-voice kinds, the payload
+// between meta and sysex).
+SmfEvent retyped(const SmfEvent &ev, int kind, uint8_t fallbackChannel)
+{
+    SmfEvent next = ev;
+    const auto toChannel = [&](uint8_t nibble) {
+        const uint8_t channel = ev.isChannel() ? ev.channel() : fallbackChannel;
+        next.status = uint8_t((nibble << 4) | (channel & 0x0F));
+        next.metaType = 0;
+        next.blob.clear();
+    };
+    switch (kind) {
+    case TypeNoteOff:   toChannel(0x8); break;
+    case TypeNoteOn:    toChannel(0x9); break;
+    case TypePolyTouch: toChannel(0xA); break;
+    case TypeCc:        toChannel(0xB); break;
+    case TypeProgram:   toChannel(0xC); next.data1 = 0; break;
+    case TypeChanTouch: toChannel(0xD); next.data1 = 0; break;
+    case TypeBend:      toChannel(0xE); break;
+    case TypeSysEx0:
+    case TypeSysEx7:
+        next.status = kind == TypeSysEx0 ? 0xF0 : 0xF7;
+        next.metaType = 0;
+        next.data0 = next.data1 = 0;
+        if (ev.isChannel())
+            next.blob.clear();
+        break;
+    default: // TypeMeta
+        next.status = 0xFF;
+        next.data0 = next.data1 = 0;
+        if (!ev.isMeta()) {
+            next.metaType = 0x06; // Marker: the least surprising blank meta
+            if (ev.isChannel())
+                next.blob.clear();
+        }
+        break;
+    }
+    return next;
+}
+
+bool sameEvent(const SmfEvent &a, const SmfEvent &b)
+{
+    return a.tick == b.tick && a.status == b.status && a.metaType == b.metaType
+        && a.data0 == b.data0 && a.data1 == b.data1 && a.blob == b.blob;
+}
+
+} // namespace
+
+// One SMF chunk as a table: every event in file order (optionally filtered
+// by kind) plus a trailing italic end-of-track row. Cell edits queue a raw
+// document edit — never mutate inside the delegate's commit chain, because
+// documentChanged resets this model — and the reset that follows re-reads
+// the SMF.
+class EventTableModel : public QAbstractTableModel
+{
+public:
+    enum Col {
+        ColTick,
+        ColType,
+        ColChannel,
+        ColData1,
+        ColData2,
+        ColData,
+        ColSummary,
+        ColCount
+    };
+    enum Filter {
+        FilterAll,
+        FilterNotes,
+        FilterCc,
+        FilterProgram,
+        FilterBend,
+        FilterTouch,
+        FilterSysEx,
+        FilterMeta
+    };
+
+    explicit EventTableModel(SongView *sv, QObject *parent)
+        : QAbstractTableModel(parent), m_sv(sv)
+    {
+    }
+
+    void setSource(SongDocument *doc, int chunk)
+    {
+        beginResetModel();
+        m_doc = doc;
+        m_chunk = doc && chunk >= 0 && chunk < int(doc->smf().tracks.size()) ? chunk : -1;
+        rebuildRows();
+        endResetModel();
+    }
+
+    void setFilter(int filter)
+    {
+        beginResetModel();
+        m_filter = filter;
+        rebuildRows();
+        endResetModel();
+    }
+
+    void reload()
+    {
+        beginResetModel();
+        if (m_doc && m_chunk >= int(m_doc->smf().tracks.size()))
+            m_chunk = -1;
+        rebuildRows();
+        endResetModel();
+    }
+
+    int chunk() const { return m_chunk; }
+    size_t shownEvents() const { return m_rows.size(); }
+
+    // The chunk-event index behind a display row; -1 for the EOT row.
+    long long eventIndexForRow(int row) const
+    {
+        if (row < 0 || row >= int(m_rows.size()))
+            return -1;
+        return (long long)m_rows[row];
+    }
+
+    // -1 when the event is filtered out.
+    int rowForEventIndex(size_t index) const
+    {
+        const auto it = std::lower_bound(m_rows.begin(), m_rows.end(), index);
+        if (it == m_rows.end() || *it != index)
+            return -1;
+        return int(it - m_rows.begin());
+    }
+
+    static bool filterMatches(int filter, const SmfEvent &ev)
+    {
+        const int kind = typeKindOf(ev);
+        switch (filter) {
+        case FilterNotes:   return kind == TypeNoteOff || kind == TypeNoteOn;
+        case FilterCc:      return kind == TypeCc;
+        case FilterProgram: return kind == TypeProgram;
+        case FilterBend:    return kind == TypeBend;
+        case FilterTouch:   return kind == TypePolyTouch || kind == TypeChanTouch;
+        case FilterSysEx:   return kind == TypeSysEx0 || kind == TypeSysEx7;
+        case FilterMeta:    return kind == TypeMeta;
+        default:            return true;
+        }
+    }
+
+    // The channel a channel-voice event gets when the source kind had none:
+    // the chunk's first channel event's, else channel 0.
+    uint8_t fallbackChannel() const
+    {
+        const SmfTrack *tr = track();
+        if (tr) {
+            for (const SmfEvent &ev : tr->events)
+                if (ev.isChannel())
+                    return ev.channel();
+        }
+        return 0;
+    }
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override
+    {
+        if (parent.isValid() || !track())
+            return 0;
+        return int(m_rows.size()) + 1; // + end-of-track row
+    }
+
+    int columnCount(const QModelIndex &parent = QModelIndex()) const override
+    {
+        return parent.isValid() ? 0 : ColCount;
+    }
+
+    QVariant headerData(int section, Qt::Orientation orientation, int role) const override
+    {
+        if (orientation == Qt::Horizontal && role == Qt::DisplayRole) {
+            switch (section) {
+            case ColTick:    return EventListView::tr("Tick");
+            case ColType:    return EventListView::tr("Type");
+            case ColChannel: return EventListView::tr("Ch");
+            case ColData1:   return EventListView::tr("Data 1");
+            case ColData2:   return EventListView::tr("Data 2");
+            case ColData:    return EventListView::tr("Data");
+            case ColSummary: return EventListView::tr("Summary");
+            }
+        }
+        return QAbstractTableModel::headerData(section, orientation, role);
+    }
+
+    QVariant data(const QModelIndex &index, int role) const override
+    {
+        const SmfTrack *tr = track();
+        if (!tr || !index.isValid())
+            return {};
+        if (role == Qt::TextAlignmentRole) {
+            if (index.column() == ColTick || index.column() == ColChannel
+                || index.column() == ColData1 || index.column() == ColData2)
+                return int(Qt::AlignRight | Qt::AlignVCenter);
+            return {};
+        }
+        if (index.row() == int(m_rows.size())) { // end-of-track row
+            if (role == Qt::FontRole) {
+                QFont font;
+                font.setItalic(true);
+                return font;
+            }
+            if (role == Qt::DisplayRole || role == Qt::EditRole) {
+                if (index.column() == ColTick)
+                    return qulonglong(tr->endTick);
+                if (index.column() == ColType && role == Qt::DisplayRole)
+                    return EventListView::tr("End of track");
+            }
+            return {};
+        }
+        if (role != Qt::DisplayRole && role != Qt::EditRole)
+            return {};
+        const SmfEvent &ev = tr->events[m_rows[index.row()]];
+        const int kind = typeKindOf(ev);
+        switch (index.column()) {
+        case ColTick:
+            return qulonglong(ev.tick);
+        case ColType:
+            return role == Qt::EditRole ? QVariant(kind) : QVariant(typeKindName(kind));
+        case ColChannel:
+            return ev.isChannel() ? QVariant(ev.channel() + 1) : QVariant();
+        case ColData1:
+            if (ev.isMeta())
+                return ev.metaType;
+            return ev.isChannel() ? QVariant(ev.data0) : QVariant();
+        case ColData2:
+            return hasData2(kind) ? QVariant(ev.data1) : QVariant();
+        case ColData:
+            return ev.isMeta() || ev.isSysEx() ? QVariant(blobText(ev)) : QVariant();
+        case ColSummary:
+            return role == Qt::DisplayRole ? QVariant(summaryText(ev, m_sv)) : QVariant();
+        }
+        return {};
+    }
+
+    Qt::ItemFlags flags(const QModelIndex &index) const override
+    {
+        Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+        const SmfTrack *tr = track();
+        if (!tr || !index.isValid())
+            return f;
+        if (index.row() == int(m_rows.size())) {
+            if (index.column() == ColTick)
+                f |= Qt::ItemIsEditable;
+            return f;
+        }
+        const SmfEvent &ev = tr->events[m_rows[index.row()]];
+        switch (index.column()) {
+        case ColTick:
+        case ColType:
+            f |= Qt::ItemIsEditable;
+            break;
+        case ColChannel:
+            if (ev.isChannel())
+                f |= Qt::ItemIsEditable;
+            break;
+        case ColData1:
+            if (ev.isChannel() || ev.isMeta())
+                f |= Qt::ItemIsEditable;
+            break;
+        case ColData2:
+            if (hasData2(typeKindOf(ev)))
+                f |= Qt::ItemIsEditable;
+            break;
+        case ColData:
+            if (ev.isMeta() || ev.isSysEx())
+                f |= Qt::ItemIsEditable;
+            break;
+        }
+        return f;
+    }
+
+    bool setData(const QModelIndex &index, const QVariant &value, int role) override
+    {
+        if (role != Qt::EditRole)
+            return false;
+        const SmfTrack *tr = track();
+        if (!tr || !index.isValid())
+            return false;
+        SongDocument *doc = m_doc;
+        const int chunk = m_chunk;
+        if (index.row() == int(m_rows.size())) {
+            if (index.column() != ColTick)
+                return false;
+            const uint64_t tick = uint64_t(std::max<qlonglong>(0, value.toLongLong()));
+            QMetaObject::invokeMethod(
+                this, [doc, chunk, tick] { doc->setTrackEndTick(chunk, tick); },
+                Qt::QueuedConnection);
+            return true;
+        }
+        const size_t evIndex = m_rows[index.row()];
+        SmfEvent next = tr->events[evIndex];
+        switch (index.column()) {
+        case ColTick:
+            next.tick = uint64_t(std::max<qlonglong>(0, value.toLongLong()));
+            break;
+        case ColType: {
+            const int kind = value.toInt();
+            if (kind < 0 || kind >= TypeKindCount)
+                return false;
+            next = retyped(next, kind, fallbackChannel());
+            break;
+        }
+        case ColChannel:
+            if (!next.isChannel())
+                return false;
+            next.status = uint8_t((next.status & 0xF0)
+                                  | uint8_t(std::clamp(value.toInt() - 1, 0, 15)));
+            break;
+        case ColData1:
+            if (next.isMeta())
+                next.metaType = uint8_t(std::clamp(value.toInt(), 0, 127));
+            else if (next.isChannel())
+                next.data0 = uint8_t(std::clamp(value.toInt(), 0, 127));
+            else
+                return false;
+            break;
+        case ColData2:
+            if (!hasData2(typeKindOf(next)))
+                return false;
+            next.data1 = uint8_t(std::clamp(value.toInt(), 0, 127));
+            break;
+        case ColData: {
+            QByteArray blob;
+            if (!parseBlob(value.toString(), &blob)) {
+                if (m_sv)
+                    m_sv->announce(EventListView::tr(
+                        "Data must be hex bytes (\"4F 12 ...\") or \"quoted text\""));
+                return false;
+            }
+            next.blob = blob;
+            break;
+        }
+        default:
+            return false;
+        }
+        // Queued: the document edit resets this model (documentChanged →
+        // refresh), which must not happen inside the delegate's commit chain.
+        QMetaObject::invokeMethod(
+            this, [doc, chunk, evIndex, next] { doc->modifyRawEvent(chunk, evIndex, next); },
+            Qt::QueuedConnection);
+        return true;
+    }
+
+private:
+    const SmfTrack *track() const
+    {
+        if (!m_doc || m_chunk < 0 || m_chunk >= int(m_doc->smf().tracks.size()))
+            return nullptr;
+        return &m_doc->smf().tracks[m_chunk];
+    }
+
+    void rebuildRows()
+    {
+        m_rows.clear();
+        const SmfTrack *tr = track();
+        if (!tr)
+            return;
+        for (size_t i = 0; i < tr->events.size(); i++)
+            if (filterMatches(m_filter, tr->events[i]))
+                m_rows.push_back(i);
+    }
+
+    SongView *m_sv;
+    SongDocument *m_doc = nullptr;
+    int m_chunk = -1;
+    int m_filter = FilterAll;
+    std::vector<size_t> m_rows; // display row -> chunk event index (ascending)
+};
+
+namespace {
+
+class EventItemDelegate : public QStyledItemDelegate
+{
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &option,
+                          const QModelIndex &index) const override
+    {
+        const auto spin = [parent](int min, int max) {
+            auto *box = new QSpinBox(parent);
+            box->setRange(min, max);
+            box->setFrame(false);
+            return box;
+        };
+        switch (index.column()) {
+        case EventTableModel::ColTick:
+            return spin(0, INT_MAX);
+        case EventTableModel::ColChannel:
+            return spin(1, 16);
+        case EventTableModel::ColData1:
+        case EventTableModel::ColData2:
+            return spin(0, 127);
+        case EventTableModel::ColType: {
+            auto *combo = new QComboBox(parent);
+            for (int kind = 0; kind < TypeKindCount; kind++)
+                combo->addItem(typeKindName(kind), kind);
+            // Commit on pick; waiting for a focus change reads as a dead combo.
+            connect(combo, QOverload<int>::of(&QComboBox::activated), this,
+                    [this, combo] {
+                        auto *self = const_cast<EventItemDelegate *>(this);
+                        emit self->commitData(combo);
+                        emit self->closeEditor(combo);
+                    });
+            return combo;
+        }
+        default:
+            return QStyledItemDelegate::createEditor(parent, option, index);
+        }
+    }
+
+    void setEditorData(QWidget *editor, const QModelIndex &index) const override
+    {
+        if (index.column() == EventTableModel::ColType) {
+            static_cast<QComboBox *>(editor)->setCurrentIndex(
+                index.data(Qt::EditRole).toInt());
+            return;
+        }
+        QStyledItemDelegate::setEditorData(editor, index);
+    }
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model,
+                      const QModelIndex &index) const override
+    {
+        if (index.column() == EventTableModel::ColType) {
+            model->setData(index, static_cast<QComboBox *>(editor)->currentData(),
+                           Qt::EditRole);
+            return;
+        }
+        QStyledItemDelegate::setModelData(editor, model, index);
+    }
+};
+
+} // namespace
+
+} // namespace eventlist
+
+using namespace eventlist;
+
+// ------------------------------------------------------------ EventListView
+
+EventListView::EventListView(SongView *sv, QWidget *parent)
+    : QWidget(parent), m_sv(sv)
+{
+    m_model = new EventTableModel(sv, this);
+
+    auto *bar = new QHBoxLayout;
+    bar->setContentsMargins(4, 2, 4, 2);
+    bar->setSpacing(4);
+
+    m_chunk = new QComboBox(this);
+    m_chunk->setObjectName(QStringLiteral("eventListChunk"));
+    m_chunk->setToolTip(tr("The MIDI file chunk shown (follows the selected track)"));
+    bar->addWidget(m_chunk);
+
+    m_filter = new QComboBox(this);
+    m_filter->setObjectName(QStringLiteral("eventListFilter"));
+    m_filter->addItem(tr("All events"));       // EventTableModel::FilterAll
+    m_filter->addItem(tr("Notes"));            // FilterNotes
+    m_filter->addItem(tr("Control changes"));  // FilterCc
+    m_filter->addItem(tr("Program changes"));  // FilterProgram
+    m_filter->addItem(tr("Pitch bends"));      // FilterBend
+    m_filter->addItem(tr("Aftertouch"));       // FilterTouch
+    m_filter->addItem(tr("SysEx"));            // FilterSysEx
+    m_filter->addItem(tr("Meta"));             // FilterMeta
+    bar->addWidget(m_filter);
+
+    auto *add = new QToolButton(this);
+    add->setObjectName(QStringLiteral("eventListAdd"));
+    add->setText(tr("+ Add"));
+    add->setAutoRaise(true);
+    add->setToolTip(tr("Insert an event at the edit cursor "
+                       "(a copy of the current row, if any)"));
+    connect(add, &QToolButton::clicked, this, &EventListView::addEvent);
+    bar->addWidget(add);
+
+    auto *remove = new QToolButton(this);
+    remove->setObjectName(QStringLiteral("eventListRemove"));
+    remove->setText(tr("Delete"));
+    remove->setAutoRaise(true);
+    remove->setToolTip(tr("Delete the selected events (Del)"));
+    connect(remove, &QToolButton::clicked, this, &EventListView::deleteSelected);
+    bar->addWidget(remove);
+
+    bar->addStretch();
+    m_count = new QLabel(this);
+    bar->addWidget(m_count);
+
+    m_table = new QTableView(this);
+    m_table->setObjectName(QStringLiteral("eventListTable"));
+    m_table->setModel(m_model);
+    m_table->setItemDelegate(new EventItemDelegate(m_table));
+    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_table->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_table->setEditTriggers(QAbstractItemView::DoubleClicked
+                             | QAbstractItemView::EditKeyPressed
+                             | QAbstractItemView::SelectedClicked);
+    m_table->setAlternatingRowColors(true);
+    m_table->setFrameShape(QFrame::NoFrame);
+    m_table->verticalHeader()->setDefaultSectionSize(m_table->fontMetrics().height() + 6);
+    m_table->horizontalHeader()->setHighlightSections(false);
+    m_table->horizontalHeader()->setStretchLastSection(true);
+    m_table->setColumnWidth(EventTableModel::ColTick, 70);
+    m_table->setColumnWidth(EventTableModel::ColType, 120);
+    m_table->setColumnWidth(EventTableModel::ColChannel, 36);
+    m_table->setColumnWidth(EventTableModel::ColData1, 56);
+    m_table->setColumnWidth(EventTableModel::ColData2, 56);
+    m_table->setColumnWidth(EventTableModel::ColData, 140);
+    m_table->installEventFilter(this);
+    setFocusProxy(m_table);
+
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+    layout->addLayout(bar);
+    layout->addWidget(m_table, 1);
+
+    // activated (not currentIndexChanged): only user picks re-target the
+    // roll's track selection; programmatic sync must not echo back.
+    connect(m_chunk, QOverload<int>::of(&QComboBox::activated), this,
+            &EventListView::chunkPicked);
+    connect(m_filter, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this](int) { filterPicked(); });
+    connect(m_sv, &SongView::selectedTrackChanged, this,
+            [this](int) { syncTrackSelection(); });
+}
+
+void EventListView::setDocument(SongDocument *document)
+{
+    if (m_document != document) {
+        if (m_document)
+            disconnect(m_document, nullptr, this, nullptr);
+        m_document = document;
+        if (m_document)
+            connect(m_document, &SongDocument::documentChanged, this,
+                    &EventListView::refresh);
+    }
+    rebuildChunkCombo();
+    syncTrackSelection();
+}
+
+void EventListView::refresh()
+{
+    if (!m_document) {
+        m_model->setSource(nullptr, -1);
+        m_chunk->clear();
+        updateCountLabel();
+        return;
+    }
+    if (m_chunk->count() != int(m_document->smf().tracks.size())) {
+        rebuildChunkCombo(); // track added/deleted or the file was reloaded
+    } else {
+        const QModelIndex current = m_table->currentIndex();
+        m_model->reload();
+        if (current.isValid() && m_model->rowCount() > 0) {
+            const int row = std::min(current.row(), m_model->rowCount() - 1);
+            m_table->setCurrentIndex(m_model->index(row, current.column()));
+        }
+    }
+    updateCountLabel();
+}
+
+void EventListView::syncTrackSelection()
+{
+    if (m_syncing || !m_document)
+        return;
+    const int chunk = m_document->smfTrackFor(m_sv->selectedTrack());
+    if (chunk < 0 || chunk == currentChunk())
+        return;
+    const int comboIndex = m_chunk->findData(chunk);
+    if (comboIndex < 0)
+        return;
+    m_syncing = true;
+    m_chunk->setCurrentIndex(comboIndex);
+    m_syncing = false;
+    m_model->setSource(m_document, chunk);
+    updateCountLabel();
+}
+
+bool EventListView::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_table) {
+        // Leave plain Space unaccepted so the window-level play/pause
+        // shortcut fires (same idiom as the song list).
+        if (event->type() == QEvent::ShortcutOverride) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Space
+                && keyEvent->modifiers() == Qt::NoModifier) {
+                keyEvent->ignore();
+                return true;
+            }
+        }
+        if (event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Delete
+                || keyEvent->key() == Qt::Key_Backspace) {
+                deleteSelected();
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void EventListView::rebuildChunkCombo()
+{
+    m_syncing = true;
+    const int previous = currentChunk();
+    m_chunk->clear();
+    if (m_document) {
+        const SmfFile &smf = m_document->smf();
+        for (int t = 0; t < int(smf.tracks.size()); t++) {
+            int engineTrack = -1;
+            for (int e = 0; e < m_document->engineTrackCount(); e++) {
+                if (m_document->smfTrackFor(e) == t) {
+                    engineTrack = e;
+                    break;
+                }
+            }
+            QString label;
+            if (smf.format == 0)
+                label = tr("Chunk 0 (all channels)");
+            else if (engineTrack >= 0)
+                label = tr("Chunk %1 — Track %2").arg(t).arg(engineTrack + 1);
+            else
+                label = tr("Chunk %1 (tempo/meta)").arg(t);
+            m_chunk->addItem(label, t);
+        }
+        const int restore = m_chunk->findData(previous);
+        m_chunk->setCurrentIndex(restore >= 0 ? restore : 0);
+    }
+    m_syncing = false;
+    m_model->setSource(m_document, currentChunk());
+    updateCountLabel();
+}
+
+void EventListView::chunkPicked(int)
+{
+    if (m_syncing)
+        return;
+    m_model->setSource(m_document, currentChunk());
+    updateCountLabel();
+    if (!m_document || m_document->smf().format == 0)
+        return;
+    // Picking a chunk with an engine track selects that track in the roll,
+    // mirroring how the roll's selection steers this combo.
+    for (int e = 0; e < m_document->engineTrackCount(); e++) {
+        if (m_document->smfTrackFor(e) == currentChunk()) {
+            if (e != m_sv->selectedTrack()) {
+                m_syncing = true;
+                m_sv->selectTrack(e);
+                m_syncing = false;
+            }
+            break;
+        }
+    }
+}
+
+void EventListView::filterPicked()
+{
+    m_model->setFilter(m_filter->currentIndex());
+    updateCountLabel();
+}
+
+void EventListView::addEvent()
+{
+    const int chunk = currentChunk();
+    if (!m_document || chunk < 0)
+        return;
+    const auto &events = m_document->smf().tracks[chunk].events;
+    SmfEvent ev;
+    const long long src = m_model->eventIndexForRow(m_table->currentIndex().row());
+    if (src >= 0 && size_t(src) < events.size()) {
+        ev = events[src]; // duplicate the cursor row at the edit cursor
+    } else {
+        ev.status = uint8_t(0xB0 | m_model->fallbackChannel()); // CC 7 = 100
+        ev.data0 = 7;
+        ev.data1 = 100;
+    }
+    ev.tick = m_sv->editCursorTick();
+    m_document->insertRawEvent(chunk, ev); // refresh arrives via documentChanged
+    selectEventRow(chunk, ev);
+}
+
+void EventListView::deleteSelected()
+{
+    const int chunk = currentChunk();
+    if (!m_document || chunk < 0 || !m_table->selectionModel())
+        return;
+    std::vector<size_t> indices;
+    const QModelIndexList rows = m_table->selectionModel()->selectedRows();
+    for (const QModelIndex &row : rows) {
+        const long long i = m_model->eventIndexForRow(row.row());
+        if (i >= 0) // the EOT row is not deletable; skip it silently
+            indices.push_back(size_t(i));
+    }
+    if (!indices.empty())
+        m_document->deleteRawEvents(chunk, std::move(indices));
+}
+
+void EventListView::updateCountLabel()
+{
+    const int chunk = currentChunk();
+    if (!m_document || chunk < 0) {
+        m_count->clear();
+        return;
+    }
+    const size_t total = m_document->smf().tracks[chunk].events.size();
+    const size_t shown = m_model->shownEvents();
+    m_count->setText(shown == total
+                         ? tr("%n event(s)", nullptr, int(total))
+                         : tr("%1 of %2 events").arg(shown).arg(total));
+}
+
+int EventListView::currentChunk() const
+{
+    return m_chunk->count() > 0 ? m_chunk->currentData().toInt() : -1;
+}
+
+void EventListView::selectEventRow(int chunk, const SmfEvent &target)
+{
+    if (!m_document || m_model->chunk() != chunk)
+        return;
+    const auto &events = m_document->smf().tracks[chunk].events;
+    for (size_t i = 0; i < events.size(); i++) {
+        if (sameEvent(events[i], target)) {
+            const int row = m_model->rowForEventIndex(i);
+            if (row >= 0) {
+                const QModelIndex idx = m_model->index(row, EventTableModel::ColTick);
+                m_table->setCurrentIndex(idx);
+                m_table->scrollTo(idx);
+            }
+            return; // an identical earlier twin is just as good a cursor home
+        }
+    }
+}

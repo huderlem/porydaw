@@ -22,6 +22,7 @@
 #include <QScrollBar>
 #include <QSpinBox>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -32,6 +33,7 @@
 
 #include "core/mid2agbtables.h"
 #include "core/songdocument.h"
+#include "ui/eventlistview.h"
 
 namespace songview {
 
@@ -3369,10 +3371,21 @@ SongView::SongView(QWidget *parent)
     m_headers = new TrackHeaderPanel(this);
     headerScroll->setWidget(m_headers);
     mid->addWidget(headerScroll);
+    // The note grid and the raw event list share the roll's slot; the
+    // headers, ruler, and lanes stay up whichever page is current.
+    m_rollStack = new QStackedWidget(this);
+    auto *rollPage = new QWidget(m_rollStack);
+    auto *rollBox = new QHBoxLayout(rollPage);
+    rollBox->setContentsMargins(0, 0, 0, 0);
+    rollBox->setSpacing(0);
     m_roll = new PianoRoll(this);
-    mid->addWidget(m_roll, 1);
+    rollBox->addWidget(m_roll, 1);
     m_vbar = new QScrollBar(Qt::Vertical, this);
-    mid->addWidget(m_vbar);
+    rollBox->addWidget(m_vbar);
+    m_rollStack->addWidget(rollPage);
+    m_events = new EventListView(this);
+    m_rollStack->addWidget(m_events);
+    mid->addWidget(m_rollStack, 1);
     m_splitter->addWidget(rollPane);
 
     m_lanesScroll = new QScrollArea(this);
@@ -3512,6 +3525,27 @@ void SongView::setDocument(SongDocument *document)
     m_selection.clear();
     m_headers->rebuild();   // the "+ Add track" button follows editability
     m_lanes->rebuildRows(); // the "+ Add lane" strip follows editability
+    m_events->setDocument(document);
+}
+
+bool SongView::eventListVisible() const
+{
+    return m_rollStack->currentIndex() == 1;
+}
+
+void SongView::setEventListVisible(bool visible)
+{
+    if (eventListVisible() == visible)
+        return;
+    m_rollStack->setCurrentIndex(visible ? 1 : 0);
+    if (visible) {
+        m_events->refresh(); // an in-place file reload may have gone unseen
+        m_events->syncTrackSelection();
+        m_events->setFocus();
+    } else {
+        m_roll->setFocus();
+    }
+    emit eventListVisibilityChanged(visible);
 }
 
 void SongView::addEmptyLane(int track, uint8_t cc)
@@ -3588,6 +3622,7 @@ SongView::ViewState SongView::viewState() const
     state.emptyLanes = m_emptyLanes;
     state.gridMinDenom = m_gridMinDenom;
     state.gridTriplet = m_gridFeel == GridFeel::Triplet;
+    state.eventList = eventListVisible();
     return state;
 }
 
@@ -3621,6 +3656,7 @@ void SongView::applyViewState(const ViewState &state)
     updateScrollbars();
     setHScroll(std::max(0, state.scrollPx));
     m_vbar->setValue(std::max(0, state.scrollY));
+    setEventListVisible(state.eventList);
     refreshTimelineViews();
 }
 

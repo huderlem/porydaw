@@ -916,6 +916,89 @@ bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick,
     return true;
 }
 
+void SongDocument::insertRawEvent(int smfTrack, const SmfEvent &event)
+{
+    if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size()))
+        return;
+    std::vector<EditOp> ops;
+    EditOp op;
+    op.type = EditOp::InsertEvent;
+    op.smfTrack = smfTrack;
+    op.event = event;
+    ops.push_back(op);
+    pushEdit(tr("insert event"), std::move(ops));
+}
+
+void SongDocument::modifyRawEvent(int smfTrack, size_t index, const SmfEvent &event)
+{
+    if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size())
+        || index >= m_smf.tracks[smfTrack].events.size())
+        return;
+    const SmfEvent &old = m_smf.tracks[smfTrack].events[index];
+    if (old.tick == event.tick && old.status == event.status
+        && old.metaType == event.metaType && old.data0 == event.data0
+        && old.data1 == event.data1 && old.blob == event.blob)
+        return;
+    std::vector<EditOp> ops;
+    if (event.tick == old.tick) {
+        // Same tick: modify in place so the event keeps its position within
+        // the tick group (same-tick order is significant to mid2agb).
+        EditOp op;
+        op.type = EditOp::ModifyEvent;
+        op.smfTrack = smfTrack;
+        op.index = index;
+        op.event = event;
+        ops.push_back(op);
+    } else {
+        EditOp remove;
+        remove.type = EditOp::RemoveEvent;
+        remove.smfTrack = smfTrack;
+        remove.index = index;
+        ops.push_back(remove);
+        EditOp insert;
+        insert.type = EditOp::InsertEvent;
+        insert.smfTrack = smfTrack;
+        insert.event = event;
+        ops.push_back(insert);
+    }
+    pushEdit(tr("edit event"), std::move(ops));
+}
+
+void SongDocument::deleteRawEvents(int smfTrack, std::vector<size_t> indices)
+{
+    if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size()))
+        return;
+    const size_t count = m_smf.tracks[smfTrack].events.size();
+    indices.erase(std::remove_if(indices.begin(), indices.end(),
+                                 [count](size_t i) { return i >= count; }),
+                  indices.end());
+    if (indices.empty())
+        return;
+    std::vector<EditOp> ops;
+    appendRemoveOps(ops, smfTrack, std::move(indices));
+    pushEdit(tr("delete %n event(s)", nullptr, int(ops.size())), std::move(ops));
+}
+
+void SongDocument::setTrackEndTick(int smfTrack, uint64_t tick)
+{
+    if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size()))
+        return;
+    const SmfTrack &track = m_smf.tracks[smfTrack];
+    uint64_t minTick = 0;
+    for (const SmfEvent &ev : track.events)
+        minTick = std::max(minTick, ev.tick); // ticks are non-decreasing, but stay safe
+    tick = std::max(tick, minTick);
+    if (tick == track.endTick)
+        return;
+    std::vector<EditOp> ops;
+    EditOp op;
+    op.type = EditOp::SetTrackEnd;
+    op.smfTrack = smfTrack;
+    op.event.tick = tick;
+    ops.push_back(op);
+    pushEdit(tr("move end of track"), std::move(ops));
+}
+
 void SongDocument::setLoopTick(bool endMarker, int64_t tick)
 {
     if (m_smf.tracks.empty())

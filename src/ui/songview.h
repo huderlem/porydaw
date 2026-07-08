@@ -16,10 +16,12 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
+class EventListView;
 class QKeyEvent;
 class QScrollArea;
 class QScrollBar;
 class QSplitter;
+class QStackedWidget;
 class SongDocument;
 
 namespace songview {
@@ -92,6 +94,7 @@ public:
         int gridMinDenom = 0;     // snap-grid floor as a note denominator
                                   // (4/8/16/32); 0 = down to the clock grid
         bool gridTriplet = false; // triplet vs straight beat subdivisions
+        bool eventList = false;   // raw MIDI event list instead of the roll
     };
     ViewState viewState() const;
     // Call after setSong (and setDocument); a default-constructed (invalid)
@@ -104,6 +107,12 @@ public:
     // swapped; once the lane gets its first point the model carries it.
     void addEmptyLane(int track, uint8_t cc);
     void removeEmptyLane(int track, uint8_t cc);
+
+    // Raw MIDI event list: an alternative to the piano roll in the same
+    // screen space (the ruler, headers, and automation lanes stay). Per-song
+    // view state; toggled from the View menu.
+    bool eventListVisible() const;
+    void setEventListVisible(bool visible);
 
     // --- shared state for the child widgets ---
     const MidiTimeline *timeline() const { return m_timeline; }
@@ -343,6 +352,9 @@ signals:
     // Edit cursor committed to a new position (click released); the main
     // window seeks playback here when not stopped.
     void editCursorMoved(uint64_t tick);
+    // Roll/event-list swap (user toggle or applyViewState); the main window
+    // mirrors it into the View-menu checkbox.
+    void eventListVisibilityChanged(bool visible);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -387,6 +399,8 @@ private:
     songview::TimeRuler *m_ruler = nullptr;
     songview::TrackHeaderPanel *m_headers = nullptr;
     songview::PianoRoll *m_roll = nullptr;
+    QStackedWidget *m_rollStack = nullptr; // page 0: roll (+vbar), page 1: event list
+    EventListView *m_events = nullptr;
     songview::AutomationArea *m_lanes = nullptr;
     QScrollArea *m_lanesScroll = nullptr;
     QSplitter *m_splitter = nullptr; // roll above, lanes area below

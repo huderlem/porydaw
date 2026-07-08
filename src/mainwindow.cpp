@@ -229,6 +229,17 @@ void MainWindow::buildUi()
     editMenu->addAction(tr("&Engine Settings..."), this,
                         &MainWindow::openEngineSettings);
 
+    // View menu: piano roll vs raw MIDI event list, per tab.
+    QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
+    m_eventListAction = viewMenu->addAction(tr("MIDI &Event List"));
+    m_eventListAction->setCheckable(true);
+    m_eventListAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
+    m_eventListAction->setEnabled(false);
+    connect(m_eventListAction, &QAction::toggled, this, [this](bool on) {
+        if (m_active)
+            m_active->view->setEventListVisible(on);
+    });
+
     // Transport toolbar
     QToolBar *transport = addToolBar(tr("Transport"));
     // saveState() persists dock/toolbar layout by objectName only.
@@ -385,6 +396,13 @@ SongSession *MainWindow::createSession()
             });
     connect(s->view, &SongView::statusMessage, this,
             [this](const QString &text) { statusBar()->showMessage(text, 6000); });
+    // A sidecar restore (applyViewState) can flip the view under the menu.
+    connect(s->view, &SongView::eventListVisibilityChanged, this, [this, s](bool on) {
+        if (s == m_active) {
+            QSignalBlocker blocker(m_eventListAction);
+            m_eventListAction->setChecked(on);
+        }
+    });
     // Moving the edit cursor while playing (or paused) seeks playback there,
     // chasing controller state to the landing position.
     connect(s->view, &SongView::editCursorMoved, this, [this, s](uint64_t tick) {
@@ -457,6 +475,13 @@ void MainWindow::activateSession(SongSession *session, bool force)
     m_exportWavAction->setEnabled(loaded);
     m_settingsAction->setEnabled(loaded);
     m_closeTabAction->setEnabled(loaded);
+    m_eventListAction->setEnabled(loaded);
+    {
+        // Reflect the incoming tab's roll/event-list state without the
+        // checkbox driving a redundant toggle.
+        QSignalBlocker blocker(m_eventListAction);
+        m_eventListAction->setChecked(session && session->view->eventListVisible());
+    }
 
     if (!session) {
         if (m_audioOk)
