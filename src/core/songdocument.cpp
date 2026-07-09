@@ -9,11 +9,7 @@
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 
-namespace {
-
-// Loop markers as mid2agb reads them: a text-type meta (0x01-0x07) whose
-// content, truncated to 32 bytes and whitespace-trimmed, is the single
-// marker character. Matches MidiTimeline::build.
+// Declared in songdocument.h: the event list's summary column shares it.
 bool metaIsLoopMarker(const SmfEvent &ev, char marker)
 {
     if (!ev.isMeta() || ev.metaType < 0x01 || ev.metaType > 0x07)
@@ -22,6 +18,8 @@ bool metaIsLoopMarker(const SmfEvent &ev, char marker)
     const QString text = QString::fromLatin1(ev.blob.constData(), len).trimmed();
     return text.size() == 1 && text[0] == QLatin1Char(marker);
 }
+
+namespace {
 
 // Time-signature metas as MidiTimeline::build reads them: numerator and
 // denominator exponent must both be present.
@@ -395,6 +393,31 @@ void SongDocument::appendRemoveOps(std::vector<EditOp> &ops, int smfTrack,
     }
 }
 
+void SongDocument::appendEventEditOps(std::vector<EditOp> &ops, int smfTrack,
+                                      size_t index, const SmfEvent &event) const
+{
+    if (event.tick == m_smf.tracks[smfTrack].events[index].tick) {
+        EditOp op;
+        op.type = EditOp::ModifyEvent;
+        op.smfTrack = smfTrack;
+        op.index = index;
+        op.event = event;
+        ops.push_back(op);
+        return;
+    }
+    EditOp remove;
+    remove.type = EditOp::RemoveEvent;
+    remove.smfTrack = smfTrack;
+    remove.index = index;
+    ops.push_back(remove);
+
+    EditOp insert;
+    insert.type = EditOp::InsertEvent;
+    insert.smfTrack = smfTrack;
+    insert.event = event;
+    ops.push_back(insert);
+}
+
 void SongDocument::addNote(int engineTrack, uint64_t tick, uint8_t key, uint32_t duration,
                            uint8_t velocity)
 {
@@ -636,30 +659,8 @@ void SongDocument::moveLanePoint(int engineTrack, uint8_t cc, const DocLanePoint
     const QString text =
         cc == DOC_CC_VOICE ? tr("change voice") : tr("edit automation point");
     std::vector<EditOp> ops;
-    if (newTick == point.tick) {
-        // Value-only edit: modify in place so the event keeps its position
-        // within its tick group (mid2agb stable-sorts, so a program change
-        // hopping past a same-tick note-on would change which voice plays).
-        EditOp op;
-        op.type = EditOp::ModifyEvent;
-        op.smfTrack = point.smfTrack;
-        op.index = point.index;
-        op.event = makeLaneEvent(cc, channelFor(engineTrack), newTick, newValue);
-        ops.push_back(op);
-        pushEdit(text, std::move(ops));
-        return;
-    }
-    EditOp remove;
-    remove.type = EditOp::RemoveEvent;
-    remove.smfTrack = point.smfTrack;
-    remove.index = point.index;
-    ops.push_back(remove);
-
-    EditOp insert;
-    insert.type = EditOp::InsertEvent;
-    insert.smfTrack = point.smfTrack;
-    insert.event = makeLaneEvent(cc, channelFor(engineTrack), newTick, newValue);
-    ops.push_back(insert);
+    appendEventEditOps(ops, point.smfTrack, point.index,
+                       makeLaneEvent(cc, channelFor(engineTrack), newTick, newValue));
     pushEdit(text, std::move(ops));
 }
 
@@ -934,33 +935,10 @@ void SongDocument::modifyRawEvent(int smfTrack, size_t index, const SmfEvent &ev
     if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size())
         || index >= m_smf.tracks[smfTrack].events.size())
         return;
-    const SmfEvent &old = m_smf.tracks[smfTrack].events[index];
-    if (old.tick == event.tick && old.status == event.status
-        && old.metaType == event.metaType && old.data0 == event.data0
-        && old.data1 == event.data1 && old.blob == event.blob)
+    if (m_smf.tracks[smfTrack].events[index] == event)
         return;
     std::vector<EditOp> ops;
-    if (event.tick == old.tick) {
-        // Same tick: modify in place so the event keeps its position within
-        // the tick group (same-tick order is significant to mid2agb).
-        EditOp op;
-        op.type = EditOp::ModifyEvent;
-        op.smfTrack = smfTrack;
-        op.index = index;
-        op.event = event;
-        ops.push_back(op);
-    } else {
-        EditOp remove;
-        remove.type = EditOp::RemoveEvent;
-        remove.smfTrack = smfTrack;
-        remove.index = index;
-        ops.push_back(remove);
-        EditOp insert;
-        insert.type = EditOp::InsertEvent;
-        insert.smfTrack = smfTrack;
-        insert.event = event;
-        ops.push_back(insert);
-    }
+    appendEventEditOps(ops, smfTrack, index, event);
     pushEdit(tr("edit event"), std::move(ops));
 }
 
@@ -984,9 +962,8 @@ void SongDocument::setTrackEndTick(int smfTrack, uint64_t tick)
     if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size()))
         return;
     const SmfTrack &track = m_smf.tracks[smfTrack];
-    uint64_t minTick = 0;
-    for (const SmfEvent &ev : track.events)
-        minTick = std::max(minTick, ev.tick); // ticks are non-decreasing, but stay safe
+    // Ticks are non-decreasing, so the last event is the latest.
+    const uint64_t minTick = track.events.empty() ? 0 : track.events.back().tick;
     tick = std::max(tick, minTick);
     if (tick == track.endTick)
         return;

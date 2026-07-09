@@ -4,16 +4,18 @@
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QStyledItemDelegate>
 #include <QTableView>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
-#include <climits>
 
 #include "core/smf.h"
 #include "core/songdocument.h"
@@ -90,13 +92,6 @@ bool hasData2(int kind)
     }
 }
 
-QString keyName(int key)
-{
-    static const char *const names[] = {"C", "C#", "D", "D#", "E", "F",
-                                        "F#", "G", "G#", "A", "A#", "B"};
-    return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
-}
-
 // Blob display: text metas render as quoted text when printable, everything
 // else as spaced hex pairs. parseBlob accepts both forms back.
 QString blobText(const SmfEvent &ev)
@@ -109,6 +104,20 @@ QString blobText(const SmfEvent &ev)
             return QStringLiteral("\"%1\"").arg(QString::fromLatin1(ev.blob));
     }
     return QString::fromLatin1(ev.blob.toHex(' ')).toUpper();
+}
+
+// Painted form of the blob: a multi-kilobyte sysex must not be re-hexed in
+// full on every repaint of its cell. The editor (EditRole) still gets the
+// complete text.
+constexpr int kBlobDisplayBytes = 64;
+
+QString blobDisplayText(const SmfEvent &ev)
+{
+    if (ev.blob.size() <= kBlobDisplayBytes)
+        return blobText(ev);
+    return EventListView::tr("%1 … (%2 bytes)")
+        .arg(QString::fromLatin1(ev.blob.left(kBlobDisplayBytes).toHex(' ')).toUpper())
+        .arg(ev.blob.size());
 }
 
 bool parseBlob(const QString &input, QByteArray *out)
@@ -163,16 +172,15 @@ QString metaSummary(const SmfEvent &ev)
             return EventListView::tr("Tempo %1 BPM").arg(qRound(60000000.0 / us));
     }
     if (ev.metaType == 0x58 && ev.blob.size() >= 2) {
-        return EventListView::tr("Time signature %1/%2")
-            .arg(uint8_t(ev.blob[0]))
-            .arg(1 << std::min<int>(uint8_t(ev.blob[1]), 6));
+        return EventListView::tr("Time signature %1").arg(
+            midiTimeSigLabel(uint8_t(ev.blob[0]), uint8_t(ev.blob[1])));
     }
     if (ev.metaType >= 0x01 && ev.metaType <= 0x07) {
-        QString text = QStringLiteral("%1 %2").arg(name, blobText(ev));
-        // mid2agb's loop markers deserve a callout: they are just Markers.
-        if (ev.metaType == 0x06 && ev.blob == "[")
+        QString text = QStringLiteral("%1 %2").arg(name, blobDisplayText(ev));
+        // mid2agb's loop markers deserve a callout: they are plain text metas.
+        if (metaIsLoopMarker(ev, '['))
             text += EventListView::tr(" — loop start");
-        else if (ev.metaType == 0x06 && ev.blob == "]")
+        else if (metaIsLoopMarker(ev, ']'))
             text += EventListView::tr(" — loop end");
         return text;
     }
@@ -185,15 +193,15 @@ QString summaryText(const SmfEvent &ev, SongView *sv)
     case TypeNoteOn:
         if (ev.data1 == 0)
             return EventListView::tr("Note off %1 (velocity-0 note-on)")
-                .arg(keyName(ev.data0));
+                .arg(midiKeyName(ev.data0));
         return EventListView::tr("Note on %1, velocity %2")
-            .arg(keyName(ev.data0))
+            .arg(midiKeyName(ev.data0))
             .arg(ev.data1);
     case TypeNoteOff:
-        return EventListView::tr("Note off %1").arg(keyName(ev.data0));
+        return EventListView::tr("Note off %1").arg(midiKeyName(ev.data0));
     case TypePolyTouch:
         return EventListView::tr("Poly aftertouch %1 = %2")
-            .arg(keyName(ev.data0))
+            .arg(midiKeyName(ev.data0))
             .arg(ev.data1);
     case TypeCc: {
         const M4aCcInfo info = m4aClassifyCc(ev.data0);
@@ -261,12 +269,6 @@ SmfEvent retyped(const SmfEvent &ev, int kind, uint8_t fallbackChannel)
         break;
     }
     return next;
-}
-
-bool sameEvent(const SmfEvent &a, const SmfEvent &b)
-{
-    return a.tick == b.tick && a.status == b.status && a.metaType == b.metaType
-        && a.data0 == b.data0 && a.data1 == b.data1 && a.blob == b.blob;
 }
 
 } // namespace
@@ -434,6 +436,8 @@ public:
         }
         if (role != Qt::DisplayRole && role != Qt::EditRole)
             return {};
+        if (m_rows[index.row()] >= tr->events.size()) // stale while hidden
+            return {};
         const SmfEvent &ev = tr->events[m_rows[index.row()]];
         const int kind = typeKindOf(ev);
         switch (index.column()) {
@@ -450,7 +454,10 @@ public:
         case ColData2:
             return hasData2(kind) ? QVariant(ev.data1) : QVariant();
         case ColData:
-            return ev.isMeta() || ev.isSysEx() ? QVariant(blobText(ev)) : QVariant();
+            if (!ev.isMeta() && !ev.isSysEx())
+                return {};
+            return role == Qt::EditRole ? QVariant(blobText(ev))
+                                        : QVariant(blobDisplayText(ev));
         case ColSummary:
             return role == Qt::DisplayRole ? QVariant(summaryText(ev, m_sv)) : QVariant();
         }
@@ -468,6 +475,8 @@ public:
                 f |= Qt::ItemIsEditable;
             return f;
         }
+        if (m_rows[index.row()] >= tr->events.size()) // stale while hidden
+            return f;
         const SmfEvent &ev = tr->events[m_rows[index.row()]];
         switch (index.column()) {
         case ColTick:
@@ -506,17 +515,21 @@ public:
         if (index.row() == int(m_rows.size())) {
             if (index.column() != ColTick)
                 return false;
-            const uint64_t tick = uint64_t(std::max<qlonglong>(0, value.toLongLong()));
+            // toULongLong covers the delegate's line-edit text and direct
+            // qulonglong values; ticks are 64-bit, never squeeze through int.
+            const uint64_t tick = value.toULongLong();
             QMetaObject::invokeMethod(
                 this, [doc, chunk, tick] { doc->setTrackEndTick(chunk, tick); },
                 Qt::QueuedConnection);
             return true;
         }
         const size_t evIndex = m_rows[index.row()];
+        if (evIndex >= tr->events.size()) // stale while hidden
+            return false;
         SmfEvent next = tr->events[evIndex];
         switch (index.column()) {
         case ColTick:
-            next.tick = uint64_t(std::max<qlonglong>(0, value.toLongLong()));
+            next.tick = value.toULongLong();
             break;
         case ColType: {
             const int kind = value.toInt();
@@ -609,8 +622,15 @@ public:
             return box;
         };
         switch (index.column()) {
-        case EventTableModel::ColTick:
-            return spin(0, INT_MAX);
+        case EventTableModel::ColTick: {
+            // Ticks are 64-bit; QSpinBox is int and would silently truncate
+            // a large tick just by opening and committing the editor.
+            auto *edit = new QLineEdit(parent);
+            edit->setFrame(false);
+            static const QRegularExpression digits(QStringLiteral("[0-9]{1,19}"));
+            edit->setValidator(new QRegularExpressionValidator(digits, edit));
+            return edit;
+        }
         case EventTableModel::ColChannel:
             return spin(1, 16);
         case EventTableModel::ColData1:
@@ -772,14 +792,43 @@ void EventListView::refresh()
         updateCountLabel();
         return;
     }
+    // Hidden (the roll's page is current): skip the O(events) rebuild; the
+    // toggle refreshes on show. The model tolerates the stale rows (data/
+    // flags/setData bounds-check against the live event vector).
+    if (isHidden())
+        return;
     if (m_chunk->count() != int(m_document->smf().tracks.size())) {
-        rebuildChunkCombo(); // track added/deleted or the file was reloaded
+        // A track add/delete (or file reload) shifted the chunk numbering,
+        // so the old combo index may now name a different chunk; re-anchor
+        // on the roll's selected track rather than trust the raw index.
+        rebuildChunkCombo();
+        syncTrackSelection();
     } else {
         const QModelIndex current = m_table->currentIndex();
+        QList<int> selectedRows;
+        if (m_table->selectionModel()) {
+            const QModelIndexList rows = m_table->selectionModel()->selectedRows();
+            for (const QModelIndex &row : rows)
+                selectedRows.append(row.row());
+        }
         m_model->reload();
-        if (current.isValid() && m_model->rowCount() > 0) {
-            const int row = std::min(current.row(), m_model->rowCount() - 1);
+        const int rowCount = m_model->rowCount();
+        if (current.isValid() && rowCount > 0) {
+            const int row = std::min(current.row(), rowCount - 1);
             m_table->setCurrentIndex(m_model->index(row, current.column()));
+        }
+        // Re-select by row position: exact for value edits (rows are
+        // stable), approximate after inserts/deletes — good enough to keep
+        // a multi-row selection alive across the reset.
+        if (selectedRows.size() > 1 && m_table->selectionModel()) {
+            QItemSelection selection;
+            for (int row : selectedRows) {
+                if (row < rowCount)
+                    selection.select(m_model->index(row, 0),
+                                     m_model->index(row, m_model->columnCount() - 1));
+            }
+            m_table->selectionModel()->select(selection,
+                                              QItemSelectionModel::ClearAndSelect);
         }
     }
     updateCountLabel();
@@ -787,7 +836,7 @@ void EventListView::refresh()
 
 void EventListView::syncTrackSelection()
 {
-    if (m_syncing || !m_document)
+    if (m_syncing || !m_document || isHidden())
         return;
     const int chunk = m_document->smfTrackFor(m_sv->selectedTrack());
     if (chunk < 0 || chunk == currentChunk())
@@ -948,7 +997,7 @@ void EventListView::selectEventRow(int chunk, const SmfEvent &target)
         return;
     const auto &events = m_document->smf().tracks[chunk].events;
     for (size_t i = 0; i < events.size(); i++) {
-        if (sameEvent(events[i], target)) {
+        if (events[i] == target) {
             const int row = m_model->rowForEventIndex(i);
             if (row >= 0) {
                 const QModelIndex idx = m_model->index(row, EventTableModel::ColTick);

@@ -70,18 +70,6 @@ bool isBlackKey(int key)
     }
 }
 
-QString keyName(int key)
-{
-    static const char *const names[] = {"C", "C#", "D", "D#", "E", "F",
-                                        "F#", "G", "G#", "A", "A#", "B"};
-    return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
-}
-
-QString timeSigLabel(int numerator, int denomPow2)
-{
-    return QStringLiteral("%1/%2").arg(numerator).arg(1 << std::min(denomPow2, 6));
-}
-
 // Modal numerator/denominator editor for a ruler time-signature marker.
 bool askTimeSignature(QWidget *parent, int *numerator, int *denomPow2)
 {
@@ -368,7 +356,7 @@ protected:
             p.drawLine(chip.x, 0, chip.x, kRulerMarkerH - 1);
             if (chip.labelW > 0)
                 p.drawText(chip.labelX, 11,
-                           timeSigLabel(chip.numerator, chip.denomPow2));
+                           midiTimeSigLabel(chip.numerator, chip.denomPow2));
         }
 
         // Loop bracket glyphs above the band edges.
@@ -651,7 +639,7 @@ private:
                              bool implicit) {
             const int x = kGutterW + m_sv->contentX(double(tick));
             chips.push_back({tick, numerator, denomPow2, implicit, x, x + 3,
-                             fm.horizontalAdvance(timeSigLabel(numerator, denomPow2))});
+                             fm.horizontalAdvance(midiTimeSigLabel(numerator, denomPow2))});
         };
         if (tl->timeSigs.empty() || tl->timeSigs.front().tick != 0)
             add(0, 4, 2, true);
@@ -1666,7 +1654,7 @@ private:
                     p.setPen(QColor(0x50, 0x50, 0x50));
                     if (keyH >= 7)
                         p.drawText(QRect(0, y, kKeyboardW - 3, keyH),
-                                   Qt::AlignRight | Qt::AlignVCenter, keyName(key));
+                                   Qt::AlignRight | Qt::AlignVCenter, midiKeyName(key));
                 }
             }
         }
@@ -3539,7 +3527,8 @@ void SongView::setEventListVisible(bool visible)
         return;
     m_rollStack->setCurrentIndex(visible ? 1 : 0);
     if (visible) {
-        m_events->refresh(); // an in-place file reload may have gone unseen
+        // The list skips refreshes while its page is hidden; catch up now.
+        m_events->refresh();
         m_events->syncTrackSelection();
         m_events->setFocus();
     } else {
@@ -4155,7 +4144,7 @@ void SongView::announceNote(const ViewNote &note)
     const bool exact = m_document && m_document->cfg().exactGate;
     const int64_t ticks = int64_t(note.endTick) - int64_t(note.startTick);
     emit statusMessage(tr("%1 · velocity %2 → plays %3 · length %4 ticks → %5 clocks")
-                           .arg(keyName(note.key))
+                           .arg(midiKeyName(note.key))
                            .arg(note.velocity)
                            .arg(mid2agbEffectiveVelocity(note.velocity))
                            .arg(ticks)

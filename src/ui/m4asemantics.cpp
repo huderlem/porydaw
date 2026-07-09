@@ -1,6 +1,7 @@
 #include "m4asemantics.h"
 
 #include <QObject>
+#include <algorithm>
 
 extern "C" {
 #include "m4a_engine.h"
@@ -96,4 +97,16 @@ QString m4aVoiceTypeName(uint8_t type)
     case VOICE_NOISE: return QObject::tr("Noise");
     default: return QObject::tr("Sample");
     }
+}
+
+QString midiKeyName(int key)
+{
+    static const char *const names[] = {"C", "C#", "D", "D#", "E", "F",
+                                        "F#", "G", "G#", "A", "A#", "B"};
+    return QStringLiteral("%1%2").arg(QLatin1String(names[key % 12])).arg(key / 12 - 1);
+}
+
+QString midiTimeSigLabel(int numerator, int denomPow2)
+{
+    return QStringLiteral("%1/%2").arg(numerator).arg(1 << std::min(denomPow2, 6));
 }

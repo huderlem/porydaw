@@ -22,6 +22,11 @@ constexpr uint8_t DOC_CC_TEMPO = 0xFE; // tempo metas; live in SMF track 0 only,
 constexpr uint8_t DOC_CC_VOICE = 0xFD; // program changes (0xC): the track's
                                        // voice; value is the voicegroup entry
 
+// Loop markers as mid2agb reads them: a text-type meta (0x01-0x07) whose
+// content, truncated to 32 bytes and whitespace-trimmed, is the single
+// marker character. Matches MidiTimeline::build.
+bool metaIsLoopMarker(const SmfEvent &ev, char marker);
+
 // A note located in the SMF model: the note-on event plus the event that ends
 // it, paired exactly as mid2agb pairs them (first same-channel same-key
 // note-off or velocity-0 note-on after the note-on). Indices are valid only
@@ -273,6 +278,12 @@ private:
                              uint8_t velocity) const;
     void appendRemoveOps(std::vector<EditOp> &ops, int smfTrack,
                          std::vector<size_t> indices) const;
+    // Replace one event: modify in place when the tick is unchanged (the
+    // event keeps its position within its tick group — mid2agb stable-sorts,
+    // so same-tick order is significant), else remove + re-insert so ticks
+    // stay sorted.
+    void appendEventEditOps(std::vector<EditOp> &ops, int smfTrack, size_t index,
+                            const SmfEvent &event) const;
     bool laneEventMatches(const SmfEvent &ev, uint8_t cc, uint8_t channel) const;
     int laneValue(const SmfEvent &ev, uint8_t cc) const;
     SmfEvent makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick, int value) const;

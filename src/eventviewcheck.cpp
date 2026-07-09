@@ -47,24 +47,13 @@ int pickChunk(const SongDocument &doc)
 
 size_t countMatching(const SmfTrack &track, const SmfEvent &target)
 {
-    return size_t(std::count_if(
-        track.events.begin(), track.events.end(), [&](const SmfEvent &ev) {
-            return ev.tick == target.tick && ev.status == target.status
-                && ev.data0 == target.data0 && ev.data1 == target.data1
-                && ev.metaType == target.metaType && ev.blob == target.blob;
-        }));
+    return size_t(std::count(track.events.begin(), track.events.end(), target));
 }
 
 long long indexOf(const SmfTrack &track, const SmfEvent &target)
 {
-    for (size_t i = 0; i < track.events.size(); i++) {
-        const SmfEvent &ev = track.events[i];
-        if (ev.tick == target.tick && ev.status == target.status
-            && ev.data0 == target.data0 && ev.data1 == target.data1
-            && ev.metaType == target.metaType && ev.blob == target.blob)
-            return (long long)i;
-    }
-    return -1;
+    const auto it = std::find(track.events.begin(), track.events.end(), target);
+    return it == track.events.end() ? -1 : (long long)(it - track.events.begin());
 }
 
 int runUiPass(const SongInfo &song, const QString &screenshotPath)
@@ -136,6 +125,16 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
         doc.undoStack()->undo();
         if (model->rowCount() != int(doc.smf().tracks[chunk].events.size()) + 1)
             fail("table did not refresh after undo");
+
+        // 64-bit ticks must not squeeze through an int anywhere in the edit
+        // path (the event moves past everything, so it lands last).
+        const qulonglong bigTick = 3000000000ULL; // > INT_MAX
+        model->setData(model->index(0, 0), bigTick, Qt::EditRole);
+        QCoreApplication::processEvents();
+        const auto &evs = doc.smf().tracks[chunk].events;
+        if (evs.empty() || evs.back().tick != bigTick)
+            fail("a >INT_MAX tick edit did not land exactly");
+        doc.undoStack()->undo();
     }
 
     // Filter: the Meta entry must show exactly the chunk's meta events.
