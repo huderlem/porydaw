@@ -193,7 +193,8 @@ public:
     // Raw SMF edits (the MIDI event list view): direct event-level operations
     // on one chunk, indices being current positions in its event vector.
     // Insert places the event at its tick's canonical position (setup events
-    // ahead of same-tick notes, like every other edit); a modify that changes
+    // ahead of same-tick notes and note ends ahead of same-tick note-ons,
+    // like every other edit); a modify that changes
     // the tick re-inserts so event order stays non-decreasing — re-resolve
     // indices afterwards. No semantic validation happens here: an orphan
     // note-on or a bogus meta is the raw editor's prerogative (the SMF still

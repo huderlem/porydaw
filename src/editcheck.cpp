@@ -182,6 +182,39 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Abutting same-pitch notes, written right-to-left: the left
+            // note's end lands at the right note's on tick, and must be
+            // ordered before it — pairing (here and in mid2agb) gives every
+            // note-on the first same-key end after it, so an end placed
+            // after a same-tick note-on makes the left note swallow the
+            // right one and orphans the real end when the pair is deleted.
+            if (ok) {
+                const uint64_t seam = base + step * 72;
+                doc.addNote(track, seam, 60, step * 2, 100);
+                doc.addNote(track, seam - step * 2, 60, step * 2, 100);
+                mutateAndCheck("events unsorted after abutting addNote");
+                DocNote leftNote, rightNote;
+                if (!doc.findNote(track, seam - step * 2, 60, &leftNote)
+                    || !doc.findNote(track, seam, 60, &rightNote)
+                    || leftNote.duration != step * 2 || rightNote.duration != step * 2
+                    || leftNote.endIndex == rightNote.endIndex) {
+                    fail("abutting notes mis-paired (note end after same-tick note-on)");
+                    ok = false;
+                } else {
+                    doc.deleteNotes({leftNote, rightNote});
+                    bool leftover = false;
+                    for (const SmfEvent &ev :
+                         doc.smf().tracks[size_t(leftNote.smfTrack)].events) {
+                        leftover |= ev.tick >= seam - step * 2 && ev.isChannel()
+                            && (ev.isNoteOn() || ev.isNoteEnd());
+                    }
+                    if (leftover) {
+                        fail("deleting abutting notes left a note event behind");
+                        ok = false;
+                    }
+                }
+            }
+
             // Range edit: a multi-track/multi-lane batch of removals and
             // insertions must land as ONE undoable command.
             if (ok) {

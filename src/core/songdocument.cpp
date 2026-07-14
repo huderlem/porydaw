@@ -1254,6 +1254,20 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
                     --it;
                 }
             }
+            // A note end must precede same-tick note-ons: pairing (here and
+            // in mid2agb) gives every note-on the first same-key end that
+            // follows it, so an end landing after an on at the same tick
+            // gets claimed by that later note — the earlier note swallows
+            // its neighbors and the real end goes orphaned. Canonical
+            // intra-tick order is setup events, note ends, note-ons.
+            if (op.event.isChannel() && op.event.isNoteEnd()) {
+                while (it != evs.begin()) {
+                    const SmfEvent &prev = *std::prev(it);
+                    if (prev.tick != op.event.tick || !prev.isNoteOn())
+                        break;
+                    --it;
+                }
+            }
             op.index = size_t(it - evs.begin());
             evs.insert(it, op.event);
             op.oldEndTick = track.endTick;

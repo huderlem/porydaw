@@ -51,7 +51,10 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
 
         // Bucket-sum accounting: every timeline event must be presented
         // exactly once. Orphan note-offs land in the strip, so they are
-        // covered by stripFromEvents rather than counted separately.
+        // covered by stripFromEvents rather than counted separately. A
+        // consumed note-off counts once even when it ends several notes
+        // (mid2agb pairing: every note-on takes the first same-key end
+        // after it, without consuming it).
         const size_t tempoEvents =
             size_t(std::count_if(tl->events.begin(), tl->events.end(),
                                  [](const TimelineEvent &ev) {
@@ -61,7 +64,10 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
         for (const AutoLane &lane : model.lanes)
             lanePoints += lane.points.size();
         const size_t stripFromEvents = model.strip.size() - tl->otherEvents.size();
-        const size_t pairedOffs = model.notes.size() - model.unpairedNoteOns;
+        const size_t offEvents = size_t(
+            std::count_if(tl->events.begin(), tl->events.end(),
+                          [](const TimelineEvent &ev) { return ev.type == 0x8; }));
+        const size_t pairedOffs = offEvents - model.orphanNoteOffs;
         const size_t bucketSum = model.notes.size() + pairedOffs + lanePoints
             + model.voices.size() + tempoEvents + stripFromEvents;
         if (bucketSum != tl->events.size()) {

@@ -21,8 +21,13 @@ SongViewModel buildSongViewModel(const MidiTimeline &tl)
 {
     SongViewModel model;
 
-    // FIFO of open note indices per (track, key): simultaneous re-strikes of
-    // the same key pair off in order, matching how the engine steals them.
+    // Open note indices per (track, key). A note end closes every note still
+    // open on its key: mid2agb pairs each note-on with the first same-key end
+    // that follows it without consuming it, and SongDocument::notesForTrack
+    // mirrors that — pairing the same way here keeps the roll showing exactly
+    // what edits operate on and what the build produces (a mis-ordered
+    // same-tick end/on pair renders as the zero-length note it really is
+    // instead of being papered over).
     std::array<std::vector<size_t>, 16 * 128> open;
 
     for (const TimelineEvent &ev : tl.events) {
@@ -50,10 +55,12 @@ SongViewModel buildSongViewModel(const MidiTimeline &tl)
                      QStringLiteral("Note off (key %1) without a note on").arg(ev.data0)});
                 break;
             }
-            ViewNote &note = model.notes[stack.front()];
-            note.endTick = ev.tick;
-            note.unterminated = false;
-            stack.erase(stack.begin());
+            for (size_t idx : stack) {
+                ViewNote &note = model.notes[idx];
+                note.endTick = ev.tick;
+                note.unterminated = false;
+            }
+            stack.clear();
             break;
         }
         case 0xB: { // control change
