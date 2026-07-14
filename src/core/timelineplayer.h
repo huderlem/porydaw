@@ -12,9 +12,10 @@ extern "C" {
 // audio between them. Shared by the real-time audio callback (AudioEngine)
 // and the offline render CLI so both play back identically.
 //
-// Loop behavior matches the GBA's GOTO command: events at the loop end play
-// before the wrap, then events at the loop start replay; events positioned
-// after the loop end are unreachable while looping. Notes are the exception:
+// Loop behavior matches the GBA's GOTO command (and poryaaaa_render's event
+// expansion): events at the loop end play before the wrap, then events at the
+// loop start replay; events positioned after the loop end are unreachable
+// while looping. Notes are the exception:
 // a note starting at the loop end does not sound (mid2agb orders same-tick
 // events so the GOTO lands after note-ends but before note-starts), and any
 // note still keyed on at the wrap is released — its note-off lies beyond the
