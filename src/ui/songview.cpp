@@ -957,6 +957,9 @@ protected:
                 m_sv->setSelection({id});
             }
             m_sv->announceNote(*hit);
+            // Reaper-style velocity latch: touching a note makes its velocity
+            // the default for the next drawn note.
+            m_lastVelocity = hit->velocity;
             if (nearRightEdge(*hit, event->pos())) {
                 m_drag = Drag::Resize;
             } else if (nearLeftEdge(*hit, event->pos())) {
@@ -1237,6 +1240,9 @@ protected:
             m_sv->setSelection(std::move(ids));
         } else if (doc && drag == Drag::Velocity && m_dVel != 0) {
             doc->nudgeNotesVelocity(resolveSelection(), m_dVel);
+            // Latch the dragged note's final velocity for the next draw.
+            m_lastVelocity =
+                uint8_t(std::clamp(int(m_velAnchor.velocity) + m_dVel, 1, 127));
         }
         m_dTick = 0;
         m_dKey = 0;
@@ -1620,8 +1626,10 @@ private:
                 SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
                     .arg(mid2agbEffectiveVelocity(1)),
                 notes.front().velocity, 1, 127, 1, &ok);
-            if (ok)
+            if (ok) {
                 doc->setNotesVelocity(notes, uint8_t(v));
+                m_lastVelocity = uint8_t(v);
+            }
         } else if (chosen == del) {
             doc->deleteNotes(notes);
             m_sv->clearSelection();
@@ -1706,7 +1714,8 @@ private:
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
     int m_soundingKey = -1;    // auditioned key highlighted on the keyboard
     bool m_auditioned = false; // a drag/draw preview note is sounding
-    uint8_t m_lastVelocity = 100;
+    uint8_t m_lastVelocity = 100; // new-note default; latches to the last
+                                  // clicked/velocity-edited note
     bool m_panning = false;    // middle-drag pan
     QPoint m_panPos;           // last pan sample, global coords
 };

@@ -36,6 +36,7 @@ qt_add_executable(porydaw
     src/songsession.h
     src/tabcheck.cpp
     src/eventviewcheck.cpp
+    src/rollcheck.cpp
     src/viewcheck.cpp
     src/roundtrip.cpp
     src/editcheck.cpp

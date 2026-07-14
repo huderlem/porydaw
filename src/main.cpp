@@ -32,6 +32,10 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel);
 // sidecars into the project: use a copy).
 int runTabCheck(const QString &projectRoot, const QString &songA,
                 const QString &songB);
+// rollcheck.cpp; piano-roll gesture check (pencil draw + velocity latch);
+// the optional path saves the rendered view after the gestures.
+int runRollCheck(const QString &projectRoot, const QString &songLabel,
+                 const QString &screenshotPath = QString());
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -96,6 +100,12 @@ int main(int argc, char *argv[])
         const QString path =
             eventViewCheck + 3 < args.size() ? args[eventViewCheck + 3] : QString();
         return runEventViewCheck(args[eventViewCheck + 1], song, path);
+    }
+    const int rollCheck = args.indexOf(QStringLiteral("--rollcheck"));
+    if (rollCheck >= 0 && rollCheck + 2 < args.size()) {
+        const QString path =
+            rollCheck + 3 < args.size() ? args[rollCheck + 3] : QString();
+        return runRollCheck(args[rollCheck + 1], args[rollCheck + 2], path);
     }
     const int roundTrip = args.indexOf(QStringLiteral("--roundtrip"));
     if (roundTrip >= 0 && roundTrip + 1 < args.size()) {
