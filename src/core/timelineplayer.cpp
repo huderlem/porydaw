@@ -85,6 +85,10 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
 
 void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
 {
+    // Both seek callers release the engine's sounding notes around the seek
+    // (their note-offs may be behind the new position or gone entirely), so
+    // nothing stays keyed on across it.
+    clearKeyedOn();
     m_pos = pos;
     m_cursor = size_t(std::lower_bound(timeline->events.begin(), timeline->events.end(), pos,
                                        [](const TimelineEvent &e, uint64_t p) {
@@ -105,10 +109,31 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
         for (;;) {
             while (m_cursor < timeline->events.size()
                    && timeline->events[m_cursor].samplePos <= m_pos) {
-                dispatchEvent(engine, timeline->events[m_cursor], muteMask);
+                const TimelineEvent &ev = timeline->events[m_cursor];
                 m_cursor++;
+                // While looping, a note starting at the loop end must not
+                // sound: the wrap replaces it with the loop-start events, and
+                // its note-off lies beyond the loop end where playback never
+                // goes (mid2agb orders the GOTO before same-tick note starts,
+                // so it is unreachable on hardware too).
+                if (loop && ev.type == 0x9 && ev.samplePos >= timeline->loopEndSample)
+                    continue;
+                if (ev.type == 0x9 && !((muteMask >> ev.track) & 1))
+                    m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
+                else if (ev.type == 0x8)
+                    m_keyedOn[ev.track][ev.data0 & 0x7F] = false;
+                dispatchEvent(engine, ev, muteMask);
             }
             if (loop && m_pos >= timeline->loopEndSample) {
+                // Any note still keyed on here has its note-off beyond the
+                // loop end, which looping playback can never reach — release
+                // it now instead of holding it forever.
+                for (int track = 0; track < 16; track++)
+                    for (int key = 0; key < 128; key++)
+                        if (m_keyedOn[track][key]) {
+                            m4a_engine_note_off(engine, track, uint8_t(key));
+                            m_keyedOn[track][key] = false;
+                        }
                 m_pos = timeline->loopStartSample;
                 m_cursor = size_t(std::lower_bound(timeline->events.begin(),
                                                    timeline->events.end(), m_pos,

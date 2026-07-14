@@ -45,6 +45,7 @@ qt_add_executable(porydaw
     src/vgcheck.cpp
     src/vgsavecheck.cpp
     src/exportcheck.cpp
+    src/loopcheck.cpp
     src/mkcheck.cpp
     src/sessioncheck.cpp
     src/audio/audioengine.cpp

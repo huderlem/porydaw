@@ -36,6 +36,8 @@ int runTabCheck(const QString &projectRoot, const QString &songA,
 // the optional path saves the rendered view after the gestures.
 int runRollCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &screenshotPath = QString());
+// loopcheck.cpp; loop-wrap playback check (self-contained, no project needed).
+int runLoopCheck();
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -90,6 +92,8 @@ int main(int argc, char *argv[])
     if (tabCheck >= 0 && tabCheck + 3 < args.size())
         return runTabCheck(args[tabCheck + 1], args[tabCheck + 2],
                            args[tabCheck + 3]);
+    if (args.contains(QStringLiteral("--loopcheck")))
+        return runLoopCheck();
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);

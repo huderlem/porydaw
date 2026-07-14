@@ -12,10 +12,13 @@ extern "C" {
 // audio between them. Shared by the real-time audio callback (AudioEngine)
 // and the offline render CLI so both play back identically.
 //
-// Loop behavior matches the GBA's GOTO command (and poryaaaa_render's event
-// expansion): events at the loop end play before the wrap, then events at the
-// loop start replay; events positioned after the loop end are unreachable
-// while looping.
+// Loop behavior matches the GBA's GOTO command: events at the loop end play
+// before the wrap, then events at the loop start replay; events positioned
+// after the loop end are unreachable while looping. Notes are the exception:
+// a note starting at the loop end does not sound (mid2agb orders same-tick
+// events so the GOTO lands after note-ends but before note-starts), and any
+// note still keyed on at the wrap is released — its note-off lies beyond the
+// loop end, so it would otherwise be held forever.
 class TimelinePlayer
 {
 public:
@@ -23,6 +26,7 @@ public:
     {
         m_pos = 0;
         m_cursor = 0;
+        clearKeyedOn();
     }
 
     uint64_t position() const { return m_pos; }
@@ -49,6 +53,16 @@ public:
 private:
     static void dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask);
 
+    void clearKeyedOn()
+    {
+        for (auto &track : m_keyedOn)
+            for (bool &key : track)
+                key = false;
+    }
+
     uint64_t m_pos = 0;
     size_t m_cursor = 0;
+    // Notes keyed on with no note-off dispatched yet, so the loop wrap can
+    // release the ones whose note-off lies beyond the loop end.
+    bool m_keyedOn[16][128] = {};
 };
