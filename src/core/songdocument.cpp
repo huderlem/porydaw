@@ -1162,6 +1162,55 @@ int SongDocument::addTrack(int voice)
     return -1;
 }
 
+int SongDocument::duplicateTrack(int engineTrack)
+{
+    const int smfTrack = smfTrackFor(engineTrack);
+    if (smfTrack < 0 || !canAddTrack())
+        return -1;
+    const int channel = freeChannel();
+    const SmfTrack &src = m_smf.tracks[smfTrack];
+    std::vector<EditOp> ops;
+    int newSmfTrack = 0;
+    if (m_smf.format != 0) {
+        newSmfTrack = int(m_smf.tracks.size());
+        EditOp insert;
+        insert.type = EditOp::InsertTrack;
+        insert.smfTrack = newSmfTrack;
+        insert.trackData.endTick = src.endTick;
+        for (const SmfEvent &ev : src.events) {
+            if (!ev.isChannel())
+                continue;
+            SmfEvent copy = ev;
+            copy.status = uint8_t((ev.status & 0xF0) | channel);
+            insert.trackData.events.push_back(copy);
+        }
+        ops.push_back(std::move(insert));
+    } else {
+        const uint8_t srcChannel = channelFor(engineTrack);
+        for (const SmfEvent &ev : src.events) {
+            if (!ev.isChannel() || ev.channel() != srcChannel)
+                continue;
+            EditOp op;
+            op.type = EditOp::InsertEvent;
+            op.smfTrack = 0;
+            op.event = ev;
+            op.event.status = uint8_t((ev.status & 0xF0) | channel);
+            ops.push_back(std::move(op));
+        }
+    }
+    if (ops.empty())
+        return -1;
+    pushEdit(tr("duplicate track"), std::move(ops));
+
+    if (m_smf.format == 0)
+        return channel;
+    for (int t = 0; t < engineTrackCount(); t++) {
+        if (m_engineToSmf[t] == newSmfTrack)
+            return t;
+    }
+    return -1;
+}
+
 void SongDocument::deleteTrack(int engineTrack)
 {
     const int smfTrack = smfTrackFor(engineTrack);

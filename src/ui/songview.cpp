@@ -3272,13 +3272,19 @@ protected:
         m_sv->selectTrack(m_track);
         QMenu menu(this);
         QAction *voiceAction = menu.addAction(SongView::tr("Change voice..."));
+        QAction *duplicateAction = menu.addAction(SongView::tr("Duplicate track"));
+        duplicateAction->setEnabled(m_sv->document()->canAddTrack());
         QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
         QAction *chosen = menu.exec(event->globalPos());
-        // Queued: both edits rebuild the header panel, which deletes this
+        // Queued: these edits rebuild the header panel, which deletes this
         // row out from under its own event handler.
         if (chosen == voiceAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
+                Qt::QueuedConnection);
+        } else if (chosen == duplicateAction) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->duplicateTrack(t); },
                 Qt::QueuedConnection);
         } else if (chosen == deleteAction) {
             QMetaObject::invokeMethod(
@@ -3320,8 +3326,8 @@ public:
                                   .arg(tl->tracks[t].noteCount)
                                   .arg(m_sv->instrumentLabel(t));
                 if (m_sv->document())
-                    tip += SongView::tr(
-                        "\nDouble-click to change the voice · right-click to delete");
+                    tip += SongView::tr("\nDouble-click to change the voice · "
+                                        "right-click to duplicate or delete");
                 row->setToolTip(tip);
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
@@ -4397,6 +4403,17 @@ void SongView::addTrack()
     if (track >= 0) {
         selectTrack(track);
         announce(tr("Added track %1").arg(track + 1));
+    }
+}
+
+void SongView::duplicateTrack(int track)
+{
+    if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
+        return;
+    const int copy = m_document->duplicateTrack(track); // rebuilds via documentChanged
+    if (copy >= 0) {
+        selectTrack(copy);
+        announce(tr("Duplicated track %1 as track %2").arg(track + 1).arg(copy + 1));
     }
 }
 

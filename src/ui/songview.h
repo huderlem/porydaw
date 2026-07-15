@@ -168,11 +168,14 @@ public:
     // first program change), inserting one at tick 0 if the track has none.
     void editTrackVoice(int track);
 
-    // Track create/delete (header-panel entry points; both undoable through
-    // the document). addTrack picks the new track's voice first, then selects
-    // the created track; deleteTrack shifts the view's per-track state
-    // (mute/solo, empty lanes, selection) over the removed engine slot.
+    // Track create/duplicate/delete (header-panel entry points; all undoable
+    // through the document). addTrack picks the new track's voice first, then
+    // selects the created track; duplicateTrack selects the copy (a fresh
+    // slot, so no per-track view state moves); deleteTrack shifts the view's
+    // per-track state (mute/solo, empty lanes, selection) over the removed
+    // engine slot.
     void addTrack();
+    void duplicateTrack(int track);
     void deleteTrack(int track);
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,

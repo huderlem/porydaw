@@ -447,6 +447,37 @@ int runEditCheck(const QString &projectRoot)
             }
         }
 
+        // Duplicating a song track: the copy lands on a fresh engine slot
+        // carrying the same notes as the source.
+        if (ok && track >= 0 && doc.canAddTrack()) {
+            const auto srcNotes = doc.notesForTrack(track);
+            const int copy = doc.duplicateTrack(track);
+            mutateAndCheck("events unsorted after duplicateTrack");
+            if (copy < 0) {
+                fail("duplicateTrack returned no track with canAddTrack true");
+                ok = false;
+            } else if (copy == track) {
+                fail("duplicateTrack returned the source track");
+                ok = false;
+            } else if (ok) {
+                const auto copyNotes = doc.notesForTrack(copy);
+                bool same = copyNotes.size() == srcNotes.size();
+                for (size_t i = 0; same && i < copyNotes.size(); i++) {
+                    same = copyNotes[i].tick == srcNotes[i].tick
+                        && copyNotes[i].key == srcNotes[i].key
+                        && copyNotes[i].duration == srcNotes[i].duration
+                        && copyNotes[i].velocity == srcNotes[i].velocity;
+                }
+                if (!same) {
+                    fail("duplicated track's notes differ from the source");
+                    ok = false;
+                } else {
+                    doc.deleteTrack(copy);
+                    mutateAndCheck("events unsorted after deleting the duplicate");
+                }
+            }
+        }
+
         // Deleting an original track must not lose the loop markers, even
         // when they live in the removed chunk (they get rescued into the seq
         // chunk). Undone right away so the loop/cfg script below still runs

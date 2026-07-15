@@ -226,6 +226,12 @@ public:
     // is free.
     bool canAddTrack() const;
     int addTrack(int voice);
+    // Copy a track onto a fresh engine slot: its channel events land on a
+    // free MIDI channel (a new appended chunk in format 1, the single chunk
+    // in format 0). Metas are not copied — a duplicated tempo, time
+    // signature, or loop marker would double up as a global event. Returns
+    // the copy's engine track, -1 when no slot is free.
+    int duplicateTrack(int engineTrack);
     // Format 1: removes the track's chunk — except chunk 0 (the seq chunk
     // mid2agb reads tempo/timesig/loop from), which only has its channel
     // events stripped; a winning loop marker inside a removed chunk is moved
