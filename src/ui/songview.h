@@ -216,6 +216,7 @@ public:
     // time-signature segment (fine snap stays on the absolute clock grid).
     uint64_t snapTick(double tick, bool fine = false) const;
     uint64_t snapTickDown(double tick) const;
+    uint64_t snapTickUp(double tick) const;
 
     // Note selection on the selected track, identified by (startTick, key) so
     // it survives document rebuilds.

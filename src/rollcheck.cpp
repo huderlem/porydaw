@@ -254,6 +254,22 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         || resized.duration != 2 * d.dur)
         fail("off-grid right-edge drag did not snap the end to the ruler grid");
 
+    // Overshooting the drag past the note's start must stop at one grid
+    // cell, not collapse to the document's 1-tick floor.
+    const QPoint edge2(
+        songview::kKeyboardW + view.contentX(double(d.tick + 2 * d.dur)), rowY);
+    const QPoint overshoot(
+        songview::kKeyboardW + view.contentX(double(d.tick) - 0.5 * double(d.dur)),
+        rowY);
+    sendMouse(roll, QEvent::MouseButtonPress, edge2, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(roll, QEvent::MouseMove, overshoot, Qt::NoButton, Qt::LeftButton);
+    sendMouse(roll, QEvent::MouseButtonRelease, overshoot, Qt::LeftButton,
+              Qt::NoButton);
+    DocNote collapsed;
+    if (!doc.findNote(track, d.tick, uint8_t(d.key), &collapsed)
+        || collapsed.duration != d.dur)
+        fail("overshot right-edge drag did not stop at one grid cell");
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -262,14 +278,14 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Seven commands: draw, set, draw, nudge, draw, add, resize. Undoing
-    // them all must restore the original bytes.
+    // Eight commands: draw, set, draw, nudge, draw, add, two resizes.
+    // Undoing them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 7)
+    if (undos != 8)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");

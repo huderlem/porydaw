@@ -963,9 +963,11 @@ protected:
             if (nearRightEdge(*hit, event->pos())) {
                 m_drag = Drag::Resize;
                 m_gripTick = hit->endTick;
+                m_gripOpposite = hit->startTick;
             } else if (nearLeftEdge(*hit, event->pos())) {
                 m_drag = Drag::ResizeLeft;
                 m_gripTick = hit->startTick;
+                m_gripOpposite = hit->endTick;
             } else if (nearVelocityHandle(*hit, event->pos())) {
                 m_drag = Drag::Velocity;
                 m_velAnchor = *hit;
@@ -1088,7 +1090,16 @@ protected:
             // moved grab is a no-op and the starting length remains
             // reachable mid-drag.
             const double desired = double(m_gripTick) + (tick - m_pressTick);
-            const double snapped = double(m_sv->snapTick(desired));
+            // A snapped drag never collapses the grabbed note: the dragged
+            // edge stops at the first grid line strictly inside the
+            // opposite edge, however far the cursor overshoots. (The
+            // document's own 1-tick floor stays as a backstop for the
+            // other notes of a multi-selection.)
+            const uint64_t snapped = m_drag == Drag::Resize
+                ? std::max(m_sv->snapTick(desired),
+                           m_sv->snapTickUp(double(m_gripOpposite) + 1.0))
+                : std::min(m_sv->snapTick(desired),
+                           m_sv->snapTickDown(double(m_gripOpposite) - 1.0));
             const int64_t d =
                 std::abs(desired - double(m_gripTick)) < std::abs(desired - snapped)
                     ? 0
@@ -1703,7 +1714,8 @@ private:
     QPoint m_curPos;
     double m_pressTick = 0.0;
     int m_pressKey = 0;
-    uint64_t m_gripTick = 0;   // edge tick grabbed by a resize drag
+    uint64_t m_gripTick = 0;     // edge tick grabbed by a resize drag
+    uint64_t m_gripOpposite = 0; // …and the note's other edge (the pivot)
     int64_t m_dTick = 0;
     int m_dKey = 0;
     int64_t m_dDur = 0;
@@ -3779,6 +3791,20 @@ uint64_t SongView::snapTickDown(double tick) const
     const GridSeg seg = gridSegAt(uint64_t(tick));
     const uint64_t g = std::max<uint64_t>(1, gridTicksIn(seg));
     return seg.start + uint64_t((tick - double(seg.start)) / double(g)) * g;
+}
+
+uint64_t SongView::snapTickUp(double tick) const
+{
+    tick = std::max(0.0, tick);
+    const GridSeg seg = gridSegAt(uint64_t(tick));
+    const uint64_t g = std::max<uint64_t>(1, gridTicksIn(seg));
+    const uint64_t lo =
+        seg.start + uint64_t((tick - double(seg.start)) / double(g)) * g;
+    if (double(lo) >= tick)
+        return lo;
+    // The next signature's tick is itself a grid position (the grid
+    // restarts there), so the upper candidate never crosses it.
+    return std::min(lo + g, seg.next);
 }
 
 bool SongView::isSelected(const ViewNote &note) const
