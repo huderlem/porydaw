@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "core/mid2agbtables.h"
+
 void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev,
                                    uint32_t muteMask)
 {
@@ -107,6 +109,18 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
         // Dispatch every event due at the current position, wrapping the loop
         // as needed.
         for (;;) {
+            // Gate-carried releases fire before regular events at the same
+            // position: on hardware the channel gate hits zero as the clock
+            // advances, before the track's commands at that clock run.
+            for (int i = 0; i < m_pendingOffCount;) {
+                if (m_pendingOffs[i].samplePos <= m_pos) {
+                    m4a_engine_note_off(engine, m_pendingOffs[i].track, m_pendingOffs[i].key);
+                    m_keyedOn[m_pendingOffs[i].track][m_pendingOffs[i].key] = false;
+                    m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
+                } else {
+                    i++;
+                }
+            }
             while (m_cursor < timeline->events.size()
                    && timeline->events[m_cursor].samplePos <= m_pos) {
                 const TimelineEvent &ev = timeline->events[m_cursor];
@@ -118,22 +132,16 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
                 // so it is unreachable on hardware too).
                 if (loop && ev.type == 0x9 && ev.samplePos >= timeline->loopEndSample)
                     continue;
-                if (ev.type == 0x9 && !((muteMask >> ev.track) & 1))
+                if (ev.type == 0x9 && !((muteMask >> ev.track) & 1)) {
                     m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
-                else if (ev.type == 0x8)
+                    m_keyedOnTick[ev.track][ev.data0 & 0x7F] = ev.tick;
+                } else if (ev.type == 0x8) {
                     m_keyedOn[ev.track][ev.data0 & 0x7F] = false;
+                }
                 dispatchEvent(engine, ev, muteMask);
             }
             if (loop && m_pos >= timeline->loopEndSample) {
-                // Any note still keyed on here has its note-off beyond the
-                // loop end, which looping playback can never reach — release
-                // it now instead of holding it forever.
-                for (int track = 0; track < 16; track++)
-                    for (int key = 0; key < 128; key++)
-                        if (m_keyedOn[track][key]) {
-                            m4a_engine_note_off(engine, track, uint8_t(key));
-                            m_keyedOn[track][key] = false;
-                        }
+                wrapNotes(engine, timeline);
                 m_pos = timeline->loopStartSample;
                 m_cursor = size_t(std::lower_bound(timeline->events.begin(),
                                                    timeline->events.end(), m_pos,
@@ -146,10 +154,12 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
             break;
         }
 
-        // Render up to the next event or the loop end.
+        // Render up to the next event, pending release, or the loop end.
         uint64_t next = UINT64_MAX;
         if (m_cursor < timeline->events.size())
             next = timeline->events[m_cursor].samplePos;
+        for (int i = 0; i < m_pendingOffCount; i++)
+            next = std::min(next, m_pendingOffs[i].samplePos);
         if (loop)
             next = std::min(next, timeline->loopEndSample);
 
@@ -162,5 +172,66 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
         m4a_engine_process(engine, outL + done, outR + done, int(n));
         m_pos += n;
         done += n;
+    }
+}
+
+// Applies mid2agb's note semantics at the loop wrap. A note still keyed on
+// here crosses the loop end: its note-off lies beyond it, where looping
+// playback never goes. mid2agb emits notes of <= 96 clocks as direct note
+// commands whose gate lives on the sound channel — the GOTO doesn't touch
+// channel state, so on hardware the note keeps sounding and releases at its
+// written duration, now at the wrapped position (gate-carry). Longer notes
+// become TIE + EOT; the EOT is beyond the loop end and unreachable, so the
+// note is held forever, a fresh instance stacking every pass.
+void TimelinePlayer::wrapNotes(M4AEngine *engine, const MidiTimeline *timeline)
+{
+    // A gate-carried release this pass never reached keeps counting through
+    // the wrap, like the channel gate it models.
+    for (int i = 0; i < m_pendingOffCount; i++) {
+        PendingOff &p = m_pendingOffs[i];
+        p.tick = timeline->loopStartTick + (p.tick - timeline->loopEndTick);
+        p.samplePos = timeline->sampleForTick(p.tick);
+    }
+
+    for (int track = 0; track < 16; track++) {
+        for (int key = 0; key < 128; key++) {
+            if (!m_keyedOn[track][key])
+                continue;
+            bool carried = false;
+            for (int i = 0; i < m_pendingOffCount && !carried; i++)
+                carried = m_pendingOffs[i].track == track && m_pendingOffs[i].key == key;
+            if (carried)
+                continue;
+
+            // The note's off event, somewhere beyond the loop end (first
+            // matching off, which is also how mid2agb pairs notes).
+            const TimelineEvent *off = nullptr;
+            for (size_t i = m_cursor; i < timeline->events.size(); i++) {
+                const TimelineEvent &e = timeline->events[i];
+                if (e.type == 0x8 && e.track == track && (e.data0 & 0x7F) == key) {
+                    off = &e;
+                    break;
+                }
+            }
+            if (off) {
+                // exactGate=true: only the raw clock count matters here — the
+                // duration LUT never moves a note across the 96-clock line.
+                const int clocks = mid2agbEffectiveDuration(
+                    int64_t(off->tick) - int64_t(m_keyedOnTick[track][key]),
+                    timeline->ticksPerBeat, timeline->extendedClocks, true);
+                if (clocks > 96)
+                    continue; // TIE + EOT: the EOT is unreachable — held forever
+                if (m_pendingOffCount < kMaxPendingOffs) {
+                    const uint64_t tick =
+                        timeline->loopStartTick + (uint64_t(off->tick) - timeline->loopEndTick);
+                    m_pendingOffs[m_pendingOffCount++] = {timeline->sampleForTick(tick), tick,
+                                                          uint8_t(track), uint8_t(key)};
+                    continue;
+                }
+            }
+            // No note-off in the file (or no room to carry one): release now.
+            m4a_engine_note_off(engine, track, uint8_t(key));
+            m_keyedOn[track][key] = false;
+        }
     }
 }

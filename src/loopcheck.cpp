@@ -16,12 +16,16 @@ extern "C" {
 // --loopcheck: loop-wrap playback check, fully self-contained (no project
 // needed). Synthesizes a looping song exercising every note/loop-boundary
 // relationship — a normal body note, a note ending exactly at the loop end,
-// a note spanning the loop end, and a note starting exactly at the loop end
-// (the downbeat of the next measure) — then renders across several wraps and
-// asserts no note is left keyed on forever. mid2agb sorts same-tick events so
-// the loop GOTO lands after note-ends but before note starts, so a note
-// starting at the loop end must not sound while looping, while one ending
-// there must still release.
+// short and long notes spanning the loop end, and a note starting exactly at
+// the loop end (the downbeat of the next measure) — then renders across
+// several wraps and asserts the engine's keyed-on channels match hardware:
+// mid2agb sorts same-tick events so the loop GOTO lands after note-ends but
+// before note-starts, so a note starting at the loop end never sounds while
+// looping and one ending there still releases; a spanning note of <= 96
+// clocks (a direct note command) gate-carries across the wrap and releases
+// at its full written duration; a longer spanning note (TIE + EOT, the EOT
+// unreachable beyond the loop end) is held forever, stacking one fresh
+// instance per pass.
 
 namespace {
 
@@ -35,8 +39,11 @@ constexpr uint64_t kLoopStartTick = 96;  // measure 2
 constexpr uint64_t kLoopEndTick = 288;   // downbeat of measure 4
 constexpr uint8_t kBodyKey = 60;     // ticks 96-120, plays every pass
 constexpr uint8_t kEndsAtKey = 62;   // ticks 264-288, off exactly at loop end
-constexpr uint8_t kSpansKey = 65;    // ticks 240-300, crosses the loop end
+constexpr uint8_t kSpansKey = 65;    // ticks 240-300, crosses the loop end (60
+                                     // clocks: direct note -> gate-carry)
 constexpr uint8_t kBoundaryKey = 64; // ticks 288-312, the reported stuck note
+constexpr uint8_t kTieKey = 67;      // ticks 192-312, crosses the loop end (120
+                                     // clocks: TIE + EOT -> held forever)
 
 SmfEvent channelEvent(uint64_t tick, uint8_t status, uint8_t data0, uint8_t data1)
 {
@@ -78,6 +85,7 @@ SmfFile buildLoopSong()
     };
     notes.events.push_back(channelEvent(0, 0xC0, 0, 0));
     note(96, 120, kBodyKey);
+    note(192, 312, kTieKey);
     note(240, 300, kSpansKey);
     note(264, 288, kEndsAtKey);
     note(288, 312, kBoundaryKey);
@@ -198,21 +206,30 @@ int runLoopCheck()
     }
     const uint64_t loopLen = timeline->loopEndSample - timeline->loopStartSample;
 
-    // Looping playback. The quiet-zone probe sits after the body note's
-    // release and before the spanning note starts; anything keyed on there is
-    // a note the wrap orphaned from its note-off.
-    const uint64_t quiet = 200000, bodyStart = 298000;
+    // Looping playback, probed in un-wrapped (global) time. The quiet-zone
+    // probes sit after the body note's release and before the short spanning
+    // note starts, where only the tied note may sound — one held instance
+    // per completed pass, plus the pass's own retrigger. The short spanning
+    // note (ticks 240-300) gate-carries across the wrap at tick 288 and
+    // releases at its full written duration — global sample 300000 — so it
+    // is still keyed at 298000 and gone by 310000.
+    const uint64_t quiet = 200000, bodyStart = 298000, afterCarry = 310000;
     failures += runProbes(*timeline, true,
-                          {{quiet, {}, "pass-1 quiet zone"},
-                           {bodyStart, {kBodyKey}, "pass-2 body note plays, "
-                                                   "loop-end note-off honored"},
-                           {quiet + loopLen, {}, "pass-2 quiet zone (stuck notes)"},
-                           {quiet + 2 * loopLen, {}, "pass-3 quiet zone (stuck notes)"}});
+                          {{quiet, {kTieKey}, "pass-1 tied note sounds"},
+                           {bodyStart, {kBodyKey, kSpansKey, kTieKey},
+                            "pass-2 gate-carry holds across the wrap, "
+                            "loop-end note-off honored"},
+                           {afterCarry, {kBodyKey, kTieKey},
+                            "gate-carry releases at written duration"},
+                           {quiet + loopLen, {kTieKey, kTieKey},
+                            "pass-2 tied note stacks, no other stuck notes"},
+                           {quiet + 2 * loopLen, {kTieKey, kTieKey, kTieKey},
+                            "pass-3 tied note stacks again"}});
 
     // Not looping: playback runs straight through, so the note at the loop
-    // end and the note spanning it both sound normally.
+    // end and both notes spanning it sound normally.
     failures += runProbes(*timeline, false,
-                          {{bodyStart, {kBoundaryKey, kSpansKey},
+                          {{bodyStart, {kBoundaryKey, kSpansKey, kTieKey},
                             "loop-boundary notes play when not looping"}});
 
     std::printf("loopcheck: %s\n", failures == 0 ? "PASS" : "FAIL");

@@ -15,11 +15,17 @@ extern "C" {
 // Loop behavior matches the GBA's GOTO command (and poryaaaa_render's event
 // expansion): events at the loop end play before the wrap, then events at the
 // loop start replay; events positioned after the loop end are unreachable
-// while looping. Notes are the exception:
-// a note starting at the loop end does not sound (mid2agb orders same-tick
-// events so the GOTO lands after note-ends but before note-starts), and any
-// note still keyed on at the wrap is released — its note-off lies beyond the
-// loop end, so it would otherwise be held forever.
+// while looping. Notes follow mid2agb's same-tick ordering (the GOTO lands
+// after note-ends but before note-starts) and the hardware channel gate:
+//  - a note starting at the loop end never sounds — its note-off lies beyond
+//    the loop end, which looping playback never reaches;
+//  - a note crossing the loop end that mid2agb emits as a direct note command
+//    (<= 96 clocks) keeps its channel gate counting across the wrap — the
+//    GOTO touches no channel state — so its release is rescheduled at the
+//    wrapped position (gate-carry);
+//  - a longer crossing note becomes TIE + EOT with the EOT beyond the loop
+//    end, unreachable, so it is held forever and a fresh instance stacks
+//    every pass — exactly as on hardware.
 class TimelinePlayer
 {
 public:
@@ -29,6 +35,16 @@ public:
         m_cursor = 0;
         clearKeyedOn();
     }
+
+    // A note-off rescheduled past a loop wrap (gate-carry), tracked in both
+    // tick and sample domains so later wraps can re-wrap it through the
+    // tempo map, like the channel gate it models.
+    struct PendingOff {
+        uint64_t samplePos;
+        uint64_t tick;
+        uint8_t track;
+        uint8_t key;
+    };
 
     uint64_t position() const { return m_pos; }
 
@@ -54,16 +70,25 @@ public:
 private:
     static void dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask);
 
+    void wrapNotes(M4AEngine *engine, const MidiTimeline *timeline);
+
     void clearKeyedOn()
     {
         for (auto &track : m_keyedOn)
             for (bool &key : track)
                 key = false;
+        m_pendingOffCount = 0;
     }
 
     uint64_t m_pos = 0;
     size_t m_cursor = 0;
-    // Notes keyed on with no note-off dispatched yet, so the loop wrap can
-    // release the ones whose note-off lies beyond the loop end.
+    // Notes keyed on with no note-off dispatched yet, and the tick each
+    // started at, so the loop wrap can classify notes crossing the loop end.
     bool m_keyedOn[16][128] = {};
+    uint32_t m_keyedOnTick[16][128] = {};
+    // Gate-carried releases in flight. One entry per crossing (track, key)
+    // per wrap; only a loop shorter than the note itself can accumulate more.
+    static constexpr int kMaxPendingOffs = 128;
+    PendingOff m_pendingOffs[kMaxPendingOffs];
+    int m_pendingOffCount = 0;
 };

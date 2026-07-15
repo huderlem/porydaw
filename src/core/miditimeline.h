@@ -81,6 +81,11 @@ public:
     int usedTrackCount = 0;
 
     double sampleRate = 0.0;
+    // mid2agb -X (48 clocks/beat) for this song: raises the tick length at
+    // which a note becomes TIE + EOT, which decides its fate at a loop wrap
+    // (see TimelinePlayer). Set by the owner right after build(); the default
+    // matches mid2agb's default 24 clocks/beat.
+    bool extendedClocks = false;
     uint64_t lengthSamples = 0; // sample position of the last event
     uint64_t loopStartSample = UINT64_MAX;
     uint64_t loopEndSample = UINT64_MAX;

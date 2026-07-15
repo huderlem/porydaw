@@ -119,6 +119,7 @@ endif()
 # ---- Offline render CLI (development/testing: parity vs poryaaaa_render) ----
 add_executable(porydaw_render_cli
     tools/porydaw_render_cli.cpp
+    src/core/mid2agbtables.cpp
     src/core/miditimeline.cpp
     src/core/smf.cpp
     src/core/timelineplayer.cpp

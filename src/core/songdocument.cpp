@@ -1225,7 +1225,10 @@ void SongDocument::setCfg(const SongCfg &cfg)
 
 std::unique_ptr<MidiTimeline> SongDocument::buildTimeline(double sampleRate) const
 {
-    return MidiTimeline::build(m_smf, sampleRate);
+    auto timeline = MidiTimeline::build(m_smf, sampleRate);
+    if (timeline)
+        timeline->extendedClocks = m_cfg.extendedClocks;
+    return timeline;
 }
 
 void SongDocument::applyOps(std::vector<EditOp> &ops)
