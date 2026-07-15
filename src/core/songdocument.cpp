@@ -734,6 +734,49 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
     pushEdit(text, std::move(ops));
 }
 
+void SongDocument::moveRange(const std::vector<DocNote> &notes,
+                             const std::vector<DocLanePoint> &points, int64_t dTick)
+{
+    if ((notes.empty() && points.empty()) || dTick == 0 || m_smf.tracks.empty())
+        return;
+    std::vector<std::vector<size_t>> moved(m_smf.tracks.size());
+    const auto mark = [&](int smfTrack, size_t index) {
+        if (smfTrack >= 0 && smfTrack < int(moved.size()))
+            moved[size_t(smfTrack)].push_back(index);
+    };
+    for (const DocNote &note : notes) {
+        mark(note.smfTrack, note.onIndex);
+        if (!note.unterminated())
+            mark(note.smfTrack, note.endIndex);
+    }
+    for (const DocLanePoint &pt : points)
+        mark(pt.smfTrack, pt.index);
+    // Ascending + deduped so the raw re-inserts below mirror the removals
+    // exactly and same-tick events keep their relative order.
+    for (std::vector<size_t> &indices : moved) {
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    }
+
+    std::vector<EditOp> ops;
+    // All removals first (indices are read at apply time), then the events'
+    // exact bytes re-inserted at the shifted ticks.
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), moved[t]);
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        for (size_t index : moved[t]) {
+            EditOp op;
+            op.type = EditOp::InsertEvent;
+            op.smfTrack = int(t);
+            op.event = m_smf.tracks[t].events[index];
+            op.event.tick =
+                uint64_t(std::max<int64_t>(0, int64_t(op.event.tick) + dTick));
+            ops.push_back(op);
+        }
+    }
+    pushEdit(tr("move range"), std::move(ops));
+}
+
 bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick,
                                    const RippleScope &scope)
 {

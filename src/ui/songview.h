@@ -280,9 +280,18 @@ public:
     // lanes so the rest of the song keeps its alignment.
     void removeTimeSelectionContents();
     void pasteRangeAtEditCursor();
+    // Ctrl+Up/Down on the selection: transpose every covered note (all
+    // scoped tracks at once). Same all-or-nothing rule as the roll's note
+    // selection — if any note would clamp at the key range, nothing moves.
+    void transposeTimeSelection(int dKey);
+    // Ctrl+Left/Right: the selection start moves to the previous/next
+    // ruler grid line and the covered contents (notes and automation
+    // points) move with it; the band follows.
+    void nudgeTimeSelection(bool right);
     // Shared shortcut handling for the roll and the lanes area: range
     // copy/cut/delete while a time selection is active, paste of range
-    // clips. Returns true when consumed.
+    // clips, and Ctrl+arrow transpose/nudge of the selection. Returns true
+    // when consumed.
     bool handleEditKey(QKeyEvent *event);
     // Copy/Cut/Delete/Paste/Clear context menu on the active selection.
     void showTimeSelectionMenu(const QPoint &globalPos);

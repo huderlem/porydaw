@@ -171,6 +171,13 @@ public:
     };
     void applyRangeEdit(const QString &text, const RangeEdit &edit);
 
+    // Time-selection nudge: shift notes and lane points (any mix of tracks
+    // and lanes, tempo included) by a tick delta as one undoable command.
+    // Events are re-inserted with their exact bytes, so tempo blobs keep
+    // their precise microseconds and unterminated notes stay unterminated.
+    void moveRange(const std::vector<DocNote> &notes,
+                   const std::vector<DocLanePoint> &points, int64_t dTick);
+
     // Ripple delete (time-selection "Remove contents"): erases [startTick,
     // endTick) on the scoped streams and closes the gap — everything at or
     // after endTick moves left by the span. Value streams (CC, bend, voice,

@@ -262,6 +262,57 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Range move (time-selection nudge): notes plus CC and tempo
+            // points shift together by a tick delta as ONE undoable command,
+            // with values intact (events move as raw bytes).
+            if (ok) {
+                doc.addNotes(track, {{base + step * 80, 60, step * 2, 90},
+                                     {base + step * 82, 64, step * 2, 90}});
+                doc.addLanePoint(track, 7, base + step * 80, 45);
+                doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 81, 140);
+                std::vector<DocNote> moveNotes;
+                for (const DocNote &n : doc.notesForTrack(track)) {
+                    if (n.tick >= base + step * 80 && n.tick < base + step * 84)
+                        moveNotes.push_back(n);
+                }
+                std::vector<DocLanePoint> movePoints;
+                for (const DocLanePoint &p : doc.lanePoints(track, 7)) {
+                    if (p.tick == base + step * 80)
+                        movePoints.push_back(p);
+                }
+                for (const DocLanePoint &p : doc.lanePoints(track, DOC_CC_TEMPO)) {
+                    if (p.tick == base + step * 81)
+                        movePoints.push_back(p);
+                }
+                doc.moveRange(moveNotes, movePoints, step * 3);
+                mutateAndCheck("events unsorted after moveRange");
+                DocNote n;
+                DocLanePoint p;
+                if (doc.findNote(track, base + step * 80, 60, &n)
+                    || !doc.findNote(track, base + step * 83, 60, &n)
+                    || n.duration != step * 2
+                    || !doc.findNote(track, base + step * 85, 64, &n)
+                    || !doc.findLanePoint(track, 7, base + step * 83, &p)
+                    || p.value != 45
+                    || !doc.findLanePoint(track, DOC_CC_TEMPO, base + step * 84, &p)
+                    || p.value != 140) {
+                    fail("range move produced wrong content");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.moveRange(moveNotes, movePoints, 0); // no-op guard
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 80, 60, &n)
+                        || doc.findNote(track, base + step * 83, 60, &n)
+                        || !doc.findLanePoint(track, 7, base + step * 80, &p)) {
+                        fail("moveRange was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
             // Ripple remove (removeTimeRange): in-range content vanishes,
             // later events shift left by the span, and the last in-range
             // automation point survives at the seam. ONE undoable command.

@@ -4092,6 +4092,80 @@ void SongView::deleteTimeSelection()
                  .arg(points));
 }
 
+void SongView::transposeTimeSelection(int dKey)
+{
+    if (!m_document || !m_timeSel.active() || dKey == 0
+        || m_timeSel.scope == TimeSelection::Lanes)
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    std::vector<DocNote> notes;
+    for (int t : timeSelectionTracks()) {
+        for (const DocNote &note : m_document->notesForTrack(t)) {
+            if (note.tick >= s && note.tick < e)
+                notes.push_back(note);
+        }
+    }
+    if (notes.empty()) {
+        announce(tr("No notes in the time selection"));
+        return;
+    }
+    for (const DocNote &note : notes) {
+        const int key = int(note.key) + dKey;
+        if (key < 0 || key > 127) {
+            announce(tr("Transpose out of range"));
+            return;
+        }
+    }
+    m_document->moveNotes(notes, 0, dKey);
+    announce(tr("Transposed %n note(s) by %1", nullptr, int(notes.size()))
+                 .arg(dKey > 0 ? QStringLiteral("+%1").arg(dKey)
+                               : QString::number(dKey)));
+}
+
+void SongView::nudgeTimeSelection(bool right)
+{
+    if (!m_document || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    const uint64_t snapped =
+        right ? snapTickUp(double(s) + 1.0) : snapTickDown(double(s) - 1.0);
+    const int64_t dTick = int64_t(snapped) - int64_t(s);
+    if (dTick == 0)
+        return;
+    std::vector<DocNote> notes;
+    std::vector<DocLanePoint> points;
+    const auto gatherLanePoints = [&](int track, uint8_t cc) {
+        const int query = track < 0 ? m_selectedTrack : track;
+        for (const DocLanePoint &pt : m_document->lanePoints(query, cc)) {
+            if (pt.tick >= s && pt.tick < e)
+                points.push_back(pt);
+        }
+    };
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        for (const std::pair<int, uint8_t> &id : m_timeSel.lanes)
+            gatherLanePoints(id.first, id.second);
+    } else {
+        for (int t : timeSelectionTracks()) {
+            for (const DocNote &note : m_document->notesForTrack(t)) {
+                if (note.tick >= s && note.tick < e)
+                    notes.push_back(note);
+            }
+            for (uint8_t cc : trackCcs(t))
+                gatherLanePoints(t, cc);
+        }
+    }
+    m_document->moveRange(notes, points, dTick);
+    // The band follows even over empty content, so repeated nudges keep
+    // aiming at the same region.
+    TimeSelection moved = m_timeSel;
+    moved.startTick = uint64_t(int64_t(s) + dTick);
+    moved.endTick = uint64_t(int64_t(e) + dTick);
+    setTimeSelection(moved);
+    ensureTickVisible(moved.startTick);
+}
+
 void SongView::removeTimeSelectionContents()
 {
     if (!m_document || !m_timeline || !m_timeSel.active())
@@ -4223,6 +4297,19 @@ bool SongView::handleEditKey(QKeyEvent *event)
     if (sel
         && (event->key() == Qt::Key_Delete || event->key() == Qt::Key_Backspace)) {
         deleteTimeSelection();
+        event->accept();
+        return true;
+    }
+    if (sel && (event->modifiers() & Qt::ControlModifier)
+        && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+        const int step = event->modifiers() & Qt::ShiftModifier ? 12 : 1;
+        transposeTimeSelection(event->key() == Qt::Key_Up ? step : -step);
+        event->accept();
+        return true;
+    }
+    if (sel && (event->modifiers() & Qt::ControlModifier)
+        && (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
+        nudgeTimeSelection(event->key() == Qt::Key_Right);
         event->accept();
         return true;
     }

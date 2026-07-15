@@ -19,8 +19,9 @@
 // velocity-dragged note's velocity the default for the next drawn note,
 // and an edge resize snaps to the ruler's absolute grid even when the
 // note's own edge sits off-grid. Ctrl+arrows transpose (Shift: octave)
-// and nudge the selection along the same absolute grid. Undoing every
-// gesture must restore the original bytes.
+// and nudge the selection along the same absolute grid — both the roll's
+// note selection and a multi-track time selection. Undoing every gesture
+// must restore the original bytes.
 
 namespace {
 
@@ -308,6 +309,22 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
         fail("Ctrl+Left did not snap the off-grid note back to the grid");
 
+    // The same shortcuts on a time selection (no notes selected): the band
+    // over the note's cell transposes every covered note of the scoped
+    // tracks, and a nudge moves the contents with the band following.
+    SongView::TimeSelection band;
+    band.startTick = d.tick + d.dur;
+    band.endTick = d.tick + 2 * d.dur;
+    view.setTimeSelection(band);
+    sendKey(roll, Qt::Key_Up, Qt::ControlModifier);
+    if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 10), &transposed))
+        fail("time-selection Ctrl+Up did not transpose the covered note");
+    sendKey(roll, Qt::Key_Right, Qt::ControlModifier);
+    if (!doc.findNote(track, d.tick + 2 * d.dur, uint8_t(d.key - 10), &transposed))
+        fail("time-selection Ctrl+Right did not nudge the covered note");
+    if (view.timeSelection().startTick != d.tick + 2 * d.dur)
+        fail("time-selection band did not follow the nudge");
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -316,15 +333,15 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Thirteen commands: draw, set, draw, nudge, draw, add, two resizes,
-    // and five keyboard/off-grid moves. Undoing them all must restore the
-    // original bytes.
+    // Fifteen commands: draw, set, draw, nudge, draw, add, two resizes,
+    // five keyboard/off-grid moves, and two time-selection moves. Undoing
+    // them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 13)
+    if (undos != 15)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
