@@ -1311,6 +1311,19 @@ protected:
             event->accept();
             return;
         }
+        if (doc && (event->modifiers() & Qt::ControlModifier)
+            && (event->key() == Qt::Key_Up || event->key() == Qt::Key_Down)) {
+            const int step = event->modifiers() & Qt::ShiftModifier ? 12 : 1;
+            transposeSelection(event->key() == Qt::Key_Up ? step : -step);
+            event->accept();
+            return;
+        }
+        if (doc && (event->modifiers() & Qt::ControlModifier)
+            && (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right)) {
+            nudgeSelection(event->key() == Qt::Key_Right);
+            event->accept();
+            return;
+        }
         if (event->key() == Qt::Key_Escape) {
             m_drag = Drag::None;
             m_leftPress = false;
@@ -1322,6 +1335,19 @@ protected:
             return;
         }
         QWidget::keyPressEvent(event);
+    }
+
+    void keyReleaseEvent(QKeyEvent *event) override
+    {
+        // End the transpose audition when the shortcut's keys come up.
+        // Autorepeat releases are skipped so a held Ctrl+Up keeps sounding
+        // the moving pitch; the Drag::None guard keeps a stray key release
+        // from cutting a mouse gesture's preview short.
+        if (!event->isAutoRepeat() && m_auditioned && m_drag == Drag::None) {
+            auditionKey(0, 0);
+            m_auditioned = false;
+        }
+        QWidget::keyReleaseEvent(event);
     }
 
 private:
@@ -1448,6 +1474,60 @@ private:
                 notes.push_back(note);
         }
         return notes;
+    }
+
+    // Ctrl+Up/Down (Shift: octave). Transposes keep intervals: if any
+    // selected note would clamp at the key range, the whole move is a
+    // no-op. The first note sounds at its new pitch, like a vertical
+    // drag; the key release ends it (keyReleaseEvent).
+    void transposeSelection(int dKey)
+    {
+        SongDocument *doc = m_sv->document();
+        const std::vector<DocNote> notes = resolveSelection();
+        if (!doc || notes.empty())
+            return;
+        for (const DocNote &note : notes) {
+            const int key = int(note.key) + dKey;
+            if (key < 0 || key > 127)
+                return;
+        }
+        doc->moveNotes(notes, 0, dKey);
+        // Follow the notes with the selection.
+        std::vector<SongView::NoteId> ids;
+        for (const DocNote &note : notes)
+            ids.push_back({uint32_t(note.tick), uint8_t(int(note.key) + dKey)});
+        m_sv->setSelection(std::move(ids));
+        auditionKey(int(notes.front().key) + dKey, notes.front().velocity);
+        m_auditioned = true;
+        update();
+    }
+
+    // Ctrl+Left/Right. The earliest selected note's start moves to the
+    // previous/next ruler grid line — absolute positions, like a draw or
+    // edge resize, so an off-grid selection lands on the grid first —
+    // and the rest keep their offsets from it.
+    void nudgeSelection(bool right)
+    {
+        SongDocument *doc = m_sv->document();
+        const std::vector<DocNote> notes = resolveSelection();
+        if (!doc || notes.empty())
+            return;
+        uint64_t anchor = UINT64_MAX;
+        for (const DocNote &note : notes)
+            anchor = std::min(anchor, note.tick);
+        const uint64_t snapped = right
+                                     ? m_sv->snapTickUp(double(anchor) + 1.0)
+                                     : m_sv->snapTickDown(double(anchor) - 1.0);
+        const int64_t dTick = int64_t(snapped) - int64_t(anchor);
+        if (dTick == 0)
+            return;
+        doc->moveNotes(notes, dTick, 0);
+        // Follow the notes with the selection.
+        std::vector<SongView::NoteId> ids;
+        for (const DocNote &note : notes)
+            ids.push_back({uint32_t(int64_t(note.tick) + dTick), note.key});
+        m_sv->setSelection(std::move(ids));
+        update();
     }
 
     // Fills the clipboard with the notes as a plain note clip (span 0,

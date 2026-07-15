@@ -1,6 +1,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPoint>
 #include <QString>
@@ -17,8 +18,9 @@
 // document), and the Reaper-style latch makes the last clicked or
 // velocity-dragged note's velocity the default for the next drawn note,
 // and an edge resize snaps to the ruler's absolute grid even when the
-// note's own edge sits off-grid. Undoing every gesture must restore the
-// original bytes.
+// note's own edge sits off-grid. Ctrl+arrows transpose (Shift: octave)
+// and nudge the selection along the same absolute grid. Undoing every
+// gesture must restore the original bytes.
 
 namespace {
 
@@ -42,6 +44,14 @@ void drawNote(QWidget *w, QPoint pos)
 {
     sendMouse(w, QEvent::MouseButtonDblClick, pos, Qt::LeftButton, Qt::LeftButton);
     sendMouse(w, QEvent::MouseButtonRelease, pos, Qt::LeftButton, Qt::NoButton);
+}
+
+void sendKey(QWidget *w, int key, Qt::KeyboardModifiers mods)
+{
+    QKeyEvent press(QEvent::KeyPress, key, mods);
+    QCoreApplication::sendEvent(w, &press);
+    QKeyEvent release(QEvent::KeyRelease, key, mods);
+    QCoreApplication::sendEvent(w, &release);
 }
 
 } // namespace
@@ -270,6 +280,34 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         || collapsed.duration != d.dur)
         fail("overshot right-edge drag did not stop at one grid cell");
 
+    // Keyboard transpose/nudge on note D (clicking it selects it):
+    // Ctrl+Up is a semitone, Ctrl+Shift+Down an octave, and Ctrl+Right
+    // moves one grid cell from an on-grid start.
+    const QPoint dCenter(songview::kKeyboardW
+                             + view.contentX(double(d.tick) + 0.5 * double(d.dur)),
+                         rowY);
+    click(roll, dCenter);
+    sendKey(roll, Qt::Key_Up, Qt::ControlModifier);
+    DocNote transposed;
+    if (!doc.findNote(track, d.tick, uint8_t(d.key + 1), &transposed))
+        fail("Ctrl+Up did not transpose up a semitone");
+    sendKey(roll, Qt::Key_Down, Qt::ControlModifier | Qt::ShiftModifier);
+    if (!doc.findNote(track, d.tick, uint8_t(d.key - 11), &transposed))
+        fail("Ctrl+Shift+Down did not transpose down an octave");
+    sendKey(roll, Qt::Key_Right, Qt::ControlModifier);
+    if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
+        fail("Ctrl+Right did not nudge one grid cell right");
+    // An off-grid selection nudges onto the grid line, not by a whole
+    // cell: push the note a quarter cell right behind the view's back
+    // (reselecting — the selection keys on the start tick, which moved),
+    // and Ctrl+Left must bring it back to the line it left.
+    doc.moveNotes({transposed}, int64_t(d.dur / 4), 0);
+    view.setSelection(
+        {{uint32_t(d.tick + d.dur + d.dur / 4), uint8_t(d.key - 11)}});
+    sendKey(roll, Qt::Key_Left, Qt::ControlModifier);
+    if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
+        fail("Ctrl+Left did not snap the off-grid note back to the grid");
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -278,14 +316,15 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Eight commands: draw, set, draw, nudge, draw, add, two resizes.
-    // Undoing them all must restore the original bytes.
+    // Thirteen commands: draw, set, draw, nudge, draw, add, two resizes,
+    // and five keyboard/off-grid moves. Undoing them all must restore the
+    // original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 8)
+    if (undos != 13)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
