@@ -962,8 +962,10 @@ protected:
             m_lastVelocity = hit->velocity;
             if (nearRightEdge(*hit, event->pos())) {
                 m_drag = Drag::Resize;
+                m_gripTick = hit->endTick;
             } else if (nearLeftEdge(*hit, event->pos())) {
                 m_drag = Drag::ResizeLeft;
+                m_gripTick = hit->startTick;
             } else if (nearVelocityHandle(*hit, event->pos())) {
                 m_drag = Drag::Velocity;
                 m_velAnchor = *hit;
@@ -1079,14 +1081,21 @@ protected:
                 }
                 update();
             }
-        } else if (m_drag == Drag::Resize) {
-            if (snappedD != m_dDur) {
-                m_dDur = snappedD;
-                update();
-            }
-        } else if (m_drag == Drag::ResizeLeft) {
-            if (snappedD != m_dTick) {
-                m_dTick = snappedD;
+        } else if (m_drag == Drag::Resize || m_drag == Drag::ResizeLeft) {
+            // The dragged edge snaps to the ruler's absolute grid lines,
+            // not to grid-sized offsets from its own (possibly off-grid)
+            // position. The original edge stays a candidate so a barely
+            // moved grab is a no-op and the starting length remains
+            // reachable mid-drag.
+            const double desired = double(m_gripTick) + (tick - m_pressTick);
+            const double snapped = double(m_sv->snapTick(desired));
+            const int64_t d =
+                std::abs(desired - double(m_gripTick)) < std::abs(desired - snapped)
+                    ? 0
+                    : int64_t(snapped) - int64_t(m_gripTick);
+            int64_t &target = m_drag == Drag::Resize ? m_dDur : m_dTick;
+            if (d != target) {
+                target = d;
                 update();
             }
         } else if (m_drag == Drag::Velocity) {
@@ -1694,6 +1703,7 @@ private:
     QPoint m_curPos;
     double m_pressTick = 0.0;
     int m_pressKey = 0;
+    uint64_t m_gripTick = 0;   // edge tick grabbed by a resize drag
     int64_t m_dTick = 0;
     int m_dKey = 0;
     int64_t m_dDur = 0;

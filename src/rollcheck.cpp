@@ -15,8 +15,10 @@
 // Drives the roll widget offscreen with synthesized mouse events: the
 // double-click pencil draws at the default velocity (100 on a fresh
 // document), and the Reaper-style latch makes the last clicked or
-// velocity-dragged note's velocity the default for the next drawn note.
-// Undoing every gesture must restore the original bytes.
+// velocity-dragged note's velocity the default for the next drawn note,
+// and an edge resize snaps to the ruler's absolute grid even when the
+// note's own edge sits off-grid. Undoing every gesture must restore the
+// original bytes.
 
 namespace {
 
@@ -226,6 +228,32 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     if (noteC.velocity != 93)
         fail("dragged velocity did not latch into the next draw");
 
+    // Edge resize snaps to the ruler's absolute grid, not to grid-sized
+    // offsets from the note's own end: give a note an off-grid duration
+    // (1.25 cells) behind the view's back, drag its right edge to 1.75
+    // cells, and the end must land on the 2-cell grid line — not at
+    // 1.25 + 1 cells, which is where delta-snapping would put it.
+    const Cell d = findFreeCell();
+    if (d.key < 0) {
+        fail("no free grid cell for the off-grid resize");
+        return failures;
+    }
+    const uint32_t offDur = uint32_t(d.dur + d.dur / 4);
+    doc.addNote(track, d.tick, uint8_t(d.key), offDur, 100);
+    const int rowY = (127 - d.key) * keyH - view.scrollY() + keyH / 2 + 1;
+    const QPoint edge(songview::kKeyboardW + view.contentX(double(d.tick + offDur)),
+                      rowY);
+    const QPoint pull(
+        songview::kKeyboardW + view.contentX(double(d.tick) + 1.75 * double(d.dur)),
+        rowY);
+    sendMouse(roll, QEvent::MouseButtonPress, edge, Qt::LeftButton, Qt::LeftButton);
+    sendMouse(roll, QEvent::MouseMove, pull, Qt::NoButton, Qt::LeftButton);
+    sendMouse(roll, QEvent::MouseButtonRelease, pull, Qt::LeftButton, Qt::NoButton);
+    DocNote resized;
+    if (!doc.findNote(track, d.tick, uint8_t(d.key), &resized)
+        || resized.duration != 2 * d.dur)
+        fail("off-grid right-edge drag did not snap the end to the ruler grid");
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -234,14 +262,14 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Five gestures, five commands: draw, set, draw, nudge, draw. Undoing
+    // Seven commands: draw, set, draw, nudge, draw, add, resize. Undoing
     // them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 5)
+    if (undos != 7)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
