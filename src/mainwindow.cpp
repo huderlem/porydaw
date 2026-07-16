@@ -5,6 +5,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDebug>
 #include <QDir>
 #include <QDockWidget>
 #include <QFormLayout>
@@ -16,7 +17,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
+#include <QPainter>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QSettings>
@@ -38,9 +41,14 @@
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#include "ui/layout.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
+#include "ui/theme/themecontroller.h"
+#include "ui/theme/themedialog.h"
+#include "ui/theme/themeruntime.h"
+#include "ui/typography.h"
 #include "ui/viewsidecar.h"
 #include "ui/voicegroupbrowser.h"
 
@@ -51,6 +59,20 @@ constexpr int kVoiceEditCommandId = 0x7661; // 'va': voice-edit merge id
 
 const QString kLastOpenSongsKey = QStringLiteral("lastOpenSongs");
 const QString kLastSongLabelKey = QStringLiteral("lastSongLabel");
+
+QIcon tintedStandardIcon(QWidget &widget, QStyle::StandardPixmap icon,
+                         const QSize &size)
+{
+    auto pixmap = widget.style()->standardIcon(icon).pixmap(
+        size, widget.devicePixelRatioF());
+    QPainter painter(&pixmap);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    // Transport glyphs use their own role so toolbar-label changes cannot
+    // silently retint playback controls.
+    painter.fillRect(pixmap.rect(), themes::color(themes::Role::transport_text));
+    painter.end();
+    return QIcon(pixmap);
+}
 } // namespace
 
 // A voicegroup voice edit, on its tab's undo stack: song and voicegroup
@@ -136,8 +158,14 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("porydaw"));
-    resize(1100, 680);
+    resize(::layout::fontPx(92), ::layout::fontPx(57));
     m_engineSettings = EngineSettings::load();
+    m_themeSettings = std::make_unique<QSettings>();
+    m_themeController =
+        std::make_unique<themes::ThemeController>(*qApp, *m_themeSettings);
+    m_themeController->restore();
+    m_themeDialog =
+        std::make_unique<themes::ThemeDialog>(*m_themeController, this);
     buildUi();
 
     QSettings settings;
@@ -228,9 +256,14 @@ void MainWindow::buildUi()
     // Global GBA-accuracy knobs (SPEC §7); not song-scoped, so always enabled.
     editMenu->addAction(tr("&Engine Settings..."), this,
                         &MainWindow::openEngineSettings);
+    auto *viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(tr("&Theme..."), this, [this] {
+        m_themeDialog->show();
+        m_themeDialog->raise();
+        m_themeDialog->activateWindow();
+    });
 
     // View menu: piano roll vs raw MIDI event list, per tab.
-    QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
     m_eventListAction = viewMenu->addAction(tr("MIDI &Event List"));
     m_eventListAction->setCheckable(true);
     m_eventListAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
@@ -241,13 +274,14 @@ void MainWindow::buildUi()
     });
 
     // Transport toolbar
-    QToolBar *transport = addToolBar(tr("Transport"));
+    QToolBar *transport = m_transportToolbar = addToolBar(tr("Transport"));
     // saveState() persists dock/toolbar layout by objectName only.
     transport->setObjectName(QStringLiteral("transportToolbar"));
     transport->setMovable(false);
+    transport->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    transport->setIconSize(transport->iconSize());
 
-    m_goToStartAction = new QAction(style()->standardIcon(QStyle::SP_MediaSkipBackward),
-                                    tr("Go to Start"), this);
+    m_goToStartAction = new QAction(tr("Go to Start"), this);
     m_goToStartAction->setShortcut(Qt::Key_Home);
     connect(m_goToStartAction, &QAction::triggered, this, [this] {
         if (m_active)
@@ -255,7 +289,7 @@ void MainWindow::buildUi()
     });
     transport->addAction(m_goToStartAction);
 
-    m_playAction = new QAction(style()->standardIcon(QStyle::SP_MediaPlay), tr("Play"), this);
+    m_playAction = new QAction(tr("Play"), this);
     connect(m_playAction, &QAction::triggered, this, [this] { startPlayback(); });
     transport->addAction(m_playAction);
 
@@ -273,32 +307,52 @@ void MainWindow::buildUi()
     });
     addAction(m_playPauseAction);
 
-    m_pauseAction = new QAction(style()->standardIcon(QStyle::SP_MediaPause), tr("Pause"), this);
+    m_pauseAction = new QAction(tr("Pause"), this);
     connect(m_pauseAction, &QAction::triggered, this, [this] { m_audio.pause(); });
     transport->addAction(m_pauseAction);
 
-    m_stopAction = new QAction(style()->standardIcon(QStyle::SP_MediaStop), tr("Stop"), this);
+    m_stopAction = new QAction(tr("Stop"), this);
     connect(m_stopAction, &QAction::triggered, this, [this] { m_audio.stop(); });
     transport->addAction(m_stopAction);
 
-    m_loopAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Loop"), this);
+    m_loopAction = new QAction(tr("Loop"), this);
     m_loopAction->setCheckable(true);
     m_loopAction->setChecked(true);
     connect(m_loopAction, &QAction::toggled, this,
             [this](bool on) { m_audio.setLoopEnabled(on); });
     transport->addAction(m_loopAction);
+    refreshTransportIcons();
 
     transport->addSeparator();
     m_timeLabel = new QLabel(QStringLiteral("--:--.- / --:--.-"), this);
-    m_timeLabel->setContentsMargins(8, 0, 8, 0);
+    m_timeLabel->setFont(typography::bodyMono(font()));
+    m_timeLabel->setContentsMargins(::layout::space(::layout::Space::Three), 0,
+                                    ::layout::space(::layout::Space::Three), 0);
     transport->addWidget(m_timeLabel);
     m_songLabel = new QLabel(this);
     transport->addWidget(m_songLabel);
+
+    // Dock titles and the tab strip share this metric-derived outer height so
+    // neither clips when the platform font or small-icon metric changes.
+    const auto chromeHeight = layout::chromeRowHeight(
+        font(), style()->pixelMetric(QStyle::PM_SmallIconSize));
+    const auto installDockTitle = [chromeHeight](QDockWidget *target) {
+        auto *title = new QLabel(target->windowTitle(), target);
+        title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        title->setContentsMargins(::layout::space(::layout::Space::Two), 0,
+                                  ::layout::space(::layout::Space::Two), 0);
+        title->setFixedHeight(chromeHeight);
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
+        QObject::connect(target, &QDockWidget::windowTitleChanged, title,
+                         &QLabel::setText);
+        target->setTitleBarWidget(title);
+    };
 
     // Song browser dock
     auto *dock = new QDockWidget(tr("Songs"), this);
     dock->setObjectName(QStringLiteral("songsDock"));
     dock->setFeatures(QDockWidget::DockWidgetMovable);
+    installDockTitle(dock);
     m_songList = new SongListPanel(dock);
     connect(m_songList, &SongListPanel::songActivated, this, &MainWindow::songActivated);
     connect(m_songList, &SongListPanel::songOpenInNewTabRequested, this,
@@ -318,6 +372,7 @@ void MainWindow::buildUi()
     m_vgDock = new QDockWidget(tr("Voicegroup"), this);
     m_vgDock->setObjectName(QStringLiteral("voicegroupDock"));
     m_vgDock->setFeatures(QDockWidget::DockWidgetMovable);
+    installDockTitle(m_vgDock);
     m_vgBrowser = new VoicegroupBrowser(m_vgDock);
     connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
             [this](int voice, int key, int velocity) {
@@ -335,16 +390,17 @@ void MainWindow::buildUi()
     // document, and undo stack.
     m_tabs = new QTabWidget(this);
     m_tabs->setTabsClosable(true);
-    m_tabs->setMovable(true);
+    m_tabs->setMovable(false);
     m_tabs->setDocumentMode(true);
+    m_tabs->tabBar()->setFixedHeight(chromeHeight);
     connect(m_tabs, &QTabWidget::currentChanged, this, &MainWindow::tabChanged);
     connect(m_tabs, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
-    connect(m_tabs->tabBar(), &QTabBar::tabMoved, this,
-            [this](int, int) { persistOpenTabs(); });
     setCentralWidget(m_tabs);
 
     // Status bar: polyphony meter
     m_polyLabel = new QLabel(this);
+    m_polyLabel->setObjectName(QStringLiteral("polyphonyLabel"));
+    m_polyLabel->setFont(typography::bodyMono(font()));
     statusBar()->addPermanentWidget(m_polyLabel);
 
     // Initial focus goes to the song list (via the panel's focus proxy), not
@@ -352,6 +408,32 @@ void MainWindow::buildUi()
     // swallowed the first keystrokes into the search field.
     m_songList->setFocus();
 }
+
+void MainWindow::refreshTransportIcons()
+{
+    const auto size = m_transportToolbar->iconSize();
+    m_goToStartAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaSkipBackward, size));
+    m_playAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaPlay, size));
+    m_pauseAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaPause, size));
+    m_stopAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaStop, size));
+    m_loopAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
+}
+
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if ((event->type() == QEvent::ApplicationPaletteChange ||
+         event->type() == QEvent::StyleChange) &&
+        m_goToStartAction)
+        refreshTransportIcons();
+}
+
 
 SongSession *MainWindow::sessionForWidget(QWidget *widget) const
 {

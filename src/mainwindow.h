@@ -15,12 +15,19 @@ class QAction;
 class QDockWidget;
 class QLabel;
 class QTabWidget;
+class QSettings;
+class QToolBar;
 class QTimer;
 class QUndoGroup;
 class SmfFile;
 class SongListPanel;
 class SongView;
 class VoicegroupBrowser;
+
+namespace themes {
+class ThemeController;
+class ThemeDialog;
+}
 
 class MainWindow : public QMainWindow
 {
@@ -55,6 +62,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void openProject();
@@ -183,6 +191,7 @@ private:
     // The session's cfg (volume/reverb) merged with the global engine knobs
     // — everything AudioEngine::updateSettings applies.
     SongSettings songSettingsFor(const SongSession &session) const;
+    void refreshTransportIcons();
     void updateTransportActions();
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
@@ -227,6 +236,10 @@ private:
     QUndoGroup *m_undoGroup = nullptr;
     VoicegroupBrowser *m_vgBrowser = nullptr;
     QDockWidget *m_vgDock = nullptr;
+    QToolBar *m_transportToolbar = nullptr;
+    std::unique_ptr<QSettings> m_themeSettings;
+    std::unique_ptr<themes::ThemeController> m_themeController;
+    std::unique_ptr<themes::ThemeDialog> m_themeDialog;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_registerAction = nullptr;

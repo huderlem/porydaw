@@ -18,6 +18,7 @@
 
 #include "audio/audioengine.h"
 #include "project/songregistry.h"
+#include "ui/layout.h"
 #include "ui/m4asemantics.h"
 
 // ---- Identity: label, constant, music player ------------------------------
@@ -457,7 +458,7 @@ NewSongWizard::~NewSongWizard()
 void NewSongWizard::buildPages(const QString &sourcePath)
 {
     setOption(QWizard::NoBackButtonOnStartPage);
-    setMinimumSize(620, 460);
+    setMinimumSize(::layout::fontPx(52), ::layout::fontPx(38));
 
     QString suggested;
     if (m_importMode) {
