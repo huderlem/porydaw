@@ -375,6 +375,65 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Mergeable moves (keyboard transpose/nudge): consecutive
+            // mergeable moveNotes of the same notes collapse into ONE undo
+            // command that re-lands from the gesture's start — a neighbor
+            // trimmed by a merely-passed-through overlap comes back — and
+            // the merge stops at the stack's clean index (a save between
+            // presses keeps its own command).
+            if (ok) {
+                doc.addNote(track, base + step * 100, 70, step * 4, 100); // S
+                doc.addNote(track, base + step * 100, 69, step * 2, 100); // M
+                const int countBefore = doc.undoStack()->count();
+                DocNote m, s;
+                if (!doc.findNote(track, base + step * 100, 69, &m)) {
+                    fail("merge-scenario notes not found");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.moveNotes({m}, 0, 1, true); // M onto S: S trimmed
+                    if (!doc.findNote(track, base + step * 102, 70, &s)
+                        || s.duration != step * 2) {
+                        fail("mergeable transpose did not trim the overlap");
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    doc.findNote(track, base + step * 100, 70, &m); // re-resolve
+                    doc.moveNotes({m}, 0, 1, true); // past S: merged, +2 total
+                    if (doc.undoStack()->count() != countBefore + 1) {
+                        fail("consecutive mergeable moves did not merge");
+                        ok = false;
+                    } else if (!doc.findNote(track, base + step * 100, 71, &m)
+                               || m.duration != step * 2
+                               || !doc.findNote(track, base + step * 100, 70, &s)
+                               || s.duration != step * 4) {
+                        fail("merged transpose did not restore the trimmed note");
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 100, 69, &m)
+                        || !doc.findNote(track, base + step * 100, 70, &s)
+                        || s.duration != step * 4) {
+                        fail("merged move undo did not restore the gesture start");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+                if (ok) {
+                    doc.findNote(track, base + step * 100, 71, &m);
+                    doc.undoStack()->setClean();
+                    doc.moveNotes({m}, 0, 1, true);
+                    if (doc.undoStack()->count() != countBefore + 2) {
+                        fail("mergeable move merged across the clean index");
+                        ok = false;
+                    }
+                }
+            }
+
             // Ripple remove (removeTimeRange): in-range content vanishes,
             // later events shift left by the span, and the last in-range
             // automation point survives at the seam. ONE undoable command.

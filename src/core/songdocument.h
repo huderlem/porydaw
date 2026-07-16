@@ -118,8 +118,14 @@ public:
     };
     void addNotes(int engineTrack, const std::vector<NewNote> &notes);
     void deleteNotes(const std::vector<DocNote> &notes);
-    // Move by a tick/key delta (note lengths preserved).
-    void moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey);
+    // Move by a tick/key delta (note lengths preserved). mergeable marks a
+    // keyboard transpose/nudge press: consecutive mergeable moves of the
+    // same notes collapse into one undo command that re-lands from the
+    // gesture's start, so a neighbor trimmed by a merely-passed-through
+    // overlap comes back (only the final resting position trims). Mouse
+    // gestures stay one command per drag.
+    void moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey,
+                   bool mergeable = false);
     void resizeNotes(const std::vector<DocNote> &notes, int64_t dDuration);
     // Left-edge resize: move the note-on by dTick with the note-off pinned
     // (tick and duration adjust together, at least 1 tick of note remains).
@@ -258,6 +264,7 @@ signals:
 private:
     friend class SongEditCommand;
     friend class SongCfgCommand;
+    friend class MoveNotesCommand;
 
     struct EditOp {
         enum Type {
@@ -315,6 +322,10 @@ private:
                              const std::vector<DocNote> &editNotes,
                              std::vector<std::vector<size_t>> &removals,
                              std::vector<EditOp> &trims) const;
+    // moveNotes' op builder, split out so MoveNotesCommand can rebuild the
+    // move with an accumulated delta when merging keyboard presses.
+    std::vector<EditOp> buildMoveNotesOps(const std::vector<DocNote> &notes,
+                                          int64_t dTick, int dKey) const;
     // Replace one event: modify in place when the tick is unchanged (the
     // event keeps its position within its tick group — mid2agb stable-sorts,
     // so same-tick order is significant), else remove + re-insert so ticks

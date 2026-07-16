@@ -1491,7 +1491,7 @@ private:
             if (key < 0 || key > 127)
                 return;
         }
-        doc->moveNotes(notes, 0, dKey);
+        doc->moveNotes(notes, 0, dKey, /*mergeable=*/true);
         // Follow the notes with the selection.
         std::vector<SongView::NoteId> ids;
         for (const DocNote &note : notes)
@@ -1521,7 +1521,7 @@ private:
         const int64_t dTick = int64_t(snapped) - int64_t(anchor);
         if (dTick == 0)
             return;
-        doc->moveNotes(notes, dTick, 0);
+        doc->moveNotes(notes, dTick, 0, /*mergeable=*/true);
         // Follow the notes with the selection.
         std::vector<SongView::NoteId> ids;
         for (const DocNote &note : notes)
@@ -4117,7 +4117,7 @@ void SongView::transposeTimeSelection(int dKey)
             return;
         }
     }
-    m_document->moveNotes(notes, 0, dKey);
+    m_document->moveNotes(notes, 0, dKey, /*mergeable=*/true);
     announce(tr("Transposed %n note(s) by %1", nullptr, int(notes.size()))
                  .arg(dKey > 0 ? QStringLiteral("+%1").arg(dKey)
                                : QString::number(dKey)));

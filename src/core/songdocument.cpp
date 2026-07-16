@@ -94,6 +94,91 @@ private:
     SongCfg m_old;
 };
 
+// A note move that may merge with the next one (keyboard transpose/nudge —
+// rapid presses form one gesture). Merging first reverts both commands,
+// which restores any neighbor the intermediate position had trimmed via
+// resolveNoteOverlaps, then re-lands the accumulated delta from the
+// gesture's ORIGINAL notes — only the final resting position decides what
+// gets trimmed. QUndoStack refuses to merge across its clean index, so a
+// save between presses keeps its own command.
+class MoveNotesCommand : public QUndoCommand
+{
+public:
+    MoveNotesCommand(SongDocument *doc, std::vector<DocNote> notes, int64_t dTick,
+                     int dKey, bool mergeable)
+        : QUndoCommand(
+              SongDocument::tr("move %n note(s)", nullptr, int(notes.size()))),
+          m_doc(doc), m_notes(std::move(notes)), m_dTick(dTick), m_dKey(dKey),
+          m_mergeable(mergeable), m_ops(doc->buildMoveNotesOps(m_notes, dTick, dKey))
+    {
+    }
+
+    int id() const override { return m_mergeable ? 0x4d76 : -1; } // 'Mv'
+
+    void redo() override
+    {
+        m_doc->applyOps(m_ops);
+        emit m_doc->documentChanged();
+    }
+
+    void undo() override
+    {
+        m_doc->revertOps(m_ops);
+        emit m_doc->documentChanged();
+    }
+
+    bool mergeWith(const QUndoCommand *command) override
+    {
+        // id() matched, so the cast is safe; on success the stack deletes
+        // the other command, so mutating it is fine.
+        auto *other = const_cast<MoveNotesCommand *>(
+            static_cast<const MoveNotesCommand *>(command));
+        if (!other->m_mergeable || !movesMyOutputs(other->m_notes))
+            return false;
+        // Both commands are applied here (the stack redoes the new one
+        // before offering the merge). Rewind to the pre-gesture state, then
+        // land the accumulated move in one hop.
+        m_doc->revertOps(other->m_ops);
+        m_doc->revertOps(m_ops);
+        m_dTick += other->m_dTick;
+        m_dKey += other->m_dKey;
+        m_ops = m_doc->buildMoveNotesOps(m_notes, m_dTick, m_dKey);
+        m_doc->applyOps(m_ops);
+        emit m_doc->documentChanged();
+        return true;
+    }
+
+private:
+    // The next press must edit the notes exactly where this command left
+    // them; anything else (new selection, another note landing on the same
+    // spot) is a separate gesture.
+    bool movesMyOutputs(const std::vector<DocNote> &next) const
+    {
+        if (next.size() != m_notes.size())
+            return false;
+        using Pos = std::tuple<int, uint64_t, int, uint32_t, uint8_t, uint8_t>;
+        std::vector<Pos> mine, theirs;
+        for (const DocNote &n : m_notes)
+            mine.push_back({n.engineTrack,
+                            uint64_t(std::max<int64_t>(0, int64_t(n.tick) + m_dTick)),
+                            std::clamp(int(n.key) + m_dKey, 0, 127), n.duration,
+                            n.velocity, n.channel});
+        for (const DocNote &n : next)
+            theirs.push_back(
+                {n.engineTrack, n.tick, int(n.key), n.duration, n.velocity, n.channel});
+        std::sort(mine.begin(), mine.end());
+        std::sort(theirs.begin(), theirs.end());
+        return mine == theirs;
+    }
+
+    SongDocument *m_doc;
+    std::vector<DocNote> m_notes; // resolved against the pre-gesture state
+    int64_t m_dTick;
+    int m_dKey;
+    bool m_mergeable;
+    std::vector<SongDocument::EditOp> m_ops;
+};
+
 SongDocument::SongDocument(QObject *parent)
     : QObject(parent)
 {
@@ -560,10 +645,17 @@ void SongDocument::deleteNotes(const std::vector<DocNote> &notes)
     pushEdit(tr("delete %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
-void SongDocument::moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey)
+void SongDocument::moveNotes(const std::vector<DocNote> &notes, int64_t dTick, int dKey,
+                             bool mergeable)
 {
     if (notes.empty() || (dTick == 0 && dKey == 0))
         return;
+    m_undoStack.push(new MoveNotesCommand(this, notes, dTick, dKey, mergeable));
+}
+
+std::vector<SongDocument::EditOp> SongDocument::buildMoveNotesOps(
+    const std::vector<DocNote> &notes, int64_t dTick, int dKey) const
+{
     std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
     std::vector<PlannedNote> written;
     for (const DocNote &note : notes) {
@@ -599,7 +691,7 @@ void SongDocument::moveNotes(const std::vector<DocNote> &notes, int64_t dTick, i
         }
     }
     ops.insert(ops.end(), trims.begin(), trims.end());
-    pushEdit(tr("move %n note(s)", nullptr, int(notes.size())), std::move(ops));
+    return ops;
 }
 
 void SongDocument::resizeNotes(const std::vector<DocNote> &notes, int64_t dDuration)

@@ -309,6 +309,11 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
         fail("Ctrl+Left did not snap the off-grid note back to the grid");
 
+    // Consecutive keyboard presses on the same notes merge into one undo
+    // command; mark a save point so the time-selection presses below get
+    // their own commands (merges never cross the stack's clean index).
+    doc.undoStack()->setClean();
+
     // The same shortcuts on a time selection (no notes selected): the band
     // over the note's cell transposes every covered note of the scoped
     // tracks, and a nudge moves the contents with the band following.
@@ -333,15 +338,17 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Fifteen commands: draw, set, draw, nudge, draw, add, two resizes,
-    // five keyboard/off-grid moves, and two time-selection moves. Undoing
-    // them all must restore the original bytes.
+    // Thirteen commands: draw, set, draw, nudge, draw, add, two resizes,
+    // the three note-selection presses MERGED into one, the off-grid
+    // behind-the-back move, Ctrl+Left, and two time-selection moves
+    // (kept separate by the clean-index save point). Undoing them all
+    // must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 15)
+    if (undos != 13)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
