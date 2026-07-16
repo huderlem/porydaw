@@ -33,6 +33,8 @@ qt_add_executable(porydaw
     src/main.cpp
     src/mainwindow.cpp
     src/mainwindow.h
+    src/ui/typography.cpp
+    src/ui/typography.h
     src/songsession.h
     src/tabcheck.cpp
     src/eventviewcheck.cpp
@@ -94,6 +96,7 @@ qt_add_executable(porydaw
     src/ui/eventlistview.h
     src/ui/viewsidecar.cpp
     src/ui/viewsidecar.h
+    resources/fonts.qrc
 )
 target_include_directories(porydaw PRIVATE
     src

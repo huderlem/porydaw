@@ -2,6 +2,7 @@
 #include <QStyleHints>
 
 #include "mainwindow.h"
+#include "ui/typography.h"
 
 // viewcheck.cpp; the optional song label + path save one song's rendered view.
 int runViewCheck(const QString &projectRoot, const QString &screenshotSong = QString(),
@@ -57,6 +58,8 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName("porydaw");
     QApplication::setApplicationVersion("0.1.0");
     QApplication::setOrganizationName("huderlem");
+    if (!typography::installBundledFonts(app))
+        return 1;
 
     const QStringList args = app.arguments();
     const int selfTest = args.indexOf(QStringLiteral("--selftest"));
