@@ -313,6 +313,68 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Same-key overlap resolution: a written note landing on another
+            // note's span trims it (head or tail kept) or removes it when
+            // fully covered, in the same undo command — the pairing rule
+            // (first same-key end after the on) cannot represent an overlap,
+            // which used to silently re-pair the stationary note's end onto
+            // the edited note's.
+            if (ok) {
+                doc.addNote(track, base + step * 90, 71, step * 4, 100); // S 90..94
+                doc.addNote(track, base + step * 88, 70, step * 4, 100); // M 88..92
+                DocNote m, s;
+                // Tail kept: M transposed up onto S's head.
+                if (!doc.findNote(track, base + step * 88, 70, &m)) {
+                    fail("overlap-scenario notes not found");
+                    ok = false;
+                } else {
+                    doc.moveNotes({m}, 0, 1);
+                    mutateAndCheck("events unsorted after overlap transpose");
+                    if (!doc.findNote(track, base + step * 88, 71, &m)
+                        || m.duration != step * 4
+                        || !doc.findNote(track, base + step * 92, 71, &s)
+                        || s.duration != step * 2) {
+                        fail("transpose onto a note's head did not keep its tail");
+                        ok = false;
+                    }
+                }
+                // Fully covered: M resized right across all of S removes it.
+                if (ok) {
+                    doc.resizeNotes({m}, step * 4); // M 88..96 covers S 92..94
+                    mutateAndCheck("events unsorted after overlap resize");
+                    if (!doc.findNote(track, base + step * 88, 71, &m)
+                        || m.duration != step * 8
+                        || doc.findNote(track, base + step * 92, 71, &s)) {
+                        fail("resize across a covered note did not remove it");
+                        ok = false;
+                    }
+                }
+                // Head kept: a note drawn over M's tail trims M back, and one
+                // undo reverts the trim together with the add.
+                if (ok) {
+                    doc.addNote(track, base + step * 94, 71, step * 4, 100);
+                    mutateAndCheck("events unsorted after overlapping addNote");
+                    if (!doc.findNote(track, base + step * 88, 71, &m)
+                        || m.duration != step * 6
+                        || !doc.findNote(track, base + step * 94, 71, &s)
+                        || s.duration != step * 4) {
+                        fail("overlapping add did not trim the covered tail");
+                        ok = false;
+                    }
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 88, 71, &m)
+                        || m.duration != step * 8
+                        || doc.findNote(track, base + step * 94, 71, &s)) {
+                        fail("overlap trim was not part of the edit's own undo");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+            }
+
             // Ripple remove (removeTimeRange): in-range content vanishes,
             // later events shift left by the span, and the last in-range
             // automation point survives at the seam. ONE undoable command.

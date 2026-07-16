@@ -292,6 +292,29 @@ private:
                              uint8_t velocity) const;
     void appendRemoveOps(std::vector<EditOp> &ops, int smfTrack,
                          std::vector<size_t> indices) const;
+    // Same-key overlap resolution for edits that write notes. The pairing
+    // rule (every note-on takes the first same-key end after it) cannot
+    // represent two overlapping notes on one key — a written note landing
+    // over a stationary one would silently re-pair the neighbor's end. So
+    // the edited note wins: a stationary same-track same-key note
+    // overlapping a written span keeps its head (end trimmed to the span
+    // start), keeps its tail (start moved to the span end), or is removed
+    // when fully covered — never split. written spans are the notes the
+    // edit is inserting; editNotes are the notes it already rewrites
+    // (excluded from trimming). Victim indices are appended to removals
+    // (per SMF track, for the caller's appendRemoveOps pass) and the
+    // trimmed events re-inserted with their exact bytes via trims (the
+    // caller appends them after all its removals).
+    struct PlannedNote {
+        int engineTrack;
+        uint8_t key;
+        uint64_t tick;
+        uint64_t endTick; // exclusive
+    };
+    void resolveNoteOverlaps(const std::vector<PlannedNote> &written,
+                             const std::vector<DocNote> &editNotes,
+                             std::vector<std::vector<size_t>> &removals,
+                             std::vector<EditOp> &trims) const;
     // Replace one event: modify in place when the tick is unchanged (the
     // event keeps its position within its tick group — mid2agb stable-sorts,
     // so same-tick order is significant), else remove + re-insert so ticks

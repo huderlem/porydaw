@@ -418,15 +418,101 @@ void SongDocument::appendEventEditOps(std::vector<EditOp> &ops, int smfTrack,
     ops.push_back(insert);
 }
 
+void SongDocument::resolveNoteOverlaps(const std::vector<PlannedNote> &written,
+                                       const std::vector<DocNote> &editNotes,
+                                       std::vector<std::vector<size_t>> &removals,
+                                       std::vector<EditOp> &trims) const
+{
+    if (written.empty())
+        return;
+    std::vector<PlannedNote> spans = written;
+    std::sort(spans.begin(), spans.end(),
+              [](const PlannedNote &a, const PlannedNote &b) { return a.tick < b.tick; });
+    std::vector<int> tracks;
+    for (const PlannedNote &w : spans) {
+        if (std::find(tracks.begin(), tracks.end(), w.engineTrack) == tracks.end())
+            tracks.push_back(w.engineTrack);
+    }
+    const auto isEdited = [&](const DocNote &s) {
+        for (const DocNote &n : editNotes) {
+            if (n.smfTrack == s.smfTrack && n.onIndex == s.onIndex)
+                return true;
+        }
+        return false;
+    };
+    for (int t : tracks) {
+        for (const DocNote &s : notesForTrack(t)) {
+            // An unterminated note has no end to trim; it stays as-is.
+            if (s.unterminated() || isEdited(s))
+                continue;
+            uint64_t sTick = s.tick;
+            uint64_t sEnd = s.tick + s.duration;
+            bool covered = false, trimEnd = false, trimLeft = false;
+            for (const PlannedNote &w : spans) {
+                if (w.engineTrack != t || w.key != s.key || w.endTick <= sTick
+                    || w.tick >= sEnd)
+                    continue;
+                if (sTick < w.tick) {
+                    // Head survives (a strictly containing note keeps only
+                    // its head — no splitting). Later spans start at or past
+                    // the new end, so this settles the note.
+                    sEnd = w.tick;
+                    trimEnd = true;
+                    break;
+                }
+                if (sEnd > w.endTick) {
+                    // Tail survives; it may still hit a later span.
+                    sTick = w.endTick;
+                    trimLeft = true;
+                    continue;
+                }
+                covered = true;
+                break;
+            }
+            if (covered) {
+                removals[size_t(s.smfTrack)].push_back(s.onIndex);
+                removals[size_t(s.smfTrack)].push_back(s.endIndex);
+                continue;
+            }
+            if (trimLeft) {
+                removals[size_t(s.smfTrack)].push_back(s.onIndex);
+                EditOp op;
+                op.type = EditOp::InsertEvent;
+                op.smfTrack = s.smfTrack;
+                op.event = m_smf.tracks[size_t(s.smfTrack)].events[s.onIndex];
+                op.event.tick = sTick;
+                trims.push_back(op);
+            }
+            if (trimEnd) {
+                removals[size_t(s.smfTrack)].push_back(s.endIndex);
+                EditOp op;
+                op.type = EditOp::InsertEvent;
+                op.smfTrack = s.smfTrack;
+                op.event = m_smf.tracks[size_t(s.smfTrack)].events[s.endIndex];
+                op.event.tick = sEnd;
+                trims.push_back(op);
+            }
+        }
+    }
+}
+
 void SongDocument::addNote(int engineTrack, uint64_t tick, uint8_t key, uint32_t duration,
                            uint8_t velocity)
 {
     const int smfTrack = smfTrackFor(engineTrack);
     if (smfTrack < 0)
         return;
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(
+        {{engineTrack, key, tick, tick + std::max<uint32_t>(1, duration)}}, {},
+        removals, trims);
     std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     appendNoteInsertOps(ops, smfTrack, channelFor(engineTrack), tick, key, duration,
                         velocity);
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("add note"), std::move(ops));
 }
 
@@ -435,11 +521,21 @@ void SongDocument::addNotes(int engineTrack, const std::vector<NewNote> &notes)
     const int smfTrack = smfTrackFor(engineTrack);
     if (smfTrack < 0 || notes.empty())
         return;
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<PlannedNote> written;
+    for (const NewNote &note : notes)
+        written.push_back({engineTrack, note.key, note.tick,
+                           note.tick + std::max<uint32_t>(1, note.duration)});
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, {}, removals, trims);
     const uint8_t channel = channelFor(engineTrack);
     std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     for (const NewNote &note : notes)
         appendNoteInsertOps(ops, smfTrack, channel, note.tick, note.key, note.duration,
                             note.velocity);
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("add %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
@@ -468,18 +564,25 @@ void SongDocument::moveNotes(const std::vector<DocNote> &notes, int64_t dTick, i
 {
     if (notes.empty() || (dTick == 0 && dKey == 0))
         return;
-    std::vector<EditOp> ops;
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocNote &note : notes) {
-            if (note.smfTrack != int(t))
-                continue;
-            indices.push_back(note.onIndex);
-            if (!note.unterminated())
-                indices.push_back(note.endIndex);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notes) {
+        if (note.smfTrack < 0 || note.smfTrack >= int(removals.size()))
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.onIndex);
+        if (note.unterminated())
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.endIndex);
+        const uint64_t newTick =
+            uint64_t(std::max<int64_t>(0, int64_t(note.tick) + dTick));
+        const uint8_t newKey = uint8_t(std::clamp(int(note.key) + dKey, 0, 127));
+        written.push_back({note.engineTrack, newKey, newTick, newTick + note.duration});
     }
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, notes, removals, trims);
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     for (const DocNote &note : notes) {
         const uint64_t newTick = uint64_t(std::max<int64_t>(0, int64_t(note.tick) + dTick));
         const int newKey = std::clamp(int(note.key) + dKey, 0, 127);
@@ -495,6 +598,7 @@ void SongDocument::moveNotes(const std::vector<DocNote> &notes, int64_t dTick, i
                                 note.duration, note.velocity);
         }
     }
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("move %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
@@ -502,15 +606,23 @@ void SongDocument::resizeNotes(const std::vector<DocNote> &notes, int64_t dDurat
 {
     if (notes.empty() || dDuration == 0)
         return;
-    std::vector<EditOp> ops;
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocNote &note : notes) {
-            if (note.smfTrack == int(t) && !note.unterminated())
-                indices.push_back(note.endIndex);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notes) {
+        if (note.unterminated() || note.smfTrack < 0
+            || note.smfTrack >= int(removals.size()))
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.endIndex);
+        const uint32_t newDuration =
+            uint32_t(std::max<int64_t>(1, int64_t(note.duration) + dDuration));
+        written.push_back(
+            {note.engineTrack, note.key, note.tick, note.tick + newDuration});
     }
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, notes, removals, trims);
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     for (const DocNote &note : notes) {
         const uint32_t newDuration =
             uint32_t(std::max<int64_t>(1, int64_t(note.duration) + dDuration));
@@ -521,6 +633,7 @@ void SongDocument::resizeNotes(const std::vector<DocNote> &notes, int64_t dDurat
             makeChannelEvent(0x9, note.channel, note.tick + newDuration, note.key, 0);
         ops.push_back(end);
     }
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("resize %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
@@ -528,15 +641,25 @@ void SongDocument::resizeNotesLeft(const std::vector<DocNote> &notes, int64_t dT
 {
     if (notes.empty() || dTick == 0)
         return;
-    std::vector<EditOp> ops;
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocNote &note : notes) {
-            if (note.smfTrack == int(t))
-                indices.push_back(note.onIndex);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notes) {
+        if (note.smfTrack < 0 || note.smfTrack >= int(removals.size()))
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.onIndex);
+        if (note.unterminated())
+            continue;
+        const uint64_t endTick = note.tick + note.duration;
+        const uint64_t newTick =
+            uint64_t(std::clamp<int64_t>(int64_t(note.tick) + dTick, 0,
+                                         int64_t(endTick) - 1));
+        written.push_back({note.engineTrack, note.key, newTick, endTick});
     }
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, notes, removals, trims);
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     for (const DocNote &note : notes) {
         // An unterminated note has no note-off to pin; its note-on just moves.
         const int64_t maxTick = note.unterminated()
@@ -550,6 +673,7 @@ void SongDocument::resizeNotesLeft(const std::vector<DocNote> &notes, int64_t dT
         on.event = makeChannelEvent(0x9, note.channel, newTick, note.key, note.velocity);
         ops.push_back(on);
     }
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("resize %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
@@ -688,25 +812,32 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
 {
     if (edit.empty() || m_smf.tracks.empty())
         return;
-    std::vector<EditOp> ops;
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    for (const DocNote &note : edit.removeNotes) {
+        if (note.smfTrack < 0 || note.smfTrack >= int(removals.size()))
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.onIndex);
+        if (!note.unterminated())
+            removals[size_t(note.smfTrack)].push_back(note.endIndex);
+    }
+    for (const DocLanePoint &pt : edit.removePoints) {
+        if (pt.smfTrack >= 0 && pt.smfTrack < int(removals.size()))
+            removals[size_t(pt.smfTrack)].push_back(pt.index);
+    }
+    std::vector<PlannedNote> written;
+    for (const RangeEdit::TrackNotes &tn : edit.addNotes) {
+        for (const NewNote &note : tn.notes)
+            written.push_back({tn.engineTrack, note.key, note.tick,
+                               note.tick + std::max<uint32_t>(1, note.duration)});
+    }
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, edit.removeNotes, removals, trims);
 
+    std::vector<EditOp> ops;
     // All removals first (per SMF track, descending — appendRemoveOps sorts
     // and dedups), so every recorded index stays valid at apply time.
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocNote &note : edit.removeNotes) {
-            if (note.smfTrack != int(t))
-                continue;
-            indices.push_back(note.onIndex);
-            if (!note.unterminated())
-                indices.push_back(note.endIndex);
-        }
-        for (const DocLanePoint &pt : edit.removePoints) {
-            if (pt.smfTrack == int(t))
-                indices.push_back(pt.index);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
-    }
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
 
     for (const RangeEdit::TrackNotes &tn : edit.addNotes) {
         const int smfTrack = smfTrackFor(tn.engineTrack);
@@ -731,6 +862,7 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
             ops.push_back(op);
         }
     }
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(text, std::move(ops));
 }
 
@@ -757,12 +889,23 @@ void SongDocument::moveRange(const std::vector<DocNote> &notes,
         std::sort(indices.begin(), indices.end());
         indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
     }
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notes) {
+        if (note.unterminated())
+            continue;
+        const uint64_t newTick =
+            uint64_t(std::max<int64_t>(0, int64_t(note.tick) + dTick));
+        written.push_back({note.engineTrack, note.key, newTick, newTick + note.duration});
+    }
+    std::vector<std::vector<size_t>> removals = moved;
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, notes, removals, trims);
 
     std::vector<EditOp> ops;
     // All removals first (indices are read at apply time), then the events'
     // exact bytes re-inserted at the shifted ticks.
     for (size_t t = 0; t < m_smf.tracks.size(); t++)
-        appendRemoveOps(ops, int(t), moved[t]);
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
     for (size_t t = 0; t < m_smf.tracks.size(); t++) {
         for (size_t index : moved[t]) {
             EditOp op;
@@ -774,6 +917,7 @@ void SongDocument::moveRange(const std::vector<DocNote> &notes,
             ops.push_back(op);
         }
     }
+    ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("move range"), std::move(ops));
 }
 
