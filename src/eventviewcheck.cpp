@@ -2,16 +2,20 @@
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFontInfo>
 #include <QImage>
 #include <QString>
+#include <QStyleOptionViewItem>
 #include <QTableView>
 #include <algorithm>
 #include <cstdio>
+#include <memory>
 
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 #include "ui/eventlistview.h"
 #include "ui/songview.h"
+#include "ui/typography.h"
 
 // --eventviewcheck <projectRoot>: MIDI event list check. Model pass over
 // every song with a MIDI source: the raw-event API (insert, same-tick
@@ -113,6 +117,26 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
     const QModelIndex eotIdx = model->index(model->rowCount() - 1, 0);
     if (model->data(eotIdx, Qt::EditRole).toULongLong() != track.endTick)
         fail("end-of-track row shows the wrong tick");
+
+    const auto monoFamily = QFontInfo(typography::bodyMono(table->font())).family();
+    constexpr int numericColumns[] = {0, 2, 3, 4};
+    for (const auto column : numericColumns) {
+        const auto cellFont =
+            model->data(model->index(0, column), Qt::FontRole).value<QFont>();
+        if (QFontInfo(cellFont).family() != monoFamily)
+            fail("a numeric event cell does not use the monospace face");
+        if (cellFont.letterSpacingType() != QFont::AbsoluteSpacing
+            || cellFont.letterSpacing() != -0.5)
+            fail("a numeric event cell does not use tightened spacing");
+        QStyleOptionViewItem editorOption;
+        editorOption.initFrom(table);
+        auto editor = std::unique_ptr<QWidget>(table->itemDelegate()->createEditor(
+            table, editorOption, model->index(0, column)));
+        if (!editor || QFontInfo(editor->font()).family() != monoFamily
+            || editor->font().letterSpacingType() != QFont::AbsoluteSpacing
+            || editor->font().letterSpacing() != -0.5)
+            fail("a numeric event editor does not match its column font");
+    }
 
     // Cell edit: bump the first event's tick. The mutation is queued (must
     // not reset the model inside the delegate's commit), so pump the loop.
