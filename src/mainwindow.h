@@ -12,12 +12,14 @@
 #include "ui/enginesettingsdialog.h"
 
 class QAction;
+class QChildEvent;
 class QDockWidget;
 class QLabel;
 class QTabWidget;
 class QSettings;
 class QToolBar;
 class QTimer;
+class QWidget;
 class QUndoGroup;
 class SmfFile;
 class SongListPanel;
@@ -63,6 +65,7 @@ public:
 protected:
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    void childEvent(QChildEvent *event) override;
 
 private slots:
     void openProject();
@@ -82,6 +85,7 @@ private slots:
 
 private:
     void buildUi();
+    void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
     // On failure warns via dialog (interactive) or status bar (restore).
     bool openProjectDir(const QString &dir, bool interactive = true);
@@ -256,6 +260,11 @@ private:
     QAction *m_eventListAction = nullptr;
     QLabel *m_timeLabel = nullptr;
     QLabel *m_songLabel = nullptr;
-    QLabel *m_polyLabel = nullptr;
+    QWidget *m_polyMeter = nullptr;
+    QLabel *m_pcmValueLabel = nullptr;
+    QLabel *m_cgbValueLabel = nullptr;
+    QLabel *m_polyLostSeparator = nullptr;
+    QLabel *m_polyLostCaption = nullptr;
+    QLabel *m_polyLostLabel = nullptr;
     QTimer *m_uiTimer = nullptr;
 };

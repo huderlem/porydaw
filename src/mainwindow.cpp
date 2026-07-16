@@ -9,6 +9,8 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QFormLayout>
+#include <QFontMetrics>
+#include <QHBoxLayout>
 #include <QLineEdit>
 #include <QRegularExpressionValidator>
 #include <QElapsedTimer>
@@ -32,6 +34,7 @@
 #include <QToolBar>
 #include <QUndoGroup>
 
+#include <QChildEvent>
 #include <QCloseEvent>
 
 #include <algorithm>
@@ -171,6 +174,7 @@ MainWindow::MainWindow(QWidget *parent)
     QSettings settings;
     restoreGeometry(settings.value(QStringLiteral("windowGeometry")).toByteArray());
     restoreState(settings.value(QStringLiteral("windowState")).toByteArray());
+    updateDockTabFonts();
     m_songList->restoreFilters(
         settings.value(QStringLiteral("songFilterText")).toString(),
         settings.value(QStringLiteral("songFilterSort")).toInt(),
@@ -398,10 +402,55 @@ void MainWindow::buildUi()
     setCentralWidget(m_tabs);
 
     // Status bar: polyphony meter
-    m_polyLabel = new QLabel(this);
-    m_polyLabel->setObjectName(QStringLiteral("polyphonyLabel"));
-    m_polyLabel->setFont(typography::bodyMono(font()));
-    statusBar()->addPermanentWidget(m_polyLabel);
+    m_polyMeter = new QWidget(this);
+    auto *polyLayout = new QHBoxLayout(m_polyMeter);
+    polyLayout->setContentsMargins(0, 0, 0, 0);
+    polyLayout->setSpacing(::layout::space(::layout::Space::Half));
+    const auto fieldInset = ::layout::space(::layout::Space::Half);
+    const auto valueFont = typography::bodyMono(font());
+    auto *pcmCaption = new QLabel(tr("PCM"), m_polyMeter);
+    m_pcmValueLabel = new QLabel(m_polyMeter);
+    m_pcmValueLabel->setObjectName(QStringLiteral("polyphonyPcmValue"));
+    m_pcmValueLabel->setFont(valueFont);
+    m_pcmValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_pcmValueLabel->setAttribute(Qt::WA_StyledBackground);
+    m_pcmValueLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_pcmValueLabel->setFixedWidth(
+        QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("15/15")) +
+        2 * fieldInset);
+    auto *separator = new QLabel(QStringLiteral("·"), m_polyMeter);
+    auto *cgbCaption = new QLabel(tr("CGB"), m_polyMeter);
+    m_cgbValueLabel = new QLabel(m_polyMeter);
+    m_cgbValueLabel->setObjectName(QStringLiteral("polyphonyCgbValue"));
+    m_cgbValueLabel->setFont(valueFont);
+    m_cgbValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_cgbValueLabel->setAttribute(Qt::WA_StyledBackground);
+    m_cgbValueLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_cgbValueLabel->setFixedWidth(
+        QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("4/4")) +
+        2 * fieldInset);
+    m_polyLostSeparator = new QLabel(QStringLiteral("·"), m_polyMeter);
+    m_polyLostLabel = new QLabel(m_polyMeter);
+    m_polyLostLabel->setObjectName(QStringLiteral("polyphonyLostValue"));
+    m_polyLostLabel->setFont(valueFont);
+    m_polyLostLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_polyLostLabel->setAttribute(Qt::WA_StyledBackground);
+    m_polyLostLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_polyLostCaption = new QLabel(tr("notes lost"), m_polyMeter);
+    m_polyLostCaption->setObjectName(QStringLiteral("polyphonyLostCaption"));
+    m_polyLostSeparator->hide();
+    m_polyLostLabel->hide();
+    m_polyLostCaption->hide();
+    polyLayout->addWidget(pcmCaption);
+    polyLayout->addWidget(m_pcmValueLabel);
+    polyLayout->addWidget(separator);
+    polyLayout->addWidget(cgbCaption);
+    polyLayout->addWidget(m_cgbValueLabel);
+    polyLayout->addWidget(m_polyLostSeparator);
+    polyLayout->addWidget(m_polyLostLabel);
+    polyLayout->addWidget(m_polyLostCaption);
+    statusBar()->addPermanentWidget(m_polyMeter);
+    m_polyMeter->hide();
 
     // Initial focus goes to the song list (via the panel's focus proxy), not
     // its filter box — first in tab order, which otherwise wins on show and
@@ -424,6 +473,20 @@ void MainWindow::refreshTransportIcons()
         tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
 }
 
+void MainWindow::updateDockTabFonts()
+{
+    const auto dockTabFont = typography::bold(font());
+    for (auto *tabBar :
+         findChildren<QTabBar *>(QString(), Qt::FindDirectChildrenOnly))
+        tabBar->setFont(dockTabFont);
+}
+
+void MainWindow::childEvent(QChildEvent *event)
+{
+    QMainWindow::childEvent(event);
+    if (event->added())
+        QTimer::singleShot(0, this, &MainWindow::updateDockTabFonts);
+}
 
 void MainWindow::changeEvent(QEvent *event)
 {
@@ -573,7 +636,13 @@ void MainWindow::activateSession(SongSession *session, bool force)
         m_registerAction->setEnabled(false);
         m_songLabel->clear();
         m_timeLabel->setText(QStringLiteral("--:--.- / --:--.-"));
-        m_polyLabel->clear();
+        m_polyMeter->hide();
+        m_pcmValueLabel->clear();
+        m_cgbValueLabel->clear();
+        m_polyLostLabel->clear();
+        m_polyLostSeparator->hide();
+        m_polyLostLabel->hide();
+        m_polyLostCaption->hide();
         m_songList->setCurrentSong(-1);
         updateWindowTitle();
         updateTransportActions();
@@ -1876,13 +1945,18 @@ void MainWindow::uiTick()
                                           m_audio.transport() == Transport::Playing);
 
         const uint64_t lost = m_audio.polyLostTotal();
-        QString poly = tr("PCM %1/%2 · CGB %3/4")
-                           .arg(m_audio.activePcmChannels())
-                           .arg(m_audio.maxPcmChannels())
-                           .arg(m_audio.activeCgbChannels());
-        if (lost > 0)
-            poly += tr(" · %1 notes lost").arg(lost);
-        m_polyLabel->setText(poly);
+        m_pcmValueLabel->setText(
+            QStringLiteral("%1/%2")
+                .arg(m_audio.activePcmChannels())
+                .arg(m_audio.maxPcmChannels()));
+        m_cgbValueLabel->setText(
+            QStringLiteral("%1/4").arg(m_audio.activeCgbChannels()));
+        const bool hasLost = lost > 0;
+        m_polyLostLabel->setText(hasLost ? QString::number(lost) : QString());
+        m_polyLostSeparator->setVisible(hasLost);
+        m_polyLostLabel->setVisible(hasLost);
+        m_polyLostCaption->setVisible(hasLost);
+        m_polyMeter->show();
     }
     updateTransportActions();
 }

@@ -13,7 +13,6 @@ extern "C" {
 
 class QComboBox;
 class QLabel;
-class QPushButton;
 class QSpinBox;
 
 // The voicegroup dock (SPEC §6.1): the current song's 128 voicegroup entries
@@ -137,5 +136,4 @@ private:
     QLabel *m_synthParamsLabel = nullptr;
     QLabel *m_adsrLabel = nullptr;
     QWidget *m_adsrRow = nullptr;
-    QPushButton *m_newButton = nullptr;
 };

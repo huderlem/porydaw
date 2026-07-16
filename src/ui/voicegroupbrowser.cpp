@@ -14,6 +14,8 @@
 
 #include <algorithm>
 
+#include "ui/layout.h"
+
 #include "ui/m4asemantics.h"
 
 namespace {
@@ -112,15 +114,23 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
 {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(2);
+    layout->setSpacing(::layout::space(::layout::Space::Half));
 
     m_title = new QLabel(tr("No song loaded"), this);
-    m_title->setContentsMargins(4, 2, 4, 0);
+    m_title->setContentsMargins(::layout::space(::layout::Space::Two),
+                              ::layout::space(::layout::Space::Half),
+                              ::layout::space(::layout::Space::Two), 0);
     layout->addWidget(m_title);
+  const int columnPadding = ::layout::space(::layout::Space::Two);
 
     m_tree = new QTreeWidget(this);
+  ::layout::configureListPositionIndicator(*m_tree->verticalScrollBar());
     m_tree->setColumnCount(3);
     m_tree->setHeaderLabels({tr("Voice"), tr("Type"), tr("ADSR")});
+  m_tree->setStyleSheet(
+      QStringLiteral("QTreeWidget::item{padding-left:%1px;}"
+                     "QHeaderView::section{padding-left:%1px;}")
+          .arg(columnPadding));
     m_tree->setRootIsDecorated(false);
     m_tree->setUniformRowHeights(true);
     m_tree->setAllColumnsShowFocus(true);
@@ -139,12 +149,15 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // ---- editor panel for the selected voice ----
     m_editor = new QWidget(this);
     auto *form = new QFormLayout(m_editor);
-    form->setContentsMargins(4, 2, 4, 2);
-    form->setVerticalSpacing(2);
+    form->setContentsMargins(::layout::space(::layout::Space::One),
+                           ::layout::space(::layout::Space::Half),
+                           ::layout::space(::layout::Space::One),
+                           ::layout::space(::layout::Space::Half));
+    form->setVerticalSpacing(::layout::space(::layout::Space::Half));
 
     m_notice = new QLabel(m_editor);
     m_notice->setWordWrap(true);
-    m_notice->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    m_notice->setObjectName(QStringLiteral("voicegroupEditorNotice"));
     form->addRow(m_notice);
 
     const auto addRow = [form](const QString &text, QWidget *field, QLabel **labelOut) {
@@ -168,7 +181,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_sweepRow = new QWidget(m_editor);
     auto *sweepLayout = new QHBoxLayout(m_sweepRow);
     sweepLayout->setContentsMargins(0, 0, 0, 0);
-    sweepLayout->setSpacing(2);
+    sweepLayout->setSpacing(::layout::space(::layout::Space::Half));
     m_sweepTimeSpin = new QSpinBox(m_sweepRow);
     m_sweepTimeSpin->setRange(0, 7);
     m_sweepTimeSpin->setSpecialValueText(tr("Off"));
@@ -234,7 +247,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_adsrRow = new QWidget(m_editor);
     auto *adsrLayout = new QHBoxLayout(m_adsrRow);
     adsrLayout->setContentsMargins(0, 0, 0, 0);
-    adsrLayout->setSpacing(2);
+    adsrLayout->setSpacing(::layout::space(::layout::Space::Half));
     for (QSpinBox **spin : {&m_attackSpin, &m_decaySpin, &m_sustainSpin, &m_releaseSpin}) {
         *spin = new QSpinBox(m_adsrRow);
         (*spin)->setRange(0, 255); // narrowed per voice family on populate
@@ -250,13 +263,13 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // undo stack, so the only button here is New…
     auto *buttons = new QWidget(m_editor);
     auto *buttonLayout = new QHBoxLayout(buttons);
-    buttonLayout->setContentsMargins(0, 2, 0, 0);
-    m_newButton = new QPushButton(tr("New…"), buttons);
-    m_newButton->setToolTip(tr("Create a new voicegroup file."));
-    buttonLayout->addWidget(m_newButton);
+    buttonLayout->setContentsMargins(0, ::layout::space(::layout::Space::Half), 0, 0);
+  auto *newButton = new QPushButton(tr("New…"), buttons);
+  newButton->setToolTip(tr("Create a new voicegroup file."));
+    buttonLayout->addWidget(newButton);
     buttonLayout->addStretch(1);
     form->addRow(buttons);
-    connect(m_newButton, &QPushButton::clicked, this,
+    connect(newButton, &QPushButton::clicked, this,
             &VoicegroupBrowser::newVoicegroupRequested);
     layout->addWidget(m_editor);
 
@@ -264,7 +277,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // text inputs claim plain printable keys via ShortcutOverride, so the
     // filter refuses Space on their behalf (see eventFilter). The button is
     // a mouse target — keyboard focus on it would also swallow Space.
-    m_newButton->setFocusPolicy(Qt::NoFocus);
+  newButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,

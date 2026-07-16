@@ -129,6 +129,7 @@ if(UNIX AND NOT APPLE)
     target_link_libraries(porydaw PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 endif()
 
+
 if(WIN32)
     set_target_properties(porydaw PROPERTIES WIN32_EXECUTABLE TRUE)
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
