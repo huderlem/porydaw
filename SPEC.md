@@ -332,7 +332,12 @@ stay in memory (pending): the edit is auditioned by patching the
 descriptor bytes straight into the loaded tone (live, no reload — the
 engine re-reads them every tick), and only the definitions the SAVED
 voicegroup references are appended to `direct_sound_synth_data.inc` on
-Save Song, so abandoned tweaks never touch disk. The definition dropdown
+Save Song, so abandoned tweaks never touch disk. The save also wires
+`direct_sound_synth_data.inc` into the ROM build (an `.include` inserted
+next to `direct_sound_data.inc`'s) when nothing assembles it yet, refusing
+with instructions when no anchor is found — porydaw's own loader scans the
+file unconditionally, which would otherwise mask an undefined-symbol build
+break. The definition dropdown
 lists on-disk entries only; a pending symbol shows as the voice's current
 value until a save lands it. Gated on the project defining the
 `set_synth_*` macros; `--vgcheck` covers naming/scan/dedupe/write and a

@@ -1,5 +1,6 @@
 #include <QComboBox>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QSettings>
 #include <QSpinBox>
@@ -344,12 +345,28 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                       && uint8_t(td.wav->data[2]) == 0x21
                       && uint8_t(td.wav->data[5]) == 0x87,
                   "param edits were not patched into the loaded tone");
+            // The scalar path renames the voice too (param-named symbols):
+            // voiceNames feeds track labels and the browser tree.
+            check(QString::fromUtf8(
+                      m_audio.voicegroup()->voiceNames[synthSlot])
+                      == wantSymbol,
+                  "param edits did not sync the loaded voice name");
 
             // Save: exactly one definition (the referenced one) is written,
-            // and it now shows up in the dropdown.
+            // it now shows up in the dropdown, and the synth data file is
+            // wired into the build (sound_data.s .include).
             check(saveSession(*tab), "synth save failed");
             check(readFileBytes(synthPath).contains(wantSymbol.toUtf8() + "::"),
                   "save did not write the referenced synth definition");
+            bool wired = false;
+            for (const QString &dir :
+                 {projectRoot + QStringLiteral("/data"), projectRoot}) {
+                QDirIterator wiredIt(dir, {QStringLiteral("*.s")}, QDir::Files);
+                while (wiredIt.hasNext() && !wired)
+                    wired = readFileBytes(wiredIt.next())
+                                .contains("direct_sound_synth_data.inc");
+            }
+            check(wired, "save did not wire the synth data file into the build");
             check(VoicegroupSource::synthInstruments(projectRoot).defs.size()
                       == defsAfterSetup + 1,
                   "save wrote more than the one referenced definition");
@@ -357,6 +374,30 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             for (int i = 0; i < symbolCombo->count(); i++)
                 listed = listed || symbolCombo->itemText(i) == wantSymbol;
             check(listed, "the saved definition did not appear in the dropdown");
+
+            // Waveform flips: to Saw the edit dedupes onto the setup's
+            // on-disk definition; back to Pulse it must adopt the 50%-square
+            // default, not commit the saw's zeroed (silent, duty-0) params.
+            const int indexBeforeFlips = tab->doc.undoStack()->index();
+            activate(waveCombo, 1);
+            const QString sawSymbol = tab->vgSource->voiceAt(synthSlot)->symbol;
+            const VgSynthDesc *sawDef =
+                VoicegroupSource::synthInstruments(projectRoot).find(sawSymbol);
+            check(sawDef && sawDef->waveform == 1,
+                  "waveform flip to saw did not dedupe onto an on-disk saw");
+            activate(waveCombo, 0);
+            // Deduped onto an on-disk 50% pulse when the project has one,
+            // minted under the param name otherwise — never the duty-0 name.
+            const QString pulseSymbol = tab->vgSource->voiceAt(synthSlot)->symbol;
+            const VgSynthDesc *pulseDef =
+                VoicegroupSource::synthInstruments(projectRoot).find(pulseSymbol);
+            check((pulseDef && *pulseDef == VgSynthDesc{})
+                      || pulseSymbol == vgSynthSymbolName(VgSynthDesc{}),
+                  "waveform flip back to pulse did not adopt the 50% default");
+            while (tab->doc.undoStack()->index() > indexBeforeFlips)
+                tab->doc.undoStack()->undo();
+            check(tab->vgSource->voiceAt(synthSlot)->symbol == wantSymbol,
+                  "undoing the waveform flips did not restore the voice");
 
             // Back to the original voice; the .inc round-trips, and no
             // further definitions are written.

@@ -161,9 +161,11 @@ private:
     void swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int keepSlot);
     // Installs/refreshes session-owned synth descriptors for every Golden Sun
     // synth voice whose loaded tone is missing (pending definition — not on
-    // disk until save) or stale (a param edit patched a different desc).
+    // disk until save) or stale (a param edit patched a different desc), and
+    // syncs voiceNames for symbol moves the scalar path never reloads.
     // Bytes are poked in place, so live tweaks are audible immediately.
-    void applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg);
+    // Returns whether any tone or name actually changed.
+    bool applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg);
     // The descriptor a synth symbol stands for: pending first, then on-disk.
     const VgSynthDesc *synthDescForSymbol(const QString &symbol);
     void cleanupVgPreview();

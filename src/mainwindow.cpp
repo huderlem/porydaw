@@ -980,15 +980,21 @@ bool MainWindow::saveSession(SongSession &session)
                 QMessageBox::warning(this, tr("Save Voicegroup"), error);
                 return false;
             }
-            // Written definitions graduate from pending to on-disk; the
-            // catalog invalidation below re-scans them into the dropdown.
-            for (const auto &def : newDefs)
-                m_pendingSynths.remove(def.first);
+            // The definitions are on disk now whatever the voicegroup save
+            // below does; the catalog must rescan or a failed save would
+            // leave them invisible to lookups, dedupe, and the dropdown.
+            invalidateVgCatalog();
         }
         if (!session.vgSource->save(&error)) {
             QMessageBox::warning(this, tr("Save Voicegroup"), error);
             return false;
         }
+        // Written definitions graduate from pending to on-disk only once the
+        // voicegroup save landed: a failed save keeps them pending so synth
+        // lookups still resolve them (the writer skips value-equal defs, so
+        // the retry save stays a no-op for them).
+        for (const auto &def : newDefs)
+            m_pendingSynths.remove(def.first);
         cleanupVgPreview();
         // Invalidate before the reload below repopulates the browser: the
         // rebuilt catalog must include any synth definitions written above.
@@ -1487,8 +1493,10 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
         session.vgSource->applyScalarsToToneData(slot, tone);
         // Synth param edits are scalar pokes too: the descriptor bytes are
         // patched straight into the loaded tone (pending definitions have
-        // nothing on disk to reload from).
-        applyPendingSynthTones(session, session.voicegroup);
+        // nothing on disk to reload from). The poke can rename the voice
+        // (param-named symbols), which track headers display — repaint.
+        if (applyPendingSynthTones(session, session.voicegroup))
+            session.view->update();
         // Playing tracks hold a copy of their instrument; refresh so the
         // edit is heard from the next note without a pause/play cycle.
         if (&session == m_active && m_audioOk)
@@ -1538,10 +1546,11 @@ const VgSynthDesc *MainWindow::synthDescForSymbol(const QString &symbol)
     return vgCatalog().synths.find(symbol);
 }
 
-void MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg)
+bool MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg)
 {
     if (!session.vgSource || !vg)
-        return;
+        return false;
+    bool changed = false;
     for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
         const VgVoice *v = session.vgSource->voiceAt(slot);
         if (!v
@@ -1552,6 +1561,18 @@ void MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *
         const VgSynthDesc *desc = synthDescForSymbol(v->symbol);
         if (!desc)
             continue;
+        // A synth param edit rides the scalar path, so the reload that would
+        // rebuild voiceNames never runs — sync the slot's name here or track
+        // labels and the browser tree keep showing the pre-edit symbol.
+        const QByteArray name = v->symbol.toUtf8();
+        if (qstrncmp(vg->voiceNames[slot], name.constData(),
+                     VG_VOICE_NAME_LEN - 1)
+            != 0) {
+            std::strncpy(vg->voiceNames[slot], name.constData(),
+                         VG_VOICE_NAME_LEN - 1);
+            vg->voiceNames[slot][VG_VOICE_NAME_LEN - 1] = '\0';
+            changed = true;
+        }
         ToneData &td = vg->voices[slot];
         // Already sounding these bytes (the loader resolved an on-disk
         // definition, or an earlier patch)? Leave the tone alone.
@@ -1581,7 +1602,9 @@ void MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *
         tone->bytes[4] = uint8_t(desc->modDepth);
         tone->bytes[5] = uint8_t(desc->phase);
         td.wav = &tone->wd;
+        changed = true;
     }
+    return changed;
 }
 
 void MainWindow::swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int keepSlot)

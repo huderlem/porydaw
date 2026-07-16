@@ -675,6 +675,17 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                          "\t.align 2\r\n"
                          "SynthCheckSaw::\r\n"
                          "    set_synth_25\r\n");
+        // The build hub: the writer must wire the synth data file into the
+        // assembly (an .include next to direct_sound_data.inc's) or the ROM
+        // build fails on the saved symbols while porydaw plays them fine.
+        QDir().mkpath(fakeRoot + QStringLiteral("/data"));
+        const QString soundDataPath =
+            fakeRoot + QStringLiteral("/data/sound_data.s");
+        wrote = wrote
+            && writeFile(soundDataPath,
+                         "\t.section .rodata\n"
+                         "\t.include \"sound/direct_sound_data.inc\"\n"
+                         "\t.include \"sound/music_player_table.inc\"\n");
         if (!wrote) {
             std::fprintf(stderr, "vgcheck: cannot write synthcheck mini-project\n");
             failures++;
@@ -736,6 +747,14 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
             expectSynth("write appends new definitions",
                         VoicegroupSource::writeSynthDefinitions(fakeRoot, newDefs,
                                                                 &error));
+            // The wiring: sound_data.s gains the synth include, right after
+            // the direct_sound_data.inc line it anchors on.
+            const QByteArray soundData = readFileBytes(soundDataPath);
+            expectSynth(
+                "write wires the synth data file into the build",
+                soundData.contains("\t.include \"sound/direct_sound_data.inc\"\n"
+                                   "\t.include "
+                                   "\"sound/direct_sound_synth_data.inc\"\n"));
             const VgSynthCatalog written =
                 VoicegroupSource::synthInstruments(fakeRoot);
             const VgSynthDesc *minted =
@@ -746,10 +765,14 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                             QStringLiteral("DirectSoundSynth_GoldenSun_Triangle"))
                             != nullptr);
             const QByteArray grown = readFileBytes(synthPath);
+            const QByteArray wired = readFileBytes(soundDataPath);
             expectSynth("re-writing the same definitions is a no-op",
                         VoicegroupSource::writeSynthDefinitions(fakeRoot, newDefs,
                                                                 &error)
-                            && readFileBytes(synthPath) == grown);
+                            && readFileBytes(synthPath) == grown
+                            && readFileBytes(soundDataPath) == wired);
+            expectSynth("the include is wired exactly once",
+                        wired.count("direct_sound_synth_data.inc") == 1);
             error.clear();
             expectSynth("conflicting bytes under an existing name refused",
                         !VoicegroupSource::writeSynthDefinitions(
@@ -793,6 +816,34 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                                 && !error.isEmpty());
             }
             QDir(bareRoot).removeRecursively();
+
+            // With macros but no assembly source including
+            // direct_sound_data.inc, the writer has nowhere to wire the synth
+            // data file into the build — refused with instructions instead of
+            // silently breaking the ROM build.
+            const QString unwiredRoot =
+                projectRoot + QStringLiteral("/.porydaw/synthcheck_unwired");
+            QDir().mkpath(unwiredRoot + QStringLiteral("/sound"));
+            QDir().mkpath(unwiredRoot + QStringLiteral("/asm/macros"));
+            if (!writeFile(unwiredRoot
+                               + QStringLiteral("/asm/macros/music_voice.inc"),
+                           "\t.macro set_synth_pulse a=0, b=0, c=0, d=0\n"
+                           "\t.endm\n")) {
+                std::fprintf(stderr, "vgcheck: cannot write synthcheck_unwired\n");
+                failures++;
+            } else {
+                error.clear();
+                expectSynth(
+                    "unwired build refused with instructions",
+                    !VoicegroupSource::writeSynthDefinitions(
+                        unwiredRoot,
+                        {{QStringLiteral("DirectSoundSynth_GoldenSun_09090909"),
+                          VgSynthDesc{0, 9, 9, 9, 9}}},
+                        &error)
+                        && error.contains(
+                            QStringLiteral("direct_sound_synth_data.inc")));
+            }
+            QDir(unwiredRoot).removeRecursively();
             if (failures == before)
                 std::printf("vgcheck: synth scan/dedupe/write OK\n");
         }

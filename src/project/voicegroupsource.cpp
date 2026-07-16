@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 #include <algorithm>
 #include <cctype>
@@ -235,6 +236,104 @@ QList<QByteArray> splitLines(const QByteArray &content, bool *endsWithNewline)
     if (*endsWithNewline && !lines.isEmpty())
         lines.removeLast();
     return lines;
+}
+
+// Ensures the game build assembles sound/direct_sound_synth_data.inc.
+// porydaw's loader scans the file unconditionally, so playback here works
+// even when the ROM build would fail with an undefined synth symbol — the
+// one failure mode this tool must not mask. When no assembly source
+// references the synth data file, an .include is inserted right after the
+// one for direct_sound_data.inc (the pokeemerald-expansion layout); with no
+// such anchor to be found, the save is refused with instructions rather
+// than left to break the user's build.
+bool ensureSynthDataIncluded(const QString &projectRoot, QString *error)
+{
+    static const QByteArray synthRef("direct_sound_synth_data.inc");
+    static const QByteArray anchorRef("sound/direct_sound_data.inc");
+
+    // Known homes of the sound-data includes first, then every assembly
+    // source that could plausibly hold them. The synth data file itself is
+    // checked too: a fork may chain-include it from direct_sound_data.inc.
+    QStringList paths = {projectRoot + QStringLiteral("/data/sound_data.s"),
+                         projectRoot + QStringLiteral("/sound/sound_data.s"),
+                         projectRoot + QStringLiteral("/sound_data.s"),
+                         projectRoot + QStringLiteral("/sound/direct_sound_data.inc")};
+    for (const QString &dir :
+         {projectRoot + QStringLiteral("/data"), projectRoot}) {
+        QDirIterator it(dir, {QStringLiteral("*.s")}, QDir::Files);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            if (!paths.contains(path))
+                paths.append(path);
+        }
+    }
+
+    QString anchorPath;
+    int anchorLine = -1;
+    for (const QString &path : paths) {
+        bool ok = false;
+        const QByteArray content = readAllBytes(path, &ok);
+        if (!ok)
+            continue;
+        if (content.contains(synthRef))
+            return true; // already assembled by the build
+        if (!anchorPath.isEmpty() || !content.contains(anchorRef))
+            continue;
+        bool unusedNewline = false;
+        const QList<QByteArray> lines = splitLines(content, &unusedNewline);
+        for (int i = 0; i < lines.size(); i++) {
+            if (lines.at(i).contains(anchorRef)
+                && lines.at(i).trimmed().startsWith(".include")) {
+                anchorPath = path;
+                anchorLine = i;
+                break;
+            }
+        }
+    }
+    if (anchorPath.isEmpty()) {
+        if (error)
+            *error = QStringLiteral(
+                "cannot find where sound/direct_sound_data.inc is assembled; "
+                "add `.include \"sound/direct_sound_synth_data.inc\"` next to "
+                "it in your build, then save again.");
+        return false;
+    }
+
+    bool ok = false;
+    const QByteArray content = readAllBytes(anchorPath, &ok);
+    bool endsWithNewline = false;
+    QList<QByteArray> lines = splitLines(content, &endsWithNewline);
+    QByteArray anchor = lines.at(anchorLine);
+    const bool crlf = anchor.endsWith('\r');
+    if (crlf)
+        anchor.chop(1);
+    QByteArray newLine =
+        leadingWs(anchor) + ".include \"sound/direct_sound_synth_data.inc\"";
+    if (crlf)
+        newLine += '\r';
+    lines.insert(anchorLine + 1, newLine);
+
+    QSaveFile out(anchorPath);
+    if (!out.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = QStringLiteral("cannot write %1.").arg(anchorPath);
+        return false;
+    }
+    QByteArray joined;
+    for (int i = 0; i < lines.size(); i++) {
+        if (i > 0)
+            joined += '\n';
+        joined += lines.at(i);
+    }
+    if (endsWithNewline && !lines.isEmpty())
+        joined += '\n';
+    out.write(joined);
+    if (!out.commit()) {
+        if (error)
+            *error = QStringLiteral("cannot write %1.").arg(anchorPath);
+        return false;
+    }
+    return true;
 }
 
 // Collects "Label::" symbols whose next content line is a set_synth_* macro,
@@ -999,20 +1098,32 @@ bool VoicegroupSource::writeSynthDefinitions(
         }
         entries += eol;
     }
-    if (entries.isEmpty())
-        return true; // everything was already on disk
-
-    QFile out(path);
-    if (!out.open(QIODevice::WriteOnly | QIODevice::Append)) {
-        if (error)
-            *error = QStringLiteral("cannot write %1.").arg(path);
-        return false;
+    if (!entries.isEmpty()) {
+        // Atomic whole-file rewrite (QSaveFile, as viewsidecar does): a plain
+        // append that dies mid-write would leave a truncated entry that both
+        // breaks assembly and derails every retry (the fragment re-parses as
+        // a conflicting definition of the same symbol).
+        QSaveFile out(path);
+        if (!out.open(QIODevice::WriteOnly)) {
+            if (error)
+                *error = QStringLiteral("cannot write %1.").arg(path);
+            return false;
+        }
+        out.write(content);
+        out.write(entries);
+        if (!out.commit()) {
+            if (error)
+                *error = QStringLiteral("cannot write %1.").arg(path);
+            return false;
+        }
     }
-    if (out.write(entries) != entries.size()) {
-        if (error)
-            *error = QStringLiteral("short write to %1.").arg(path);
+    // The definitions resolve for porydaw's loader either way; make sure the
+    // ROM build assembles them too. Skipped when the synth data file doesn't
+    // exist (every definition already lives inline in direct_sound_data.inc):
+    // there is nothing new to wire in, and an .include of a missing file
+    // would itself break the build.
+    if (QFile::exists(path) && !ensureSynthDataIncluded(projectRoot, error))
         return false;
-    }
     return true;
 }
 

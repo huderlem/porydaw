@@ -588,6 +588,7 @@ void VoicegroupBrowser::commitEdit()
         v.macro = macroIsDsFamily(cur->macro) ? cur->macro : VgMacro::DirectSound;
         v.keysplitTable.clear();
         VgSynthDesc desc;
+        QString symbol;
         const QString comboSymbol = m_symbolCombo->currentText().trimmed();
         if (!curSynth) {
             // Just switched to Synth: the waveform/param fields are stale, so
@@ -596,30 +597,41 @@ void VoicegroupBrowser::commitEdit()
                 desc = m_synths.defs.first().second;
         } else if (comboSymbol != cur->symbol
                    && m_synthBySymbol.contains(comboSymbol)) {
-            desc = m_synthBySymbol.value(comboSymbol); // picked a definition
+            // Picked a definition: honor the symbol as chosen. Resolving it
+            // back through the descriptor would land value-equal twins (any
+            // two saws compare equal) on whichever one scans first.
+            desc = m_synthBySymbol.value(comboSymbol);
+            symbol = comboSymbol;
         } else {
             desc.waveform = m_synthWaveCombo->currentIndex();
             desc.baseDuty = m_synthDutySpin->value();
             desc.dutyStep = m_synthStepSpin->value();
             desc.modDepth = m_synthDepthSpin->value();
             desc.phase = m_synthPhaseSpin->value();
+            // Saw/triangle definitions carry all-zero pulse params (their
+            // macros take none), so switching the waveform to Pulse would
+            // commit a duty-0 wave: constant DC, i.e. silence. Adopt the
+            // 50%-square default instead, like the Sample-to-Synth path.
+            if (desc.waveform == 0 && curDesc.waveform != 0)
+                desc = VgSynthDesc{};
         }
-        QString symbol;
-        if (curSynth && desc == curDesc) {
-            symbol = cur->symbol; // unchanged (or a duplicate definition)
-        } else {
-            symbol = m_synths.symbolFor(desc); // on-disk definitions
-            if (symbol.isEmpty()) {            // then pending ones
-                for (auto it = m_synthBySymbol.constBegin();
-                     it != m_synthBySymbol.constEnd(); ++it) {
-                    if (it.value() == desc) {
-                        symbol = it.key();
-                        break;
+        if (symbol.isEmpty()) {
+            if (curSynth && desc == curDesc) {
+                symbol = cur->symbol; // unchanged (or a duplicate definition)
+            } else {
+                symbol = m_synths.symbolFor(desc); // on-disk definitions
+                if (symbol.isEmpty()) {            // then pending ones
+                    for (auto it = m_synthBySymbol.constBegin();
+                         it != m_synthBySymbol.constEnd(); ++it) {
+                        if (it.value() == desc) {
+                            symbol = it.key();
+                            break;
+                        }
                     }
                 }
+                if (symbol.isEmpty() && m_mintSynth)
+                    symbol = m_mintSynth(desc);
             }
-            if (symbol.isEmpty() && m_mintSynth)
-                symbol = m_mintSynth(desc);
         }
         if (symbol.isEmpty()) {
             populateEditor(); // no definition to point at — refuse the change
@@ -745,9 +757,15 @@ void VoicegroupBrowser::commitEdit()
     // A synth-to-synth change is a scalar poke even though the symbol
     // changed: only the descriptor bytes move, and the owner patches those
     // into the loaded tone directly (no reload — pending definitions aren't
-    // on disk to reload from anyway).
+    // on disk to reload from anyway). That shortcut needs the OUTGOING
+    // symbol's descriptor to be resolvable from the definition catalogs,
+    // though: a voice classified from raw tone bytes (a zero-size .bin
+    // descriptor with no set_synth entry) has nothing to restore those bytes
+    // from on undo, so it must take the reload path, where the loader
+    // re-reads the .bin itself.
     bool structural = vgVoiceStructuralChange(*cur, v);
-    if (curSynth && selData == kSynthTypeData && v.macro == cur->macro)
+    if (curSynth && selData == kSynthTypeData && v.macro == cur->macro
+        && m_synthBySymbol.contains(cur->symbol))
         structural = false;
     emit voiceEditRequested(slot, v, structural);
 }
