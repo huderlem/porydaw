@@ -3,6 +3,7 @@
 #include <QHash>
 #include <QTreeWidget>
 #include <QWidget>
+#include <functional>
 
 extern "C" {
 #include "voicegroup_loader.h"
@@ -17,9 +18,9 @@ class QSpinBox;
 
 // The voicegroup dock (SPEC §6.1): the current song's 128 voicegroup entries
 // with press-and-hold audition, plus an editor panel for the selected voice.
-// Basic voice types (sample/square/wave/noise) plus keysplit and drumkit
-// voices are editable when a source file was located; cry voices stay
-// read-only.
+// Basic voice types (sample/square/wave/noise) plus keysplit, drumkit, and
+// Golden Sun synth voices are editable when a source file was located; cry
+// voices stay read-only.
 class VoicegroupBrowser : public QWidget
 {
     Q_OBJECT
@@ -37,11 +38,17 @@ public:
     // combos; keysplit instruments appear at the top of the sample list.
     // adsrDefaults seeds the envelope a voice adopts on a family-crossing
     // type change (project-typical values; see VoicegroupSource::typicalAdsr).
+    // synths lists the project's Golden Sun synth instruments; ensureSynth
+    // resolves an edited descriptor to a symbol (writing a new definition
+    // when needed — see VoicegroupSource::ensureSynthSymbol), returning ""
+    // on failure after reporting the error itself.
     void setSource(VoicegroupSource *source, const QStringList &sampleSymbols,
                    const QStringList &waveSymbols,
                    const QList<QPair<QString, QString>> &keysplits,
                    const QStringList &drumkits,
-                   const VgAdsrDefaults &adsrDefaults = VgAdsrDefaults());
+                   const VgAdsrDefaults &adsrDefaults = VgAdsrDefaults(),
+                   const VgSynthCatalog &synths = VgSynthCatalog(),
+                   std::function<QString(const VgSynthDesc &)> ensureSynth = {});
 
     int currentSlot() const;
     void selectSlot(int slot);
@@ -70,7 +77,11 @@ private:
     void populateEditor();
     void commitEdit();
     void updateRow(int slot);
-    void setEditorRowsVisible(VgMacro macro, bool visible);
+    void setEditorRowsVisible(VgMacro macro, bool synth, bool visible);
+    // Whether the voice at slot is a Golden Sun synth, filling desc. Known
+    // synth symbols answer directly; zero-size samples (.bin descriptors with
+    // no set_synth entry) classify from the loaded ToneData.
+    bool synthDescFor(const VgVoice &voice, int slot, VgSynthDesc *desc) const;
 
     QLabel *m_title = nullptr;
     QTreeWidget *m_tree = nullptr;
@@ -82,6 +93,9 @@ private:
     QStringList m_waveSymbols;
     QStringList m_drumkitChoices; // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
+    VgSynthCatalog m_synths; // grows as ensureSynth mints new definitions
+    QHash<QString, VgSynthDesc> m_synthBySymbol;
+    std::function<QString(const VgSynthDesc &)> m_ensureSynth;
     VgAdsrDefaults m_adsrDefaults;
     // The envelope each slot last had in each family, so switching a voice's
     // type away and back restores it. Keyed slot -> vgAdsrFamily(); survives
@@ -100,6 +114,12 @@ private:
     QSpinBox *m_sweepShiftSpin = nullptr;
     QComboBox *m_dutyCombo = nullptr;
     QComboBox *m_periodCombo = nullptr;
+    QComboBox *m_synthWaveCombo = nullptr;
+    QWidget *m_synthParamsRow = nullptr;
+    QSpinBox *m_synthDutySpin = nullptr;
+    QSpinBox *m_synthStepSpin = nullptr;
+    QSpinBox *m_synthDepthSpin = nullptr;
+    QSpinBox *m_synthPhaseSpin = nullptr;
     QSpinBox *m_attackSpin = nullptr;
     QSpinBox *m_decaySpin = nullptr;
     QSpinBox *m_sustainSpin = nullptr;
@@ -109,6 +129,8 @@ private:
     QLabel *m_sweepLabel = nullptr;
     QLabel *m_dutyLabel = nullptr;
     QLabel *m_periodLabel = nullptr;
+    QLabel *m_synthWaveLabel = nullptr;
+    QLabel *m_synthParamsLabel = nullptr;
     QLabel *m_adsrLabel = nullptr;
     QWidget *m_adsrRow = nullptr;
     QPushButton *m_newButton = nullptr;

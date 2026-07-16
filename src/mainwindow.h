@@ -178,7 +178,7 @@ private:
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
 
-    // The Voicegroup dock's project-wide symbol/instrument lists: five
+    // The Voicegroup dock's project-wide symbol/instrument lists: six
     // full-project .inc scans, far too slow to re-run on every tab switch.
     // Cached per project root; invalidated on project open/reload and on
     // any voicegroup write.
@@ -188,6 +188,7 @@ private:
         QStringList progWave;
         QList<QPair<QString, QString>> keysplits;
         QStringList drumkits;
+        VgSynthCatalog synths;
         VgAdsrDefaults typicalAdsr;
     };
     const VgCatalog &vgCatalog();

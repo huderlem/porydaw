@@ -6,8 +6,10 @@
 #include <QFileInfo>
 #include <QMap>
 #include <QRegularExpression>
+#include <QSet>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 
 // Line classification and slot accounting mirror parse_voicegroup_file in
 // external/poryaaaa/plugin/voicegroup_loader.c (:1671-2058) exactly:
@@ -158,6 +160,59 @@ QStringList symbolsFromFiles(const QStringList &paths)
     return symbols;
 }
 
+// Mirrors parse_synth_macro_line (voicegroup_loader.c): the recognized
+// set_synth_* macro words, the waveform byte each assembles, and whether the
+// four pulse parameters follow.
+struct SynthMacroDef {
+    const char *word;
+    int waveform;
+    bool hasParams;
+};
+
+const SynthMacroDef kSynthMacros[] = {
+    {"set_synth_custom", 0, true},  {"set_synth_pulse", 0, true},
+    {"set_synth_25", 1, false},     {"set_synth_saw", 1, false},
+    {"set_synth_50", 2, false},     {"set_synth_triangle", 2, false},
+};
+
+// Parses one trimmed content line as a set_synth_* macro. Mirrors the
+// loader's parse_synth_macro_line: word-boundary match (so set_synth_50
+// never matches set_synth_5), strtoul base 0 for the pulse parameters,
+// missing parameters stay 0.
+bool parseSynthMacroLine(const QByteArray &trimmed, VgSynthDesc *desc)
+{
+    for (const SynthMacroDef &m : kSynthMacros) {
+        const int len = int(qstrlen(m.word));
+        if (!trimmed.startsWith(m.word))
+            continue;
+        if (trimmed.size() > len && trimmed[len] != ' ' && trimmed[len] != '\t')
+            continue;
+        *desc = VgSynthDesc{m.waveform, 0, 0, 0, 0};
+        if (m.hasParams) {
+            const char *p = trimmed.constData() + len;
+            int *fields[] = {&desc->baseDuty, &desc->dutyStep, &desc->modDepth,
+                             &desc->phase};
+            for (int *field : fields) {
+                while (*p == ' ' || *p == '\t' || *p == ',')
+                    p++;
+                if (!*p)
+                    break;
+                *field = int(uint8_t(strtoul(p, const_cast<char **>(&p), 0)));
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// The sound data files that can hold synth definitions — the same two the
+// loader feeds into its DirectSound symbol map.
+QStringList synthDefPaths(const QString &projectRoot)
+{
+    return {projectRoot + QStringLiteral("/sound/direct_sound_data.inc"),
+            projectRoot + QStringLiteral("/sound/direct_sound_synth_data.inc")};
+}
+
 QByteArray readAllBytes(const QString &path, bool *ok = nullptr)
 {
     QFile file(path);
@@ -180,6 +235,46 @@ QList<QByteArray> splitLines(const QByteArray &content, bool *endsWithNewline)
     if (*endsWithNewline && !lines.isEmpty())
         lines.removeLast();
     return lines;
+}
+
+// Collects "Label::" symbols whose next content line is a set_synth_* macro,
+// in file order. Mirrors parse_direct_sound_data_file's label tracking: an
+// .incbin or synth macro consumes the pending label; a new label replaces it.
+QList<QPair<QString, VgSynthDesc>> scanSynthDefs(const QStringList &paths)
+{
+    static const QRegularExpression labelRe(QStringLiteral(R"(^(\w+)::)"));
+    QList<QPair<QString, VgSynthDesc>> defs;
+    for (const QString &path : paths) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly))
+            continue;
+        QString pending;
+        bool unusedNewline = false;
+        const QList<QByteArray> lines = splitLines(file.readAll(), &unusedNewline);
+        for (const QByteArray &raw : lines) {
+            int start = 0, end = 0;
+            contentBounds(raw, &start, &end);
+            const QByteArray content = raw.mid(start, end - start);
+            const QRegularExpressionMatch label =
+                labelRe.match(QString::fromUtf8(content));
+            if (label.hasMatch()) {
+                pending = label.captured(1);
+                continue;
+            }
+            if (pending.isEmpty())
+                continue;
+            if (content.contains(".incbin")) {
+                pending.clear();
+                continue;
+            }
+            VgSynthDesc desc;
+            if (parseSynthMacroLine(content, &desc)) {
+                defs.append({pending, desc});
+                pending.clear();
+            }
+        }
+    }
+    return defs;
 }
 
 // The voicegroup symbols a file declares, in file order, with the line forms.
@@ -332,6 +427,33 @@ int vgAdsrFamily(VgMacro macro)
         return -1;
     }
     return -1;
+}
+
+QString vgSynthWaveformName(int waveform)
+{
+    switch (waveform) {
+    case 0: return QStringLiteral("Pulse");
+    case 1: return QStringLiteral("Sawtooth");
+    default: return QStringLiteral("Triangle");
+    }
+}
+
+const VgSynthDesc *VgSynthCatalog::find(const QString &symbol) const
+{
+    for (const auto &def : defs) {
+        if (def.first == symbol)
+            return &def.second;
+    }
+    return nullptr;
+}
+
+QString VgSynthCatalog::symbolFor(const VgSynthDesc &desc) const
+{
+    for (const auto &def : defs) {
+        if (def.second == desc)
+            return def.first;
+    }
+    return QString();
 }
 
 VgAdsr vgDefaultAdsr(const VgAdsrDefaults &defaults, VgMacro macro,
@@ -742,16 +864,152 @@ bool VoicegroupSource::applyScalarsToToneData(int slot, ToneData *td) const
 
 QStringList VoicegroupSource::directSoundSymbols(const QString &projectRoot)
 {
-    const QStringList all = symbolsFromFiles(
-        {projectRoot + QStringLiteral("/sound/direct_sound_data.inc"),
-         projectRoot + QStringLiteral("/sound/direct_sound_synth_data.inc")});
+    const QStringList all = symbolsFromFiles(synthDefPaths(projectRoot));
+    // Synth definitions get their own UI (the Synth voice type), so they
+    // don't belong in the sample list.
+    QSet<QString> synths;
+    for (const auto &def : scanSynthDefs(synthDefPaths(projectRoot)))
+        synths.insert(def.first);
     // Phonemes (voice snippets, not instruments) go to the end of the list.
     QStringList instruments, phonemes;
     for (const QString &symbol : all) {
+        if (synths.contains(symbol))
+            continue;
         (symbol.contains(QStringLiteral("Phoneme")) ? phonemes : instruments)
             .append(symbol);
     }
     return instruments + phonemes;
+}
+
+VgSynthCatalog VoicegroupSource::synthInstruments(const QString &projectRoot)
+{
+    VgSynthCatalog catalog;
+    catalog.defs = scanSynthDefs(synthDefPaths(projectRoot));
+    // The macros normally live in asm/macros/music_voice.inc, but any macro
+    // file counts — only their existence gates writing new definitions.
+    static const QRegularExpression macroRe(
+        QStringLiteral(R"(^\s*\.macro\s+(set_synth_\w+))"));
+    QDirIterator it(projectRoot + QStringLiteral("/asm/macros"),
+                    {QStringLiteral("*.inc")}, QDir::Files);
+    while (it.hasNext()) {
+        QFile file(it.next());
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+            continue;
+        while (!file.atEnd()) {
+            const QRegularExpressionMatch m =
+                macroRe.match(QString::fromUtf8(file.readLine()));
+            if (m.hasMatch() && !catalog.macroWords.contains(m.captured(1)))
+                catalog.macroWords.append(m.captured(1));
+        }
+    }
+    return catalog;
+}
+
+bool VoicegroupSource::ensureSynthSymbol(const QString &projectRoot,
+                                         const VgSynthDesc &desc, QString *symbol,
+                                         QString *error)
+{
+    const VgSynthCatalog catalog = synthInstruments(projectRoot);
+    const QString existing = catalog.symbolFor(desc);
+    if (!existing.isEmpty()) {
+        *symbol = existing;
+        return true;
+    }
+
+    // Prefer the descriptive macro aliases over the pokeemerald-expansion
+    // originals when the project defines both.
+    static const char *const kWordChoices[3][2] = {
+        {"set_synth_pulse", "set_synth_custom"},
+        {"set_synth_saw", "set_synth_25"},
+        {"set_synth_triangle", "set_synth_50"},
+    };
+    const int waveform = std::clamp(desc.waveform, 0, 2);
+    QString word;
+    for (const char *choice : kWordChoices[waveform]) {
+        if (catalog.macroWords.contains(QLatin1String(choice))) {
+            word = QLatin1String(choice);
+            break;
+        }
+    }
+    if (word.isEmpty()) {
+        if (error)
+            *error = QStringLiteral(
+                "this project doesn't define the set_synth_* macros "
+                "(Golden Sun synth instruments need ipatix's improved mixer).");
+        return false;
+    }
+
+    const auto hexByte = [](int v) {
+        return QString::asprintf("%02X", uint8_t(v));
+    };
+    // Param-named symbol, following the pokeemerald-expansion convention.
+    QString name;
+    if (waveform == 0) {
+        name = QStringLiteral("DirectSoundSynthData_Custom_Param_%1%2%3%4")
+                   .arg(hexByte(desc.baseDuty), hexByte(desc.dutyStep),
+                        hexByte(desc.modDepth), hexByte(desc.phase));
+    } else {
+        name = waveform == 1 ? QStringLiteral("DirectSoundSynthData_Saw")
+                             : QStringLiteral("DirectSoundSynthData_Triangle");
+    }
+    // A name collision means an existing definition with different bytes
+    // (equal ones were reused above) — or a plain sample; suffix past it.
+    QSet<QString> taken;
+    for (const auto &def : catalog.defs)
+        taken.insert(def.first);
+    for (const QString &sample : symbolsFromFiles(synthDefPaths(projectRoot)))
+        taken.insert(sample);
+    const QString base = name;
+    for (int i = 2; taken.contains(name); i++)
+        name = base + QStringLiteral("_%1").arg(i);
+
+    // Append to the synth data file (the one place the loader always scans),
+    // matching its line endings and entry style; create it when the project
+    // keeps its synths elsewhere or has none yet.
+    const QString path =
+        projectRoot + QStringLiteral("/sound/direct_sound_synth_data.inc");
+    const QByteArray content = readAllBytes(path);
+    const QByteArray eol = content.contains("\r\n") ? "\r\n" : "\n";
+    QByteArray alignIndent("\t"), macroIndent("\t");
+    bool unusedNewline = false;
+    const QList<QByteArray> lines = splitLines(content, &unusedNewline);
+    for (const QByteArray &raw : lines) {
+        if (raw.trimmed().startsWith(".align"))
+            alignIndent = leadingWs(raw);
+        else if (raw.trimmed().startsWith("set_synth_"))
+            macroIndent = leadingWs(raw);
+    }
+
+    QByteArray entry;
+    if (!content.isEmpty()) {
+        if (!content.endsWith('\n'))
+            entry += eol;
+        entry += eol; // blank line between entries, matching the known layouts
+    }
+    entry += alignIndent + ".align 2" + eol;
+    entry += name.toUtf8() + "::" + eol;
+    entry += macroIndent + word.toUtf8();
+    if (waveform == 0) {
+        entry += QStringLiteral(" 0x%1, 0x%2, 0x%3, 0x%4")
+                     .arg(hexByte(desc.baseDuty), hexByte(desc.dutyStep),
+                          hexByte(desc.modDepth), hexByte(desc.phase))
+                     .toUtf8();
+    }
+    entry += eol;
+
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        if (error)
+            *error = QStringLiteral("cannot write %1.").arg(path);
+        return false;
+    }
+    if (out.write(entry) != entry.size()) {
+        if (error)
+            *error = QStringLiteral("short write to %1.").arg(path);
+        return false;
+    }
+    *symbol = name;
+    return true;
 }
 
 QList<QPair<QString, QString>> VoicegroupSource::keysplitInstruments(

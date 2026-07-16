@@ -39,6 +39,24 @@ VgMacro typeComboMacro(VgMacro m)
     return m == VgMacro::Keysplit ? VgMacro::DirectSound : m;
 }
 
+// The Type dropdown's userData for the Synth pseudo-type: synth voices are
+// voice_directsound lines whose symbol is a synth descriptor, so like
+// Keysplit there is no VgMacro for them (all VgMacro values are >= 0).
+constexpr int kSynthTypeData = -1;
+
+bool macroIsDsFamily(VgMacro m)
+{
+    return m == VgMacro::DirectSound || m == VgMacro::DirectSoundNoResample
+        || m == VgMacro::DirectSoundAlt;
+}
+
+// A loaded DirectSound tone whose sample has size 0 is a Golden Sun synth
+// descriptor, not PCM (m4a_pcm_channel_start; 0x18 = the fix/alt type bits).
+bool toneIsSynth(const ToneData &td)
+{
+    return (td.type & ~0x18) == 0 && td.wav && td.wav->size == 0 && td.wav->data;
+}
+
 bool macroIsDrumkit(VgMacro m)
 {
     return m == VgMacro::KeysplitAll;
@@ -181,6 +199,38 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_periodCombo->addItems({tr("0 (15-bit, hiss)"), tr("1 (7-bit, metallic)")});
     addRow(tr("Period"), m_periodCombo, &m_periodLabel);
 
+    // Golden Sun synth voices: waveform, plus the pulse duty-cycle LFO.
+    m_synthWaveCombo = new QComboBox(m_editor);
+    for (int waveform = 0; waveform < 3; waveform++)
+        m_synthWaveCombo->addItem(vgSynthWaveformName(waveform));
+    addRow(tr("Waveform"), m_synthWaveCombo, &m_synthWaveLabel);
+
+    m_synthParamsRow = new QWidget(m_editor);
+    auto *synthLayout = new QHBoxLayout(m_synthParamsRow);
+    synthLayout->setContentsMargins(0, 0, 0, 0);
+    synthLayout->setSpacing(2);
+    for (QSpinBox **spin : {&m_synthDutySpin, &m_synthStepSpin, &m_synthDepthSpin,
+                            &m_synthPhaseSpin}) {
+        *spin = new QSpinBox(m_synthParamsRow);
+        (*spin)->setRange(0, 255);
+        // Commit on steps/editing-finished only: every distinct value here
+        // mints a shared definition and reloads the voicegroup, so
+        // per-keystroke commits would litter the synth data file.
+        (*spin)->setKeyboardTracking(false);
+        synthLayout->addWidget(*spin);
+    }
+    m_synthDutySpin->setToolTip(
+        tr("Base duty cycle: the pulse width the wave centers on "
+           "(128 = 50% square)."));
+    m_synthStepSpin->setToolTip(
+        tr("Duty LFO step per frame: how fast the pulse width wobbles "
+           "(0 = static)."));
+    m_synthDepthSpin->setToolTip(
+        tr("Modulation amount: how far the pulse width swings around the "
+           "base duty."));
+    m_synthPhaseSpin->setToolTip(tr("Duty LFO phase offset."));
+    addRow(tr("Duty LFO"), m_synthParamsRow, &m_synthParamsLabel);
+
     m_adsrRow = new QWidget(m_editor);
     auto *adsrLayout = new QHBoxLayout(m_adsrRow);
     adsrLayout->setContentsMargins(0, 0, 0, 0);
@@ -217,8 +267,9 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_newButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
-             m_sweepTimeSpin, m_sweepDirCombo, m_sweepShiftSpin, m_attackSpin,
-             m_decaySpin, m_sustainSpin, m_releaseSpin}) {
+             m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,
+             m_synthPhaseSpin, m_sweepTimeSpin, m_sweepDirCombo, m_sweepShiftSpin,
+             m_attackSpin, m_decaySpin, m_sustainSpin, m_releaseSpin}) {
         w->installEventFilter(this);
         for (QLineEdit *edit : w->findChildren<QLineEdit *>())
             edit->installEventFilter(this);
@@ -231,8 +282,10 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     connect(m_dutyCombo, &QComboBox::activated, this, commit);
     connect(m_periodCombo, &QComboBox::activated, this, commit);
     connect(m_sweepDirCombo, &QComboBox::activated, this, commit);
-    for (QSpinBox *spin : {m_sweepTimeSpin, m_sweepShiftSpin, m_attackSpin,
-                           m_decaySpin, m_sustainSpin, m_releaseSpin})
+    connect(m_synthWaveCombo, &QComboBox::activated, this, commit);
+    for (QSpinBox *spin : {m_sweepTimeSpin, m_sweepShiftSpin, m_synthDutySpin,
+                           m_synthStepSpin, m_synthDepthSpin, m_synthPhaseSpin,
+                           m_attackSpin, m_decaySpin, m_sustainSpin, m_releaseSpin})
         connect(spin, &QSpinBox::valueChanged, this, commit);
 
     populateEditor();
@@ -255,7 +308,8 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
     for (int i = 0; i < VOICEGROUP_SIZE; i++) {
         const ToneData &voice = vg->voices[i];
         QString name = QString::fromUtf8(vg->voiceNames[i]).trimmed();
-        const QString type = m4aVoiceTypeName(voice.type);
+        const QString type =
+            toneIsSynth(voice) ? tr("Synth") : m4aVoiceTypeName(voice.type);
         auto *item = new QTreeWidgetItem(m_tree);
         item->setText(0, QStringLiteral("%1  %2").arg(i, 3, 10, QLatin1Char('0'))
                              .arg(name.isEmpty() ? type : name));
@@ -276,7 +330,9 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
                                   const QStringList &waveSymbols,
                                   const QList<QPair<QString, QString>> &keysplits,
                                   const QStringList &drumkits,
-                                  const VgAdsrDefaults &adsrDefaults)
+                                  const VgAdsrDefaults &adsrDefaults,
+                                  const VgSynthCatalog &synths,
+                                  std::function<QString(const VgSynthDesc &)> ensureSynth)
 {
     if (source != m_source)
         m_adsrHistory.clear();
@@ -284,6 +340,13 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
     m_adsrDefaults = adsrDefaults;
     m_waveSymbols = waveSymbols;
     m_drumkitChoices = drumkits;
+    m_synths = synths;
+    m_ensureSynth = std::move(ensureSynth);
+    m_synthBySymbol.clear();
+    for (const auto &def : m_synths.defs) {
+        if (!m_synthBySymbol.contains(def.first)) // first definition wins
+            m_synthBySymbol.insert(def.first, def.second);
+    }
     m_keysplitTables.clear();
     m_sampleChoices.clear();
     for (const auto &pair : keysplits) {
@@ -342,7 +405,7 @@ bool VoicegroupBrowser::eventFilter(QObject *watched, QEvent *event)
     return QWidget::eventFilter(watched, event);
 }
 
-void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool visible)
+void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool synth, bool visible)
 {
     const auto showRow = [](QLabel *label, QWidget *field, bool on) {
         label->setVisible(on);
@@ -354,8 +417,36 @@ void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool visible)
     showRow(m_dutyLabel, m_dutyCombo,
             visible && (macroIsSquare1(macro) || macroIsSquare2(macro)));
     showRow(m_periodLabel, m_periodCombo, visible && macroIsNoise(macro));
+    showRow(m_synthWaveLabel, m_synthWaveCombo, visible && synth);
+    // The pulse LFO row narrows further by waveform (populateEditor).
+    showRow(m_synthParamsLabel, m_synthParamsRow, visible && synth);
     showRow(m_adsrLabel, m_adsrRow,
             visible && macro != VgMacro::Keysplit && !macroIsDrumkit(macro));
+}
+
+bool VoicegroupBrowser::synthDescFor(const VgVoice &voice, int slot,
+                                     VgSynthDesc *desc) const
+{
+    if (!macroIsDsFamily(voice.macro))
+        return false;
+    const auto it = m_synthBySymbol.constFind(voice.symbol);
+    if (it != m_synthBySymbol.constEnd()) {
+        *desc = it.value();
+        return true;
+    }
+    if (m_vg && slot >= 0 && slot < VOICEGROUP_SIZE) {
+        const ToneData &td = m_vg->voices[slot];
+        if (toneIsSynth(td)) {
+            const auto *d = reinterpret_cast<const uint8_t *>(td.wav->data);
+            desc->waveform = d[1] > 2 ? 2 : d[1];
+            desc->baseDuty = d[2];
+            desc->dutyStep = d[3];
+            desc->modDepth = d[4];
+            desc->phase = d[5];
+            return true;
+        }
+    }
+    return false;
 }
 
 void VoicegroupBrowser::populateEditor()
@@ -366,7 +457,7 @@ void VoicegroupBrowser::populateEditor()
         (m_source && slot >= 0) ? m_source->voiceAt(slot) : nullptr;
 
     if (!voice) {
-        setEditorRowsVisible(VgMacro::DirectSound, false);
+        setEditorRowsVisible(VgMacro::DirectSound, false, false);
         QString notice;
         if (!m_vg)
             notice.clear();
@@ -394,18 +485,29 @@ void VoicegroupBrowser::populateEditor()
         return;
     }
 
-    m_notice->setVisible(false);
-    setEditorRowsVisible(voice->macro, true);
+    VgSynthDesc synthDesc;
+    const bool synth = synthDescFor(*voice, slot, &synthDesc);
 
-    // The selectable types, plus the current one when it's an _alt CGB
+    m_notice->setVisible(false);
+    setEditorRowsVisible(voice->macro, synth, true);
+    if (synth) {
+        m_synthParamsLabel->setVisible(synthDesc.waveform == 0);
+        m_synthParamsRow->setVisible(synthDesc.waveform == 0);
+    }
+
+    // The selectable types (with Synth after the Sample variants when the
+    // project has synth support), plus the current one when it's an _alt CGB
     // variant we display but never offer.
-    const VgMacro shownMacro = typeComboMacro(voice->macro);
+    const int shownData = synth ? kSynthTypeData : int(typeComboMacro(voice->macro));
     m_typeCombo->clear();
-    for (VgMacro macro : kSelectableMacros)
+    for (VgMacro macro : kSelectableMacros) {
         m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
-    if (m_typeCombo->findData(int(shownMacro)) < 0)
-        m_typeCombo->addItem(vgMacroDisplayName(shownMacro), int(shownMacro));
-    m_typeCombo->setCurrentIndex(m_typeCombo->findData(int(shownMacro)));
+        if (macro == VgMacro::DirectSoundAlt && (m_synths.available() || synth))
+            m_typeCombo->addItem(tr("Synth"), kSynthTypeData);
+    }
+    if (m_typeCombo->findData(shownData) < 0)
+        m_typeCombo->addItem(vgMacroDisplayName(VgMacro(shownData)), shownData);
+    m_typeCombo->setCurrentIndex(m_typeCombo->findData(shownData));
 
     // Real GBA ranges; out-of-range file values clamp here (and the engine
     // masks them to the same effect on load anyway).
@@ -418,13 +520,27 @@ void VoicegroupBrowser::populateEditor()
     if (vgMacroHasSymbol(voice->macro)) {
         const bool wave = macroIsWave(voice->macro);
         const bool drumkit = macroIsDrumkit(voice->macro);
-        m_symbolLabel->setText(wave ? tr("Wave")
-                                    : drumkit ? tr("Drumkit") : tr("Sample"));
+        m_symbolLabel->setText(synth ? tr("Synth")
+                                     : wave ? tr("Wave")
+                                            : drumkit ? tr("Drumkit") : tr("Sample"));
         m_symbolCombo->clear();
-        m_symbolCombo->addItems(wave ? m_waveSymbols
-                                     : drumkit ? m_drumkitChoices : m_sampleChoices);
+        if (synth) {
+            // The current symbol may be a zero-size .bin descriptor with no
+            // set_synth entry; setCurrentText still shows it (editable combo).
+            for (const auto &def : m_synths.defs)
+                m_symbolCombo->addItem(def.first);
+        } else {
+            m_symbolCombo->addItems(wave ? m_waveSymbols
+                                         : drumkit ? m_drumkitChoices
+                                                   : m_sampleChoices);
+        }
         m_symbolCombo->setCurrentText(voice->symbol);
     }
+    m_synthWaveCombo->setCurrentIndex(std::clamp(synthDesc.waveform, 0, 2));
+    m_synthDutySpin->setValue(synthDesc.baseDuty);
+    m_synthStepSpin->setValue(synthDesc.dutyStep);
+    m_synthDepthSpin->setValue(synthDesc.modDepth);
+    m_synthPhaseSpin->setValue(synthDesc.phase);
     m_sweepTimeSpin->setValue((voice->sweep >> 4) & 7);
     m_sweepDirCombo->setCurrentIndex((voice->sweep >> 3) & 1);
     m_sweepShiftSpin->setValue(voice->sweep & 7);
@@ -448,29 +564,78 @@ void VoicegroupBrowser::commitEdit()
     if (!cur)
         return;
 
+    VgSynthDesc curDesc;
+    const bool curSynth = synthDescFor(*cur, slot, &curDesc);
+
     VgVoice v = *cur; // key & pan carry over: no UI for them
     // The combo never holds Keysplit (a keysplit voice reads as "Sample"
     // there), so a keysplit voice's unchanged type comes back as DirectSound;
-    // the symbol check below restores the keysplit macro.
-    v.macro = VgMacro(m_typeCombo->currentData().toInt());
-    const bool typeChanged = v.macro != typeComboMacro(cur->macro);
+    // the symbol check below restores the keysplit macro. Synth voices read
+    // as the kSynthTypeData pseudo-type instead.
+    const int selData = m_typeCombo->currentData().toInt();
+    const int shownData =
+        curSynth ? kSynthTypeData : int(typeComboMacro(cur->macro));
+    const bool typeChanged = selData != shownData;
 
-    // Resolve the instrument symbol first: for sample-list types the chosen
-    // symbol decides between a keysplit and a plain sample voice.
-    if (vgMacroHasSymbol(v.macro)) {
+    if (selData == kSynthTypeData) {
+        // A synth voice stays a voice_directsound line; the symbol alone
+        // carries the waveform and pulse parameters, deduplicated across the
+        // project's definitions (param-named entries are minted on demand).
+        v.macro = macroIsDsFamily(cur->macro) ? cur->macro : VgMacro::DirectSound;
+        v.keysplitTable.clear();
+        VgSynthDesc desc;
+        const QString comboSymbol = m_symbolCombo->currentText().trimmed();
+        if (!curSynth) {
+            // Just switched to Synth: the waveform/param fields are stale, so
+            // adopt the project's first definition (or a plain 50% pulse).
+            if (!m_synths.defs.isEmpty())
+                desc = m_synths.defs.first().second;
+        } else if (comboSymbol != cur->symbol
+                   && m_synthBySymbol.contains(comboSymbol)) {
+            desc = m_synthBySymbol.value(comboSymbol); // picked a definition
+        } else {
+            desc.waveform = m_synthWaveCombo->currentIndex();
+            desc.baseDuty = m_synthDutySpin->value();
+            desc.dutyStep = m_synthStepSpin->value();
+            desc.modDepth = m_synthDepthSpin->value();
+            desc.phase = m_synthPhaseSpin->value();
+        }
+        QString symbol;
+        if (curSynth && desc == curDesc) {
+            symbol = cur->symbol; // unchanged (or a duplicate definition)
+        } else {
+            symbol = m_synths.symbolFor(desc);
+            if (symbol.isEmpty() && m_ensureSynth)
+                symbol = m_ensureSynth(desc);
+        }
+        if (symbol.isEmpty()) {
+            populateEditor(); // no definition to point at — refuse the change
+            return;
+        }
+        if (!m_synthBySymbol.contains(symbol)) {
+            m_synths.defs.append({symbol, desc});
+            m_synthBySymbol.insert(symbol, desc);
+        }
+        v.symbol = symbol;
+    } else if (vgMacroHasSymbol(VgMacro(selData))) {
+        // Resolve the instrument symbol first: for sample-list types the
+        // chosen symbol decides between a keysplit and a plain sample voice.
+        v.macro = VgMacro(selData);
         const bool wave = macroIsWave(v.macro);
         const bool drumkit = macroIsDrumkit(v.macro);
         // The combo only holds this family's list when the current voice
-        // shares it (samples and keysplits share one list; waves and
-        // drumkits each have their own).
+        // shares it (samples and keysplits share one list; waves, drumkits,
+        // and synths each have their own).
         const bool comboShowsThisList = wave
             ? macroIsWave(cur->macro)
-            : drumkit ? macroIsDrumkit(cur->macro) : macroUsesSampleList(cur->macro);
+            : drumkit ? macroIsDrumkit(cur->macro)
+                      : macroUsesSampleList(cur->macro) && !curSynth;
         QString symbol =
             comboShowsThisList ? m_symbolCombo->currentText().trimmed() : QString();
-        // A deliberate Type change away from a keysplit voice overrides the
-        // stale keysplit symbol shown in the combo.
-        if (!wave && !drumkit && typeChanged && m_keysplitTables.contains(symbol))
+        // A deliberate Type change away from a keysplit or synth voice
+        // overrides the stale symbol shown in the combo.
+        if (!wave && !drumkit && typeChanged
+            && (m_keysplitTables.contains(symbol) || m_synthBySymbol.contains(symbol)))
             symbol.clear();
         if (symbol.isEmpty()) {
             if (wave)
@@ -492,6 +657,7 @@ void VoicegroupBrowser::commitEdit()
             v.keysplitTable.clear();
         }
     } else {
+        v.macro = VgMacro(selData);
         v.symbol.clear();
         v.keysplitTable.clear();
     }
@@ -580,7 +746,10 @@ void VoicegroupBrowser::updateRow(int slot)
     const VgVoice *voice = m_source ? m_source->voiceAt(slot) : nullptr;
     if (!item || !voice)
         return;
-    const QString type = m4aVoiceTypeName(vgMacroVoiceType(voice->macro));
+    VgSynthDesc desc;
+    const QString type = synthDescFor(*voice, slot, &desc)
+                             ? tr("Synth")
+                             : m4aVoiceTypeName(vgMacroVoiceType(voice->macro));
     const QString name = vgMacroHasSymbol(voice->macro) ? voice->symbol : QString();
     item->setText(0, QStringLiteral("%1  %2").arg(slot, 3, 10, QLatin1Char('0'))
                          .arg(name.isEmpty() ? type : name));

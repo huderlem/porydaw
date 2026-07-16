@@ -85,6 +85,46 @@ struct VgAdsr {
 // -1 for keysplit/drumkit voices, which carry no envelope of their own.
 int vgAdsrFamily(VgMacro macro);
 
+// One Golden Sun synth instrument (ipatix improved-mixer feature): a
+// DirectSound voice whose "sample" has size 0 and whose data bytes select a
+// synthesized waveform instead of PCM. Pulse carries a duty-cycle LFO;
+// saw/triangle take no parameters (see parse_synth_macro_line and the
+// M4A_SYNTH_* notes in external/poryaaaa/plugin).
+struct VgSynthDesc {
+    int waveform = 0;    // 0 = pulse, 1 = pseudo-saw, 2 = triangle
+    int baseDuty = 0x80; // pulse only: duty threshold (0x80 = 50% square)
+    int dutyStep = 0;    // pulse only: duty LFO advance per frame
+    int modDepth = 0;    // pulse only: LFO swing around the base duty
+    int phase = 0;       // pulse only: duty LFO phase offset
+
+    bool operator==(const VgSynthDesc &o) const
+    {
+        if (waveform != o.waveform)
+            return false;
+        return waveform != 0
+            || (baseDuty == o.baseDuty && dutyStep == o.dutyStep
+                && modDepth == o.modDepth && phase == o.phase);
+    }
+    bool operator!=(const VgSynthDesc &o) const { return !(*this == o); }
+};
+
+// Waveform label ("Pulse", "Sawtooth", "Triangle").
+QString vgSynthWaveformName(int waveform);
+
+// The project's Golden Sun synth instruments: every set_synth_* definition in
+// the sound data files (file order), plus which set_synth_* assembler macros
+// the project defines. An empty macro list means new definitions can't be
+// written — they wouldn't assemble (the mixer support ships with the macros).
+struct VgSynthCatalog {
+    QList<QPair<QString, VgSynthDesc>> defs;
+    QStringList macroWords;
+
+    bool available() const { return !defs.isEmpty() || !macroWords.isEmpty(); }
+    bool creatable() const { return !macroWords.isEmpty(); }
+    const VgSynthDesc *find(const QString &symbol) const;
+    QString symbolFor(const VgSynthDesc &desc) const; // "" when none matches
+};
+
 // The most common envelopes observed across a project's voicegroups, keyed
 // by instrument symbol and by envelope family. Silent or clicking envelopes
 // never qualify (see typicalAdsr), so a hit is always audible.
@@ -159,9 +199,20 @@ public:
     bool applyScalarsToToneData(int slot, ToneData *td) const;
 
     // Sample/wave symbols declared in the project's sound data files.
-    // DirectSound symbols exclude pokemon cries and sort phonemes last.
+    // DirectSound symbols exclude pokemon cries and synth definitions (which
+    // get their own UI) and sort phonemes last.
     static QStringList directSoundSymbols(const QString &projectRoot);
     static QStringList progWaveSymbols(const QString &projectRoot);
+    // Golden Sun synth instruments across the project's sound data files.
+    static VgSynthCatalog synthInstruments(const QString &projectRoot);
+    // Resolves desc to a project synth symbol: an existing definition with
+    // the same descriptor is reused; otherwise a param-named entry is
+    // appended to sound/direct_sound_synth_data.inc (created if missing),
+    // using a set_synth_* macro the project defines — fails when it defines
+    // none.
+    static bool ensureSynthSymbol(const QString &projectRoot,
+                                  const VgSynthDesc &desc, QString *symbol,
+                                  QString *error);
     // Keysplit instruments observed across the project's voicegroups:
     // sub-voicegroup symbol -> its paired keysplit table symbol.
     static QList<QPair<QString, QString>> keysplitInstruments(const QString &projectRoot);

@@ -1330,9 +1330,22 @@ void MainWindow::updateVoicegroupBrowser()
     m_vgBrowser->setVoicegroup(session->voicegroup,
                                QStringLiteral("voicegroup%1").arg(arg));
     const VgCatalog &catalog = vgCatalog();
-    m_vgBrowser->setSource(session->vgSource.get(), catalog.directSound,
-                           catalog.progWave, catalog.keysplits, catalog.drumkits,
-                           catalog.typicalAdsr);
+    m_vgBrowser->setSource(
+        session->vgSource.get(), catalog.directSound, catalog.progWave,
+        catalog.keysplits, catalog.drumkits, catalog.typicalAdsr, catalog.synths,
+        [this](const VgSynthDesc &desc) -> QString {
+            QString symbol, error;
+            if (!VoicegroupSource::ensureSynthSymbol(m_project.root(), desc,
+                                                     &symbol, &error)) {
+                statusBar()->showMessage(
+                    tr("Cannot create synth instrument: %1").arg(error), 8000);
+                return QString();
+            }
+            // Keep the cached catalog in step without a full project rescan.
+            if (m_vgCatalog.valid && !m_vgCatalog.synths.find(symbol))
+                m_vgCatalog.synths.defs.append({symbol, desc});
+            return symbol;
+        });
     updateVgDockTitle();
 }
 
@@ -1344,6 +1357,7 @@ const MainWindow::VgCatalog &MainWindow::vgCatalog()
         m_vgCatalog.progWave = VoicegroupSource::progWaveSymbols(root);
         m_vgCatalog.keysplits = VoicegroupSource::keysplitInstruments(root);
         m_vgCatalog.drumkits = VoicegroupSource::drumkitInstruments(root);
+        m_vgCatalog.synths = VoicegroupSource::synthInstruments(root);
         m_vgCatalog.typicalAdsr = VoicegroupSource::typicalAdsr(root);
         m_vgCatalog.valid = true;
     }
