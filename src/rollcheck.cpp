@@ -22,7 +22,9 @@
 // and nudge the selection along the same absolute grid — both the roll's
 // note selection and a multi-track time selection — and the view follows
 // notes moved out of sight with a minimal scroll (flush at the edge, not
-// re-centered). Undoing every gesture must restore the original bytes.
+// re-centered). The playhead follow-scroll pauses while a mouse gesture
+// is held (pan, drag, sweep) and resumes on release. Undoing every
+// gesture must restore the original bytes.
 
 namespace {
 
@@ -370,6 +372,34 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         fail("time-selection Ctrl+Right did not nudge the covered note");
     if (view.timeSelection().startTick != d.tick + 2 * d.dur)
         fail("time-selection band did not follow the nudge");
+
+    // Playhead follow-scroll pauses while a mouse gesture is live: with a
+    // middle-button pan held in the roll (or the lanes), a playing playhead
+    // far past the right edge must not move the view; releasing the button
+    // lets the next playhead tick scroll again.
+    auto *lanes = view.findChild<QWidget *>(QStringLiteral("automationArea"));
+    if (!lanes)
+        fail("automation area not found");
+    for (QWidget *panned : {roll, lanes}) {
+        if (!panned)
+            continue;
+        const int home = view.contentX(0.0);
+        const uint64_t farTick =
+            uint64_t(std::max(0.0, view.tickAtContentX(vw * 2)));
+        const QPoint mid(panned->width() / 2, panned->height() / 2);
+        sendMouse(panned, QEvent::MouseButtonPress, mid, Qt::MiddleButton,
+                  Qt::MiddleButton);
+        view.setPlayheadSample(timeline->sampleForTick(farTick), true);
+        if (view.contentX(0.0) != home)
+            fail("playhead follow-scroll moved the view during a pan gesture");
+        sendMouse(panned, QEvent::MouseButtonRelease, mid, Qt::MiddleButton,
+                  Qt::NoButton);
+        view.setPlayheadSample(timeline->sampleForTick(farTick), true);
+        if (view.contentX(0.0) == home)
+            fail("playhead follow-scroll did not resume after the pan ended");
+        view.setPlayheadSample(0, false);
+        view.scrollByPx(view.contentX(0.0) - home); // back where it started
+    }
 
     const QImage image = view.grab().toImage();
     if (image.isNull())

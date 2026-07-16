@@ -295,6 +295,15 @@ public:
                                                                                      : 0);
     }
 
+    // A mouse gesture is live (marker/time-sig/selection-edge drag, cursor
+    // scrub, right-press sweep); the playhead follow-scroll pauses while
+    // one runs so the view doesn't jump under the cursor.
+    bool gestureActive() const
+    {
+        return m_dragMarker >= 0 || m_dragTimeSig || m_placingCursor
+            || m_rightPress || m_dragSelEdge >= 0;
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -808,6 +817,16 @@ public:
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setMouseTracking(true);
         setFocusPolicy(Qt::ClickFocus);
+    }
+
+    // A mouse gesture is live (pan, note move/resize/velocity/draw, band or
+    // time-selection sweep, a still-undecided press, keyboard gliss); the
+    // playhead follow-scroll pauses while one runs so the view doesn't jump
+    // under the cursor.
+    bool gestureActive() const
+    {
+        return m_panning || m_drag != Drag::None || m_leftPress || m_rightPress
+            || m_kbdKey >= 0;
     }
 
 protected:
@@ -1859,6 +1878,15 @@ public:
     // resets to the default.
     int laneHeight() const { return m_laneH; }
     const QHash<QString, int> &rowHeightOverrides() const { return m_rowHeights; }
+
+    // A mouse gesture is live (pan, point/sweep/line edit, row resize,
+    // right-press sweep); the playhead follow-scroll pauses while one runs
+    // so the view doesn't jump under the cursor.
+    bool gestureActive() const
+    {
+        return m_panning || m_gesture != Gesture::None || m_dragRow >= 0
+            || m_resizeRow >= 0 || m_rightPress;
+    }
     void setViewHeights(int laneH, const QHash<QString, int> &overrides)
     {
         m_laneH = laneH > 0 ? std::clamp(laneH, kMinLaneH, kMaxLaneH) : kLaneH;
@@ -4400,13 +4428,23 @@ void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
         return;
     m_playheadTick = m_timeline->tickForSample(samplePos);
     m_playing = playing;
-    if (playing) {
+    // Follow the playhead — but not while the user is mid-gesture (panning,
+    // dragging notes or selections, sweeping automation): yanking the view
+    // out from under a held mouse button is disorienting.
+    if (playing && !userGestureActive()) {
         const int px = contentX(m_playheadTick);
         const int vw = viewportWidth();
         if (px < 0 || px > vw * 85 / 100)
             setHScroll(int(m_playheadTick * m_pxPerTick) - vw / 10);
     }
     refreshTimelineViews();
+}
+
+bool SongView::userGestureActive() const
+{
+    return (m_ruler && m_ruler->gestureActive())
+        || (m_roll && m_roll->gestureActive())
+        || (m_lanes && m_lanes->gestureActive());
 }
 
 void SongView::setEditCursorTick(uint64_t tick)

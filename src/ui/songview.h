@@ -383,6 +383,9 @@ protected:
 
 private:
     uint64_t gridTicksIn(const GridSeg &seg) const;
+    // A mouse gesture is live in the ruler, roll, or lanes (pan, drag,
+    // sweep); playhead follow-scroll pauses while one runs.
+    bool userGestureActive() const;
     int viewportWidth() const;
     void setHScroll(int px);
     void updateScrollbars();
