@@ -1123,15 +1123,16 @@ void EventListView::showContextMenu(const QPoint &pos)
         }
     }
 
-    // No before/after placement: rows order by tick, and within a tick the
-    // document enforces the canonical setup → note-end → note-on order that
-    // mid2agb's pairing depends on, so raw position is not the user's to
-    // pick. The copy lands adjacent in the same tick group, ready to edit.
+    // One insert, no before/after placement: rows order by tick, and within
+    // a tick the document enforces the canonical setup → note-end → note-on
+    // order that mid2agb's pairing depends on, so raw position is not the
+    // user's to pick. On a row, the insert is a copy of it at its own tick
+    // (lands adjacent, ready to edit); on the end-of-track row or empty
+    // space it falls back to the toolbar's add-at-edit-cursor. (No separate
+    // "at edit cursor" item: the retarget above just moved the cursor to
+    // the clicked row, so the two would coincide.)
     QMenu menu(this);
-    QAction *insertHere = nullptr;
-    if (src >= 0)
-        insertHere = menu.addAction(tr("Insert event at this tick"));
-    QAction *insertCursor = menu.addAction(tr("Insert event at edit cursor"));
+    QAction *insert = menu.addAction(tr("Insert event"));
     menu.addSeparator();
     QAction *del = menu.addAction(deletable > 0
                                       ? tr("Delete %n event(s)", nullptr, deletable)
@@ -1141,12 +1142,14 @@ void EventListView::showContextMenu(const QPoint &pos)
     QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(pos));
     if (!chosen)
         return;
-    if (insertHere && chosen == insertHere)
-        insertCopyOfRow(idx.row());
-    else if (chosen == insertCursor)
-        addEvent();
-    else if (chosen == del)
+    if (chosen == insert) {
+        if (src >= 0)
+            insertCopyOfRow(idx.row());
+        else
+            addEvent();
+    } else if (chosen == del) {
         deleteSelected();
+    }
 }
 
 void EventListView::deleteSelected()
