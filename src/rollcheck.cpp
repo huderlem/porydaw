@@ -20,8 +20,9 @@
 // and an edge resize snaps to the ruler's absolute grid even when the
 // note's own edge sits off-grid. Ctrl+arrows transpose (Shift: octave)
 // and nudge the selection along the same absolute grid — both the roll's
-// note selection and a multi-track time selection. Undoing every gesture
-// must restore the original bytes.
+// note selection and a multi-track time selection — and the view follows
+// notes moved out of sight with a minimal scroll (flush at the edge, not
+// re-centered). Undoing every gesture must restore the original bytes.
 
 namespace {
 
@@ -309,6 +310,46 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
         fail("Ctrl+Left did not snap the off-grid note back to the grid");
 
+    // Keyboard moves keep the notes in view, scrolling just enough rather
+    // than re-anchoring. Vertical: park the note's row above the viewport,
+    // and Ctrl+Up must land it flush at the top edge.
+    const int keyNow = d.key - 11;
+    view.scrollRollBy((129 - keyNow) * keyH - view.scrollY());
+    if ((128 - keyNow) * keyH - view.scrollY() > 0)
+        fail("could not park the note's row above the viewport");
+    sendKey(roll, Qt::Key_Up, Qt::ControlModifier);
+    if (view.scrollY() != (126 - keyNow) * keyH)
+        fail("Ctrl+Up above the viewport did not scroll the row flush to the top");
+    sendKey(roll, Qt::Key_Down, Qt::ControlModifier); // undo the extra semitone
+
+    // Horizontal: park the note past the left edge; nudging right must
+    // bring its start flush to the left edge (minimal scroll, not the
+    // paste jump). Then ride it right across the viewport: once the end
+    // crosses the right edge, it must stay flush there.
+    uint64_t nStart = d.tick + d.dur;
+    view.scrollByPx(view.contentX(double(nStart + d.dur)) + 40);
+    if (view.contentX(double(nStart + d.dur)) >= 0)
+        fail("could not park the note past the left edge");
+    sendKey(roll, Qt::Key_Right, Qt::ControlModifier);
+    nStart += d.dur;
+    if (view.contentX(double(nStart)) != 0)
+        fail("Ctrl+Right off-screen-left did not scroll the start flush to the left edge");
+    const int vw = std::max(50, roll->width() - songview::kKeyboardW);
+    const int cellPx =
+        view.contentX(double(nStart + d.dur)) - view.contentX(double(nStart));
+    const int rides = (vw - view.contentX(double(nStart + d.dur))) / cellPx + 2;
+    for (int i = 0; i < rides; i++)
+        sendKey(roll, Qt::Key_Right, Qt::ControlModifier);
+    nStart += uint64_t(rides) * d.dur;
+    if (view.contentX(double(nStart + d.dur)) != vw - 1)
+        fail("riding the nudge right did not keep the note's end at the right edge");
+    // Ride back home so the time-selection checks below find the note
+    // where they expect it; every press so far merges into one command.
+    for (int i = 0; i < rides + 1; i++)
+        sendKey(roll, Qt::Key_Left, Qt::ControlModifier);
+    if (!doc.findNote(track, d.tick + d.dur, uint8_t(d.key - 11), &transposed))
+        fail("the ride right and back did not return the note home");
+
     // Consecutive keyboard presses on the same notes merge into one undo
     // command; mark a save point so the time-selection presses below get
     // their own commands (merges never cross the stack's clean index).
@@ -340,9 +381,10 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
 
     // Thirteen commands: draw, set, draw, nudge, draw, add, two resizes,
     // the three note-selection presses MERGED into one, the off-grid
-    // behind-the-back move, Ctrl+Left, and two time-selection moves
-    // (kept separate by the clean-index save point). Undoing them all
-    // must restore the original bytes.
+    // behind-the-back move, Ctrl+Left (all the scroll-follow presses
+    // merge into it), and two time-selection moves (kept separate by the
+    // clean-index save point). Undoing them all must restore the
+    // original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();

@@ -1497,6 +1497,14 @@ private:
         for (const DocNote &note : notes)
             ids.push_back({uint32_t(note.tick), uint8_t(int(note.key) + dKey)});
         m_sv->setSelection(std::move(ids));
+        // Keep the moved notes in sight: the row the move headed toward
+        // scrolls into view just enough (no re-centering).
+        int edge = int(notes.front().key) + dKey;
+        for (const DocNote &note : notes) {
+            const int key = int(note.key) + dKey;
+            edge = dKey > 0 ? std::max(edge, key) : std::min(edge, key);
+        }
+        m_sv->ensureKeyVisible(edge);
         auditionKey(int(notes.front().key) + dKey, notes.front().velocity);
         m_auditioned = true;
         update();
@@ -1527,6 +1535,14 @@ private:
         for (const DocNote &note : notes)
             ids.push_back({uint32_t(int64_t(note.tick) + dTick), note.key});
         m_sv->setSelection(std::move(ids));
+        // Keep the moved notes in sight, scrolling just enough.
+        uint64_t lo = UINT64_MAX, hi = 0;
+        for (const DocNote &note : notes) {
+            const uint64_t tick = uint64_t(int64_t(note.tick) + dTick);
+            lo = std::min(lo, tick);
+            hi = std::max(hi, tick + note.duration);
+        }
+        m_sv->ensureRangeVisible(lo, hi, right);
         update();
     }
 
@@ -4118,6 +4134,14 @@ void SongView::transposeTimeSelection(int dKey)
         }
     }
     m_document->moveNotes(notes, 0, dKey, /*mergeable=*/true);
+    // Keep the moved notes in sight: the row the move headed toward
+    // scrolls into view just enough (no re-centering).
+    int edge = int(notes.front().key) + dKey;
+    for (const DocNote &note : notes) {
+        const int key = int(note.key) + dKey;
+        edge = dKey > 0 ? std::max(edge, key) : std::min(edge, key);
+    }
+    ensureKeyVisible(edge);
     announce(tr("Transposed %n note(s) by %1", nullptr, int(notes.size()))
                  .arg(dKey > 0 ? QStringLiteral("+%1").arg(dKey)
                                : QString::number(dKey)));
@@ -4163,7 +4187,7 @@ void SongView::nudgeTimeSelection(bool right)
     moved.startTick = uint64_t(int64_t(s) + dTick);
     moved.endTick = uint64_t(int64_t(e) + dTick);
     setTimeSelection(moved);
-    ensureTickVisible(moved.startTick);
+    ensureRangeVisible(moved.startTick, moved.endTick, right);
 }
 
 void SongView::removeTimeSelectionContents()
@@ -4750,6 +4774,33 @@ void SongView::ensureTickVisible(uint64_t tick)
     if (x >= 0 && x < vw)
         return;
     setHScroll(int(double(tick) * m_pxPerTick) - vw / 3);
+}
+
+void SongView::ensureRangeVisible(uint64_t startTick, uint64_t endTick, bool preferEnd)
+{
+    const int x0 = contentX(double(startTick));
+    const int x1 = contentX(double(endTick));
+    const int vw = viewportWidth();
+    int dx = 0;
+    if (x1 - x0 >= vw) // wider than the viewport: the leading edge wins
+        dx = preferEnd ? x1 - vw + 1 : x0;
+    else if (x1 >= vw)
+        dx = x1 - vw + 1;
+    else if (x0 < 0)
+        dx = x0;
+    if (dx != 0)
+        setHScroll(m_scrollPx + dx);
+}
+
+void SongView::ensureKeyVisible(int key)
+{
+    const int y0 = (127 - key) * m_keyHeight - m_scrollY;
+    const int y1 = y0 + m_keyHeight;
+    const int vh = m_roll->height();
+    if (y0 < 0)
+        m_vbar->setValue(m_vbar->value() + y0);
+    else if (y1 > vh)
+        m_vbar->setValue(m_vbar->value() + y1 - vh);
 }
 
 int SongView::viewportWidth() const

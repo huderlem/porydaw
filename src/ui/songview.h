@@ -350,6 +350,15 @@ public:
     // alone. Pastes anchor at the edit cursor, which can be scrolled out
     // of view — without this the paste looks like a no-op.
     void ensureTickVisible(uint64_t tick);
+    // Minimal-scroll companion for the keyboard transpose/nudge moves:
+    // shifts the view just enough to bring the tick span back inside,
+    // instead of ensureTickVisible's jump-to-a-third anchoring. A span
+    // wider than the viewport keeps the edge the move headed toward
+    // (the end when preferEnd, else the start).
+    void ensureRangeVisible(uint64_t startTick, uint64_t endTick, bool preferEnd);
+    // Vertical counterpart: scrolls the roll just enough for the key's
+    // row to be fully visible.
+    void ensureKeyVisible(int key);
     void refreshTimelineViews();
 
 signals:
