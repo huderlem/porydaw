@@ -3590,6 +3590,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_editCursorTick = 0;
     m_playing = false;
     m_scrollPx = 0;
+    m_events->setPlayheadTick(-1.0, false); // another song's ticks are stale
     // Lane heights and the snap grid are per-song view state; back to
     // defaults until a sidecar (applyViewState) says otherwise.
     m_lanes->setViewHeights(0, {});
@@ -4437,6 +4438,9 @@ void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
         if (px < 0 || px > vw * 85 / 100)
             setHScroll(int(m_playheadTick * m_pxPerTick) - vw / 10);
     }
+    // The event list mirrors the playhead as a tinted row (and follows it
+    // while playing, mirroring the roll's scroll-follow).
+    m_events->setPlayheadTick(m_playheadTick, playing);
     refreshTimelineViews();
 }
 

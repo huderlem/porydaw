@@ -1,6 +1,8 @@
 #include "eventlistview.h"
 
 #include <QAbstractTableModel>
+#include <QApplication>
+#include <QColor>
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -353,6 +355,42 @@ public:
         return int(it - m_rows.begin());
     }
 
+    // The row the playhead has reached: the last shown event at or before
+    // tick (the last of a same-tick run — the most recently fired), the
+    // end-of-track row once the playhead passes the chunk end, -1 while it
+    // is still ahead of every shown event.
+    int rowForTick(double tick) const
+    {
+        const SmfTrack *tr = track();
+        if (!tr || tick < 0)
+            return -1;
+        if (tick >= double(tr->endTick))
+            return int(m_rows.size()); // end-of-track row
+        const auto it = std::upper_bound(
+            m_rows.begin(), m_rows.end(), tick, [tr](double t, size_t i) {
+                // Stale indexes (possible while hidden) sort as +infinity.
+                return i >= tr->events.size() || t < double(tr->events[i].tick);
+            });
+        return int(it - m_rows.begin()) - 1;
+    }
+
+    int playRow() const { return m_playRow; }
+
+    void setPlayRow(int row)
+    {
+        if (row == m_playRow)
+            return;
+        const int old = m_playRow;
+        m_playRow = row;
+        const auto repaint = [this](int r) {
+            if (r >= 0 && r < rowCount())
+                emit dataChanged(index(r, ColTick), index(r, ColCount - 1),
+                                 {Qt::BackgroundRole});
+        };
+        repaint(old);
+        repaint(row);
+    }
+
     static bool filterMatches(int filter, const SmfEvent &ev)
     {
         const int kind = typeKindOf(ev);
@@ -418,6 +456,14 @@ public:
             if (index.column() == ColTick || index.column() == ColChannel
                 || index.column() == ColData1 || index.column() == ColData2)
                 return int(Qt::AlignRight | Qt::AlignVCenter);
+            return {};
+        }
+        if (role == Qt::BackgroundRole) {
+            // Playhead tint (translucent over the alternating base): the
+            // row the play cursor last passed. Same red as the timeline's
+            // playhead line.
+            if (index.row() == m_playRow)
+                return QColor(226, 66, 66, 44);
             return {};
         }
         if (index.row() == int(m_rows.size())) { // end-of-track row
@@ -590,6 +636,7 @@ private:
     void rebuildRows()
     {
         m_rows.clear();
+        m_playRow = -1; // the mapping changed; the view recomputes it
         const SmfTrack *tr = track();
         if (!tr)
             return;
@@ -602,6 +649,7 @@ private:
     SongDocument *m_doc = nullptr;
     int m_chunk = -1;
     int m_filter = FilterAll;
+    int m_playRow = -1; // display row under the playhead; -1 = none
     std::vector<size_t> m_rows; // display row -> chunk event index (ascending)
 };
 
@@ -768,6 +816,21 @@ EventListView::EventListView(SongView *sv, QWidget *parent)
             [this](int) { filterPicked(); });
     connect(m_sv, &SongView::selectedTrackChanged, this,
             [this](int) { syncTrackSelection(); });
+
+    // Row focus drives the song position: clicking or arrowing onto a row
+    // commits the edit cursor at the event's tick (which also seeks playback
+    // when not stopped). Programmatic row changes — the refresh restore,
+    // add-event reselect — are guarded so document edits never move the
+    // cursor by themselves.
+    connect(m_table->selectionModel(), &QItemSelectionModel::currentRowChanged,
+            this, [this](const QModelIndex &current, const QModelIndex &) {
+                if (!m_settingCurrent && current.isValid())
+                    jumpCursorToRow(current.row());
+            });
+    // currentRowChanged misses a re-click on the already-current row (the
+    // cursor may have moved elsewhere since); clicked() covers it.
+    connect(m_table, &QTableView::clicked, this,
+            [this](const QModelIndex &index) { jumpCursorToRow(index.row()); });
 }
 
 void EventListView::setDocument(SongDocument *document)
@@ -811,6 +874,7 @@ void EventListView::refresh()
             for (const QModelIndex &row : rows)
                 selectedRows.append(row.row());
         }
+        m_settingCurrent = true;
         m_model->reload();
         const int rowCount = m_model->rowCount();
         if (current.isValid() && rowCount > 0) {
@@ -830,8 +894,10 @@ void EventListView::refresh()
             m_table->selectionModel()->select(selection,
                                               QItemSelectionModel::ClearAndSelect);
         }
+        m_settingCurrent = false;
     }
     updateCountLabel();
+    updatePlayRow();
 }
 
 void EventListView::syncTrackSelection()
@@ -849,6 +915,63 @@ void EventListView::syncTrackSelection()
     m_syncing = false;
     m_model->setSource(m_document, chunk);
     updateCountLabel();
+    updatePlayRow();
+}
+
+void EventListView::setPlayheadTick(double tick, bool playing)
+{
+    if (m_playTick == tick && m_playing == playing)
+        return;
+    m_playTick = tick;
+    m_playing = playing;
+    updatePlayRow();
+}
+
+void EventListView::updatePlayRow()
+{
+    // Hidden (the roll's page is current): the model's rows may be stale and
+    // there is nothing to tint; the show-time refresh recomputes.
+    if (isHidden())
+        return;
+    const int row = m_model->rowForTick(m_playTick);
+    if (row == m_model->playRow())
+        return;
+    m_model->setPlayRow(row);
+    if (!m_playing || row < 0)
+        return;
+    // Follow the playhead like the roll does — but never yank the table
+    // while the user is holding a mouse button (row-drag selection, the
+    // scrollbar) or editing a cell.
+    if (QApplication::mouseButtons() != Qt::NoButton)
+        return;
+    QWidget *focus = QApplication::focusWidget();
+    if (focus && focus != m_table && m_table->isAncestorOf(focus))
+        return; // an open cell editor
+    m_table->scrollTo(m_model->index(row, EventTableModel::ColTick));
+}
+
+// Commit the edit cursor at a row's tick — the event's, or the chunk end for
+// the end-of-track row — and scroll the timeline around the list to show it.
+// No-op when the cursor is already there, so a click that also changed the
+// current row commits only once.
+void EventListView::jumpCursorToRow(int row)
+{
+    const int chunk = m_model->chunk();
+    if (!m_document || chunk < 0 || chunk >= int(m_document->smf().tracks.size()))
+        return;
+    const SmfTrack &track = m_document->smf().tracks[chunk];
+    uint64_t tick = 0;
+    const long long i = m_model->eventIndexForRow(row);
+    if (i >= 0 && size_t(i) < track.events.size())
+        tick = track.events[i].tick;
+    else if (row == int(m_model->shownEvents()))
+        tick = track.endTick;
+    else
+        return;
+    if (tick == m_sv->editCursorTick())
+        return;
+    m_sv->commitEditCursor(tick);
+    m_sv->ensureTickVisible(tick);
 }
 
 bool EventListView::eventFilter(QObject *watched, QEvent *event)
@@ -906,6 +1029,7 @@ void EventListView::rebuildChunkCombo()
     m_syncing = false;
     m_model->setSource(m_document, currentChunk());
     updateCountLabel();
+    updatePlayRow();
 }
 
 void EventListView::chunkPicked(int)
@@ -914,6 +1038,7 @@ void EventListView::chunkPicked(int)
         return;
     m_model->setSource(m_document, currentChunk());
     updateCountLabel();
+    updatePlayRow();
     if (!m_document || m_document->smf().format == 0)
         return;
     // Picking a chunk with an engine track selects that track in the roll,
@@ -934,6 +1059,7 @@ void EventListView::filterPicked()
 {
     m_model->setFilter(m_filter->currentIndex());
     updateCountLabel();
+    updatePlayRow();
 }
 
 void EventListView::addEvent()
@@ -1001,7 +1127,9 @@ void EventListView::selectEventRow(int chunk, const SmfEvent &target)
             const int row = m_model->rowForEventIndex(i);
             if (row >= 0) {
                 const QModelIndex idx = m_model->index(row, EventTableModel::ColTick);
+                m_settingCurrent = true;
                 m_table->setCurrentIndex(idx);
+                m_settingCurrent = false;
                 m_table->scrollTo(idx);
             }
             return; // an identical earlier twin is just as good a cursor home

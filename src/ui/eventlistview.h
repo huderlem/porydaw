@@ -34,6 +34,11 @@ public:
     void refresh();
     // Follow the roll's track selection into the matching chunk.
     void syncTrackSelection();
+    // Playhead marker: tints the row the play cursor last passed and, while
+    // playing, keeps it scrolled into view (never while the user is holding
+    // a mouse button or editing a cell). SongView pushes this every UI tick;
+    // cheap when the row didn't change.
+    void setPlayheadTick(double tick, bool playing);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -45,6 +50,8 @@ private:
     void addEvent();
     void deleteSelected();
     void updateCountLabel();
+    void updatePlayRow();
+    void jumpCursorToRow(int row);
     int currentChunk() const;
     void selectEventRow(int chunk, const SmfEvent &event);
 
@@ -56,4 +63,8 @@ private:
     QComboBox *m_filter;
     QLabel *m_count;
     bool m_syncing = false;
+    bool m_settingCurrent = false; // programmatic row changes must not
+                                   // commit the edit cursor
+    double m_playTick = -1.0;      // last playhead tick pushed (-1 = none)
+    bool m_playing = false;
 };

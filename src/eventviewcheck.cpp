@@ -10,6 +10,7 @@
 
 #include "core/songdocument.h"
 #include "project/decompproject.h"
+#include "ui/eventlistview.h"
 #include "ui/songview.h"
 
 // --eventviewcheck <projectRoot>: MIDI event list check. Model pass over
@@ -18,7 +19,9 @@
 // keeps event ticks sorted and undoes back to the original bytes. UI pass
 // on the first song: the event list swaps in for the roll, mirrors the
 // chunk's events plus an end-of-track row, routes cell edits into the
-// document (queued), filters, and round-trips through view state.
+// document (queued), filters, round-trips through view state, tints the
+// row under the playhead (end-of-track row past the end), and commits the
+// edit cursor when a row is focused — but never on programmatic restores.
 
 namespace {
 
@@ -145,6 +148,73 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
     if (model->rowCount() != int(metas) + 1)
         fail("meta filter shows the wrong row count");
     filterCombo->setCurrentIndex(0); // FilterAll
+
+    // Playhead marker: exactly the row the play cursor last passed carries a
+    // background tint (the last of a same-tick run), the end-of-track row
+    // once the playhead passes the end. Row focus commits the edit cursor at
+    // the row's tick, but programmatic restores after document edits do not.
+    auto *events = view.findChild<EventListView *>();
+    uint64_t markerTick = 0; // left on-screen for the screenshot
+    if (!events) {
+        fail("EventListView child not found");
+    } else if (!doc.smf().tracks[chunk].events.empty()) {
+        const auto tinted = [&](int row) {
+            return model->data(model->index(row, 0), Qt::BackgroundRole).isValid();
+        };
+        {
+            const auto &evs = doc.smf().tracks[chunk].events;
+            int expect = int(evs.size() / 2);
+            markerTick = evs[expect].tick;
+            while (expect + 1 < int(evs.size()) && evs[expect + 1].tick <= markerTick)
+                expect++;
+            events->setPlayheadTick(double(markerTick), false);
+            if (!tinted(expect))
+                fail("playhead row not tinted");
+            if (tinted(expect + 1) || (expect > 0 && tinted(expect - 1)))
+                fail("playhead tint on the wrong row");
+            events->setPlayheadTick(double(doc.smf().tracks[chunk].endTick) + 10.0,
+                                    false);
+            if (!tinted(model->rowCount() - 1))
+                fail("end-of-track row not tinted past the end");
+            if (tinted(expect))
+                fail("stale playhead tint after the playhead moved");
+            // The SongView wiring pushes ticks through setPlayheadSample.
+            view.setPlayheadSample(0, false);
+            int zeroRun = 0;
+            while (zeroRun < int(evs.size()) && evs[zeroRun].tick == 0)
+                zeroRun++;
+            if (zeroRun > 0 && !tinted(zeroRun - 1))
+                fail("setPlayheadSample did not tint the tick-0 row");
+        }
+        {
+            const auto &evs = doc.smf().tracks[chunk].events;
+            table->setCurrentIndex(model->index(int(evs.size()) - 1, 0));
+            if (view.editCursorTick() != evs.back().tick)
+                fail("row focus did not move the edit cursor");
+            table->setCurrentIndex(model->index(model->rowCount() - 1, 0));
+            if (view.editCursorTick() != doc.smf().tracks[chunk].endTick)
+                fail("end-of-track focus did not move the edit cursor");
+        }
+        {
+            // A document edit reloads the table and restores the current row
+            // programmatically; that must not commit the edit cursor.
+            const uint64_t cursorBefore = view.editCursorTick();
+            SmfEvent probe;
+            probe.tick = doc.smf().tracks[chunk].endTick + 50;
+            probe.status = 0xB0;
+            probe.data0 = 7;
+            probe.data1 = 64;
+            doc.insertRawEvent(chunk, probe);
+            if (view.editCursorTick() != cursorBefore)
+                fail("document refresh moved the edit cursor");
+            doc.undoStack()->undo();
+            if (view.editCursorTick() != cursorBefore)
+                fail("undo refresh moved the edit cursor");
+        }
+        // For the screenshot: playing, so the follow-scroll brings the
+        // tinted row into view (also exercises the scrollTo path).
+        events->setPlayheadTick(double(markerTick), true);
+    }
 
     const QImage image = view.grab().toImage();
     if (image.isNull())
