@@ -39,6 +39,17 @@ qt_add_executable(porydaw
     src/ui/applicationstartup.h
     src/ui/layout.cpp
     src/ui/layout.h
+    src/ui/theme/theme.h
+    src/ui/theme/theme_roles.h
+    src/ui/theme/color_math.cpp
+    src/ui/theme/color_math.h
+    src/ui/theme/presetcolors.h
+    src/ui/theme/trackidentitycolors.cpp
+    src/ui/theme/trackidentitycolors.h
+    src/ui/theme/themeresolver.cpp
+    src/ui/theme/themeresolver.h
+    src/ui/theme/themeruntime.cpp
+    src/ui/theme/themeruntime.h
     src/songsession.h
     src/tabcheck.cpp
     src/eventviewcheck.cpp
