@@ -50,6 +50,12 @@ qt_add_executable(porydaw
     src/ui/theme/themeresolver.h
     src/ui/theme/themeruntime.cpp
     src/ui/theme/themeruntime.h
+    src/ui/theme/themecontroller.cpp
+    src/ui/theme/themecontroller.h
+    src/ui/theme/oklchpicker.cpp
+    src/ui/theme/oklchpicker.h
+    src/ui/theme/themedialog.cpp
+    src/ui/theme/themedialog.h
     src/songsession.h
     src/tabcheck.cpp
     src/eventviewcheck.cpp

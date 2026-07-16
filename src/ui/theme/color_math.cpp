@@ -8,6 +8,9 @@ namespace themes {
 namespace {
 
 constexpr auto kPi = 3.141592653589793238462643383279502884;
+// Matrix conversion can put a color that is mathematically on the gamut edge
+// a few millionths below 0 or above 1. Accept that tiny error so valid edge
+// colors are not rejected; encodedSample then clamps it back to the exact edge.
 constexpr auto kGamutEpsilon = 1e-6;
 
 struct LinearRgb {
@@ -20,6 +23,8 @@ double clamp(double value, double minimum, double maximum) {
   return std::max(minimum, std::min(maximum, value));
 }
 
+// Canonical IEC sRGB transfer functions. Keep the paired thresholds and
+// exponents intact or forward/inverse conversion will no longer agree.
 double srgbToLinear(double channel) {
   return channel <= 0.04045 ? channel / 12.92
                             : std::pow((channel + 0.055) / 1.055, 2.4);
@@ -31,6 +36,8 @@ double linearToSrgb(double channel) {
              : 1.055 * std::pow(std::max(0.0, channel), 1.0 / 2.4) - 0.055;
 }
 
+// Björn Ottosson's OKLab-to-linear-sRGB transform. The published coefficient
+// precision matters near gamut and contrast boundaries.
 LinearRgb toLinearRgb(const Oklab &lab) {
   const auto l = lab.lightness + 0.3963377774 * lab.a + 0.2158037573 * lab.b;
   const auto m = lab.lightness - 0.1055613458 * lab.a - 0.0638541728 * lab.b;
@@ -56,6 +63,8 @@ QColor colorFromLinearRgb(const LinearRgb &rgb, int alpha = 255) {
 }
 
 double linearChannel(int channel) {
+  // QColor channels are exactly 8-bit here, so cache every possible decoded
+  // value instead of evaluating the transfer power function in raster loops.
   static const auto channels = [] {
     std::array<double, 256> result{};
     for (auto index = std::size_t{0}; index < result.size(); ++index)
