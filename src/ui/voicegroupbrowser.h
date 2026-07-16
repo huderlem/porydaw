@@ -38,17 +38,20 @@ public:
     // combos; keysplit instruments appear at the top of the sample list.
     // adsrDefaults seeds the envelope a voice adopts on a family-crossing
     // type change (project-typical values; see VoicegroupSource::typicalAdsr).
-    // synths lists the project's Golden Sun synth instruments; ensureSynth
-    // resolves an edited descriptor to a symbol (writing a new definition
-    // when needed — see VoicegroupSource::ensureSynthSymbol), returning ""
-    // on failure after reporting the error itself.
+    // synths lists the project's on-disk Golden Sun synth instruments (the
+    // definition dropdown); pendingSynths are minted-but-unsaved definitions
+    // (looked up, never listed — they persist only when their voicegroup
+    // saves). mintSynth resolves an edited descriptor to a symbol without
+    // touching disk, returning "" on failure after reporting the error
+    // itself.
     void setSource(VoicegroupSource *source, const QStringList &sampleSymbols,
                    const QStringList &waveSymbols,
                    const QList<QPair<QString, QString>> &keysplits,
                    const QStringList &drumkits,
                    const VgAdsrDefaults &adsrDefaults = VgAdsrDefaults(),
                    const VgSynthCatalog &synths = VgSynthCatalog(),
-                   std::function<QString(const VgSynthDesc &)> ensureSynth = {});
+                   const QHash<QString, VgSynthDesc> &pendingSynths = {},
+                   std::function<QString(const VgSynthDesc &)> mintSynth = {});
 
     int currentSlot() const;
     void selectSlot(int slot);
@@ -93,9 +96,10 @@ private:
     QStringList m_waveSymbols;
     QStringList m_drumkitChoices; // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
-    VgSynthCatalog m_synths; // grows as ensureSynth mints new definitions
+    VgSynthCatalog m_synths; // on-disk definitions only (the dropdown)
+    // Symbol lookup: on-disk definitions plus pending (unsaved) ones.
     QHash<QString, VgSynthDesc> m_synthBySymbol;
-    std::function<QString(const VgSynthDesc &)> m_ensureSynth;
+    std::function<QString(const VgSynthDesc &)> m_mintSynth;
     VgAdsrDefaults m_adsrDefaults;
     // The envelope each slot last had in each family, so switching a voice's
     // type away and back restores it. Keyed slot -> vgAdsrFamily(); survives

@@ -703,51 +703,65 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                         !samples.contains(QStringLiteral("SynthCheckInline"))
                             && !samples.contains(QStringLiteral("SynthCheckSaw")));
 
+            // Canonical param-derived symbol names.
+            const VgSynthDesc fresh{0, 0x40, 2, 3, 4};
+            expectSynth("pulse symbol name",
+                        vgSynthSymbolName(fresh)
+                            == QStringLiteral("DirectSoundSynth_GoldenSun_40020304"));
+            expectSynth("saw symbol name",
+                        vgSynthSymbolName(VgSynthDesc{1, 0, 0, 0, 0})
+                            == QStringLiteral("DirectSoundSynth_GoldenSun_Saw"));
+            expectSynth("triangle symbol name",
+                        vgSynthSymbolName(VgSynthDesc{2, 0, 0, 0, 0})
+                            == QStringLiteral("DirectSoundSynth_GoldenSun_Triangle"));
+
+            // Value-equal descriptors resolve to existing symbols, whichever
+            // file defines them (this is the commit-time dedupe).
+            expectSynth("dedupe reuses the inline pulse",
+                        catalog.symbolFor(VgSynthDesc{0, 0x10, 0xF0, 0xE0, 0x80})
+                            == QStringLiteral("SynthCheckInline"));
+            expectSynth("dedupe reuses the saw",
+                        catalog.symbolFor(VgSynthDesc{1, 0, 0, 0, 0})
+                            == QStringLiteral("SynthCheckSaw"));
+
+            // The save-time writer: appends new definitions, skips ones
+            // already on disk with equal bytes, refuses conflicting bytes.
             const QString synthPath =
                 fakeRoot + QStringLiteral("/sound/direct_sound_synth_data.inc");
-            const QByteArray synthBefore = readFileBytes(synthPath);
-            QString symbol;
-            // Value-equal descriptors reuse existing symbols, whichever file
-            // defines them, without touching the data file.
-            expectSynth("dedupe reuses the inline pulse",
-                        VoicegroupSource::ensureSynthSymbol(
-                            fakeRoot, VgSynthDesc{0, 0x10, 0xF0, 0xE0, 0x80},
-                            &symbol, &error)
-                            && symbol == QStringLiteral("SynthCheckInline"));
-            expectSynth("dedupe reuses the saw",
-                        VoicegroupSource::ensureSynthSymbol(
-                            fakeRoot, VgSynthDesc{1, 0, 0, 0, 0}, &symbol, &error)
-                            && symbol == QStringLiteral("SynthCheckSaw"));
-            expectSynth("dedupe writes nothing",
-                        readFileBytes(synthPath) == synthBefore);
-
-            // A new pulse mints a param-named entry; asking again reuses it.
-            const VgSynthDesc fresh{0, 0x40, 2, 3, 4};
-            expectSynth(
-                "new pulse minted",
-                VoicegroupSource::ensureSynthSymbol(fakeRoot, fresh, &symbol,
-                                                    &error)
-                    && symbol
-                        == QStringLiteral(
-                            "DirectSoundSynthData_Custom_Param_40020304"));
+            const QList<QPair<QString, VgSynthDesc>> newDefs = {
+                {vgSynthSymbolName(fresh), fresh},
+                {vgSynthSymbolName(VgSynthDesc{2, 0, 0, 0, 0}),
+                 VgSynthDesc{2, 0, 0, 0, 0}},
+            };
+            expectSynth("write appends new definitions",
+                        VoicegroupSource::writeSynthDefinitions(fakeRoot, newDefs,
+                                                                &error));
+            const VgSynthCatalog written =
+                VoicegroupSource::synthInstruments(fakeRoot);
             const VgSynthDesc *minted =
-                VoicegroupSource::synthInstruments(fakeRoot).find(symbol);
-            expectSynth("minted entry parses back", minted && *minted == fresh);
+                written.find(QStringLiteral("DirectSoundSynth_GoldenSun_40020304"));
+            expectSynth("written pulse parses back", minted && *minted == fresh);
+            expectSynth("written triangle parses back",
+                        written.find(
+                            QStringLiteral("DirectSoundSynth_GoldenSun_Triangle"))
+                            != nullptr);
             const QByteArray grown = readFileBytes(synthPath);
-            expectSynth("second ask reuses the minted entry",
-                        VoicegroupSource::ensureSynthSymbol(fakeRoot, fresh,
-                                                            &symbol, &error)
+            expectSynth("re-writing the same definitions is a no-op",
+                        VoicegroupSource::writeSynthDefinitions(fakeRoot, newDefs,
+                                                                &error)
                             && readFileBytes(synthPath) == grown);
-            expectSynth("triangle minted",
-                        VoicegroupSource::ensureSynthSymbol(
-                            fakeRoot, VgSynthDesc{2, 0, 0, 0, 0}, &symbol, &error)
-                            && symbol
-                                == QStringLiteral("DirectSoundSynthData_Triangle"));
+            error.clear();
+            expectSynth("conflicting bytes under an existing name refused",
+                        !VoicegroupSource::writeSynthDefinitions(
+                            fakeRoot,
+                            {{QStringLiteral("SynthCheckSaw"),
+                              VgSynthDesc{0, 9, 9, 9, 9}}},
+                            &error)
+                            && !error.isEmpty() && readFileBytes(synthPath) == grown);
             // The CRLF file must stay CRLF: no bare '\n' anywhere.
-            const QByteArray bytes = readFileBytes(synthPath);
             bool crlfOk = true;
-            for (int i = 0; i < bytes.size(); i++) {
-                if (bytes[i] == '\n' && (i == 0 || bytes[i - 1] != '\r'))
+            for (int i = 0; i < grown.size(); i++) {
+                if (grown[i] == '\n' && (i == 0 || grown[i - 1] != '\r'))
                     crlfOk = false;
             }
             expectSynth("appends keep CRLF endings", crlfOk);
@@ -763,17 +777,18 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                 std::fprintf(stderr, "vgcheck: cannot write synthcheck_bare\n");
                 failures++;
             } else {
-                expectSynth("gate: not creatable without macros",
-                            !VoicegroupSource::synthInstruments(bareRoot).creatable());
+                const VgSynthCatalog bare =
+                    VoicegroupSource::synthInstruments(bareRoot);
+                expectSynth("gate: not creatable without macros", !bare.creatable());
                 expectSynth("gate: existing definition still resolves",
-                            VoicegroupSource::ensureSynthSymbol(
-                                bareRoot, VgSynthDesc{1, 0, 0, 0, 0}, &symbol,
-                                &error)
-                                && symbol == QStringLiteral("SynthCheckSaw"));
+                            bare.symbolFor(VgSynthDesc{1, 0, 0, 0, 0})
+                                == QStringLiteral("SynthCheckSaw"));
                 error.clear();
                 expectSynth("gate: new definition refused",
-                            !VoicegroupSource::ensureSynthSymbol(
-                                bareRoot, VgSynthDesc{0, 9, 9, 9, 9}, &symbol,
+                            !VoicegroupSource::writeSynthDefinitions(
+                                bareRoot,
+                                {{QStringLiteral("DirectSoundSynth_GoldenSun_09090909"),
+                                  VgSynthDesc{0, 9, 9, 9, 9}}},
                                 &error)
                                 && !error.isEmpty());
             }

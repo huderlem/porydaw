@@ -309,7 +309,8 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
         const ToneData &voice = vg->voices[i];
         QString name = QString::fromUtf8(vg->voiceNames[i]).trimmed();
         const QString type =
-            toneIsSynth(voice) ? tr("Synth") : m4aVoiceTypeName(voice.type);
+            toneIsSynth(voice) ? tr("Synth (Golden Sun)")
+                               : m4aVoiceTypeName(voice.type);
         auto *item = new QTreeWidgetItem(m_tree);
         item->setText(0, QStringLiteral("%1  %2").arg(i, 3, 10, QLatin1Char('0'))
                              .arg(name.isEmpty() ? type : name));
@@ -332,7 +333,8 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
                                   const QStringList &drumkits,
                                   const VgAdsrDefaults &adsrDefaults,
                                   const VgSynthCatalog &synths,
-                                  std::function<QString(const VgSynthDesc &)> ensureSynth)
+                                  const QHash<QString, VgSynthDesc> &pendingSynths,
+                                  std::function<QString(const VgSynthDesc &)> mintSynth)
 {
     if (source != m_source)
         m_adsrHistory.clear();
@@ -341,12 +343,14 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
     m_waveSymbols = waveSymbols;
     m_drumkitChoices = drumkits;
     m_synths = synths;
-    m_ensureSynth = std::move(ensureSynth);
+    m_mintSynth = std::move(mintSynth);
     m_synthBySymbol.clear();
     for (const auto &def : m_synths.defs) {
         if (!m_synthBySymbol.contains(def.first)) // first definition wins
             m_synthBySymbol.insert(def.first, def.second);
     }
+    for (auto it = pendingSynths.constBegin(); it != pendingSynths.constEnd(); ++it)
+        m_synthBySymbol.insert(it.key(), it.value());
     m_keysplitTables.clear();
     m_sampleChoices.clear();
     for (const auto &pair : keysplits) {
@@ -503,7 +507,7 @@ void VoicegroupBrowser::populateEditor()
     for (VgMacro macro : kSelectableMacros) {
         m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
         if (macro == VgMacro::DirectSoundAlt && (m_synths.available() || synth))
-            m_typeCombo->addItem(tr("Synth"), kSynthTypeData);
+            m_typeCombo->addItem(tr("Synth (Golden Sun)"), kSynthTypeData);
     }
     if (m_typeCombo->findData(shownData) < 0)
         m_typeCombo->addItem(vgMacroDisplayName(VgMacro(shownData)), shownData);
@@ -604,18 +608,26 @@ void VoicegroupBrowser::commitEdit()
         if (curSynth && desc == curDesc) {
             symbol = cur->symbol; // unchanged (or a duplicate definition)
         } else {
-            symbol = m_synths.symbolFor(desc);
-            if (symbol.isEmpty() && m_ensureSynth)
-                symbol = m_ensureSynth(desc);
+            symbol = m_synths.symbolFor(desc); // on-disk definitions
+            if (symbol.isEmpty()) {            // then pending ones
+                for (auto it = m_synthBySymbol.constBegin();
+                     it != m_synthBySymbol.constEnd(); ++it) {
+                    if (it.value() == desc) {
+                        symbol = it.key();
+                        break;
+                    }
+                }
+            }
+            if (symbol.isEmpty() && m_mintSynth)
+                symbol = m_mintSynth(desc);
         }
         if (symbol.isEmpty()) {
             populateEditor(); // no definition to point at — refuse the change
             return;
         }
-        if (!m_synthBySymbol.contains(symbol)) {
-            m_synths.defs.append({symbol, desc});
-            m_synthBySymbol.insert(symbol, desc);
-        }
+        // Pending definitions are looked up but never listed: the dropdown
+        // (m_synths.defs) only gains them once a save lands them on disk.
+        m_synthBySymbol.insert(symbol, desc);
         v.symbol = symbol;
     } else if (vgMacroHasSymbol(VgMacro(selData))) {
         // Resolve the instrument symbol first: for sample-list types the
@@ -730,7 +742,14 @@ void VoicegroupBrowser::commitEdit()
     // The owner applies the edit (through the song's undo stack) and echoes
     // it back: voiceChanged for a scalar poke, a full voicegroup swap for a
     // structural one — either path refreshes the row and this editor.
-    emit voiceEditRequested(slot, v, vgVoiceStructuralChange(*cur, v));
+    // A synth-to-synth change is a scalar poke even though the symbol
+    // changed: only the descriptor bytes move, and the owner patches those
+    // into the loaded tone directly (no reload — pending definitions aren't
+    // on disk to reload from anyway).
+    bool structural = vgVoiceStructuralChange(*cur, v);
+    if (curSynth && selData == kSynthTypeData && v.macro == cur->macro)
+        structural = false;
+    emit voiceEditRequested(slot, v, structural);
 }
 
 void VoicegroupBrowser::voiceChanged(int slot)
@@ -748,8 +767,8 @@ void VoicegroupBrowser::updateRow(int slot)
         return;
     VgSynthDesc desc;
     const QString type = synthDescFor(*voice, slot, &desc)
-                             ? tr("Synth")
-                             : m4aVoiceTypeName(vgMacroVoiceType(voice->macro));
+        ? tr("Synth (Golden Sun)")
+        : m4aVoiceTypeName(vgMacroVoiceType(voice->macro));
     const QString name = vgMacroHasSymbol(voice->macro) ? voice->symbol : QString();
     item->setText(0, QStringLiteral("%1  %2").arg(slot, 3, 10, QLatin1Char('0'))
                          .arg(name.isEmpty() ? type : name));

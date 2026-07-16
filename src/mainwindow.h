@@ -159,6 +159,13 @@ private:
     // Swaps in a freshly loaded voicegroup (owned by the session from here),
     // reattaching the views — and, when active, the engine — around it.
     void swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int keepSlot);
+    // Installs/refreshes session-owned synth descriptors for every Golden Sun
+    // synth voice whose loaded tone is missing (pending definition — not on
+    // disk until save) or stale (a param edit patched a different desc).
+    // Bytes are poked in place, so live tweaks are audible immediately.
+    void applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg);
+    // The descriptor a synth symbol stands for: pending first, then on-disk.
+    const VgSynthDesc *synthDescForSymbol(const QString &symbol);
     void cleanupVgPreview();
     void updateVgDockTitle();
     void newVoicegroup();
@@ -193,6 +200,11 @@ private:
     };
     const VgCatalog &vgCatalog();
     void invalidateVgCatalog() { m_vgCatalog.valid = false; }
+    // Minted-but-unsaved Golden Sun synth definitions (symbol -> descriptor),
+    // project-wide. Param edits point voice lines at these; they reach disk
+    // (and the browser's dropdown) only when a voicegroup referencing them
+    // saves. Cleared on project switch.
+    QHash<QString, VgSynthDesc> m_pendingSynths;
 
     AudioEngine m_audio;
     bool m_audioOk = false;

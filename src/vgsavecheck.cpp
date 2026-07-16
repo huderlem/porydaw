@@ -1,3 +1,4 @@
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QSettings>
@@ -217,6 +218,156 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             check(!tab->doc.isDirty() && !tab->vgSource->dirty()
                       && releaseSpin->value() == original.release,
                   "undo did not refresh the Release spin box");
+        }
+    }
+
+    // 7. Golden Sun synth param edits: minted definitions live in memory
+    // only (no disk write, not in the definition dropdown) until the
+    // voicegroup saves — and the save writes exactly the definitions the
+    // saved state references, never the abandoned intermediate tweaks.
+    {
+        // Give the scratch project synth support: the macros (gate) and one
+        // definition, appended so a project that already has them is fine.
+        const QString synthPath =
+            projectRoot + QStringLiteral("/sound/direct_sound_synth_data.inc");
+        QDir().mkpath(projectRoot + QStringLiteral("/asm/macros"));
+        bool wrote = false;
+        {
+            QFile macros(projectRoot
+                         + QStringLiteral("/asm/macros/vgsavecheck_synth.inc"));
+            wrote = macros.open(QIODevice::WriteOnly)
+                && macros.write("\t.macro set_synth_pulse base_duty=0x80, "
+                                "duty_step=0x00, mod_depth=0x00, duty_phase=0x00\n"
+                                "\t.endm\n"
+                                "\t.macro set_synth_saw\n\t.endm\n"
+                                "\t.macro set_synth_triangle\n\t.endm\n")
+                    > 0;
+        }
+        {
+            QFile data(synthPath);
+            wrote = wrote && data.open(QIODevice::WriteOnly | QIODevice::Append)
+                && data.write("\n\t.align 2\nVgSaveCheckSaw::\n\tset_synth_saw\n")
+                    > 0;
+        }
+        if (!check(wrote, "cannot write synth support files"))
+            return false;
+        invalidateVgCatalog();
+        updateVoicegroupBrowser(); // hand the browser the new catalog
+        const VgSynthCatalog setupCatalog =
+            VoicegroupSource::synthInstruments(projectRoot);
+        const int defsAfterSetup = setupCatalog.defs.size();
+        const QByteArray synthBytesSetup = readFileBytes(synthPath);
+        const int indexBeforeSynth = tab->doc.undoStack()->index();
+
+        // A sample voice that is NOT already a synth (a synth-heavy
+        // voicegroup's first DirectSound voice may be one, and switching it
+        // to Synth would rightly be a no-op).
+        int synthSlot = -1;
+        for (int i = 0; i < VOICEGROUP_SIZE && synthSlot < 0; i++) {
+            const VgVoice *v = tab->vgSource->voiceAt(i);
+            if (v
+                && (v->macro == VgMacro::DirectSound
+                    || v->macro == VgMacro::DirectSoundNoResample
+                    || v->macro == VgMacro::DirectSoundAlt)
+                && !setupCatalog.find(v->symbol))
+                synthSlot = i;
+        }
+        if (synthSlot < 0) {
+            std::printf("vgsavecheck: note: every sample voice is already a "
+                        "synth, synth section skipped\n");
+            std::printf("vgsavecheck: %s (%d failures)\n",
+                        failures ? "FAIL" : "PASS", failures);
+            return failures == 0;
+        }
+        const VgVoice synthOriginal = *tab->vgSource->voiceAt(synthSlot);
+
+        m_vgBrowser->selectSlot(synthSlot);
+        QComboBox *typeCombo = nullptr, *symbolCombo = nullptr, *waveCombo = nullptr;
+        for (QComboBox *combo : m_vgBrowser->findChildren<QComboBox *>()) {
+            for (int i = 0; i < combo->count(); i++) {
+                if (combo->itemText(i) == tr("Synth (Golden Sun)"))
+                    typeCombo = combo;
+                if (combo->itemText(i) == QStringLiteral("Sawtooth"))
+                    waveCombo = combo;
+            }
+            if (combo->isEditable())
+                symbolCombo = combo;
+        }
+        QSpinBox *dutySpin = nullptr, *stepSpin = nullptr, *depthSpin = nullptr,
+                 *phaseSpin = nullptr;
+        for (QSpinBox *spin : m_vgBrowser->findChildren<QSpinBox *>()) {
+            if (spin->toolTip().startsWith(QStringLiteral("Base duty")))
+                dutySpin = spin;
+            else if (spin->toolTip().startsWith(QStringLiteral("Duty LFO step")))
+                stepSpin = spin;
+            else if (spin->toolTip().startsWith(QStringLiteral("Modulation")))
+                depthSpin = spin;
+            else if (spin->toolTip().startsWith(QStringLiteral("Duty LFO phase")))
+                phaseSpin = spin;
+        }
+        if (check(typeCombo && symbolCombo && waveCombo && dutySpin && stepSpin
+                      && depthSpin && phaseSpin,
+                  "synth editor widgets not found")) {
+            const auto activate = [](QComboBox *combo, int index) {
+                combo->setCurrentIndex(index);
+                QMetaObject::invokeMethod(combo, "activated", Qt::DirectConnection,
+                                          Q_ARG(int, index));
+            };
+            int synthIndex = -1;
+            for (int i = 0; i < typeCombo->count(); i++) {
+                if (typeCombo->itemText(i) == tr("Synth (Golden Sun)"))
+                    synthIndex = i;
+            }
+            activate(typeCombo, synthIndex);
+            check(tab->vgSource->voiceAt(synthSlot)->symbol
+                      != synthOriginal.symbol,
+                  "switching the voice to Synth did not take");
+            // Dial a known pulse through several commits (each one mints).
+            activate(waveCombo, 0);
+            dutySpin->setValue(0x21);
+            stepSpin->setValue(0x43);
+            depthSpin->setValue(0x65);
+            phaseSpin->setValue(0x87);
+            const QString wantSymbol =
+                vgSynthSymbolName(VgSynthDesc{0, 0x21, 0x43, 0x65, 0x87});
+            check(tab->vgSource->voiceAt(synthSlot)->symbol == wantSymbol,
+                  "param edits did not land on the param-named symbol");
+            check(readFileBytes(synthPath) == synthBytesSetup,
+                  "a param edit wrote to the synth data file before save");
+            bool listed = false;
+            for (int i = 0; i < symbolCombo->count(); i++)
+                listed = listed || symbolCombo->itemText(i) == wantSymbol;
+            check(!listed, "an unsaved definition appeared in the dropdown");
+            const ToneData &td = m_audio.voicegroup()->voices[synthSlot];
+            check(td.wav && td.wav->size == 0
+                      && uint8_t(td.wav->data[1]) == 0
+                      && uint8_t(td.wav->data[2]) == 0x21
+                      && uint8_t(td.wav->data[5]) == 0x87,
+                  "param edits were not patched into the loaded tone");
+
+            // Save: exactly one definition (the referenced one) is written,
+            // and it now shows up in the dropdown.
+            check(saveSession(*tab), "synth save failed");
+            check(readFileBytes(synthPath).contains(wantSymbol.toUtf8() + "::"),
+                  "save did not write the referenced synth definition");
+            check(VoicegroupSource::synthInstruments(projectRoot).defs.size()
+                      == defsAfterSetup + 1,
+                  "save wrote more than the one referenced definition");
+            listed = false;
+            for (int i = 0; i < symbolCombo->count(); i++)
+                listed = listed || symbolCombo->itemText(i) == wantSymbol;
+            check(listed, "the saved definition did not appear in the dropdown");
+
+            // Back to the original voice; the .inc round-trips, and no
+            // further definitions are written.
+            const QByteArray synthBytesSaved = readFileBytes(synthPath);
+            while (tab->doc.undoStack()->index() > indexBeforeSynth)
+                tab->doc.undoStack()->undo();
+            check(saveSession(*tab), "post-undo save failed");
+            check(readFileBytes(vgPath) == vgBytesOriginal,
+                  "undone synth edits did not round-trip the .inc");
+            check(readFileBytes(synthPath) == synthBytesSaved,
+                  "the post-undo save wrote synth definitions");
         }
     }
 

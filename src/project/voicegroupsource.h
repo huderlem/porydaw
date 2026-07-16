@@ -111,6 +111,11 @@ struct VgSynthDesc {
 // Waveform label ("Pulse", "Sawtooth", "Triangle").
 QString vgSynthWaveformName(int waveform);
 
+// The canonical param-named symbol for a descriptor
+// ("DirectSoundSynth_GoldenSun_<params>" / "_Saw" / "_Triangle"), before any
+// collision suffixing.
+QString vgSynthSymbolName(const VgSynthDesc &desc);
+
 // The project's Golden Sun synth instruments: every set_synth_* definition in
 // the sound data files (file order), plus which set_synth_* assembler macros
 // the project defines. An empty macro list means new definitions can't be
@@ -205,14 +210,14 @@ public:
     static QStringList progWaveSymbols(const QString &projectRoot);
     // Golden Sun synth instruments across the project's sound data files.
     static VgSynthCatalog synthInstruments(const QString &projectRoot);
-    // Resolves desc to a project synth symbol: an existing definition with
-    // the same descriptor is reused; otherwise a param-named entry is
-    // appended to sound/direct_sound_synth_data.inc (created if missing),
-    // using a set_synth_* macro the project defines — fails when it defines
-    // none.
-    static bool ensureSynthSymbol(const QString &projectRoot,
-                                  const VgSynthDesc &desc, QString *symbol,
-                                  QString *error);
+    // Appends the given definitions to sound/direct_sound_synth_data.inc
+    // (created if missing), using set_synth_* macros the project defines —
+    // fails when it defines none. A symbol already on disk with an equal
+    // descriptor is skipped; one with a different descriptor is an error.
+    // Called at save time only: unsaved (pending) definitions live in memory.
+    static bool writeSynthDefinitions(const QString &projectRoot,
+                                      const QList<QPair<QString, VgSynthDesc>> &defs,
+                                      QString *error);
     // Keysplit instruments observed across the project's voicegroups:
     // sub-voicegroup symbol -> its paired keysplit table symbol.
     static QList<QPair<QString, QString>> keysplitInstruments(const QString &projectRoot);

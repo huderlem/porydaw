@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QString>
 
+#include <map>
 #include <memory>
 
 #include "core/miditimeline.h"
@@ -24,11 +25,26 @@ extern "C" {
 // Two tabs sharing a -G voicegroup are deliberately independent copies:
 // unsaved voice edits stay inside their tab, and a clean tab whose .inc was
 // re-saved from another tab reloads it on activation (vgFileTime below).
+// A session-owned Golden Sun synth descriptor: a zero-size WaveData whose
+// bytes porydaw fills itself, for synth voices whose definition isn't on
+// disk (pending param edits persist only on save) or whose loader-owned
+// WaveData is shared and must not be mutated. ToneData.wav points here;
+// bytes are patched in place so live tweaks are heard without a reload.
+struct SynthToneBuf {
+    WaveData wd;
+    uint8_t bytes[17];
+};
+
 struct SongSession {
     SongDocument doc;
     std::unique_ptr<VoicegroupSource> vgSource;
     std::unique_ptr<MidiTimeline> timeline;
     LoadedVoiceGroup *voicegroup = nullptr;
+    // Keyed by slot; entries outlive any one LoadedVoiceGroup (engine track
+    // caches hold ToneData copies pointing here) and are re-installed into a
+    // freshly loaded voicegroup by MainWindow::applyPendingSynthTones.
+    // std::map: Qt 6.2's QHash can't hold move-only values.
+    std::map<int, std::unique_ptr<SynthToneBuf>> synthTones;
     SongView *view = nullptr; // tab page; deleted here, before the tab widget
     int songId = -1;
     // Engine-applied cfg values, to react only to real changes on edits.

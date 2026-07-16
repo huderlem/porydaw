@@ -438,6 +438,19 @@ QString vgSynthWaveformName(int waveform)
     }
 }
 
+QString vgSynthSymbolName(const VgSynthDesc &desc)
+{
+    switch (desc.waveform) {
+    case 0:
+        return QStringLiteral("DirectSoundSynth_GoldenSun_%1")
+            .arg(QString::asprintf("%02X%02X%02X%02X", uint8_t(desc.baseDuty),
+                                   uint8_t(desc.dutyStep), uint8_t(desc.modDepth),
+                                   uint8_t(desc.phase)));
+    case 1: return QStringLiteral("DirectSoundSynth_GoldenSun_Saw");
+    default: return QStringLiteral("DirectSoundSynth_GoldenSun_Triangle");
+    }
+}
+
 const VgSynthDesc *VgSynthCatalog::find(const QString &symbol) const
 {
     for (const auto &def : defs) {
@@ -905,16 +918,11 @@ VgSynthCatalog VoicegroupSource::synthInstruments(const QString &projectRoot)
     return catalog;
 }
 
-bool VoicegroupSource::ensureSynthSymbol(const QString &projectRoot,
-                                         const VgSynthDesc &desc, QString *symbol,
-                                         QString *error)
+bool VoicegroupSource::writeSynthDefinitions(
+    const QString &projectRoot, const QList<QPair<QString, VgSynthDesc>> &defs,
+    QString *error)
 {
     const VgSynthCatalog catalog = synthInstruments(projectRoot);
-    const QString existing = catalog.symbolFor(desc);
-    if (!existing.isEmpty()) {
-        *symbol = existing;
-        return true;
-    }
 
     // Prefer the descriptive macro aliases over the pokeemerald-expansion
     // originals when the project defines both.
@@ -923,45 +931,13 @@ bool VoicegroupSource::ensureSynthSymbol(const QString &projectRoot,
         {"set_synth_saw", "set_synth_25"},
         {"set_synth_triangle", "set_synth_50"},
     };
-    const int waveform = std::clamp(desc.waveform, 0, 2);
-    QString word;
-    for (const char *choice : kWordChoices[waveform]) {
-        if (catalog.macroWords.contains(QLatin1String(choice))) {
-            word = QLatin1String(choice);
-            break;
+    const auto macroWord = [&catalog](int waveform) {
+        for (const char *choice : kWordChoices[std::clamp(waveform, 0, 2)]) {
+            if (catalog.macroWords.contains(QLatin1String(choice)))
+                return QLatin1String(choice);
         }
-    }
-    if (word.isEmpty()) {
-        if (error)
-            *error = QStringLiteral(
-                "this project doesn't define the set_synth_* macros "
-                "(Golden Sun synth instruments need ipatix's improved mixer).");
-        return false;
-    }
-
-    const auto hexByte = [](int v) {
-        return QString::asprintf("%02X", uint8_t(v));
+        return QLatin1String("");
     };
-    // Param-named symbol, following the pokeemerald-expansion convention.
-    QString name;
-    if (waveform == 0) {
-        name = QStringLiteral("DirectSoundSynthData_Custom_Param_%1%2%3%4")
-                   .arg(hexByte(desc.baseDuty), hexByte(desc.dutyStep),
-                        hexByte(desc.modDepth), hexByte(desc.phase));
-    } else {
-        name = waveform == 1 ? QStringLiteral("DirectSoundSynthData_Saw")
-                             : QStringLiteral("DirectSoundSynthData_Triangle");
-    }
-    // A name collision means an existing definition with different bytes
-    // (equal ones were reused above) — or a plain sample; suffix past it.
-    QSet<QString> taken;
-    for (const auto &def : catalog.defs)
-        taken.insert(def.first);
-    for (const QString &sample : symbolsFromFiles(synthDefPaths(projectRoot)))
-        taken.insert(sample);
-    const QString base = name;
-    for (int i = 2; taken.contains(name); i++)
-        name = base + QStringLiteral("_%1").arg(i);
 
     // Append to the synth data file (the one place the loader always scans),
     // matching its line endings and entry style; create it when the project
@@ -980,22 +956,51 @@ bool VoicegroupSource::ensureSynthSymbol(const QString &projectRoot,
             macroIndent = leadingWs(raw);
     }
 
-    QByteArray entry;
-    if (!content.isEmpty()) {
-        if (!content.endsWith('\n'))
-            entry += eol;
-        entry += eol; // blank line between entries, matching the known layouts
+    QByteArray entries;
+    bool contentEndsWithNewline = content.isEmpty() || content.endsWith('\n');
+    for (const auto &def : defs) {
+        // Already on disk (a save from another tab, or a hand edit): equal
+        // bytes are simply reused, conflicting ones refuse the save rather
+        // than silently redefining a shared symbol.
+        if (const VgSynthDesc *existing = catalog.find(def.first)) {
+            if (*existing == def.second)
+                continue;
+            if (error)
+                *error = QStringLiteral(
+                             "synth symbol %1 already exists with different "
+                             "parameters.")
+                             .arg(def.first);
+            return false;
+        }
+        const QLatin1String word = macroWord(def.second.waveform);
+        if (word.isEmpty()) {
+            if (error)
+                *error = QStringLiteral(
+                    "this project doesn't define the set_synth_* macros "
+                    "(Golden Sun synth instruments need ipatix's improved "
+                    "mixer).");
+            return false;
+        }
+        if (!contentEndsWithNewline) {
+            entries += eol;
+            contentEndsWithNewline = true;
+        }
+        if (!content.isEmpty() || !entries.isEmpty())
+            entries += eol; // blank line between entries (known layouts)
+        entries += alignIndent + ".align 2" + eol;
+        entries += def.first.toUtf8() + "::" + eol;
+        entries += macroIndent + QByteArray(word.data(), word.size());
+        if (std::clamp(def.second.waveform, 0, 2) == 0) {
+            entries += QString::asprintf(
+                           " 0x%02X, 0x%02X, 0x%02X, 0x%02X",
+                           uint8_t(def.second.baseDuty), uint8_t(def.second.dutyStep),
+                           uint8_t(def.second.modDepth), uint8_t(def.second.phase))
+                           .toUtf8();
+        }
+        entries += eol;
     }
-    entry += alignIndent + ".align 2" + eol;
-    entry += name.toUtf8() + "::" + eol;
-    entry += macroIndent + word.toUtf8();
-    if (waveform == 0) {
-        entry += QStringLiteral(" 0x%1, 0x%2, 0x%3, 0x%4")
-                     .arg(hexByte(desc.baseDuty), hexByte(desc.dutyStep),
-                          hexByte(desc.modDepth), hexByte(desc.phase))
-                     .toUtf8();
-    }
-    entry += eol;
+    if (entries.isEmpty())
+        return true; // everything was already on disk
 
     QFile out(path);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Append)) {
@@ -1003,12 +1008,11 @@ bool VoicegroupSource::ensureSynthSymbol(const QString &projectRoot,
             *error = QStringLiteral("cannot write %1.").arg(path);
         return false;
     }
-    if (out.write(entry) != entry.size()) {
+    if (out.write(entries) != entries.size()) {
         if (error)
             *error = QStringLiteral("short write to %1.").arg(path);
         return false;
     }
-    *symbol = name;
     return true;
 }
 

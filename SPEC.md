@@ -322,14 +322,22 @@ and save with Save Song (no separate save/revert; a `-G` voicegroup switch
 keeps unsaved voice edits in the undo history and replays them when the
 switch is undone); `--vgsavecheck` harness covers the unified pipeline.
 Golden Sun synth instruments (ipatix improved-mixer feature; zero-size
-DirectSound samples selecting pulse/saw/triangle) get their own "Synth"
-type in the dock: waveform + pulse duty-LFO parameters are editable, and
-edits resolve to param-named shared definitions (pokeemerald-expansion's
-`DirectSoundSynthData_Custom_Param_XXXXXXXX` convention) deduplicated by
-value across `sound/direct_sound_data.inc` and
-`sound/direct_sound_synth_data.inc`, minting new `set_synth_*` entries in
-the latter on demand — gated on the project defining those macros;
-`--vgcheck` covers the scan/dedupe/write paths and a loader roundtrip.
+DirectSound samples selecting pulse/saw/triangle) get their own
+"Synth (Golden Sun)" type in the dock: waveform + pulse duty-LFO
+parameters are editable, and edits resolve to param-named shared
+definitions (`DirectSoundSynth_GoldenSun_<params>`) deduplicated by value
+across `sound/direct_sound_data.inc` and
+`sound/direct_sound_synth_data.inc`. Definitions minted by param edits
+stay in memory (pending): the edit is auditioned by patching the
+descriptor bytes straight into the loaded tone (live, no reload — the
+engine re-reads them every tick), and only the definitions the SAVED
+voicegroup references are appended to `direct_sound_synth_data.inc` on
+Save Song, so abandoned tweaks never touch disk. The definition dropdown
+lists on-disk entries only; a pending symbol shows as the voice's current
+value until a save lands it. Gated on the project defining the
+`set_synth_*` macros; `--vgcheck` covers naming/scan/dedupe/write and a
+loader roundtrip, `--vgsavecheck` the pending-until-save pipeline
+end-to-end.
 
 **WAV export (shipped after M3, from M4):**
 File → Export WAV renders the loaded song (including unsaved edits) offline

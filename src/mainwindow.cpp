@@ -717,6 +717,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     // Sessions were prompted above; closing them now needs no questions.
     teardownSessions();
     invalidateVgCatalog();
+    m_pendingSynths.clear(); // unsaved synth definitions die with the project
 
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
@@ -957,11 +958,41 @@ bool MainWindow::saveSession(SongSession &session)
     const bool vgWasDirty = session.vgSource && session.vgSource->dirty();
     if (vgWasDirty) {
         QString error;
+        // Golden Sun synth definitions this voicegroup references that only
+        // exist in memory (minted by param edits) must land on disk first —
+        // the saved file's symbols have to resolve. Only what the SAVED
+        // state references is written; abandoned tweaks never persist.
+        QList<QPair<QString, VgSynthDesc>> newDefs;
+        for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
+            const VgVoice *v = session.vgSource->voiceAt(slot);
+            if (!v)
+                continue;
+            const auto it = m_pendingSynths.constFind(v->symbol);
+            if (it == m_pendingSynths.constEnd())
+                continue;
+            const QPair<QString, VgSynthDesc> def{it.key(), it.value()};
+            if (!newDefs.contains(def))
+                newDefs.append(def);
+        }
+        if (!newDefs.isEmpty()) {
+            if (!VoicegroupSource::writeSynthDefinitions(m_project.root(),
+                                                         newDefs, &error)) {
+                QMessageBox::warning(this, tr("Save Voicegroup"), error);
+                return false;
+            }
+            // Written definitions graduate from pending to on-disk; the
+            // catalog invalidation below re-scans them into the dropdown.
+            for (const auto &def : newDefs)
+                m_pendingSynths.remove(def.first);
+        }
         if (!session.vgSource->save(&error)) {
             QMessageBox::warning(this, tr("Save Voicegroup"), error);
             return false;
         }
         cleanupVgPreview();
+        // Invalidate before the reload below repopulates the browser: the
+        // rebuilt catalog must include any synth definitions written above.
+        invalidateVgCatalog();
         // Reload from the project: verifies the saved file parses and
         // replaces any preview-loaded state.
         const int slot = &session == m_active ? m_vgBrowser->currentSlot() : 0;
@@ -973,7 +1004,6 @@ bool MainWindow::saveSession(SongSession &session)
         // doc-only save would silently absorb another tab's voicegroup save
         // and defeat the staleness reload for good.
         session.vgFileTime = QFileInfo(session.vgSource->filePath()).lastModified();
-        invalidateVgCatalog();
         // Sibling tabs on this voicegroup can't wait for their next
         // activation: the ACTIVE tab never gets one, and a stale parse
         // there would revert this save on its own next voicegroup write.
@@ -1333,17 +1363,36 @@ void MainWindow::updateVoicegroupBrowser()
     m_vgBrowser->setSource(
         session->vgSource.get(), catalog.directSound, catalog.progWave,
         catalog.keysplits, catalog.drumkits, catalog.typicalAdsr, catalog.synths,
-        [this](const VgSynthDesc &desc) -> QString {
-            QString symbol, error;
-            if (!VoicegroupSource::ensureSynthSymbol(m_project.root(), desc,
-                                                     &symbol, &error)) {
+        m_pendingSynths, [this](const VgSynthDesc &desc) -> QString {
+            // Mint a pending symbol for the descriptor — nothing is written;
+            // the definition reaches disk when a voicegroup referencing it
+            // saves. Value-equal definitions (on disk or pending) are reused.
+            const VgSynthCatalog &synths = vgCatalog().synths;
+            QString symbol = synths.symbolFor(desc);
+            if (!symbol.isEmpty())
+                return symbol;
+            for (auto it = m_pendingSynths.constBegin();
+                 it != m_pendingSynths.constEnd(); ++it) {
+                if (it.value() == desc)
+                    return it.key();
+            }
+            if (!synths.creatable()) {
                 statusBar()->showMessage(
-                    tr("Cannot create synth instrument: %1").arg(error), 8000);
+                    tr("Cannot create synth instrument: this project doesn't "
+                       "define the set_synth_* macros (Golden Sun synths need "
+                       "ipatix's improved mixer)."),
+                    8000);
                 return QString();
             }
-            // Keep the cached catalog in step without a full project rescan.
-            if (m_vgCatalog.valid && !m_vgCatalog.synths.find(symbol))
-                m_vgCatalog.synths.defs.append({symbol, desc});
+            // Param-named; a hand-written symbol with the same name but
+            // different bytes (or a plain sample) forces a suffix.
+            symbol = vgSynthSymbolName(desc);
+            const QString base = symbol;
+            for (int i = 2; synths.find(symbol)
+                 || vgCatalog().directSound.contains(symbol);
+                 i++)
+                symbol = base + QStringLiteral("_%1").arg(i);
+            m_pendingSynths.insert(symbol, desc);
             return symbol;
         });
     updateVgDockTitle();
@@ -1436,6 +1485,10 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
         if (session.voicegroup && slot >= 0 && slot < VOICEGROUP_SIZE)
             tone = &session.voicegroup->voices[slot];
         session.vgSource->applyScalarsToToneData(slot, tone);
+        // Synth param edits are scalar pokes too: the descriptor bytes are
+        // patched straight into the loaded tone (pending definitions have
+        // nothing on disk to reload from).
+        applyPendingSynthTones(session, session.voicegroup);
         // Playing tracks hold a copy of their instrument; refresh so the
         // edit is heard from the next note without a pause/play cycle.
         if (&session == m_active && m_audioOk)
@@ -1477,8 +1530,65 @@ void MainWindow::reloadVoicegroupPreview(SongSession &session, int keepSlot)
     swapVoicegroup(session, vg, keepSlot);
 }
 
+const VgSynthDesc *MainWindow::synthDescForSymbol(const QString &symbol)
+{
+    const auto pending = m_pendingSynths.constFind(symbol);
+    if (pending != m_pendingSynths.constEnd())
+        return &pending.value();
+    return vgCatalog().synths.find(symbol);
+}
+
+void MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg)
+{
+    if (!session.vgSource || !vg)
+        return;
+    for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
+        const VgVoice *v = session.vgSource->voiceAt(slot);
+        if (!v
+            || (v->macro != VgMacro::DirectSound
+                && v->macro != VgMacro::DirectSoundNoResample
+                && v->macro != VgMacro::DirectSoundAlt))
+            continue;
+        const VgSynthDesc *desc = synthDescForSymbol(v->symbol);
+        if (!desc)
+            continue;
+        ToneData &td = vg->voices[slot];
+        // Already sounding these bytes (the loader resolved an on-disk
+        // definition, or an earlier patch)? Leave the tone alone.
+        if (td.wav && td.wav->size == 0 && td.wav->data) {
+            const auto *d = reinterpret_cast<const uint8_t *>(td.wav->data);
+            const VgSynthDesc current{d[1] > 2 ? 2 : d[1], d[2], d[3], d[4], d[5]};
+            if (current == *desc)
+                continue;
+        }
+        // Never mutate a loader-owned WaveData (shared across voices via its
+        // cache): point the tone at a session-owned descriptor instead.
+        // Re-patching an installed buffer pokes its bytes in place, which the
+        // engine reads every tick — live tweaks sound without a reload.
+        std::unique_ptr<SynthToneBuf> &tone = session.synthTones[slot];
+        if (!tone) {
+            tone = std::make_unique<SynthToneBuf>();
+            std::memset(tone.get(), 0, sizeof(SynthToneBuf));
+            tone->wd.status = 0x4000;     // loop flag, as the synth header sets
+            tone->wd.freq = 0x01058920;   // 64-sample period lands on middle C
+            tone->wd.size = 0;            // size 0 = synth descriptor
+            tone->wd.data = reinterpret_cast<int8_t *>(tone->bytes);
+        }
+        tone->bytes[0] = 0x80;
+        tone->bytes[1] = uint8_t(desc->waveform);
+        tone->bytes[2] = uint8_t(desc->baseDuty);
+        tone->bytes[3] = uint8_t(desc->dutyStep);
+        tone->bytes[4] = uint8_t(desc->modDepth);
+        tone->bytes[5] = uint8_t(desc->phase);
+        td.wav = &tone->wd;
+    }
+}
+
 void MainWindow::swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int keepSlot)
 {
+    // Pending synth definitions aren't on disk, so a fresh load can't have
+    // resolved them; patch before anything (views, engine) sees the group.
+    applyPendingSynthTones(session, vg);
     session.view->setVoicegroup(nullptr);
     if (&session == m_active) {
         m_vgBrowser->setVoicegroup(nullptr);
