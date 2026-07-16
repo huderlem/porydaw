@@ -39,6 +39,10 @@ public:
     // a mouse button or editing a cell). SongView pushes this every UI tick;
     // cheap when the row didn't change.
     void setPlayheadTick(double tick, bool playing);
+    // Context-menu insert: a copy of the given table row's event at that
+    // row's own tick. Public because the menu itself blocks in exec() and
+    // can't be driven by the offscreen harness.
+    void insertCopyOfRow(int row);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -49,6 +53,7 @@ private:
     void filterPicked();
     void addEvent();
     void deleteSelected();
+    void showContextMenu(const QPoint &pos);
     void updateCountLabel();
     void updatePlayRow();
     void jumpCursorToRow(int row);

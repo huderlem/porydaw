@@ -20,8 +20,10 @@
 // on the first song: the event list swaps in for the roll, mirrors the
 // chunk's events plus an end-of-track row, routes cell edits into the
 // document (queued), filters, round-trips through view state, tints the
-// row under the playhead (end-of-track row past the end), and commits the
-// edit cursor when a row is focused — but never on programmatic restores.
+// row under the playhead (end-of-track row past the end), commits the
+// edit cursor when a row is focused — but never on programmatic restores —
+// and inserts a copy of a row at its own tick (the context menu's insert;
+// the end-of-track row is not copyable).
 
 namespace {
 
@@ -210,6 +212,27 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
             doc.undoStack()->undo();
             if (view.editCursorTick() != cursorBefore)
                 fail("undo refresh moved the edit cursor");
+        }
+        {
+            // Context-menu insert: a copy of the clicked row at its own
+            // tick, placed by the document (still sorted), undoable.
+            const SmfEvent src = doc.smf().tracks[chunk].events[0];
+            const size_t had = countMatching(doc.smf().tracks[chunk], src);
+            events->insertCopyOfRow(0);
+            if (countMatching(doc.smf().tracks[chunk], src) != had + 1)
+                fail("insertCopyOfRow did not add a twin of the source row");
+            if (!trackSorted(doc.smf().tracks[chunk]))
+                fail("insertCopyOfRow broke tick order");
+            if (model->rowCount() != int(doc.smf().tracks[chunk].events.size()) + 1)
+                fail("table did not refresh after insertCopyOfRow");
+            doc.undoStack()->undo();
+            if (countMatching(doc.smf().tracks[chunk], src) != had)
+                fail("undo did not remove the copied event");
+            // The end-of-track row is not a copyable event; a no-op.
+            const size_t total = doc.smf().tracks[chunk].events.size();
+            events->insertCopyOfRow(model->rowCount() - 1);
+            if (doc.smf().tracks[chunk].events.size() != total)
+                fail("insertCopyOfRow on the end-of-track row mutated the chunk");
         }
         // For the screenshot: playing, so the follow-scroll brings the
         // tinted row into view (also exercises the scrollTo path).

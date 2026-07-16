@@ -10,6 +10,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
@@ -800,6 +801,9 @@ EventListView::EventListView(SongView *sv, QWidget *parent)
     m_table->setColumnWidth(EventTableModel::ColData2, 56);
     m_table->setColumnWidth(EventTableModel::ColData, 140);
     m_table->installEventFilter(this);
+    m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_table, &QTableView::customContextMenuRequested, this,
+            &EventListView::showContextMenu);
     setFocusProxy(m_table);
 
     auto *layout = new QVBoxLayout(this);
@@ -1080,6 +1084,69 @@ void EventListView::addEvent()
     ev.tick = m_sv->editCursorTick();
     m_document->insertRawEvent(chunk, ev); // refresh arrives via documentChanged
     selectEventRow(chunk, ev);
+}
+
+void EventListView::insertCopyOfRow(int row)
+{
+    const int chunk = currentChunk();
+    if (!m_document || chunk < 0)
+        return;
+    const auto &events = m_document->smf().tracks[chunk].events;
+    const long long src = m_model->eventIndexForRow(row);
+    if (src < 0 || size_t(src) >= events.size())
+        return;
+    const SmfEvent ev = events[src];
+    m_document->insertRawEvent(chunk, ev); // refresh arrives via documentChanged
+    selectEventRow(chunk, ev);
+}
+
+void EventListView::showContextMenu(const QPoint &pos)
+{
+    const int chunk = currentChunk();
+    if (!m_document || chunk < 0)
+        return;
+    const QModelIndex idx = m_table->indexAt(pos);
+    // Right-clicking outside the selection focuses that row first, exactly
+    // like a left click (so the edit cursor follows); a click inside the
+    // selection keeps it, so multi-row delete stays possible.
+    if (idx.isValid() && m_table->selectionModel()
+        && !m_table->selectionModel()->isRowSelected(idx.row(), QModelIndex()))
+        m_table->setCurrentIndex(m_model->index(idx.row(), EventTableModel::ColTick));
+
+    const long long src = idx.isValid() ? m_model->eventIndexForRow(idx.row()) : -1;
+    int deletable = 0;
+    if (m_table->selectionModel()) {
+        const QModelIndexList rows = m_table->selectionModel()->selectedRows();
+        for (const QModelIndex &row : rows) {
+            if (m_model->eventIndexForRow(row.row()) >= 0)
+                deletable++;
+        }
+    }
+
+    // No before/after placement: rows order by tick, and within a tick the
+    // document enforces the canonical setup → note-end → note-on order that
+    // mid2agb's pairing depends on, so raw position is not the user's to
+    // pick. The copy lands adjacent in the same tick group, ready to edit.
+    QMenu menu(this);
+    QAction *insertHere = nullptr;
+    if (src >= 0)
+        insertHere = menu.addAction(tr("Insert event at this tick"));
+    QAction *insertCursor = menu.addAction(tr("Insert event at edit cursor"));
+    menu.addSeparator();
+    QAction *del = menu.addAction(deletable > 0
+                                      ? tr("Delete %n event(s)", nullptr, deletable)
+                                      : tr("Delete"));
+    del->setEnabled(deletable > 0);
+
+    QAction *chosen = menu.exec(m_table->viewport()->mapToGlobal(pos));
+    if (!chosen)
+        return;
+    if (insertHere && chosen == insertHere)
+        insertCopyOfRow(idx.row());
+    else if (chosen == insertCursor)
+        addEvent();
+    else if (chosen == del)
+        deleteSelected();
 }
 
 void EventListView::deleteSelected()
