@@ -650,6 +650,90 @@ int runEditCheck(const QString &projectRoot)
             }
         }
 
+        // Reordering tracks (format 1): the chunk moves with its events and
+        // channel bytes untouched, and the seq globals — tempo, time
+        // signatures, loop markers — stay with chunk 0 even when the move
+        // displaces it (mid2agb and the tempo lane read them only there).
+        if (ok && doc.smf().format != 0 && doc.engineTrackCount() >= 2 && track >= 0) {
+            doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 110, 145);
+            doc.setTimeSig(base + step * 112, 5, 2);
+            const uint64_t loopStartBefore = doc.loopTick(false);
+            const uint64_t loopEndBefore = doc.loopTick(true);
+            const auto srcNotes = doc.notesForTrack(0);
+            const uint8_t srcChannel = doc.channelFor(0);
+            const int last = doc.engineTrackCount() - 1;
+            const int countBefore = doc.undoStack()->count();
+            doc.moveTrack(0, 0); // no-op guard
+            if (doc.undoStack()->count() != countBefore) {
+                fail("moveTrack onto itself pushed a command");
+                ok = false;
+            }
+            auto seqChunkHas = [&doc](uint8_t metaType, uint64_t tick) {
+                for (const SmfEvent &ev : doc.smf().tracks[0].events) {
+                    if (ev.isMeta() && ev.metaType == metaType && ev.tick == tick)
+                        return true;
+                }
+                return false;
+            };
+            auto notesMatch = [&doc](int engineTrack,
+                                     const std::vector<DocNote> &want) {
+                const auto got = doc.notesForTrack(engineTrack);
+                if (got.size() != want.size())
+                    return false;
+                for (size_t i = 0; i < got.size(); i++) {
+                    if (got[i].tick != want[i].tick || got[i].key != want[i].key
+                        || got[i].duration != want[i].duration
+                        || got[i].velocity != want[i].velocity)
+                        return false;
+                }
+                return true;
+            };
+            if (ok) {
+                doc.moveTrack(0, last);
+                mutateAndCheck("events unsorted after moveTrack");
+            }
+            if (ok && doc.undoStack()->count() != countBefore + 1) {
+                fail("moveTrack was not a single undo command");
+                ok = false;
+            }
+            if (ok
+                && (!notesMatch(last, srcNotes) || doc.channelFor(last) != srcChannel)) {
+                fail("moved track's notes or channel changed");
+                ok = false;
+            }
+            if (ok
+                && (!seqChunkHas(0x51, base + step * 110)
+                    || !seqChunkHas(0x58, base + step * 112))) {
+                fail("seq globals did not stay with chunk 0 across the move");
+                ok = false;
+            }
+            if (ok
+                && (doc.loopTick(false) != loopStartBefore
+                    || doc.loopTick(true) != loopEndBefore)) {
+                fail("moveTrack lost the loop markers");
+                ok = false;
+            }
+            if (ok) {
+                doc.undoStack()->undo();
+                if (!notesMatch(0, srcNotes)) {
+                    fail("moveTrack undo did not restore the track order");
+                    ok = false;
+                } else {
+                    doc.undoStack()->redo();
+                }
+            }
+            if (ok) {
+                doc.moveTrack(last, 0); // and back again
+                mutateAndCheck("events unsorted after moveTrack back");
+                if (!notesMatch(0, srcNotes)
+                    || !seqChunkHas(0x51, base + step * 110)
+                    || !seqChunkHas(0x58, base + step * 112)) {
+                    fail("moving the track back did not restore its slot");
+                    ok = false;
+                }
+            }
+        }
+
         // Deleting an original track must not lose the loop markers, even
         // when they live in the removed chunk (they get rescued into the seq
         // chunk). Undone right away so the loop/cfg script below still runs

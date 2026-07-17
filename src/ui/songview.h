@@ -173,10 +173,12 @@ public:
     // selects the created track; duplicateTrack selects the copy (a fresh
     // slot, so no per-track view state moves); deleteTrack shifts the view's
     // per-track state (mute/solo, empty lanes, selection) over the removed
-    // engine slot.
+    // engine slot; moveTrack (header-row drag, format 1 only) rotates that
+    // state along with the reordered engine slots.
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
+    void moveTrack(int from, int to);
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber) for every beat, honoring the song's time signature changes.
