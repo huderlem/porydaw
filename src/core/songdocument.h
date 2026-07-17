@@ -27,6 +27,11 @@ constexpr uint8_t DOC_CC_VOICE = 0xFD; // program changes (0xC): the track's
 // marker character. Matches MidiTimeline::build.
 bool metaIsLoopMarker(const SmfEvent &ev, char marker);
 
+// True for names mid2agb would read as a loop/label command instead of a
+// name — it accepts ANY text-type meta (0x01-0x07, Track Name included)
+// in the seq chunk whose whole text is one of these.
+bool nameIsLoopMarker(const QString &name);
+
 // A note located in the SMF model: the note-on event plus the event that ends
 // it, paired exactly as mid2agb pairs them (first same-channel same-key
 // note-off or velocity-0 note-on after the note-on). Indices are valid only
@@ -252,12 +257,14 @@ public:
     // track's channel.
     void deleteTrack(int engineTrack);
 
-    // Track display name: the chunk's first Track Name meta (0x03), exactly
-    // as MidiTimeline reads it. Rename modifies that event in place (keeping
-    // its tick and chunk position) or inserts one at tick 0; an empty name
-    // removes it. Format 1 only — a format-0 file has one chunk shared by
-    // every track, so a per-track name can't be represented.
-    bool canRenameTrack() const { return m_smf.format == 1; }
+    // Track display name, exactly as MidiTimeline reads it: format 1 = the
+    // chunk's first unprefixed Track Name meta (0x03); format 0 = the first
+    // 0x03 scoped to the track's channel by a MIDI Channel Prefix meta
+    // (0x20) — the spec's per-track naming mechanism for single-chunk
+    // files. Rename modifies the 0x03 in place (keeping its tick and
+    // position) or inserts it at tick 0 (with its prefix, in format 0); an
+    // empty name removes it (and its adjacent prefix). Names mid2agb would
+    // read as loop/label markers (nameIsLoopMarker) are refused.
     QString trackName(int engineTrack) const;
     void renameTrack(int engineTrack, const QString &name);
 

@@ -1544,23 +1544,54 @@ void SongDocument::deleteTrack(int engineTrack)
     pushEdit(tr("delete track"), std::move(ops));
 }
 
-namespace {
-
-// MidiTimeline's reading of a chunk's name: the first 0x03 meta, Latin-1
-// (SMF text metas have no declared encoding), capped at 64 chars, trimmed.
-size_t trackNameEventIndex(const SmfTrack &track)
+bool nameIsLoopMarker(const QString &name)
 {
-    for (size_t i = 0; i < track.events.size(); i++) {
-        if (track.events[i].isMeta() && track.events[i].metaType == 0x03)
-            return i;
-    }
-    return SIZE_MAX;
+    return name == QLatin1String("[") || name == QLatin1String("]")
+        || name == QLatin1String("][") || name == QLatin1String(":");
 }
 
+namespace {
+
+// Latin-1 (SMF text metas have no declared encoding), capped at 64 chars,
+// trimmed — MidiTimeline's reading of a name meta's text.
 QString trackNameText(const SmfEvent &ev)
 {
     const int len = std::min<int>(int(ev.blob.size()), 64);
     return QString::fromLatin1(ev.blob.constData(), len).trimmed();
+}
+
+struct TrackNameLoc {
+    size_t nameIndex = SIZE_MAX;   // the winning 0x03 meta
+    size_t prefixIndex = SIZE_MAX; // its 0x20 prefix, when immediately before
+};
+
+// Where the track's display name lives, mirroring MidiTimeline's reader:
+// format 1 = the chunk's first unprefixed 0x03; format 0 = the first 0x03
+// scoped to the channel by a MIDI Channel Prefix meta (0x20), the prefix
+// staying live until the next channel event or prefix. The prefix is only
+// claimed for removal when it immediately precedes the name — a shared
+// prefix may scope other metas.
+TrackNameLoc trackNameLoc(const SmfTrack &track, bool format0, uint8_t channel)
+{
+    TrackNameLoc loc;
+    int prefixChannel = -1;
+    size_t prefixIndex = SIZE_MAX;
+    for (size_t i = 0; i < track.events.size(); i++) {
+        const SmfEvent &ev = track.events[i];
+        if (ev.isChannel()) {
+            prefixChannel = -1;
+        } else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1) {
+            prefixChannel = ev.blob[0] & 0x0F;
+            prefixIndex = i;
+        } else if (ev.isMeta() && ev.metaType == 0x03
+                   && (format0 ? prefixChannel == channel : prefixChannel < 0)) {
+            loc.nameIndex = i;
+            if (format0 && prefixIndex == i - 1)
+                loc.prefixIndex = prefixIndex;
+            return loc;
+        }
+    }
+    return loc;
 }
 
 } // namespace
@@ -1568,47 +1599,70 @@ QString trackNameText(const SmfEvent &ev)
 QString SongDocument::trackName(int engineTrack) const
 {
     const int smfTrack = smfTrackFor(engineTrack);
-    if (smfTrack < 0 || !canRenameTrack())
+    if (smfTrack < 0)
         return QString();
-    const size_t index = trackNameEventIndex(m_smf.tracks[smfTrack]);
-    return index == SIZE_MAX ? QString()
-                             : trackNameText(m_smf.tracks[smfTrack].events[index]);
+    const SmfTrack &track = m_smf.tracks[smfTrack];
+    const TrackNameLoc loc =
+        trackNameLoc(track, m_smf.format == 0, channelFor(engineTrack));
+    return loc.nameIndex == SIZE_MAX ? QString()
+                                     : trackNameText(track.events[loc.nameIndex]);
 }
 
 void SongDocument::renameTrack(int engineTrack, const QString &name)
 {
     const int smfTrack = smfTrackFor(engineTrack);
-    if (smfTrack < 0 || !canRenameTrack())
+    if (smfTrack < 0)
         return;
     const QString trimmed = name.trimmed().left(64);
+    if (nameIsLoopMarker(trimmed))
+        return;
+    const bool format0 = m_smf.format == 0;
     const SmfTrack &track = m_smf.tracks[smfTrack];
-    const size_t index = trackNameEventIndex(track);
+    const TrackNameLoc loc = trackNameLoc(track, format0, channelFor(engineTrack));
 
     std::vector<EditOp> ops;
-    EditOp op;
-    op.smfTrack = smfTrack;
-    if (index != SIZE_MAX) {
+    if (loc.nameIndex != SIZE_MAX) {
         if (trimmed.isEmpty()) {
-            op.type = EditOp::RemoveEvent;
-            op.index = index;
+            std::vector<size_t> indices{loc.nameIndex};
+            if (loc.prefixIndex != SIZE_MAX)
+                indices.push_back(loc.prefixIndex);
+            appendRemoveOps(ops, smfTrack, std::move(indices));
         } else {
-            if (trackNameText(track.events[index]) == trimmed)
+            if (trackNameText(track.events[loc.nameIndex]) == trimmed)
                 return;
+            EditOp op;
             op.type = EditOp::ModifyEvent;
-            op.index = index;
-            op.event = track.events[index];
+            op.smfTrack = smfTrack;
+            op.index = loc.nameIndex;
+            op.event = track.events[loc.nameIndex];
             op.event.blob = trimmed.toLatin1();
+            ops.push_back(op);
         }
     } else {
         if (trimmed.isEmpty())
             return;
+        if (format0) {
+            // Both inserts land at the end of the tick-0 group, so the pair
+            // stays adjacent; later same-tick inserts never split it (setup
+            // events only back up over note events, not metas).
+            EditOp prefix;
+            prefix.type = EditOp::InsertEvent;
+            prefix.smfTrack = smfTrack;
+            prefix.event.tick = 0;
+            prefix.event.status = 0xFF;
+            prefix.event.metaType = 0x20;
+            prefix.event.blob = QByteArray(1, char(channelFor(engineTrack)));
+            ops.push_back(prefix);
+        }
+        EditOp op;
         op.type = EditOp::InsertEvent;
+        op.smfTrack = smfTrack;
         op.event.tick = 0;
         op.event.status = 0xFF;
         op.event.metaType = 0x03;
         op.event.blob = trimmed.toLatin1();
+        ops.push_back(op);
     }
-    ops.push_back(op);
     pushEdit(tr("rename track"), std::move(ops));
 }
 

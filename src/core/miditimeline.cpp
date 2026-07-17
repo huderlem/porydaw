@@ -99,14 +99,21 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::vector<RawOther> rawOthers;
     std::vector<bool> trackHasChannelEvents(numTracks, false);
     std::vector<QString> trackNames(numTracks);
+    std::vector<QString> channelNames(16);
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;
 
     for (int t = 0; t < numTracks; t++) {
+        // MIDI Channel Prefix (meta 0x20) state: scopes the metas that
+        // follow to one channel — the spec's per-track naming mechanism for
+        // single-chunk (format 0) files. Live until the next channel event
+        // or prefix.
+        int prefixChannel = -1;
         for (const SmfEvent &sev : smf.tracks[t].events) {
             const uint64_t tick = sev.tick;
 
             if (sev.isChannel()) {
+                prefixChannel = -1;
                 const uint8_t type = sev.typeNibble();
                 const uint8_t chan = sev.channel();
                 auto push = [&](uint8_t playType) {
@@ -160,9 +167,15 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                                                 | (static_cast<uint32_t>(p[1]) << 8) | p[2]});
                 } else if (metaType == 0x58 && blob.size() >= 2) {
                     timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
-                } else if (metaType == 0x03 && trackNames[t].isEmpty()) {
+                } else if (metaType == 0x20 && blob.size() >= 1) {
+                    prefixChannel = blob[0] & 0x0F;
+                } else if (metaType == 0x03
+                           && (prefixChannel >= 0
+                                   ? channelNames[prefixChannel].isEmpty()
+                                   : trackNames[t].isEmpty())) {
                     const int len = std::min<int>(blob.size(), 64);
-                    trackNames[t] = QString::fromLatin1(blob.constData(), len).trimmed();
+                    (prefixChannel >= 0 ? channelNames[prefixChannel] : trackNames[t]) =
+                        QString::fromLatin1(blob.constData(), len).trimmed();
                 } else if (metaType >= 0x01 && metaType <= 0x07) {
                     // Text-type meta: check for loop markers ('[' / ']').
                     const uint32_t len = uint32_t(std::min<int>(blob.size(), 32));
@@ -261,8 +274,9 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
         int used = 0;
         for (int i = 0; i < 16; i++) {
             if (timeline->tracks[i].used) {
-                if (timeline->tracks[i].name.isEmpty())
-                    timeline->tracks[i].name = QStringLiteral("Channel %1").arg(i + 1);
+                timeline->tracks[i].name = channelNames[i].isEmpty()
+                    ? QStringLiteral("Channel %1").arg(i + 1)
+                    : channelNames[i];
                 used = i + 1;
             }
         }
