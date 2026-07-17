@@ -114,6 +114,10 @@ int runRoundTrip(const QString &projectRoot, const QString &mid2agbArg)
             failures++;
             continue;
         }
+        // SongDocument::load coerces format 0 to format 1, so a real save
+        // writes the converted file — the .s diff below therefore also
+        // proves the conversion is invisible to mid2agb.
+        convertToFormat1(&smf);
         const QByteArray savedBytes = smf.write();
         if (savedBytes == origBytes)
             byteIdentical++;

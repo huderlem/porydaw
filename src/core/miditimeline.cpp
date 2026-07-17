@@ -27,7 +27,6 @@ struct TempoChange {
 struct RawOther {
     uint64_t tick;
     uint16_t smfTrack;
-    int channel; // MIDI channel, or -1 for metas/sysex
     QString label;
 };
 
@@ -85,6 +84,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
     SmfFile smf;
     if (!SmfFile::readFile(path, &smf, error))
         return nullptr;
+    convertToFormat1(&smf); // build, like all of porydaw, deals in format 1 only
     return build(smf, sampleRate);
 }
 
@@ -99,15 +99,16 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::vector<RawOther> rawOthers;
     std::vector<bool> trackHasChannelEvents(numTracks, false);
     std::vector<QString> trackNames(numTracks);
-    std::vector<QString> channelNames(16);
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;
 
     for (int t = 0; t < numTracks; t++) {
-        // MIDI Channel Prefix (meta 0x20) state: scopes the metas that
-        // follow to one channel — the spec's per-track naming mechanism for
-        // single-chunk (format 0) files. Live until the next channel event
-        // or prefix.
+        // MIDI Channel Prefix (meta 0x20) state: scopes the name metas that
+        // follow to one channel, live until the next channel event or
+        // prefix. Format 0's per-track naming mechanism — conversion
+        // rewrites those, but a foreign format-1 file may still carry
+        // prefixed 0x03s, and they are never the chunk's name (nor loop
+        // markers).
         int prefixChannel = -1;
         for (const SmfEvent &sev : smf.tracks[t].events) {
             const uint64_t tick = sev.tick;
@@ -136,7 +137,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                     push(sev.data1 ? 0x9 : 0x8);
                     break;
                 case 0xA: // polyphonic aftertouch: not played
-                    rawOthers.push_back({tick, uint16_t(t), chan,
+                    rawOthers.push_back({tick, uint16_t(t),
                                          QStringLiteral("Poly aftertouch key %1 = %2")
                                              .arg(sev.data0)
                                              .arg(sev.data1)});
@@ -148,7 +149,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                     push(0xC);
                     break;
                 case 0xD: // channel pressure: not played
-                    rawOthers.push_back({tick, uint16_t(t), chan,
+                    rawOthers.push_back({tick, uint16_t(t),
                                          QStringLiteral("Channel pressure %1").arg(sev.data0)});
                     break;
                 case 0xE:
@@ -156,7 +157,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                     break;
                 }
             } else if (sev.isSysEx()) {
-                rawOthers.push_back({tick, uint16_t(t), -1,
+                rawOthers.push_back({tick, uint16_t(t),
                                      QStringLiteral("SysEx (%1 bytes)").arg(sev.blob.size())});
             } else if (sev.isMeta()) {
                 const uint8_t metaType = sev.metaType;
@@ -169,13 +170,12 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                     timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
                 } else if (metaType == 0x20 && blob.size() >= 1) {
                     prefixChannel = blob[0] & 0x0F;
-                } else if (metaType == 0x03
-                           && (prefixChannel >= 0
-                                   ? channelNames[prefixChannel].isEmpty()
-                                   : trackNames[t].isEmpty())) {
+                } else if (metaType == 0x03 && prefixChannel >= 0) {
+                    // A channel-scoped name: not this chunk's, and never
+                    // misread as a loop marker below.
+                } else if (metaType == 0x03 && trackNames[t].isEmpty()) {
                     const int len = std::min<int>(blob.size(), 64);
-                    (prefixChannel >= 0 ? channelNames[prefixChannel] : trackNames[t]) =
-                        QString::fromLatin1(blob.constData(), len).trimmed();
+                    trackNames[t] = QString::fromLatin1(blob.constData(), len).trimmed();
                 } else if (metaType >= 0x01 && metaType <= 0x07) {
                     // Text-type meta: check for loop markers ('[' / ']').
                     const uint32_t len = uint32_t(std::min<int>(blob.size(), 32));
@@ -193,12 +193,12 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                             QString::fromLatin1(blob.constData(), int(len)).trimmed();
                         if (!text.isEmpty())
                             rawOthers.push_back(
-                                {tick, uint16_t(t), -1,
+                                {tick, uint16_t(t),
                                  QStringLiteral("%1: %2").arg(
                                      QLatin1String(kTextMetaNames[metaType - 1]), text)});
                     }
                 } else {
-                    rawOthers.push_back({tick, uint16_t(t), -1,
+                    rawOthers.push_back({tick, uint16_t(t),
                                          QStringLiteral("Meta 0x%1 (%2 bytes)")
                                              .arg(metaType, 2, 16, QLatin1Char('0'))
                                              .arg(blob.size())});
@@ -220,23 +220,23 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     timeline->sampleRate = sampleRate;
     timeline->ticksPerBeat = tpqn;
 
-    // Map SMF tracks (Type 1) or MIDI channels (Type 0) to engine tracks.
+    // Map SMF tracks to engine tracks: the first 16 chunks with channel
+    // events, in chunk order (loaders coerce format 0 away, so chunk order
+    // IS track order).
     std::vector<int> smfToEngine(numTracks, -1);
-    if (smf.format == 1) {
-        int next = 0;
-        for (int t = 0; t < numTracks; t++) {
-            if (!trackHasChannelEvents[t])
-                continue;
-            if (next < 16) {
-                smfToEngine[t] = next;
-                timeline->tracks[next].name = trackNames[t];
-                next++;
-            } else {
-                timeline->droppedTracks++;
-            }
+    int next = 0;
+    for (int t = 0; t < numTracks; t++) {
+        if (!trackHasChannelEvents[t])
+            continue;
+        if (next < 16) {
+            smfToEngine[t] = next;
+            timeline->tracks[next].name = trackNames[t];
+            next++;
+        } else {
+            timeline->droppedTracks++;
         }
-        timeline->usedTrackCount = next;
     }
+    timeline->usedTrackCount = next;
 
     // Convert raw events to sample positions with final engine track indices.
     timeline->events.reserve(rawEvents.size() + tempos.size() + 1);
@@ -244,14 +244,9 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::vector<TimelineEvent> noteEvents;
     noteEvents.reserve(rawEvents.size());
     for (const RawEvent &re : rawEvents) {
-        int engineTrack;
-        if (smf.format == 1) {
-            engineTrack = smfToEngine[re.smfTrack];
-            if (engineTrack < 0)
-                continue; // beyond 16 usable tracks
-        } else {
-            engineTrack = re.channel;
-        }
+        const int engineTrack = smfToEngine[re.smfTrack];
+        if (engineTrack < 0)
+            continue; // beyond 16 usable tracks
 
         TimelineEvent ev;
         ev.samplePos = tickToSample(re.tick, tempos, tpqn, sampleRate);
@@ -268,19 +263,6 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
             ti.noteCount++;
         if (ev.type == 0xC && ti.firstProgram < 0)
             ti.firstProgram = ev.data0;
-    }
-
-    if (smf.format == 0) {
-        int used = 0;
-        for (int i = 0; i < 16; i++) {
-            if (timeline->tracks[i].used) {
-                timeline->tracks[i].name = channelNames[i].isEmpty()
-                    ? QStringLiteral("Channel %1").arg(i + 1)
-                    : channelNames[i];
-                used = i + 1;
-            }
-        }
-        timeline->usedTrackCount = used;
     }
 
     // Tempo events, with the SMF default of 120 BPM prepended when the song
@@ -330,11 +312,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
               [](const RawOther &a, const RawOther &b) { return a.tick < b.tick; });
     timeline->otherEvents.reserve(rawOthers.size());
     for (RawOther &ro : rawOthers) {
-        int engineTrack = -1;
-        if (smf.format == 1)
-            engineTrack = smfToEngine[ro.smfTrack];
-        else if (ro.channel >= 0)
-            engineTrack = ro.channel;
+        const int engineTrack = smfToEngine[ro.smfTrack];
         timeline->otherEvents.push_back({ro.tick,
                                          tickToSample(ro.tick, tempos, tpqn, sampleRate),
                                          engineTrack, std::move(ro.label)});

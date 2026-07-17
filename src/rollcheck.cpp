@@ -482,7 +482,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     // undo/redo re-permute the mute flag along with the tracks.
     bool reordered = false;
     bool dragRenamed = false;
-    if (doc.smf().format != 0 && doc.engineTrackCount() >= 2) {
+    if (doc.engineTrackCount() >= 2) {
         // The panel was rebuilt by the edits above; force a layout pass so
         // the rows have real positions for the drop-slot hit test.
         (void)view.grab();

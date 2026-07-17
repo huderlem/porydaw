@@ -3387,8 +3387,8 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         m_sv->trackHeaderClicked(m_track, event->modifiers());
-        // A plain left press may become a reorder drag (format 1 moves the
-        // chunk; format 0 rotates the used channels).
+        // A plain left press may become a reorder drag (the track's chunk
+        // moves — AGB track order is chunk order).
         m_dragArmed = event->button() == Qt::LeftButton
             && !(event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             && m_sv->document();
@@ -3445,9 +3445,7 @@ public:
         }
         m_editor->setText(doc->trackName(m_track));
         // What an empty name falls back to (mirrors the painted default).
-        m_editor->setPlaceholderText(
-            doc->smf().format == 0 ? SongView::tr("Channel %1").arg(m_track + 1)
-                                   : SongView::tr("Track %1").arg(m_track + 1));
+        m_editor->setPlaceholderText(SongView::tr("Track %1").arg(m_track + 1));
         m_editor->setGeometry(editorRect());
         m_editor->show();
         m_editor->setFocus();
@@ -4983,51 +4981,33 @@ void SongView::deleteTrack(int track)
 {
     if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
         return;
-    if (m_document->smf().format != 0) {
-        // Removing a format-1 chunk shifts every higher engine slot down by
-        // one; move the per-track view state with it, before the document
-        // edit rebuilds the headers and lanes. (Format 0 slots are fixed
-        // channels: just drop the deleted track's state.)
-        const uint32_t low = (1u << track) - 1;
-        const uint32_t mute = (m_muteMask & low) | ((m_muteMask >> 1) & ~low);
-        const uint32_t solo = (m_soloMask & low) | ((m_soloMask >> 1) & ~low);
-        if (mute != m_muteMask) {
-            m_muteMask = mute;
-            emit muteMaskChanged(mute);
-        }
-        if (solo != m_soloMask) {
-            m_soloMask = solo;
-            emit soloMaskChanged(solo);
-        }
-        for (auto it = m_emptyLanes.begin(); it != m_emptyLanes.end();) {
-            if (it->first == track) {
-                it = m_emptyLanes.erase(it);
-            } else {
-                if (it->first > track)
-                    it->first--;
-                ++it;
-            }
-        }
-        if (m_selectedTrack > track)
-            m_selectedTrack--;
-    } else {
-        const uint32_t bit = 1u << track;
-        if (m_muteMask & bit) {
-            m_muteMask &= ~bit;
-            emit muteMaskChanged(m_muteMask);
-        }
-        if (m_soloMask & bit) {
-            m_soloMask &= ~bit;
-            emit soloMaskChanged(m_soloMask);
-        }
-        m_emptyLanes.erase(std::remove_if(m_emptyLanes.begin(), m_emptyLanes.end(),
-                                          [track](const std::pair<int, uint8_t> &lane) {
-                                              return lane.first == track;
-                                          }),
-                           m_emptyLanes.end());
+    // Removing a chunk shifts every higher engine slot down by one; move
+    // the per-track view state with it, before the document edit rebuilds
+    // the headers and lanes.
+    const uint32_t low = (1u << track) - 1;
+    const uint32_t mute = (m_muteMask & low) | ((m_muteMask >> 1) & ~low);
+    const uint32_t solo = (m_soloMask & low) | ((m_soloMask >> 1) & ~low);
+    if (mute != m_muteMask) {
+        m_muteMask = mute;
+        emit muteMaskChanged(mute);
     }
-    // Track slots shift (format 1) or empty out (format 0); collapse the
-    // multi-track scope and drop the time selection rather than remap them.
+    if (solo != m_soloMask) {
+        m_soloMask = solo;
+        emit soloMaskChanged(solo);
+    }
+    for (auto it = m_emptyLanes.begin(); it != m_emptyLanes.end();) {
+        if (it->first == track) {
+            it = m_emptyLanes.erase(it);
+        } else {
+            if (it->first > track)
+                it->first--;
+            ++it;
+        }
+    }
+    if (m_selectedTrack > track)
+        m_selectedTrack--;
+    // Track slots shift; collapse the multi-track scope and drop the time
+    // selection rather than remap them.
     m_trackSelMask = 1u << m_selectedTrack;
     clearTimeSelection();
     m_document->deleteTrack(track); // rebuilds via documentChanged
@@ -5038,10 +5018,9 @@ void SongView::moveTrack(int from, int to)
 {
     if (!m_document)
         return;
-    // The document decides validity (format-0 moves only rotate used
-    // channels); the per-track view state follows in onTrackMoved, which
-    // the reorder op signals through — undo and redo replay the same
-    // permutation, so the masks stay on their tracks.
+    // The document decides validity; the per-track view state follows in
+    // onTrackMoved, which the reorder op signals through — undo and redo
+    // replay the same permutation, so the masks stay on their tracks.
     if (m_document->moveTrack(from, to)) // rebuilds via documentChanged
         announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
 }

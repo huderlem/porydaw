@@ -178,8 +178,8 @@ public:
     // selects the created track; duplicateTrack selects the copy (a fresh
     // slot, so no per-track view state moves); deleteTrack shifts the view's
     // per-track state (mute/solo, empty lanes, selection) over the removed
-    // engine slot; moveTrack (header-row drag; chunk move in format 1,
-    // used-channel rotation in format 0) rotates that state along with the
+    // engine slot; moveTrack (header-row drag; the track's chunk moves —
+    // AGB track order is chunk order) rotates that state along with the
     // reordered engine slots — in onTrackMoved, off the document's
     // trackMoved signal, so undo/redo rotate it back too.
     void addTrack();

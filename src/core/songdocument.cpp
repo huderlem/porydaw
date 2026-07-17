@@ -61,38 +61,6 @@ QVector<int> engineRotationMap(int from, int to)
     return map;
 }
 
-// trackMoved's engine permutation for a format-0 channel remap (engine slot
-// == channel there).
-QVector<int> engineMapFromChannels(const std::array<uint8_t, 16> &chanMap)
-{
-    QVector<int> map(16);
-    for (int c = 0; c < 16; c++)
-        map[c] = chanMap[c];
-    return map;
-}
-
-std::array<uint8_t, 16> invertChannelMap(const std::array<uint8_t, 16> &chanMap)
-{
-    std::array<uint8_t, 16> inverse{};
-    for (int c = 0; c < 16; c++)
-        inverse[chanMap[c]] = uint8_t(c);
-    return inverse;
-}
-
-// Rewrite every channel-carrying byte in the single format-0 chunk: channel
-// events' status nibbles and Channel Prefix metas (0x20), whose scoped names
-// must follow their track. Event order never changes — sorting is by tick,
-// and per-channel relative order is file order either way.
-void remapChannels(SmfTrack &track, const std::array<uint8_t, 16> &chanMap)
-{
-    for (SmfEvent &ev : track.events) {
-        if (ev.isChannel())
-            ev.status = uint8_t((ev.status & 0xF0) | chanMap[ev.channel()]);
-        else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1)
-            ev.blob[0] = char(chanMap[ev.blob[0] & 0x0F]);
-    }
-}
-
 bool cfgSemanticEqual(const SongCfg &a, const SongCfg &b)
 {
     return a.voicegroupArg == b.voicegroupArg && a.masterVolume == b.masterVolume
@@ -254,6 +222,11 @@ bool SongDocument::load(const SongInfo &song, QString *error)
     SmfFile smf;
     if (!SmfFile::readFile(song.midPath, &smf, error))
         return false;
+    // Format 0 is coerced to format 1 here, once, so every edit path below
+    // deals in one shape: chunks are tracks. Deterministic, so an untouched
+    // file re-converts identically next open; the disk copy flips to format
+    // 1 on the first real edit + save.
+    convertToFormat1(&smf);
 
     m_smf = std::move(smf);
     m_cfg = song.cfg;
@@ -295,14 +268,6 @@ void SongDocument::rebuildTrackMap()
 {
     m_engineToSmf.clear();
     m_engineChannel.clear();
-    if (m_smf.format == 0) {
-        // Engine track == MIDI channel, all events in the single chunk.
-        for (int c = 0; c < 16; c++) {
-            m_engineToSmf.push_back(0);
-            m_engineChannel.push_back(uint8_t(c));
-        }
-        return;
-    }
     for (size_t t = 0; t < m_smf.tracks.size() && m_engineToSmf.size() < 16; t++) {
         for (const SmfEvent &ev : m_smf.tracks[t].events) {
             if (ev.isChannel()) {
@@ -344,14 +309,10 @@ std::vector<DocNote> SongDocument::notesForTrack(int engineTrack) const
     if (smfTrack < 0)
         return notes;
     const auto &evs = m_smf.tracks[smfTrack].events;
-    const uint8_t wantChannel =
-        m_smf.format == 0 ? channelFor(engineTrack) : 0xFF; // 0xFF = any
 
     for (size_t i = 0; i < evs.size(); i++) {
         const SmfEvent &on = evs[i];
         if (!on.isNoteOn())
-            continue;
-        if (wantChannel != 0xFF && on.channel() != wantChannel)
             continue;
 
         DocNote note;
@@ -390,11 +351,9 @@ bool SongDocument::findNote(int engineTrack, uint64_t tick, uint8_t key, DocNote
     return false;
 }
 
-bool SongDocument::laneEventMatches(const SmfEvent &ev, uint8_t cc, uint8_t channel) const
+bool SongDocument::laneEventMatches(const SmfEvent &ev, uint8_t cc) const
 {
     if (!ev.isChannel())
-        return false;
-    if (m_smf.format == 0 && ev.channel() != channel)
         return false;
     if (cc == DOC_CC_BEND)
         return ev.typeNibble() == 0xE;
@@ -435,10 +394,9 @@ std::vector<DocLanePoint> SongDocument::lanePoints(int engineTrack, uint8_t cc) 
     const int smfTrack = smfTrackFor(engineTrack);
     if (smfTrack < 0)
         return points;
-    const uint8_t channel = channelFor(engineTrack);
     const auto &evs = m_smf.tracks[smfTrack].events;
     for (size_t i = 0; i < evs.size(); i++) {
-        if (laneEventMatches(evs[i], cc, channel))
+        if (laneEventMatches(evs[i], cc))
             points.push_back({smfTrack, i, evs[i].tick, laneValue(evs[i], cc)});
     }
     return points;
@@ -1186,15 +1144,11 @@ bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick,
         // Every other channel event, one value stream per kind: controllers
         // and key pressure stream per data0; program, channel pressure, and
         // bend are one stream each.
-        const uint8_t wantChannel =
-            m_smf.format == 0 ? channelFor(engineTrack) : 0xFF;
         std::map<uint32_t, std::vector<StreamPt>> streams;
         const auto &evs = m_smf.tracks[smfTrack].events;
         for (size_t i = 0; i < evs.size(); i++) {
             const SmfEvent &ev = evs[i];
             if (!ev.isChannel() || ev.typeNibble() <= 0x9)
-                continue;
-            if (wantChannel != 0xFF && ev.channel() != wantChannel)
                 continue;
             const bool perData0 = ev.typeNibble() == 0xB || ev.typeNibble() == 0xA;
             const uint32_t key =
@@ -1459,15 +1413,8 @@ void SongDocument::deleteTimeSig(uint64_t tick)
 int SongDocument::freeChannel() const
 {
     bool used[16] = {};
-    if (m_smf.format == 0) {
-        for (const SmfEvent &ev : m_smf.tracks[0].events) {
-            if (ev.isChannel())
-                used[ev.channel()] = true;
-        }
-    } else {
-        for (uint8_t c : m_engineChannel)
-            used[c] = true;
-    }
+    for (uint8_t c : m_engineChannel)
+        used[c] = true;
     for (int c = 0; c < 16; c++) {
         if (!used[c])
             return c;
@@ -1479,7 +1426,7 @@ bool SongDocument::canAddTrack() const
 {
     if (m_smf.tracks.empty())
         return false;
-    if (m_smf.format != 0 && engineTrackCount() >= 16)
+    if (engineTrackCount() >= 16)
         return false;
     return freeChannel() >= 0;
 }
@@ -1490,14 +1437,11 @@ int SongDocument::addTrack(int voice)
         return -1;
     const int channel = freeChannel();
     std::vector<EditOp> ops;
-    int smfTrack = 0;
-    if (m_smf.format != 0) {
-        smfTrack = int(m_smf.tracks.size());
-        EditOp insert;
-        insert.type = EditOp::InsertTrack;
-        insert.smfTrack = smfTrack;
-        ops.push_back(insert);
-    }
+    const int smfTrack = int(m_smf.tracks.size());
+    EditOp insert;
+    insert.type = EditOp::InsertTrack;
+    insert.smfTrack = smfTrack;
+    ops.push_back(insert);
     EditOp seed;
     seed.type = EditOp::InsertEvent;
     seed.smfTrack = smfTrack;
@@ -1506,8 +1450,6 @@ int SongDocument::addTrack(int voice)
     ops.push_back(seed);
     pushEdit(tr("add track"), std::move(ops));
 
-    if (m_smf.format == 0)
-        return channel;
     for (int t = 0; t < engineTrackCount(); t++) {
         if (m_engineToSmf[t] == smfTrack)
             return t;
@@ -1523,40 +1465,23 @@ int SongDocument::duplicateTrack(int engineTrack)
     const int channel = freeChannel();
     const SmfTrack &src = m_smf.tracks[smfTrack];
     std::vector<EditOp> ops;
-    int newSmfTrack = 0;
-    if (m_smf.format != 0) {
-        newSmfTrack = int(m_smf.tracks.size());
-        EditOp insert;
-        insert.type = EditOp::InsertTrack;
-        insert.smfTrack = newSmfTrack;
-        insert.trackData.endTick = src.endTick;
-        for (const SmfEvent &ev : src.events) {
-            if (!ev.isChannel())
-                continue;
-            SmfEvent copy = ev;
-            copy.status = uint8_t((ev.status & 0xF0) | channel);
-            insert.trackData.events.push_back(copy);
-        }
-        ops.push_back(std::move(insert));
-    } else {
-        const uint8_t srcChannel = channelFor(engineTrack);
-        for (const SmfEvent &ev : src.events) {
-            if (!ev.isChannel() || ev.channel() != srcChannel)
-                continue;
-            EditOp op;
-            op.type = EditOp::InsertEvent;
-            op.smfTrack = 0;
-            op.event = ev;
-            op.event.status = uint8_t((ev.status & 0xF0) | channel);
-            ops.push_back(std::move(op));
-        }
+    const int newSmfTrack = int(m_smf.tracks.size());
+    EditOp insert;
+    insert.type = EditOp::InsertTrack;
+    insert.smfTrack = newSmfTrack;
+    insert.trackData.endTick = src.endTick;
+    for (const SmfEvent &ev : src.events) {
+        if (!ev.isChannel())
+            continue;
+        SmfEvent copy = ev;
+        copy.status = uint8_t((ev.status & 0xF0) | channel);
+        insert.trackData.events.push_back(copy);
     }
-    if (ops.empty())
+    if (insert.trackData.events.empty())
         return -1;
+    ops.push_back(std::move(insert));
     pushEdit(tr("duplicate track"), std::move(ops));
 
-    if (m_smf.format == 0)
-        return channel;
     for (int t = 0; t < engineTrackCount(); t++) {
         if (m_engineToSmf[t] == newSmfTrack)
             return t;
@@ -1571,17 +1496,13 @@ void SongDocument::deleteTrack(int engineTrack)
         return;
     std::vector<EditOp> ops;
     const auto &evs = m_smf.tracks[smfTrack].events;
-    if (m_smf.format == 0 || smfTrack == 0) {
-        // Chunk 0 stays (it is the seq chunk), and format 0 has only the one
-        // chunk: strip the track's channel events, keep everything else.
-        const uint8_t channel = channelFor(engineTrack);
+    if (smfTrack == 0) {
+        // Chunk 0 stays (it is the seq chunk): strip the track's channel
+        // events, keep everything else.
         std::vector<size_t> indices;
         for (size_t i = 0; i < evs.size(); i++) {
-            if (!evs[i].isChannel())
-                continue;
-            if (m_smf.format == 0 && evs[i].channel() != channel)
-                continue;
-            indices.push_back(i);
+            if (evs[i].isChannel())
+                indices.push_back(i);
         }
         appendRemoveOps(ops, smfTrack, std::move(indices));
     } else {
@@ -1634,38 +1555,26 @@ QString trackNameText(const SmfEvent &ev)
     return QString::fromLatin1(ev.blob.constData(), len).trimmed();
 }
 
-struct TrackNameLoc {
-    size_t nameIndex = SIZE_MAX;   // the winning 0x03 meta
-    size_t prefixIndex = SIZE_MAX; // its 0x20 prefix, when immediately before
-};
-
 // Where the track's display name lives, mirroring MidiTimeline's reader:
-// format 1 = the chunk's first unprefixed 0x03; format 0 = the first 0x03
-// scoped to the channel by a MIDI Channel Prefix meta (0x20), the prefix
-// staying live until the next channel event or prefix. The prefix is only
-// claimed for removal when it immediately precedes the name — a shared
-// prefix may scope other metas.
-TrackNameLoc trackNameLoc(const SmfTrack &track, bool format0, uint8_t channel)
+// the chunk's first unprefixed 0x03. An 0x03 scoped to a channel by a MIDI
+// Channel Prefix meta (0x20, live until the next channel event or prefix)
+// was format 0's per-track naming mechanism; conversion rewrites those, but
+// a foreign format-1 file may still carry them — never a chunk name.
+// SIZE_MAX when absent.
+size_t trackNameLoc(const SmfTrack &track)
 {
-    TrackNameLoc loc;
     int prefixChannel = -1;
-    size_t prefixIndex = SIZE_MAX;
     for (size_t i = 0; i < track.events.size(); i++) {
         const SmfEvent &ev = track.events[i];
         if (ev.isChannel()) {
             prefixChannel = -1;
         } else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1) {
             prefixChannel = ev.blob[0] & 0x0F;
-            prefixIndex = i;
-        } else if (ev.isMeta() && ev.metaType == 0x03
-                   && (format0 ? prefixChannel == channel : prefixChannel < 0)) {
-            loc.nameIndex = i;
-            if (format0 && prefixIndex == i - 1)
-                loc.prefixIndex = prefixIndex;
-            return loc;
+        } else if (ev.isMeta() && ev.metaType == 0x03 && prefixChannel < 0) {
+            return i;
         }
     }
-    return loc;
+    return SIZE_MAX;
 }
 
 } // namespace
@@ -1676,10 +1585,8 @@ QString SongDocument::trackName(int engineTrack) const
     if (smfTrack < 0)
         return QString();
     const SmfTrack &track = m_smf.tracks[smfTrack];
-    const TrackNameLoc loc =
-        trackNameLoc(track, m_smf.format == 0, channelFor(engineTrack));
-    return loc.nameIndex == SIZE_MAX ? QString()
-                                     : trackNameText(track.events[loc.nameIndex]);
+    const size_t nameIndex = trackNameLoc(track);
+    return nameIndex == SIZE_MAX ? QString() : trackNameText(track.events[nameIndex]);
 }
 
 void SongDocument::renameTrack(int engineTrack, const QString &name)
@@ -1690,44 +1597,27 @@ void SongDocument::renameTrack(int engineTrack, const QString &name)
     const QString trimmed = name.trimmed().left(64);
     if (nameIsLoopMarker(trimmed))
         return;
-    const bool format0 = m_smf.format == 0;
     const SmfTrack &track = m_smf.tracks[smfTrack];
-    const TrackNameLoc loc = trackNameLoc(track, format0, channelFor(engineTrack));
+    const size_t nameIndex = trackNameLoc(track);
 
     std::vector<EditOp> ops;
-    if (loc.nameIndex != SIZE_MAX) {
+    if (nameIndex != SIZE_MAX) {
         if (trimmed.isEmpty()) {
-            std::vector<size_t> indices{loc.nameIndex};
-            if (loc.prefixIndex != SIZE_MAX)
-                indices.push_back(loc.prefixIndex);
-            appendRemoveOps(ops, smfTrack, std::move(indices));
+            appendRemoveOps(ops, smfTrack, {nameIndex});
         } else {
-            if (trackNameText(track.events[loc.nameIndex]) == trimmed)
+            if (trackNameText(track.events[nameIndex]) == trimmed)
                 return;
             EditOp op;
             op.type = EditOp::ModifyEvent;
             op.smfTrack = smfTrack;
-            op.index = loc.nameIndex;
-            op.event = track.events[loc.nameIndex];
+            op.index = nameIndex;
+            op.event = track.events[nameIndex];
             op.event.blob = trimmed.toLatin1();
             ops.push_back(op);
         }
     } else {
         if (trimmed.isEmpty())
             return;
-        if (format0) {
-            // Both inserts land at the end of the tick-0 group, so the pair
-            // stays adjacent; later same-tick inserts never split it (setup
-            // events only back up over note events, not metas).
-            EditOp prefix;
-            prefix.type = EditOp::InsertEvent;
-            prefix.smfTrack = smfTrack;
-            prefix.event.tick = 0;
-            prefix.event.status = 0xFF;
-            prefix.event.metaType = 0x20;
-            prefix.event.blob = QByteArray(1, char(channelFor(engineTrack)));
-            ops.push_back(prefix);
-        }
         EditOp op;
         op.type = EditOp::InsertEvent;
         op.smfTrack = smfTrack;
@@ -1744,51 +1634,6 @@ bool SongDocument::moveTrack(int engineTrack, int targetEngine)
 {
     if (engineTrack == targetEngine)
         return false;
-    if (m_smf.format == 0) {
-        // Track order is channel order: rotate the used channels between the
-        // endpoints among themselves. Empty channels keep their numbers —
-        // slots are fixed identities here, as in deleteTrack.
-        if (engineTrack < 0 || engineTrack > 15 || targetEngine < 0
-            || targetEngine > 15 || m_smf.tracks.empty())
-            return false;
-        std::array<bool, 16> used{};
-        for (const SmfEvent &ev : m_smf.tracks[0].events) {
-            if (ev.isChannel())
-                used[ev.channel()] = true;
-        }
-        if (!used[engineTrack] || !used[targetEngine])
-            return false;
-        std::vector<uint8_t> chans; // used channels, ascending = display order
-        for (int c = 0; c < 16; c++) {
-            if (used[c])
-                chans.push_back(uint8_t(c));
-        }
-        const auto pos = [&chans](int channel) {
-            for (size_t p = 0; p < chans.size(); p++) {
-                if (chans[p] == channel)
-                    return int(p);
-            }
-            return -1;
-        };
-        const int i = pos(engineTrack);
-        const int j = pos(targetEngine);
-        EditOp op;
-        op.type = EditOp::RemapChannels;
-        for (int c = 0; c < 16; c++)
-            op.chanMap[c] = uint8_t(c);
-        op.chanMap[chans[size_t(i)]] = chans[size_t(j)];
-        if (i < j) {
-            for (int p = i + 1; p <= j; p++)
-                op.chanMap[chans[size_t(p)]] = chans[size_t(p - 1)];
-        } else {
-            for (int p = j; p < i; p++)
-                op.chanMap[chans[size_t(p)]] = chans[size_t(p + 1)];
-        }
-        std::vector<EditOp> ops;
-        ops.push_back(op);
-        pushEdit(tr("move track"), std::move(ops));
-        return true;
-    }
     const int fromChunk = smfTrackFor(engineTrack);
     const int toChunk = smfTrackFor(targetEngine);
     if (fromChunk < 0 || toChunk < 0)
@@ -1945,10 +1790,6 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
                                               engineTrackForChunk(op.smfTrackTo)));
             moveChunk(m_smf.tracks, op.smfTrack, op.smfTrackTo);
             break;
-        case EditOp::RemapChannels:
-            emit trackMoved(0, 0, engineMapFromChannels(op.chanMap));
-            remapChannels(m_smf.tracks[0], op.chanMap);
-            break;
         }
     }
     rebuildTrackMap();
@@ -1988,12 +1829,6 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
                                               engineTrackForChunk(op.smfTrack)));
             moveChunk(m_smf.tracks, op.smfTrackTo, op.smfTrack);
             break;
-        case EditOp::RemapChannels: {
-            const std::array<uint8_t, 16> inverse = invertChannelMap(op.chanMap);
-            emit trackMoved(0, 0, engineMapFromChannels(inverse));
-            remapChannels(m_smf.tracks[0], inverse);
-            break;
-        }
         }
     }
     rebuildTrackMap();

@@ -96,7 +96,12 @@ The document is `sound/songs/midi/<song>.mid`, plus its options line in
 
 - Reads any SMF, but **writes only the mid2agb-compatible subset** (format 1,
   channel-per-track semantics as mid2agb expects, the CC vocabulary below, loop
-  markers as `[` / `]` text/marker meta events).
+  markers as `[` / `]` text/marker meta events). A format-0 file is coerced to
+  format 1 on open/import (`convertToFormat1`): a conductor chunk 0 for the
+  non-channel metas plus one chunk per used channel in ascending channel
+  order — the order mid2agb emits agb tracks for a format-0 file, so the
+  compiled `.s` output is unchanged (`--roundtrip` proves it). Everything past
+  the loaders deals in format 1 only.
 - Preserves unrecognized meta events and any data it doesn't model on round-trip,
   so a file authored in another DAW survives a porydaw edit session.
 - Treats the `midi.cfg` flags as song properties editable in a Song Settings panel:

@@ -302,8 +302,7 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
     // Remap program 5 -> 10 on the lead track, then land the song in the
     // project the same way the wizard does.
     SmfFile imported = external;
-    applyProgramRemaps(&imported, {{analysis.tracks[0].smfTrack,
-                                    analysis.tracks[0].channel, 5, 10}});
+    applyProgramRemaps(&imported, {{analysis.tracks[0].smfTrack, 5, 10}});
     int remapped = 0;
     for (const SmfEvent &ev : imported.tracks[1].events) {
         if (ev.isChannel() && ev.typeNibble() == 0xC)

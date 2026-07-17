@@ -71,3 +71,16 @@ struct SmfFile {
     QByteArray write() const;
     bool writeFile(const QString &path, QString *error) const;
 };
+
+// Rewrites a format-0 file as format 1: a conductor chunk 0 carrying every
+// non-channel event (tempo, time signatures, loop markers — mid2agb reads
+// seq events from the first chunk exclusively), then one chunk per used
+// channel in ascending channel order — the same order mid2agb emits agb
+// tracks for a format-0 file (it scans each chunk for channels 0-15 in
+// turn), so the compiled .s output is unchanged. Channel-Prefix names
+// (0x20 + 0x03 pairs) become ordinary chunk name metas; the prefixes
+// themselves are dropped, the per-channel chunk structure now carrying
+// their meaning. No-op on format-1 input. Everything past the loaders
+// assumes format 1: this runs on every open and import, so format 0 never
+// escapes them.
+void convertToFormat1(SmfFile *smf);

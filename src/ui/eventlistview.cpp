@@ -943,8 +943,6 @@ void EventListView::syncTrackSelection()
 
 void EventListView::onTrackMoved(int fromChunk, int toChunk)
 {
-    // Format 0 (both endpoints 0): no chunk renumbering, and the reloaded
-    // rows pick up the rewritten channels through the ordinary refresh.
     if (fromChunk == toChunk)
         return;
     // Remap the anchored chunk through the rotation, into m_pendingChunk
@@ -1064,9 +1062,7 @@ void EventListView::rebuildChunkCombo()
                 }
             }
             QString label;
-            if (smf.format == 0)
-                label = tr("Chunk 0 (all channels)");
-            else if (engineTrack >= 0)
+            if (engineTrack >= 0)
                 label = tr("Chunk %1 — Track %2").arg(t).arg(engineTrack + 1);
             else
                 label = tr("Chunk %1 (tempo/meta)").arg(t);
@@ -1088,7 +1084,7 @@ void EventListView::chunkPicked(int)
     m_model->setSource(m_document, currentChunk());
     updateCountLabel();
     updatePlayRow();
-    if (!m_document || m_document->smf().format == 0)
+    if (!m_document)
         return;
     // Picking a chunk with an engine track selects that track in the roll,
     // mirroring how the roll's selection steers this combo.

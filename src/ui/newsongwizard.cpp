@@ -369,7 +369,7 @@ public:
                 });
                 m_tree->setItemWidget(item, 3, play);
 
-                m_rows.push_back({track.smfTrack, track.channel, program, combo});
+                m_rows.push_back({track.smfTrack, program, combo});
             }
         }
         if (m_rows.empty())
@@ -385,7 +385,7 @@ public:
         std::vector<ProgramRemap> result;
         for (const Row &row : m_rows) {
             if (row.combo->currentIndex() != row.program)
-                result.push_back({row.smfTrack, row.channel, row.program,
+                result.push_back({row.smfTrack, row.program,
                                   uint8_t(row.combo->currentIndex())});
         }
         return result;
@@ -414,7 +414,6 @@ private:
 
     struct Row {
         int smfTrack;
-        uint8_t channel;
         uint8_t program;
         QComboBox *combo;
     };
@@ -444,7 +443,15 @@ NewSongWizard::NewSongWizard(DecompProject *project, AudioEngine *audio, SmfFile
       m_imported(std::move(imported))
 {
     setWindowTitle(tr("Import MIDI — %1").arg(QFileInfo(sourcePath).fileName()));
+    // Coerce format 0 up front so the analysis, mapping page, and written
+    // .mid all deal in format 1 — one chunk per channel, like every song
+    // porydaw opens.
+    const bool wasFormat0 = m_imported.format == 0;
+    convertToFormat1(&m_imported);
     m_analysis = analyzeForImport(m_imported);
+    if (wasFormat0)
+        m_analysis.warnings.prepend(
+            tr("Format 0 file — imported as format 1 (one chunk per channel)."));
     buildPages(sourcePath);
 }
 

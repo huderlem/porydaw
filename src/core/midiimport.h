@@ -15,7 +15,7 @@
 // a division rescale onto the m4a clock grid.
 
 struct ImportTrackInfo {
-    int smfTrack = -1;      // chunk index (format 1) or 0 (format 0)
+    int smfTrack = -1;      // chunk index
     uint8_t channel = 0;    // the track's MIDI channel, as the engine maps it
     QString name;           // track-name meta, if present
     int noteCount = 0;
@@ -47,10 +47,9 @@ struct ImportAnalysis {
 ImportAnalysis analyzeForImport(const SmfFile &smf);
 
 // One row of the wizard's program-mapping table: rewrite every program-change
-// to `fromProgram` on this track/channel to `toProgram`.
+// to `fromProgram` on this track to `toProgram`.
 struct ProgramRemap {
     int smfTrack = -1;
-    uint8_t channel = 0;
     uint8_t fromProgram = 0;
     uint8_t toProgram = 0;
 };

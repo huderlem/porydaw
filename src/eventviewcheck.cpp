@@ -154,7 +154,7 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
     // A track move permutes the chunk numbering at constant count (invisible
     // to the count-changed re-anchor): the list must follow its anchored
     // chunk to the new index — and back on undo.
-    if (doc.smf().format != 0 && doc.engineTrackCount() >= 2) {
+    if (doc.engineTrackCount() >= 2) {
         int anchorEngine = -1;
         for (int e = 0; e < doc.engineTrackCount(); e++) {
             if (doc.smfTrackFor(e) == chunk)

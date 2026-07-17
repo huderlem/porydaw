@@ -11,25 +11,13 @@ namespace {
 constexpr int kMaxEngineTracks = 16; // m4a MAX_TRACKS
 constexpr int kDefaultPcmBudget = 5; // pokeemerald m4aSoundInit maxChans
 
-// Mirrors SongDocument::rebuildTrackMap / MidiTimeline::build: format 0 maps
-// engine track == channel; format 1 maps the first 16 channel-bearing chunks,
-// each tagged with its first channel event's channel.
+// Mirrors SongDocument::rebuildTrackMap / MidiTimeline::build: the first 16
+// channel-bearing chunks, each tagged with its first channel event's channel
+// (callers convert format 0 away before analysis).
 std::vector<std::pair<int, uint8_t>> engineTrackMap(const SmfFile &smf, int *dropped)
 {
     std::vector<std::pair<int, uint8_t>> map;
     *dropped = 0;
-    if (smf.format == 0) {
-        if (!smf.tracks.empty()) {
-            for (const SmfEvent &ev : smf.tracks[0].events) {
-                if (!ev.isChannel())
-                    continue;
-                const auto entry = std::make_pair(0, ev.channel());
-                if (std::find(map.begin(), map.end(), entry) == map.end())
-                    map.push_back(entry);
-            }
-        }
-        return map;
-    }
     for (size_t t = 0; t < smf.tracks.size(); t++) {
         for (const SmfEvent &ev : smf.tracks[t].events) {
             if (!ev.isChannel())
@@ -74,11 +62,10 @@ ImportAnalysis analyzeForImport(const SmfFile &smf)
         info.smfTrack = smfTrack;
         info.channel = channel;
 
-        const bool anyChannel = smf.format != 0;
         for (const SmfEvent &ev : smf.tracks[smfTrack].events) {
             if (ev.isMeta() && ev.metaType == 0x03 && info.name.isEmpty())
                 info.name = QString::fromLatin1(ev.blob).trimmed();
-            if (!ev.isChannel() || (!anyChannel && ev.channel() != channel))
+            if (!ev.isChannel())
                 continue;
             switch (ev.typeNibble()) {
             case 0x9:
@@ -187,10 +174,8 @@ void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps)
         if (r.fromProgram == r.toProgram || r.smfTrack < 0
             || r.smfTrack >= int(smf->tracks.size()))
             continue;
-        const bool anyChannel = smf->format != 0;
         for (SmfEvent &ev : smf->tracks[r.smfTrack].events) {
-            if (ev.isChannel() && ev.typeNibble() == 0xC && ev.data0 == r.fromProgram
-                && (anyChannel || ev.channel() == r.channel))
+            if (ev.isChannel() && ev.typeNibble() == 0xC && ev.data0 == r.fromProgram)
                 ev.data0 = r.toProgram;
         }
     }

@@ -652,11 +652,11 @@ int runEditCheck(const QString &projectRoot)
             }
         }
 
-        // Reordering tracks (format 1): the chunk moves with its events and
-        // channel bytes untouched, and the seq globals — tempo, time
-        // signatures, loop markers — stay with chunk 0 even when the move
-        // displaces it (mid2agb and the tempo lane read them only there).
-        if (ok && doc.smf().format != 0 && doc.engineTrackCount() >= 2 && track >= 0) {
+        // Reordering tracks: the chunk moves with its events and channel
+        // bytes untouched, and the seq globals — tempo, time signatures,
+        // loop markers — stay with chunk 0 even when the move displaces it
+        // (mid2agb and the tempo lane read them only there).
+        if (ok && doc.engineTrackCount() >= 2 && track >= 0) {
             doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 110, 145);
             doc.setTimeSig(base + step * 112, 5, 2);
             const uint64_t loopStartBefore = doc.loopTick(false);
@@ -741,8 +741,7 @@ int runEditCheck(const QString &projectRoot)
         // with its chunk (findLoopMarkerEvent skips it; imported files can
         // carry such names even though renameTrack refuses them), while the
         // combined "][" marker mid2agb reads stays with chunk 0.
-        if (ok && doc.smf().format != 0 && doc.engineTrackCount() >= 2
-            && doc.smfTrackFor(0) == 0) {
+        if (ok && doc.engineTrackCount() >= 2 && doc.smfTrackFor(0) == 0) {
             const int last = doc.engineTrackCount() - 1;
             const int indexBefore = doc.undoStack()->index();
             const uint64_t loopStartBefore = doc.loopTick(false);
@@ -938,13 +937,16 @@ int runEditCheck(const QString &projectRoot)
         checked++;
     }
 
-    // Format-0 rename: per-channel names ride the spec's Channel Prefix
-    // mechanism (0x20 + 0x03 pairs in the single chunk). Synthetic file —
-    // decomp projects are format 1 in practice, so the loop above never
-    // exercises this path.
+    // Format 0 is coerced to format 1 at load (convertToFormat1): the
+    // single chunk splits into a conductor chunk 0 carrying every
+    // non-channel meta, then one chunk per used channel in ascending
+    // channel order — the order mid2agb emits agb tracks for a format-0
+    // file, so the build output is unchanged (--roundtrip proves that end
+    // to end). Channel-Prefix names (0x20 + 0x03) become ordinary chunk
+    // names. Synthetic file — decomp projects are format 1 in practice.
     {
         auto fail0 = [&](const char *what) {
-            std::fprintf(stderr, "editcheck: FAIL format0-rename: %s\n", what);
+            std::fprintf(stderr, "editcheck: FAIL format0-convert: %s\n", what);
             failures++;
         };
         SmfFile smf;
@@ -959,14 +961,33 @@ int runEditCheck(const QString &projectRoot)
             ev.data1 = d1;
             return ev;
         };
-        tr.events.push_back(chEvent(0xC0, 0, 1, 0));
-        tr.events.push_back(chEvent(0xC1, 0, 2, 0));
-        tr.events.push_back(chEvent(0x90, 0, 60, 100));
-        tr.events.push_back(chEvent(0x91, 0, 64, 100));
-        tr.events.push_back(chEvent(0x80, 24, 60, 0));
-        tr.events.push_back(chEvent(0x81, 24, 64, 0));
-        tr.endTick = 24;
+        auto meta = [](uint64_t tick, uint8_t type, QByteArray blob) {
+            SmfEvent ev;
+            ev.tick = tick;
+            ev.status = 0xFF;
+            ev.metaType = type;
+            ev.blob = std::move(blob);
+            return ev;
+        };
+        // Global metas, a prefixed per-channel name, and notes on the
+        // non-contiguous channels 1, 4, 7 (so slot order = channel order is
+        // visible). The unprefixed 0x03 precedes the prefix — after a
+        // channel prefix, names are scoped until the next channel event.
+        tr.events.push_back(meta(0, 0x51, QByteArray("\x07\xA1\x20", 3))); // 120 BPM
+        tr.events.push_back(meta(0, 0x03, QByteArrayLiteral("Song")));
+        tr.events.push_back(meta(0, 0x20, QByteArray(1, char(4))));
+        tr.events.push_back(meta(0, 0x03, QByteArrayLiteral("Lead")));
+        tr.events.push_back(chEvent(0x91, 0, 60, 100));
+        tr.events.push_back(chEvent(0x94, 0, 64, 100));
+        tr.events.push_back(chEvent(0x97, 0, 67, 100));
+        tr.events.push_back(meta(12, 0x06, QByteArrayLiteral("[")));
+        tr.events.push_back(chEvent(0x81, 24, 60, 0));
+        tr.events.push_back(chEvent(0x84, 24, 64, 0));
+        tr.events.push_back(chEvent(0x87, 24, 67, 0));
+        tr.events.push_back(meta(36, 0x06, QByteArrayLiteral("]")));
+        tr.endTick = 48;
         smf.tracks.push_back(tr);
+        const QByteArray originalBytes = smf.write();
 
         QTemporaryDir tmp;
         const QString midPath = tmp.path() + QStringLiteral("/format0.mid");
@@ -980,161 +1001,111 @@ int runEditCheck(const QString &projectRoot)
             && doc.load(info, &werror);
         if (!ok)
             fail0("could not write/load the synthetic format-0 file");
-        const QByteArray baseline = ok ? doc.smf().write() : QByteArray();
+        if (ok
+            && (doc.smf().format != 1 || doc.smf().tracks.size() != 4
+                || doc.engineTrackCount() != 3)) {
+            fail0("load did not split into conductor + one chunk per channel");
+            ok = false;
+        }
+        if (ok
+            && (doc.channelFor(0) != 1 || doc.channelFor(1) != 4
+                || doc.channelFor(2) != 7 || doc.smfTrackFor(0) != 1)) {
+            fail0("converted chunks not in ascending channel order");
+            ok = false;
+        }
         if (ok) {
-            doc.renameTrack(0, QStringLiteral("Bass"));
-            doc.renameTrack(1, QStringLiteral("Lead"));
-            if (doc.trackName(0) != QStringLiteral("Bass")
-                || doc.trackName(1) != QStringLiteral("Lead")) {
-                fail0("format-0 renames not applied per channel");
+            const auto note = [&doc](int track) {
+                const auto notes = doc.notesForTrack(track);
+                return notes.size() == 1 && notes[0].duration == 24
+                    ? int(notes[0].key)
+                    : -1;
+            };
+            if (note(0) != 60 || note(1) != 64 || note(2) != 67) {
+                fail0("notes did not land on their channel's chunk");
                 ok = false;
             }
+        }
+        if (ok
+            && (doc.trackName(1) != QStringLiteral("Lead")
+                || !doc.trackName(0).isEmpty() || !doc.trackName(2).isEmpty())) {
+            fail0("the prefixed name did not become its channel chunk's name");
+            ok = false;
+        }
+        if (ok) {
+            for (const SmfTrack &track : doc.smf().tracks) {
+                for (const SmfEvent &ev : track.events) {
+                    if (ev.isMeta() && ev.metaType == 0x20) {
+                        fail0("a Channel Prefix meta survived conversion");
+                        ok = false;
+                    }
+                }
+                if (track.endTick != 48) {
+                    fail0("a converted chunk lost the end-of-track tick");
+                    ok = false;
+                }
+            }
+            for (const SmfEvent &ev : doc.smf().tracks[0].events) {
+                if (ev.isChannel()) {
+                    fail0("a channel event landed in the conductor chunk");
+                    ok = false;
+                }
+            }
+        }
+        if (ok
+            && (doc.loopTick(false) != 12 || doc.loopTick(true) != 36
+                || doc.lanePoints(0, DOC_CC_TEMPO).size() != 1)) {
+            fail0("seq globals did not stay readable in chunk 0");
+            ok = false;
         }
         if (ok) {
             const auto timeline = doc.buildTimeline(48000.0);
-            if (!timeline || timeline->tracks[0].name != QStringLiteral("Bass")
-                || timeline->tracks[1].name != QStringLiteral("Lead")) {
-                fail0("format-0 names not visible in the timeline projection");
-                ok = false;
-            }
-        }
-        if (ok) {
-            doc.renameTrack(0, QStringLiteral("Bass 2"));
-            if (doc.trackName(0) != QStringLiteral("Bass 2")
-                || doc.trackName(1) != QStringLiteral("Lead")) {
-                fail0("format-0 rename did not modify the right channel's name");
-                ok = false;
-            }
-        }
-        if (ok) {
-            doc.renameTrack(0, QString());
-            int prefixes = 0;
-            for (const SmfEvent &ev : doc.smf().tracks[0].events)
-                prefixes += ev.isMeta() && ev.metaType == 0x20;
-            if (!doc.trackName(0).isEmpty() || doc.trackName(1) != QStringLiteral("Lead")
-                || prefixes != 1) {
-                fail0("format-0 clear did not remove the name and its prefix");
+            if (!timeline || timeline->usedTrackCount != 3
+                || timeline->tracks[1].name != QStringLiteral("Lead")
+                || timeline->loopStartTick != 12) {
+                fail0("conversion not reflected in the timeline projection");
                 ok = false;
             }
         }
         if (ok && !tracksSorted(doc.smf())) {
-            fail0("events unsorted after format-0 renames");
+            fail0("events unsorted after conversion");
             ok = false;
         }
+        const QByteArray converted = ok ? doc.smf().write() : QByteArray();
         if (ok) {
+            // Deterministic (an untouched file re-converts identically next
+            // open) and a fixed point (converting the converted file is a
+            // no-op).
+            SmfFile redo;
+            QString rerror;
+            if (!SmfFile::read(originalBytes, &redo, &rerror)) {
+                fail0("could not re-read the original bytes");
+                ok = false;
+            } else {
+                convertToFormat1(&redo);
+                if (redo.write() != converted) {
+                    fail0("conversion is not deterministic");
+                    ok = false;
+                }
+                convertToFormat1(&redo);
+                if (ok && redo.write() != converted) {
+                    fail0("conversion of a converted file is not a no-op");
+                    ok = false;
+                }
+            }
+        }
+        if (ok) {
+            // The editing layer runs on the converted shape: undo-all
+            // restores the converted baseline, not the format-0 bytes.
+            doc.renameTrack(0, QStringLiteral("Bass"));
+            doc.moveTrack(0, 2);
+            if (doc.trackName(2) != QStringLiteral("Bass")) {
+                fail0("edits after conversion did not behave as format 1");
+                ok = false;
+            }
             while (doc.undoStack()->canUndo())
                 doc.undoStack()->undo();
-            if (doc.smf().write() != baseline)
-                fail0("format-0 undo-all did not restore the original bytes");
-        }
-    }
-
-    // Format-0 reorder: track order is channel order, so a move renumbers
-    // channel bytes — the used channels between the endpoints rotate among
-    // themselves, Channel Prefix names follow their track, and empty
-    // channels stay put (fixed-slot model, like delete). Synthetic file for
-    // the same reason as the rename block above.
-    {
-        auto fail0 = [&](const char *what) {
-            std::fprintf(stderr, "editcheck: FAIL format0-reorder: %s\n", what);
-            failures++;
-        };
-        SmfFile smf;
-        smf.format = 0;
-        smf.division = 24;
-        SmfTrack tr;
-        auto chEvent = [](uint8_t status, uint64_t tick, uint8_t d0, uint8_t d1) {
-            SmfEvent ev;
-            ev.tick = tick;
-            ev.status = status;
-            ev.data0 = d0;
-            ev.data1 = d1;
-            return ev;
-        };
-        // Used channels 1, 4, 7 with empty channels around them, so a
-        // rotation that dragged empties along would be visible.
-        tr.events.push_back(chEvent(0x91, 0, 60, 100));
-        tr.events.push_back(chEvent(0x94, 0, 64, 100));
-        tr.events.push_back(chEvent(0x97, 0, 67, 100));
-        tr.events.push_back(chEvent(0x81, 24, 60, 0));
-        tr.events.push_back(chEvent(0x84, 24, 64, 0));
-        tr.events.push_back(chEvent(0x87, 24, 67, 0));
-        tr.endTick = 24;
-        smf.tracks.push_back(tr);
-
-        QTemporaryDir tmp;
-        const QString midPath = tmp.path() + QStringLiteral("/format0move.mid");
-        QString werror;
-        SongInfo info;
-        info.label = QStringLiteral("format0move");
-        info.midPath = midPath;
-        info.hasMid = true;
-        SongDocument doc;
-        bool ok = tmp.isValid() && smf.writeFile(midPath, &werror)
-            && doc.load(info, &werror);
-        if (!ok)
-            fail0("could not write/load the synthetic format-0 file");
-        const QByteArray baseline = ok ? doc.smf().write() : QByteArray();
-        if (ok) {
-            doc.renameTrack(1, QStringLiteral("Alpha"));
-            doc.renameTrack(7, QStringLiteral("Gamma"));
-            if (doc.trackName(1) != QStringLiteral("Alpha")
-                || doc.trackName(7) != QStringLiteral("Gamma")) {
-                fail0("names not applied before the move");
-                ok = false;
-            }
-        }
-        const QByteArray named = ok ? doc.smf().write() : QByteArray();
-        if (ok && (doc.moveTrack(1, 1) || doc.moveTrack(1, 2) || doc.moveTrack(2, 1))) {
-            fail0("a no-op or unused-channel move was not refused");
-            ok = false;
-        }
-        if (ok && doc.smf().write() != named) {
-            fail0("a refused move changed the bytes");
-            ok = false;
-        }
-        if (ok) {
-            const int countBefore = doc.undoStack()->count();
-            if (!doc.moveTrack(1, 7)) {
-                fail0("a used-channel move was refused");
-                ok = false;
-            } else if (doc.undoStack()->count() != countBefore + 1) {
-                fail0("the move was not a single undo command");
-                ok = false;
-            }
-        }
-        if (ok) {
-            const auto note = [&doc](int channel) {
-                const auto notes = doc.notesForTrack(channel);
-                return notes.size() == 1 ? int(notes[0].key) : -1;
-            };
-            // 1 -> 7, 4 -> 1, 7 -> 4; names ride along; empties untouched.
-            if (note(7) != 60 || note(1) != 64 || note(4) != 67) {
-                fail0("the used channels did not rotate as a block");
-                ok = false;
-            } else if (doc.trackName(7) != QStringLiteral("Alpha")
-                       || doc.trackName(4) != QStringLiteral("Gamma")
-                       || !doc.trackName(1).isEmpty()) {
-                fail0("names did not follow their tracks through the move");
-                ok = false;
-            } else if (!doc.notesForTrack(0).empty() || !doc.notesForTrack(2).empty()
-                       || !doc.notesForTrack(3).empty()) {
-                fail0("an empty channel gained events in the move");
-                ok = false;
-            }
-        }
-        if (ok && !tracksSorted(doc.smf())) {
-            fail0("events unsorted after the format-0 move");
-            ok = false;
-        }
-        if (ok) {
-            doc.undoStack()->undo();
-            if (doc.smf().write() != named)
-                fail0("undoing the move did not restore the channels");
-            while (doc.undoStack()->canUndo())
-                doc.undoStack()->undo();
-            if (doc.smf().write() != baseline)
-                fail0("format-0 undo-all did not restore the original bytes");
+            if (ok && doc.smf().write() != converted)
+                fail0("undo-all did not restore the converted baseline");
         }
     }
 

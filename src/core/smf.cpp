@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 namespace {
@@ -313,4 +314,63 @@ bool SmfFile::writeFile(const QString &path, QString *error) const
     if (file.write(bytes) != bytes.size())
         return fail(error, QStringLiteral("Short write to %1").arg(path));
     return true;
+}
+
+void convertToFormat1(SmfFile *smf)
+{
+    if (smf->format != 0)
+        return;
+    smf->format = 1;
+    if (smf->tracks.empty())
+        return;
+
+    SmfTrack conductor;
+    std::array<SmfTrack, 16> channels;
+    std::array<bool, 16> used{}; // has channel events (a name alone doesn't
+                                 // occupy an engine slot in either format)
+    uint64_t endTick = 0;
+
+    // A format-0 file has one chunk; out-of-spec extras get the same
+    // treatment, merged into the shared buckets.
+    for (const SmfTrack &track : smf->tracks) {
+        endTick = std::max(endTick, track.endTick);
+        // Channel Prefix (0x20) scopes following name metas to a channel,
+        // live until the next channel event or prefix — the readers'
+        // (MidiTimeline, trackNameLoc) exact rule.
+        int prefixChannel = -1;
+        for (const SmfEvent &ev : track.events) {
+            if (ev.isChannel()) {
+                prefixChannel = -1;
+                channels[ev.channel()].events.push_back(ev);
+                used[ev.channel()] = true;
+            } else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1) {
+                prefixChannel = ev.blob[0] & 0x0F;
+            } else if (ev.isMeta() && ev.metaType == 0x03 && prefixChannel >= 0) {
+                channels[prefixChannel].events.push_back(ev);
+            } else {
+                conductor.events.push_back(ev);
+            }
+        }
+    }
+
+    smf->tracks.clear();
+    conductor.endTick = endTick;
+    std::stable_sort(conductor.events.begin(), conductor.events.end(),
+                     [](const SmfEvent &a, const SmfEvent &b) {
+                         return a.tick < b.tick;
+                     });
+    smf->tracks.push_back(std::move(conductor));
+    for (int c = 0; c < 16; c++) {
+        if (!used[c])
+            continue;
+        channels[c].endTick = endTick;
+        // Already tick-sorted for a single source chunk; a merge of
+        // out-of-spec extra chunks may need it (stable: same-tick order
+        // within each source chunk survives).
+        std::stable_sort(channels[c].events.begin(), channels[c].events.end(),
+                         [](const SmfEvent &a, const SmfEvent &b) {
+                             return a.tick < b.tick;
+                         });
+        smf->tracks.push_back(std::move(channels[c]));
+    }
 }
