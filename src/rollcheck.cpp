@@ -1,10 +1,12 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QIcon>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPoint>
+#include <QPixmap>
 #include <QString>
 #include <QWidget>
 #include <cstdio>
@@ -258,6 +260,23 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     const int rowY = (127 - d.key) * keyH - view.scrollY() + keyH / 2 + 1;
     const QPoint edge(songview::kKeyboardW + view.contentX(double(d.tick + offDur)),
                       rowY);
+    const QPoint leftEdge(songview::kKeyboardW + view.contentX(double(d.tick)), rowY);
+    sendMouse(roll, QEvent::MouseMove, leftEdge, Qt::NoButton, Qt::NoButton);
+    const QPixmap expectedLeftCursor =
+        QIcon(QStringLiteral(":/cursors/left-drag.png"))
+            .pixmap(QSize(24, 24), roll->devicePixelRatioF());
+    if (roll->cursor().pixmap().devicePixelRatio()
+            != expectedLeftCursor.devicePixelRatio()
+        || roll->cursor().pixmap().toImage() != expectedLeftCursor.toImage())
+        fail("left note edge did not show its DPI-matched custom cursor");
+    sendMouse(roll, QEvent::MouseMove, edge, Qt::NoButton, Qt::NoButton);
+    const QPixmap expectedRightCursor =
+        QIcon(QStringLiteral(":/cursors/right-drag.png"))
+            .pixmap(QSize(24, 24), roll->devicePixelRatioF());
+    if (roll->cursor().pixmap().devicePixelRatio()
+            != expectedRightCursor.devicePixelRatio()
+        || roll->cursor().pixmap().toImage() != expectedRightCursor.toImage())
+        fail("right note edge did not show its DPI-matched custom cursor");
     const QPoint pull(
         songview::kKeyboardW + view.contentX(double(d.tick) + 1.75 * double(d.dur)),
         rowY);
