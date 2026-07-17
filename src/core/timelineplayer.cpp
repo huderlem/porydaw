@@ -85,6 +85,23 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         m4a_engine_set_tempo_bpm(engine, 150); // engine reset default
 }
 
+void TimelinePlayer::primeVoices(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos)
+{
+    bool chased[16] = {}; // program at or before pos: chase already applied it
+    const TimelineEvent *first[16] = {};
+    for (const TimelineEvent &ev : timeline->events) {
+        if (ev.type != 0xC)
+            continue;
+        if (ev.samplePos <= pos)
+            chased[ev.track] = true;
+        else if (!first[ev.track])
+            first[ev.track] = &ev;
+    }
+    for (int track = 0; track < 16; track++)
+        if (!chased[track] && first[track])
+            m4a_engine_program_change(engine, track, first[track]->data0);
+}
+
 void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
 {
     // Both seek callers release the engine's sounding notes around the seek

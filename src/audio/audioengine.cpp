@@ -147,6 +147,14 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_engine->maxPcmChannels = m_settings.maxPcmChannels;
     m_engine->analogFilter = m_settings.analogFilter;
     m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
+    // Latch the song's initial controller state and prime each track's voice
+    // so auditioned notes (previewNote) sound as they would in the song
+    // before playback has ever dispatched the track's events. Playback
+    // re-dispatches the real events, so this changes nothing it plays.
+    if (m_timeline) {
+        TimelinePlayer::chase(m_engine.get(), m_timeline, 0);
+        TimelinePlayer::primeVoices(m_engine.get(), m_timeline, 0);
+    }
     resetPreviewEngine();
 
     m_transport.store(static_cast<int>(Transport::Stopped));
@@ -182,6 +190,7 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // deleted or moved the events behind the engine's current bend/CC values
     // (e.g. clearing a lane), which would otherwise stay latched until stop.
     TimelinePlayer::chase(m_engine.get(), m_timeline, pos);
+    TimelinePlayer::primeVoices(m_engine.get(), m_timeline, pos);
 
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -201,6 +210,7 @@ void AudioEngine::seek(uint64_t samplePos)
         m4a_engine_all_notes_off(m_engine.get(), track);
     m_player.seek(samplePos, m_timeline);
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
+    TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
     m_playhead.store(samplePos);
 
     if (m_deviceStarted)
@@ -233,8 +243,10 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
     m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
     // Re-latch program changes: the tracks' instrument state still points
     // into the old voices array until the chase reapplies it.
-    if (m_timeline)
+    if (m_timeline) {
         TimelinePlayer::chase(m_engine.get(), m_timeline, m_playhead.load());
+        TimelinePlayer::primeVoices(m_engine.get(), m_timeline, m_playhead.load());
+    }
     resetPreviewEngine();
     if (m_deviceStarted)
         ma_device_start(m_device);

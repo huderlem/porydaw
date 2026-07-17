@@ -61,6 +61,16 @@ public:
     // the playhead) so deleted or moved automation can't stay latched.
     static void chase(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos);
 
+    // Primes voices for auditioning: each track with no program change at or
+    // before `pos` gets its first program change from later in the timeline,
+    // so notes previewed outside playback (piano-key clicks, note-draw) sound
+    // before the track's voice event has ever been dispatched. Call after
+    // chase() — a chase-applied program is never overridden — and only for
+    // the interactive engine: playback re-dispatches the real event when it
+    // reaches it, but an offline render must keep the engine's authentic
+    // uninitialized-track silence.
+    static void primeVoices(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos);
+
     // Renders exactly `frames` samples into outL/outR, dispatching every due
     // event. Note-ons for tracks set in muteMask are skipped (note-offs and
     // controllers always pass so state stays consistent).
