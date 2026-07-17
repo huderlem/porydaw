@@ -32,8 +32,9 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel);
 // sidecars into the project: use a copy).
 int runTabCheck(const QString &projectRoot, const QString &songA,
                 const QString &songB);
-// rollcheck.cpp; piano-roll gesture check (pencil draw + velocity latch);
-// the optional path saves the rendered view after the gestures.
+// rollcheck.cpp; piano-roll gesture check (pencil draw + velocity latch +
+// header-drag track reorder); the optional path saves the rendered view
+// after the gestures.
 int runRollCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &screenshotPath = QString());
 // loopcheck.cpp; loop-wrap playback check (self-contained, no project needed).

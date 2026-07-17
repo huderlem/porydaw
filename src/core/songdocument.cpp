@@ -1666,6 +1666,53 @@ void SongDocument::renameTrack(int engineTrack, const QString &name)
     pushEdit(tr("rename track"), std::move(ops));
 }
 
+void SongDocument::moveTrack(int engineTrack, int targetEngine)
+{
+    if (m_smf.format == 0 || engineTrack == targetEngine)
+        return;
+    const int fromChunk = smfTrackFor(engineTrack);
+    const int toChunk = smfTrackFor(targetEngine);
+    if (fromChunk < 0 || toChunk < 0)
+        return;
+
+    std::vector<EditOp> ops;
+    // mid2agb reads tempo, time signatures, and loop markers only from the
+    // first chunk (so does the tempo lane). When the move changes which
+    // chunk is first, those globals stay with position 0: strip them from
+    // the old seq chunk and re-insert into the new one. Everything else —
+    // channel events, the track's name meta — travels with its chunk.
+    std::vector<SmfEvent> rescued;
+    if (fromChunk == 0 || toChunk == 0) {
+        const auto &evs = m_smf.tracks[0].events;
+        std::vector<size_t> indices;
+        for (size_t i = 0; i < evs.size(); i++) {
+            const SmfEvent &ev = evs[i];
+            if ((ev.isMeta() && ev.metaType == 0x51) || metaIsTimeSig(ev)
+                || metaIsLoopMarker(ev, '[') || metaIsLoopMarker(ev, ']')) {
+                indices.push_back(i);
+                rescued.push_back(ev);
+            }
+        }
+        appendRemoveOps(ops, 0, std::move(indices));
+    }
+    EditOp move;
+    move.type = EditOp::MoveTrack;
+    move.smfTrack = fromChunk;
+    move.smfTrackTo = toChunk;
+    ops.push_back(move);
+    // Re-inserted in original order: InsertEvent lands each at the end of
+    // its tick group, so same-tick globals keep their relative order (the
+    // last tempo/signature at a tick is the one that wins).
+    for (const SmfEvent &ev : rescued) {
+        EditOp insert;
+        insert.type = EditOp::InsertEvent;
+        insert.smfTrack = 0;
+        insert.event = ev;
+        ops.push_back(insert);
+    }
+    pushEdit(tr("move track"), std::move(ops));
+}
+
 void SongDocument::setCfg(const SongCfg &cfg)
 {
     if (cfgSemanticEqual(cfg, m_cfg))
@@ -1753,6 +1800,16 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
             track.endTick = op.event.tick;
             break;
         }
+        case EditOp::MoveTrack: {
+            const auto begin = m_smf.tracks.begin();
+            if (op.smfTrack < op.smfTrackTo)
+                std::rotate(begin + op.smfTrack, begin + op.smfTrack + 1,
+                            begin + op.smfTrackTo + 1);
+            else
+                std::rotate(begin + op.smfTrackTo, begin + op.smfTrack,
+                            begin + op.smfTrack + 1);
+            break;
+        }
         }
     }
     rebuildTrackMap();
@@ -1786,6 +1843,16 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
         case EditOp::SetTrackEnd:
             m_smf.tracks[op.smfTrack].endTick = op.oldEndTick;
             break;
+        case EditOp::MoveTrack: {
+            const auto begin = m_smf.tracks.begin();
+            if (op.smfTrackTo < op.smfTrack)
+                std::rotate(begin + op.smfTrackTo, begin + op.smfTrackTo + 1,
+                            begin + op.smfTrack + 1);
+            else
+                std::rotate(begin + op.smfTrack, begin + op.smfTrackTo,
+                            begin + op.smfTrackTo + 1);
+            break;
+        }
         }
     }
     rebuildTrackMap();

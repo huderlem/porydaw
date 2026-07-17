@@ -178,10 +178,12 @@ public:
     // selects the created track; duplicateTrack selects the copy (a fresh
     // slot, so no per-track view state moves); deleteTrack shifts the view's
     // per-track state (mute/solo, empty lanes, selection) over the removed
-    // engine slot.
+    // engine slot; moveTrack (header-row drag, format 1 only) rotates that
+    // state along with the reordered engine slots.
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
+    void moveTrack(int from, int to);
     // Inline rename: opens a line editor on the track's header row
     // (double-click and the context menu land here). commitTrackRename
     // applies the typed name — queued, since the edit rebuilds the header

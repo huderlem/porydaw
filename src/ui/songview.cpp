@@ -3339,6 +3339,8 @@ public:
         layout->addLayout(buttons);
     }
 
+    int track() const { return m_track; }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -3385,7 +3387,17 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         m_sv->trackHeaderClicked(m_track, event->modifiers());
+        // A plain left press may become a reorder drag (format 1 only —
+        // format 0 slots are fixed channels, there is no chunk order).
+        m_dragArmed = event->button() == Qt::LeftButton
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            && m_sv->document() && m_sv->document()->smf().format != 0;
+        m_pressPos = event->pos();
     }
+
+    // Defined below TrackHeaderPanel (they drive its drag state).
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
 
 public:
     // Inline rename: a line edit overlaid on the row's name line. Return
@@ -3411,9 +3423,12 @@ public:
         QString tip = SongView::tr("%1 notes · %2")
                           .arg(tl->tracks[m_track].noteCount)
                           .arg(m_sv->instrumentLabel(m_track));
-        if (m_sv->document())
+        if (m_sv->document()) {
             tip += SongView::tr("\nDouble-click to rename · right-click "
                                 "to change voice, duplicate, or delete");
+            if (m_sv->document()->smf().format != 0)
+                tip += SongView::tr(" · drag to reorder");
+        }
         setToolTip(tip);
     }
 
@@ -3534,6 +3549,9 @@ private:
     // Program painted on the voice line, for syncVoice's changed check
     // (-2 = never painted; distinct from -1, "no voice set").
     int m_shownProgram = -2;
+    QPoint m_pressPos;
+    bool m_dragArmed = false;
+    bool m_dragging = false;
 };
 
 class TrackHeaderPanel : public QWidget
@@ -3542,27 +3560,40 @@ public:
     explicit TrackHeaderPanel(SongView *sv)
         : QWidget(nullptr), m_sv(sv)
     {
+        setObjectName(QStringLiteral("trackHeaderPanel"));
         m_layout = new QVBoxLayout(this);
         m_layout->setContentsMargins(0, 0, 0, 0);
         m_layout->setSpacing(0);
         m_layout->addStretch();
+        // Reorder-drag drop indicator: a thin line floating over the rows at
+        // the insertion point.
+        m_indicator = new QWidget(this);
+        m_indicator->setFixedHeight(3);
+        m_indicator->setStyleSheet(QStringLiteral("background: palette(highlight);"));
+        m_indicator->hide();
     }
 
     void rebuild()
     {
+        // A document edit mid-drag rebuilds the rows, deleting the dragged
+        // one out from under its own gesture; abandon the drag first.
+        endRowDrag(false);
         qDeleteAll(m_rows);
         m_rows.clear();
         m_rowByTrack.clear();
+        m_trackRows.clear();
         const MidiTimeline *tl = m_sv->timeline();
         if (tl) {
             for (int t = 0; t < 16; t++) {
                 if (!tl->tracks[t].used)
                     continue;
                 auto *row = new TrackHeaderRow(m_sv, t, this);
+                row->setObjectName(QStringLiteral("trackHeaderRow%1").arg(t));
                 m_rowByTrack[t] = row;
                 row->updateToolTip();
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
+                m_trackRows.push_back(row);
             }
             SongDocument *doc = m_sv->document();
             if (doc && doc->canAddTrack()) {
@@ -3601,12 +3632,103 @@ public:
             entry.second->syncVoice();
     }
 
+    // --- header-row reorder drag (driven by TrackHeaderRow's mouse events;
+    // the panel owns the state so a mid-drag rebuild can abandon it) ---
+
+    bool beginRowDrag(int track)
+    {
+        if (m_dragFrom >= 0 || m_trackRows.size() < 2)
+            return false;
+        m_dragFrom = track;
+        m_dropSlot = -1;
+        QApplication::setOverrideCursor(Qt::ClosedHandCursor);
+        return true;
+    }
+
+    void dragRowTo(QPoint pos)
+    {
+        if (m_dragFrom < 0)
+            return;
+        // Insertion slot: before the first row whose center is below the
+        // cursor; past the last row otherwise.
+        int slot = 0;
+        for (const TrackHeaderRow *row : m_trackRows) {
+            if (pos.y() > row->y() + row->height() / 2)
+                slot++;
+        }
+        m_dropSlot = slot;
+        const int y = slot < int(m_trackRows.size())
+            ? m_trackRows[size_t(slot)]->y()
+            : m_trackRows.back()->y() + m_trackRows.back()->height();
+        m_indicator->setGeometry(0, y - 1, width(), 3);
+        m_indicator->raise();
+        m_indicator->show();
+    }
+
+    void endRowDrag(bool commit)
+    {
+        if (m_dragFrom < 0)
+            return;
+        const int from = m_dragFrom;
+        const int slot = m_dropSlot;
+        m_dragFrom = -1;
+        m_dropSlot = -1;
+        m_indicator->hide();
+        QApplication::restoreOverrideCursor();
+        if (!commit || slot < 0)
+            return;
+        int fromIdx = -1;
+        for (size_t i = 0; i < m_trackRows.size(); i++) {
+            if (m_trackRows[i]->track() == from)
+                fromIdx = int(i);
+        }
+        // The slots adjacent to the dragged row leave it where it was.
+        if (fromIdx < 0 || slot == fromIdx || slot == fromIdx + 1)
+            return;
+        const int target = m_trackRows[size_t(slot > fromIdx ? slot - 1 : slot)]->track();
+        // Queued: the edit rebuilds this panel, deleting the dragged row out
+        // from under its own mouse-release handler.
+        QMetaObject::invokeMethod(
+            m_sv, [sv = m_sv, from, target] { sv->moveTrack(from, target); },
+            Qt::QueuedConnection);
+    }
+
 private:
     SongView *m_sv;
     QVBoxLayout *m_layout;
     std::vector<QWidget *> m_rows;
     std::map<int, TrackHeaderRow *> m_rowByTrack;
+    std::vector<TrackHeaderRow *> m_trackRows;
+    QWidget *m_indicator = nullptr;
+    int m_dragFrom = -1; // dragged engine track; -1 = no drag live
+    int m_dropSlot = -1; // insertion slot the indicator marks
 };
+
+// The drag handlers live below TrackHeaderPanel because they drive it.
+
+void TrackHeaderRow::mouseMoveEvent(QMouseEvent *event)
+{
+    auto *panel = static_cast<TrackHeaderPanel *>(parentWidget());
+    if (!m_dragging) {
+        if (!m_dragArmed || !(event->buttons() & Qt::LeftButton)
+            || (event->pos() - m_pressPos).manhattanLength()
+                < QApplication::startDragDistance())
+            return;
+        m_dragging = panel->beginRowDrag(m_track);
+        if (!m_dragging)
+            return;
+    }
+    panel->dragRowTo(mapTo(panel, event->pos()));
+}
+
+void TrackHeaderRow::mouseReleaseEvent(QMouseEvent *)
+{
+    m_dragArmed = false;
+    if (!m_dragging)
+        return;
+    m_dragging = false;
+    static_cast<TrackHeaderPanel *>(parentWidget())->endRowDrag(true);
+}
 
 } // namespace songview
 
@@ -4878,6 +5000,52 @@ void SongView::deleteTrack(int track)
     clearTimeSelection();
     m_document->deleteTrack(track); // rebuilds via documentChanged
     announce(tr("Deleted track %1").arg(track + 1));
+}
+
+void SongView::moveTrack(int from, int to)
+{
+    if (!m_document || m_document->smf().format == 0 || from == to
+        || m_document->smfTrackFor(from) < 0 || m_document->smfTrackFor(to) < 0)
+        return;
+    // Format-1 engine slots are contiguous, so the move renumbers every slot
+    // between the endpoints; rotate the per-track view state with them
+    // (deleteTrack's shift, generalized to both directions). The note
+    // selection needs nothing: it is (tick, key) on the selected track, and
+    // the selected track's number moves with its notes.
+    const auto newIndex = [from, to](int t) {
+        if (t == from)
+            return to;
+        if (from < to)
+            return t > from && t <= to ? t - 1 : t;
+        return t >= to && t < from ? t + 1 : t;
+    };
+    const auto permuteMask = [&newIndex](uint32_t mask) {
+        uint32_t out = 0;
+        for (int t = 0; t < 16; t++) {
+            if (mask & (1u << t))
+                out |= 1u << newIndex(t);
+        }
+        return out;
+    };
+    const uint32_t mute = permuteMask(m_muteMask);
+    const uint32_t solo = permuteMask(m_soloMask);
+    if (mute != m_muteMask) {
+        m_muteMask = mute;
+        emit muteMaskChanged(mute);
+    }
+    if (solo != m_soloMask) {
+        m_soloMask = solo;
+        emit soloMaskChanged(solo);
+    }
+    for (auto &lane : m_emptyLanes)
+        lane.first = newIndex(lane.first);
+    m_selectedTrack = newIndex(m_selectedTrack);
+    // The multi-track scope and time selection are track-addressed;
+    // collapse them like deleteTrack does rather than remap.
+    m_trackSelMask = 1u << m_selectedTrack;
+    clearTimeSelection();
+    m_document->moveTrack(from, to); // rebuilds via documentChanged
+    announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
 }
 
 void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,

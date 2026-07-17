@@ -24,8 +24,9 @@
 // note selection and a multi-track time selection — and the view follows
 // notes moved out of sight with a minimal scroll (flush at the edge, not
 // re-centered). The playhead follow-scroll pauses while a mouse gesture
-// is held (pan, drag, sweep) and resumes on release. Undoing every
-// gesture must restore the original bytes.
+// is held (pan, drag, sweep) and resumes on release. Dragging a track
+// header row reorders the tracks, the mute flag following the moved
+// track. Undoing every gesture must restore the original bytes.
 
 namespace {
 
@@ -470,6 +471,49 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("voice label did not return to the edit cursor after stop");
     }
 
+    // Header-row drag reorder (format 1 with two or more tracks): press the
+    // first row, drag past the second row's center, release — the first two
+    // tracks swap slots, the notes and the mute flag following, as ONE undo
+    // command (committed queued, so the event loop must spin).
+    bool reordered = false;
+    if (doc.smf().format != 0 && doc.engineTrackCount() >= 2) {
+        // The panel was rebuilt by the edits above; force a layout pass so
+        // the rows have real positions for the drop-slot hit test.
+        (void)view.grab();
+        auto *row0 = view.findChild<QWidget *>(QStringLiteral("trackHeaderRow0"));
+        auto *row1 = view.findChild<QWidget *>(QStringLiteral("trackHeaderRow1"));
+        if (!row0 || !row1) {
+            fail("track header rows not found");
+        } else {
+            const auto firstNotes = doc.notesForTrack(0);
+            view.setTrackMute(0, true);
+            const QPoint start(row0->width() / 2, row0->height() / 2);
+            // Past row 1's center in row-0 coordinates: rows are contiguous
+            // and equal-height, so 1.6 row heights lands between row 1's
+            // center (1.5) and its bottom.
+            const QPoint drop(row0->width() / 2, row0->height() * 8 / 5);
+            sendMouse(row0, QEvent::MouseButtonPress, start, Qt::LeftButton,
+                      Qt::LeftButton);
+            sendMouse(row0, QEvent::MouseMove, drop, Qt::NoButton, Qt::LeftButton);
+            sendMouse(row0, QEvent::MouseButtonRelease, drop, Qt::LeftButton,
+                      Qt::NoButton);
+            QCoreApplication::processEvents(); // the queued moveTrack commit
+            const auto movedNotes = doc.notesForTrack(1);
+            bool same = movedNotes.size() == firstNotes.size();
+            for (size_t i = 0; same && i < movedNotes.size(); i++) {
+                same = movedNotes[i].tick == firstNotes[i].tick
+                    && movedNotes[i].key == firstNotes[i].key;
+            }
+            if (!same)
+                fail("header drag did not move the track's notes to slot 1");
+            else if (!view.trackMuted(1) || view.trackMuted(0))
+                fail("header drag did not move the mute flag with the track");
+            else
+                reordered = true;
+            view.setTrackMute(1, false);
+        }
+    }
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -483,13 +527,14 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     // behind-the-back move, Ctrl+Left (all the scroll-follow presses
     // merge into it), two time-selection moves (kept separate by the
     // clean-index save point), the inline rename, and the mid-song voice
-    // change. Undoing them all must restore the original bytes.
+    // change — plus the header-drag track move when the song has a
+    // second track. Undoing them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 15)
+    if (undos != (reordered ? 16 : 15))
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");

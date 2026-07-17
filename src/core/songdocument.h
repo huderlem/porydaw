@@ -256,6 +256,14 @@ public:
     // to chunk 0 so the loop survives. Format 0: removes every event on the
     // track's channel.
     void deleteTrack(int engineTrack);
+    // Reorder (format 1 only): the track's chunk moves so it lands at the
+    // target track's engine slot. Events travel with their chunk untouched —
+    // AGB track order is chunk order, and a track's MIDI channel is its
+    // identity, not its position, so no channel bytes change. When the move
+    // displaces chunk 0, the seq globals (tempo, time signatures, loop
+    // markers) migrate to the new first chunk, where mid2agb and the tempo
+    // lane read them.
+    void moveTrack(int engineTrack, int targetEngine);
 
     // Track display name, exactly as MidiTimeline reads it: format 1 = the
     // chunk's first unprefixed Track Name meta (0x03); format 0 = the first
@@ -289,9 +297,11 @@ private:
             ModifyEvent,
             InsertTrack, // insert trackData as chunk smfTrack
             RemoveTrack, // remove chunk smfTrack (contents recorded on apply)
-            SetTrackEnd  // set chunk endTick to event.tick (old recorded on apply)
+            SetTrackEnd, // set chunk endTick to event.tick (old recorded on apply)
+            MoveTrack    // move chunk smfTrack so it lands at index smfTrackTo
         } type;
         int smfTrack = 0;
+        int smfTrackTo = 0; // MoveTrack: the chunk's index after the move
         size_t index = 0;   // Remove/Modify: target; Insert: recorded on apply
         SmfEvent event;     // Insert: new event; Modify: new content (same tick)
         SmfEvent oldEvent;  // recorded on apply (Remove/Modify)
