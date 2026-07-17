@@ -1,7 +1,9 @@
 #include <QElapsedTimer>
 #include <QString>
+#include <QTemporaryDir>
 #include <cstdio>
 
+#include "core/miditimeline.h"
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 
@@ -668,6 +670,64 @@ int runEditCheck(const QString &projectRoot)
             doc.undoStack()->undo();
         }
 
+        // Track rename: set, no-op guard (trimmed match pushes nothing),
+        // clear, and undo back through the chunk's Track Name meta (0x03).
+        if (ok && track >= 0) {
+            doc.renameTrack(track, QStringLiteral("editcheck name"));
+            mutateAndCheck("events unsorted after renameTrack");
+            if (ok && doc.trackName(track) != QStringLiteral("editcheck name")) {
+                fail("rename not applied");
+                ok = false;
+            }
+            // The header paints from the playable projection, not the raw
+            // SMF — the new meta must land where MidiTimeline's reader
+            // (first 0x03 in the chunk) finds it.
+            if (ok) {
+                const auto timeline = doc.buildTimeline(48000.0);
+                if (!timeline
+                    || timeline->tracks[track].name != QStringLiteral("editcheck name")) {
+                    fail("renamed track not visible in the timeline projection");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                const int count = doc.undoStack()->count();
+                doc.renameTrack(track, QStringLiteral("  editcheck name  "));
+                if (doc.undoStack()->count() != count) {
+                    fail("no-op rename pushed an undo command");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                // mid2agb reads any text meta whose whole text is a marker
+                // as a loop/label command; those names must be refused.
+                const int count = doc.undoStack()->count();
+                doc.renameTrack(track, QStringLiteral("["));
+                doc.renameTrack(track, QStringLiteral(" ][ "));
+                if (doc.undoStack()->count() != count
+                    || doc.trackName(track) != QStringLiteral("editcheck name")) {
+                    fail("loop-marker name was not refused");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.renameTrack(track, QString());
+                if (!doc.trackName(track).isEmpty()) {
+                    fail("empty rename did not clear the name");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.undoStack()->undo();
+                if (doc.trackName(track) != QStringLiteral("editcheck name")) {
+                    fail("rename undo did not restore the name");
+                    ok = false;
+                } else {
+                    doc.undoStack()->redo();
+                }
+            }
+        }
+
         // Time signatures: create, modify in place, move, delete.
         if (ok) {
             auto findSig = [&doc](uint64_t tick, DocTimeSig *out) {
@@ -742,6 +802,97 @@ int runEditCheck(const QString &projectRoot)
         }
 
         checked++;
+    }
+
+    // Format-0 rename: per-channel names ride the spec's Channel Prefix
+    // mechanism (0x20 + 0x03 pairs in the single chunk). Synthetic file —
+    // decomp projects are format 1 in practice, so the loop above never
+    // exercises this path.
+    {
+        auto fail0 = [&](const char *what) {
+            std::fprintf(stderr, "editcheck: FAIL format0-rename: %s\n", what);
+            failures++;
+        };
+        SmfFile smf;
+        smf.format = 0;
+        smf.division = 24;
+        SmfTrack tr;
+        auto chEvent = [](uint8_t status, uint64_t tick, uint8_t d0, uint8_t d1) {
+            SmfEvent ev;
+            ev.tick = tick;
+            ev.status = status;
+            ev.data0 = d0;
+            ev.data1 = d1;
+            return ev;
+        };
+        tr.events.push_back(chEvent(0xC0, 0, 1, 0));
+        tr.events.push_back(chEvent(0xC1, 0, 2, 0));
+        tr.events.push_back(chEvent(0x90, 0, 60, 100));
+        tr.events.push_back(chEvent(0x91, 0, 64, 100));
+        tr.events.push_back(chEvent(0x80, 24, 60, 0));
+        tr.events.push_back(chEvent(0x81, 24, 64, 0));
+        tr.endTick = 24;
+        smf.tracks.push_back(tr);
+
+        QTemporaryDir tmp;
+        const QString midPath = tmp.path() + QStringLiteral("/format0.mid");
+        QString werror;
+        SongInfo info;
+        info.label = QStringLiteral("format0");
+        info.midPath = midPath;
+        info.hasMid = true;
+        SongDocument doc;
+        bool ok = tmp.isValid() && smf.writeFile(midPath, &werror)
+            && doc.load(info, &werror);
+        if (!ok)
+            fail0("could not write/load the synthetic format-0 file");
+        const QByteArray baseline = ok ? doc.smf().write() : QByteArray();
+        if (ok) {
+            doc.renameTrack(0, QStringLiteral("Bass"));
+            doc.renameTrack(1, QStringLiteral("Lead"));
+            if (doc.trackName(0) != QStringLiteral("Bass")
+                || doc.trackName(1) != QStringLiteral("Lead")) {
+                fail0("format-0 renames not applied per channel");
+                ok = false;
+            }
+        }
+        if (ok) {
+            const auto timeline = doc.buildTimeline(48000.0);
+            if (!timeline || timeline->tracks[0].name != QStringLiteral("Bass")
+                || timeline->tracks[1].name != QStringLiteral("Lead")) {
+                fail0("format-0 names not visible in the timeline projection");
+                ok = false;
+            }
+        }
+        if (ok) {
+            doc.renameTrack(0, QStringLiteral("Bass 2"));
+            if (doc.trackName(0) != QStringLiteral("Bass 2")
+                || doc.trackName(1) != QStringLiteral("Lead")) {
+                fail0("format-0 rename did not modify the right channel's name");
+                ok = false;
+            }
+        }
+        if (ok) {
+            doc.renameTrack(0, QString());
+            int prefixes = 0;
+            for (const SmfEvent &ev : doc.smf().tracks[0].events)
+                prefixes += ev.isMeta() && ev.metaType == 0x20;
+            if (!doc.trackName(0).isEmpty() || doc.trackName(1) != QStringLiteral("Lead")
+                || prefixes != 1) {
+                fail0("format-0 clear did not remove the name and its prefix");
+                ok = false;
+            }
+        }
+        if (ok && !tracksSorted(doc.smf())) {
+            fail0("events unsorted after format-0 renames");
+            ok = false;
+        }
+        if (ok) {
+            while (doc.undoStack()->canUndo())
+                doc.undoStack()->undo();
+            if (doc.smf().write() != baseline)
+                fail0("format-0 undo-all did not restore the original bytes");
+        }
     }
 
     std::printf("editcheck: %d songs in %lld ms\n", checked, (long long)timer.elapsed());

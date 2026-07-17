@@ -153,6 +153,11 @@ public:
     void setTrackSolo(int track, bool on);
 
     static QColor trackColor(int track);
+    // The track's program at the display position — the playhead while
+    // playing, the edit cursor otherwise — so the header label follows the
+    // song's voice changes. Before the first change it stays firstProgram
+    // (which is what primes the engine), -1 if the track has none.
+    int currentProgram(int track) const;
     QString instrumentLabel(int track) const; // "042 name (type)" from the voicegroup
     QString voiceShortName(uint8_t program) const;
 
@@ -172,6 +177,16 @@ public:
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
+    // Inline rename: opens a line editor on the track's header row
+    // (double-click and the context menu land here). commitTrackRename
+    // applies the typed name — queued, since the edit rebuilds the header
+    // panel out from under the editor's own signal — and refuses names
+    // mid2agb would read as loop/label markers, with a status message.
+    void renameTrack(int track);
+    void commitTrackRename(int track, const QString &name);
+    // Focus the current editing surface (roll or event list), e.g. after an
+    // inline editor closes.
+    void focusContent();
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber, beatNumber) for every beat, honoring the song's time
