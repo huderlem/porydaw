@@ -3376,6 +3376,7 @@ protected:
         f.setPixelSize(std::max(9, f.pixelSize() > 0 ? f.pixelSize() - 2 : 10));
         p.setFont(f);
         p.setPen(palette().color(QPalette::PlaceholderText));
+        m_shownProgram = m_sv->currentProgram(m_track);
         p.drawText(QRect(10, 22, textW, 16), Qt::AlignLeft | Qt::AlignVCenter,
                    QFontMetrics(f).elidedText(m_sv->instrumentLabel(m_track),
                                               Qt::ElideRight, textW));
@@ -3392,6 +3393,30 @@ public:
     // commits Reaper-style. The document edit itself is queued by
     // commitTrackRename — it rebuilds the header panel, which would delete
     // this row and the editor mid-signal.
+    // The voice line follows the song's program changes as the playhead (or
+    // edit cursor) moves; repaint only when the shown program flips.
+    void syncVoice()
+    {
+        if (m_shownProgram == m_sv->currentProgram(m_track))
+            return;
+        update();
+        updateToolTip();
+    }
+
+    void updateToolTip()
+    {
+        const MidiTimeline *tl = m_sv->timeline();
+        if (!tl)
+            return;
+        QString tip = SongView::tr("%1 notes · %2")
+                          .arg(tl->tracks[m_track].noteCount)
+                          .arg(m_sv->instrumentLabel(m_track));
+        if (m_sv->document())
+            tip += SongView::tr("\nDouble-click to rename · right-click "
+                                "to change voice, duplicate, or delete");
+        setToolTip(tip);
+    }
+
     void beginRename()
     {
         SongDocument *doc = m_sv->document();
@@ -3506,6 +3531,9 @@ private:
     QToolButton *m_solo;
     QLineEdit *m_editor = nullptr;
     bool m_finishing = false;
+    // Program painted on the voice line, for syncVoice's changed check
+    // (-2 = never painted; distinct from -1, "no voice set").
+    int m_shownProgram = -2;
 };
 
 class TrackHeaderPanel : public QWidget
@@ -3532,13 +3560,7 @@ public:
                     continue;
                 auto *row = new TrackHeaderRow(m_sv, t, this);
                 m_rowByTrack[t] = row;
-                QString tip = SongView::tr("%1 notes · %2")
-                                  .arg(tl->tracks[t].noteCount)
-                                  .arg(m_sv->instrumentLabel(t));
-                if (m_sv->document())
-                    tip += SongView::tr("\nDouble-click to rename · right-click "
-                                        "to change voice, duplicate, or delete");
-                row->setToolTip(tip);
+                row->updateToolTip();
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
             }
@@ -3569,6 +3591,14 @@ public:
         const auto it = m_rowByTrack.find(track);
         if (it != m_rowByTrack.end())
             it->second->beginRename();
+    }
+
+    // Called on every playhead/cursor move; each row repaints only when its
+    // shown program actually changes.
+    void syncVoices()
+    {
+        for (const auto &entry : m_rowByTrack)
+            entry.second->syncVoice();
     }
 
 private:
@@ -4541,6 +4571,7 @@ void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
     // The event list mirrors the playhead as a tinted row (and follows it
     // while playing, mirroring the roll's scroll-follow).
     m_events->setPlayheadTick(m_playheadTick, playing);
+    m_headers->syncVoices();
     refreshTimelineViews();
 }
 
@@ -4556,6 +4587,7 @@ void SongView::setEditCursorTick(uint64_t tick)
     if (m_editCursorTick == tick)
         return;
     m_editCursorTick = tick;
+    m_headers->syncVoices();
     refreshTimelineViews();
 }
 
@@ -4674,11 +4706,26 @@ QColor SongView::trackColor(int track)
     return QColor::fromHsv(int(track * 137.508) % 360, 150, 205);
 }
 
+int SongView::currentProgram(int track) const
+{
+    if (!m_timeline)
+        return -1;
+    int prog = m_timeline->tracks[track].firstProgram;
+    const uint64_t tick = m_playing ? uint64_t(m_playheadTick) : m_editCursorTick;
+    for (const VoiceChange &vc : m_model.voices) {
+        if (vc.tick > tick)
+            break;
+        if (vc.track == track)
+            prog = vc.program;
+    }
+    return prog;
+}
+
 QString SongView::instrumentLabel(int track) const
 {
     if (!m_timeline)
         return QString();
-    const int prog = m_timeline->tracks[track].firstProgram;
+    const int prog = currentProgram(track);
     if (prog < 0)
         return tr("(no voice set)");
     QString name = voiceShortName(uint8_t(prog));

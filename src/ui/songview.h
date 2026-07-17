@@ -158,6 +158,11 @@ public:
     void setTrackSolo(int track, bool on);
 
     static QColor trackColor(int track);
+    // The track's program at the display position — the playhead while
+    // playing, the edit cursor otherwise — so the header label follows the
+    // song's voice changes. Before the first change it stays firstProgram
+    // (which is what primes the engine), -1 if the track has none.
+    int currentProgram(int track) const;
     QString instrumentLabel(int track) const; // "042 name (type)" from the voicegroup
     QString voiceShortName(uint8_t program) const;
 

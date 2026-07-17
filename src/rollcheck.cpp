@@ -443,6 +443,33 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         }
     }
 
+    // The header voice line is live: currentProgram is the last program
+    // change at or before the display position — the playhead while playing,
+    // the edit cursor otherwise — falling back to the track's first program
+    // (which is what primes the engine before any change).
+    {
+        view.setEditCursorTick(0);
+        const int base = view.currentProgram(track);
+        const int changed = base == 5 ? 6 : 5;
+        const uint64_t vcTick = a.tick + 4 * a.dur;
+        doc.addLanePoint(track, DOC_CC_VOICE, vcTick, changed);
+        // A track with no program at all adopts the added one everywhere
+        // (it becomes the priming first program).
+        const int atStart = base < 0 ? changed : base;
+        if (view.currentProgram(track) != atStart)
+            fail("voice label at the start did not show the priming program");
+        view.setEditCursorTick(vcTick);
+        if (view.currentProgram(track) != changed)
+            fail("voice label did not follow the edit cursor past the change");
+        view.setEditCursorTick(0);
+        view.setPlayheadSample(timeline->sampleForTick(vcTick), true);
+        if (view.currentProgram(track) != changed)
+            fail("voice label did not follow the playing playhead");
+        view.setPlayheadSample(0, false); // stopped: back to the edit cursor
+        if (view.currentProgram(track) != atStart)
+            fail("voice label did not return to the edit cursor after stop");
+    }
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -451,18 +478,18 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Fourteen commands: draw, set, draw, nudge, draw, add, two resizes,
+    // Fifteen commands: draw, set, draw, nudge, draw, add, two resizes,
     // the three note-selection presses MERGED into one, the off-grid
     // behind-the-back move, Ctrl+Left (all the scroll-follow presses
     // merge into it), two time-selection moves (kept separate by the
-    // clean-index save point), and the inline rename. Undoing them all
-    // must restore the original bytes.
+    // clean-index save point), the inline rename, and the mid-song voice
+    // change. Undoing them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 14)
+    if (undos != 15)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
