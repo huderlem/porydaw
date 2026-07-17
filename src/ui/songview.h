@@ -177,6 +177,9 @@ public:
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
+    // Prompts for a new name (double-click on a header row); no-op when the
+    // document can't carry per-track names (format 0).
+    void renameTrack(int track);
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber) for every beat, honoring the song's time signature changes.

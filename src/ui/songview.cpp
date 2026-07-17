@@ -3386,7 +3386,17 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *) override
     {
         m_sv->selectTrack(m_track);
-        m_sv->editTrackVoice(m_track);
+        SongDocument *doc = m_sv->document();
+        if (doc && doc->canRenameTrack()) {
+            // Queued: the rename rebuilds the header panel, which deletes
+            // this row out from under its own event handler.
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->renameTrack(t); },
+                Qt::QueuedConnection);
+        } else {
+            // Format 0 can't carry per-track names; keep the old shortcut.
+            m_sv->editTrackVoice(m_track);
+        }
     }
 
     void contextMenuEvent(QContextMenuEvent *event) override
@@ -3396,13 +3406,19 @@ protected:
         m_sv->selectTrack(m_track);
         QMenu menu(this);
         QAction *voiceAction = menu.addAction(SongView::tr("Change voice..."));
+        QAction *renameAction = menu.addAction(SongView::tr("Rename track..."));
+        renameAction->setEnabled(m_sv->document()->canRenameTrack());
         QAction *duplicateAction = menu.addAction(SongView::tr("Duplicate track"));
         duplicateAction->setEnabled(m_sv->document()->canAddTrack());
         QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
         QAction *chosen = menu.exec(event->globalPos());
         // Queued: these edits rebuild the header panel, which deletes this
         // row out from under its own event handler.
-        if (chosen == voiceAction) {
+        if (chosen == renameAction) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->renameTrack(t); },
+                Qt::QueuedConnection);
+        } else if (chosen == voiceAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
                 Qt::QueuedConnection);
@@ -3449,9 +3465,13 @@ public:
                 QString tip = SongView::tr("%1 notes · %2")
                                   .arg(tl->tracks[t].noteCount)
                                   .arg(m_sv->instrumentLabel(t));
-                if (m_sv->document())
-                    tip += SongView::tr("\nDouble-click to change the voice · "
-                                        "right-click to duplicate or delete");
+                if (m_sv->document()) {
+                    tip += m_sv->document()->canRenameTrack()
+                        ? SongView::tr("\nDouble-click to rename · right-click "
+                                       "to change voice, duplicate, or delete")
+                        : SongView::tr("\nDouble-click to change the voice · "
+                                       "right-click to duplicate or delete");
+                }
                 row->setToolTip(tip);
                 m_layout->insertWidget(m_layout->count() - 1, row);
                 m_rows.push_back(row);
@@ -4623,6 +4643,20 @@ void SongView::editTrackVoice(int track)
     else if (voice != initial)
         m_document->moveLanePoint(track, DOC_CC_VOICE, changes.front(),
                                   changes.front().tick, voice);
+}
+
+void SongView::renameTrack(int track)
+{
+    if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0
+        || !m_document->canRenameTrack())
+        return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(
+        this, tr("Rename Track %1").arg(track + 1),
+        tr("Track name (empty for the default):"), QLineEdit::Normal,
+        m_document->trackName(track), &ok);
+    if (ok)
+        m_document->renameTrack(track, name); // rebuilds via documentChanged
 }
 
 void SongView::addTrack()

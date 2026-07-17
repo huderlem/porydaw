@@ -1544,6 +1544,74 @@ void SongDocument::deleteTrack(int engineTrack)
     pushEdit(tr("delete track"), std::move(ops));
 }
 
+namespace {
+
+// MidiTimeline's reading of a chunk's name: the first 0x03 meta, Latin-1
+// (SMF text metas have no declared encoding), capped at 64 chars, trimmed.
+size_t trackNameEventIndex(const SmfTrack &track)
+{
+    for (size_t i = 0; i < track.events.size(); i++) {
+        if (track.events[i].isMeta() && track.events[i].metaType == 0x03)
+            return i;
+    }
+    return SIZE_MAX;
+}
+
+QString trackNameText(const SmfEvent &ev)
+{
+    const int len = std::min<int>(int(ev.blob.size()), 64);
+    return QString::fromLatin1(ev.blob.constData(), len).trimmed();
+}
+
+} // namespace
+
+QString SongDocument::trackName(int engineTrack) const
+{
+    const int smfTrack = smfTrackFor(engineTrack);
+    if (smfTrack < 0 || !canRenameTrack())
+        return QString();
+    const size_t index = trackNameEventIndex(m_smf.tracks[smfTrack]);
+    return index == SIZE_MAX ? QString()
+                             : trackNameText(m_smf.tracks[smfTrack].events[index]);
+}
+
+void SongDocument::renameTrack(int engineTrack, const QString &name)
+{
+    const int smfTrack = smfTrackFor(engineTrack);
+    if (smfTrack < 0 || !canRenameTrack())
+        return;
+    const QString trimmed = name.trimmed().left(64);
+    const SmfTrack &track = m_smf.tracks[smfTrack];
+    const size_t index = trackNameEventIndex(track);
+
+    std::vector<EditOp> ops;
+    EditOp op;
+    op.smfTrack = smfTrack;
+    if (index != SIZE_MAX) {
+        if (trimmed.isEmpty()) {
+            op.type = EditOp::RemoveEvent;
+            op.index = index;
+        } else {
+            if (trackNameText(track.events[index]) == trimmed)
+                return;
+            op.type = EditOp::ModifyEvent;
+            op.index = index;
+            op.event = track.events[index];
+            op.event.blob = trimmed.toLatin1();
+        }
+    } else {
+        if (trimmed.isEmpty())
+            return;
+        op.type = EditOp::InsertEvent;
+        op.event.tick = 0;
+        op.event.status = 0xFF;
+        op.event.metaType = 0x03;
+        op.event.blob = trimmed.toLatin1();
+    }
+    ops.push_back(op);
+    pushEdit(tr("rename track"), std::move(ops));
+}
+
 void SongDocument::setCfg(const SongCfg &cfg)
 {
     if (cfgSemanticEqual(cfg, m_cfg))

@@ -252,6 +252,15 @@ public:
     // track's channel.
     void deleteTrack(int engineTrack);
 
+    // Track display name: the chunk's first Track Name meta (0x03), exactly
+    // as MidiTimeline reads it. Rename modifies that event in place (keeping
+    // its tick and chunk position) or inserts one at tick 0; an empty name
+    // removes it. Format 1 only — a format-0 file has one chunk shared by
+    // every track, so a per-track name can't be represented.
+    bool canRenameTrack() const { return m_smf.format == 1; }
+    QString trackName(int engineTrack) const;
+    void renameTrack(int engineTrack, const QString &name);
+
     void setCfg(const SongCfg &cfg);
 
     // Playable projection for the audio engine (MidiTimeline::build).

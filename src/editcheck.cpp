@@ -2,6 +2,7 @@
 #include <QString>
 #include <cstdio>
 
+#include "core/miditimeline.h"
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 
@@ -666,6 +667,52 @@ int runEditCheck(const QString &projectRoot)
                 ok = false;
             }
             doc.undoStack()->undo();
+        }
+
+        // Track rename: set, no-op guard (trimmed match pushes nothing),
+        // clear, and undo back through the chunk's Track Name meta (0x03).
+        if (ok && track >= 0 && doc.canRenameTrack()) {
+            doc.renameTrack(track, QStringLiteral("editcheck name"));
+            mutateAndCheck("events unsorted after renameTrack");
+            if (ok && doc.trackName(track) != QStringLiteral("editcheck name")) {
+                fail("rename not applied");
+                ok = false;
+            }
+            // The header paints from the playable projection, not the raw
+            // SMF — the new meta must land where MidiTimeline's reader
+            // (first 0x03 in the chunk) finds it.
+            if (ok) {
+                const auto timeline = doc.buildTimeline(48000.0);
+                if (!timeline
+                    || timeline->tracks[track].name != QStringLiteral("editcheck name")) {
+                    fail("renamed track not visible in the timeline projection");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                const int count = doc.undoStack()->count();
+                doc.renameTrack(track, QStringLiteral("  editcheck name  "));
+                if (doc.undoStack()->count() != count) {
+                    fail("no-op rename pushed an undo command");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.renameTrack(track, QString());
+                if (!doc.trackName(track).isEmpty()) {
+                    fail("empty rename did not clear the name");
+                    ok = false;
+                }
+            }
+            if (ok) {
+                doc.undoStack()->undo();
+                if (doc.trackName(track) != QStringLiteral("editcheck name")) {
+                    fail("rename undo did not restore the name");
+                    ok = false;
+                } else {
+                    doc.undoStack()->redo();
+                }
+            }
         }
 
         // Time signatures: create, modify in place, move, delete.
