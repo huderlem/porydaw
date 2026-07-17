@@ -943,6 +943,10 @@ void EventListView::syncTrackSelection()
 
 void EventListView::onTrackMoved(int fromChunk, int toChunk)
 {
+    // Format 0 (both endpoints 0): no chunk renumbering, and the reloaded
+    // rows pick up the rewritten channels through the ordinary refresh.
+    if (fromChunk == toChunk)
+        return;
     // Remap the anchored chunk through the rotation, into m_pendingChunk
     // for the documentChanged refresh that follows (the document is
     // mid-mutation here — no reads, no rebuild yet). Starts from a prior

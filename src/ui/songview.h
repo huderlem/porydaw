@@ -178,9 +178,10 @@ public:
     // selects the created track; duplicateTrack selects the copy (a fresh
     // slot, so no per-track view state moves); deleteTrack shifts the view's
     // per-track state (mute/solo, empty lanes, selection) over the removed
-    // engine slot; moveTrack (header-row drag, format 1 only) rotates that
-    // state along with the reordered engine slots — in onTrackMoved, off the
-    // document's trackMoved signal, so undo/redo rotate it back too.
+    // engine slot; moveTrack (header-row drag; chunk move in format 1,
+    // used-channel rotation in format 0) rotates that state along with the
+    // reordered engine slots — in onTrackMoved, off the document's
+    // trackMoved signal, so undo/redo rotate it back too.
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
@@ -403,7 +404,7 @@ private:
     uint64_t gridTicksIn(const GridSeg &seg) const;
     // Document trackMoved handler: rotates the per-track view state with the
     // renumbered engine slots on apply, undo, and redo alike.
-    void onTrackMoved(int fromChunk, int toChunk, int from, int to);
+    void onTrackMoved(int fromChunk, int toChunk, const QVector<int> &map);
     // A mouse gesture is live in the ruler, roll, or lanes (pan, drag,
     // sweep); playhead follow-scroll pauses while one runs.
     bool userGestureActive() const;

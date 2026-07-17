@@ -40,6 +40,59 @@ void moveChunk(std::vector<SmfTrack> &tracks, int from, int to)
         std::rotate(begin + to, begin + from, begin + from + 1);
 }
 
+// trackMoved's engine permutation for a format-1 chunk move: the contiguous
+// rotation between the engine endpoints (identity when either chunk has no
+// engine slot).
+QVector<int> engineRotationMap(int from, int to)
+{
+    QVector<int> map(16);
+    for (int t = 0; t < 16; t++)
+        map[t] = t;
+    if (from < 0 || to < 0 || from == to)
+        return map;
+    for (int t = 0; t < 16; t++) {
+        if (t == from)
+            map[t] = to;
+        else if (from < to && t > from && t <= to)
+            map[t] = t - 1;
+        else if (to < from && t >= to && t < from)
+            map[t] = t + 1;
+    }
+    return map;
+}
+
+// trackMoved's engine permutation for a format-0 channel remap (engine slot
+// == channel there).
+QVector<int> engineMapFromChannels(const std::array<uint8_t, 16> &chanMap)
+{
+    QVector<int> map(16);
+    for (int c = 0; c < 16; c++)
+        map[c] = chanMap[c];
+    return map;
+}
+
+std::array<uint8_t, 16> invertChannelMap(const std::array<uint8_t, 16> &chanMap)
+{
+    std::array<uint8_t, 16> inverse{};
+    for (int c = 0; c < 16; c++)
+        inverse[chanMap[c]] = uint8_t(c);
+    return inverse;
+}
+
+// Rewrite every channel-carrying byte in the single format-0 chunk: channel
+// events' status nibbles and Channel Prefix metas (0x20), whose scoped names
+// must follow their track. Event order never changes — sorting is by tick,
+// and per-channel relative order is file order either way.
+void remapChannels(SmfTrack &track, const std::array<uint8_t, 16> &chanMap)
+{
+    for (SmfEvent &ev : track.events) {
+        if (ev.isChannel())
+            ev.status = uint8_t((ev.status & 0xF0) | chanMap[ev.channel()]);
+        else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1)
+            ev.blob[0] = char(chanMap[ev.blob[0] & 0x0F]);
+    }
+}
+
 bool cfgSemanticEqual(const SongCfg &a, const SongCfg &b)
 {
     return a.voicegroupArg == b.voicegroupArg && a.masterVolume == b.masterVolume
@@ -1687,14 +1740,59 @@ void SongDocument::renameTrack(int engineTrack, const QString &name)
     pushEdit(tr("rename track"), std::move(ops));
 }
 
-void SongDocument::moveTrack(int engineTrack, int targetEngine)
+bool SongDocument::moveTrack(int engineTrack, int targetEngine)
 {
-    if (m_smf.format == 0 || engineTrack == targetEngine)
-        return;
+    if (engineTrack == targetEngine)
+        return false;
+    if (m_smf.format == 0) {
+        // Track order is channel order: rotate the used channels between the
+        // endpoints among themselves. Empty channels keep their numbers —
+        // slots are fixed identities here, as in deleteTrack.
+        if (engineTrack < 0 || engineTrack > 15 || targetEngine < 0
+            || targetEngine > 15 || m_smf.tracks.empty())
+            return false;
+        std::array<bool, 16> used{};
+        for (const SmfEvent &ev : m_smf.tracks[0].events) {
+            if (ev.isChannel())
+                used[ev.channel()] = true;
+        }
+        if (!used[engineTrack] || !used[targetEngine])
+            return false;
+        std::vector<uint8_t> chans; // used channels, ascending = display order
+        for (int c = 0; c < 16; c++) {
+            if (used[c])
+                chans.push_back(uint8_t(c));
+        }
+        const auto pos = [&chans](int channel) {
+            for (size_t p = 0; p < chans.size(); p++) {
+                if (chans[p] == channel)
+                    return int(p);
+            }
+            return -1;
+        };
+        const int i = pos(engineTrack);
+        const int j = pos(targetEngine);
+        EditOp op;
+        op.type = EditOp::RemapChannels;
+        for (int c = 0; c < 16; c++)
+            op.chanMap[c] = uint8_t(c);
+        op.chanMap[chans[size_t(i)]] = chans[size_t(j)];
+        if (i < j) {
+            for (int p = i + 1; p <= j; p++)
+                op.chanMap[chans[size_t(p)]] = chans[size_t(p - 1)];
+        } else {
+            for (int p = j; p < i; p++)
+                op.chanMap[chans[size_t(p)]] = chans[size_t(p + 1)];
+        }
+        std::vector<EditOp> ops;
+        ops.push_back(op);
+        pushEdit(tr("move track"), std::move(ops));
+        return true;
+    }
     const int fromChunk = smfTrackFor(engineTrack);
     const int toChunk = smfTrackFor(targetEngine);
     if (fromChunk < 0 || toChunk < 0)
-        return;
+        return false;
 
     std::vector<EditOp> ops;
     // mid2agb reads tempo, time signatures, and loop markers only from the
@@ -1748,6 +1846,7 @@ void SongDocument::moveTrack(int engineTrack, int targetEngine)
         ops.push_back(insert);
     }
     pushEdit(tr("move track"), std::move(ops));
+    return true;
 }
 
 void SongDocument::setCfg(const SongCfg &cfg)
@@ -1842,9 +1941,13 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
             // runs after the loop), so receivers get the numbering their
             // state is keyed by.
             emit trackMoved(op.smfTrack, op.smfTrackTo,
-                            engineTrackForChunk(op.smfTrack),
-                            engineTrackForChunk(op.smfTrackTo));
+                            engineRotationMap(engineTrackForChunk(op.smfTrack),
+                                              engineTrackForChunk(op.smfTrackTo)));
             moveChunk(m_smf.tracks, op.smfTrack, op.smfTrackTo);
+            break;
+        case EditOp::RemapChannels:
+            emit trackMoved(0, 0, engineMapFromChannels(op.chanMap));
+            remapChannels(m_smf.tracks[0], op.chanMap);
             break;
         }
     }
@@ -1881,10 +1984,16 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
             break;
         case EditOp::MoveTrack:
             emit trackMoved(op.smfTrackTo, op.smfTrack,
-                            engineTrackForChunk(op.smfTrackTo),
-                            engineTrackForChunk(op.smfTrack));
+                            engineRotationMap(engineTrackForChunk(op.smfTrackTo),
+                                              engineTrackForChunk(op.smfTrack)));
             moveChunk(m_smf.tracks, op.smfTrackTo, op.smfTrack);
             break;
+        case EditOp::RemapChannels: {
+            const std::array<uint8_t, 16> inverse = invertChannelMap(op.chanMap);
+            emit trackMoved(0, 0, engineMapFromChannels(inverse));
+            remapChannels(m_smf.tracks[0], inverse);
+            break;
+        }
         }
     }
     rebuildTrackMap();

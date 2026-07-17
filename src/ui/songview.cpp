@@ -3387,11 +3387,11 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         m_sv->trackHeaderClicked(m_track, event->modifiers());
-        // A plain left press may become a reorder drag (format 1 only —
-        // format 0 slots are fixed channels, there is no chunk order).
+        // A plain left press may become a reorder drag (format 1 moves the
+        // chunk; format 0 rotates the used channels).
         m_dragArmed = event->button() == Qt::LeftButton
             && !(event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
-            && m_sv->document() && m_sv->document()->smf().format != 0;
+            && m_sv->document();
         m_pressPos = event->pos();
     }
 
@@ -3425,9 +3425,8 @@ public:
                           .arg(m_sv->instrumentLabel(m_track));
         if (m_sv->document()) {
             tip += SongView::tr("\nDouble-click to rename · right-click "
-                                "to change voice, duplicate, or delete");
-            if (m_sv->document()->smf().format != 0)
-                tip += SongView::tr(" · drag to reorder");
+                                "to change voice, duplicate, or delete"
+                                " · drag to reorder");
         }
         setToolTip(tip);
     }
@@ -5037,34 +5036,29 @@ void SongView::deleteTrack(int track)
 
 void SongView::moveTrack(int from, int to)
 {
-    if (!m_document || m_document->smf().format == 0 || from == to
-        || m_document->smfTrackFor(from) < 0 || m_document->smfTrackFor(to) < 0)
+    if (!m_document)
         return;
-    // The per-track view state follows in onTrackMoved, which the
-    // document's MoveTrack op signals through — undo and redo replay the
-    // same permutation, so the masks stay on their tracks.
-    m_document->moveTrack(from, to); // rebuilds via documentChanged
-    announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
+    // The document decides validity (format-0 moves only rotate used
+    // channels); the per-track view state follows in onTrackMoved, which
+    // the reorder op signals through — undo and redo replay the same
+    // permutation, so the masks stay on their tracks.
+    if (m_document->moveTrack(from, to)) // rebuilds via documentChanged
+        announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
 }
 
-void SongView::onTrackMoved(int, int, int from, int to)
+void SongView::onTrackMoved(int, int, const QVector<int> &map)
 {
-    // A MoveTrack op is applying or reverting (interactive move, undo, or
-    // redo — the document emits each direction with the endpoints swapped).
-    // Format-1 engine slots are contiguous, so the move renumbers every slot
-    // between the endpoints; rotate the per-track view state with them
-    // (deleteTrack's shift, generalized to both directions). The note
-    // selection needs nothing: it is (tick, key) on the selected track, and
-    // the selected track's number moves with its notes. The document is
-    // mid-mutation: remap state only, don't read it back.
-    if (from < 0 || to < 0 || from == to)
+    // A reorder op is applying or reverting (interactive move, undo, or
+    // redo — the document emits each direction with the inverse map): rotate
+    // the per-track view state along with the renumbered engine slots
+    // (deleteTrack's shift, generalized). The note selection needs nothing:
+    // it is (tick, key) on the selected track, and the selected track's
+    // number moves with its notes. The document is mid-mutation: remap
+    // state only, don't read it back.
+    if (map.size() < 16)
         return;
-    const auto newIndex = [from, to](int t) {
-        if (t == from)
-            return to;
-        if (from < to)
-            return t > from && t <= to ? t - 1 : t;
-        return t >= to && t < from ? t + 1 : t;
+    const auto newIndex = [&map](int t) {
+        return t >= 0 && t < 16 ? map[t] : t;
     };
     const auto permuteMask = [&newIndex](uint32_t mask) {
         uint32_t out = 0;

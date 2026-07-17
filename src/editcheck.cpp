@@ -1029,6 +1029,115 @@ int runEditCheck(const QString &projectRoot)
         }
     }
 
+    // Format-0 reorder: track order is channel order, so a move renumbers
+    // channel bytes — the used channels between the endpoints rotate among
+    // themselves, Channel Prefix names follow their track, and empty
+    // channels stay put (fixed-slot model, like delete). Synthetic file for
+    // the same reason as the rename block above.
+    {
+        auto fail0 = [&](const char *what) {
+            std::fprintf(stderr, "editcheck: FAIL format0-reorder: %s\n", what);
+            failures++;
+        };
+        SmfFile smf;
+        smf.format = 0;
+        smf.division = 24;
+        SmfTrack tr;
+        auto chEvent = [](uint8_t status, uint64_t tick, uint8_t d0, uint8_t d1) {
+            SmfEvent ev;
+            ev.tick = tick;
+            ev.status = status;
+            ev.data0 = d0;
+            ev.data1 = d1;
+            return ev;
+        };
+        // Used channels 1, 4, 7 with empty channels around them, so a
+        // rotation that dragged empties along would be visible.
+        tr.events.push_back(chEvent(0x91, 0, 60, 100));
+        tr.events.push_back(chEvent(0x94, 0, 64, 100));
+        tr.events.push_back(chEvent(0x97, 0, 67, 100));
+        tr.events.push_back(chEvent(0x81, 24, 60, 0));
+        tr.events.push_back(chEvent(0x84, 24, 64, 0));
+        tr.events.push_back(chEvent(0x87, 24, 67, 0));
+        tr.endTick = 24;
+        smf.tracks.push_back(tr);
+
+        QTemporaryDir tmp;
+        const QString midPath = tmp.path() + QStringLiteral("/format0move.mid");
+        QString werror;
+        SongInfo info;
+        info.label = QStringLiteral("format0move");
+        info.midPath = midPath;
+        info.hasMid = true;
+        SongDocument doc;
+        bool ok = tmp.isValid() && smf.writeFile(midPath, &werror)
+            && doc.load(info, &werror);
+        if (!ok)
+            fail0("could not write/load the synthetic format-0 file");
+        const QByteArray baseline = ok ? doc.smf().write() : QByteArray();
+        if (ok) {
+            doc.renameTrack(1, QStringLiteral("Alpha"));
+            doc.renameTrack(7, QStringLiteral("Gamma"));
+            if (doc.trackName(1) != QStringLiteral("Alpha")
+                || doc.trackName(7) != QStringLiteral("Gamma")) {
+                fail0("names not applied before the move");
+                ok = false;
+            }
+        }
+        const QByteArray named = ok ? doc.smf().write() : QByteArray();
+        if (ok && (doc.moveTrack(1, 1) || doc.moveTrack(1, 2) || doc.moveTrack(2, 1))) {
+            fail0("a no-op or unused-channel move was not refused");
+            ok = false;
+        }
+        if (ok && doc.smf().write() != named) {
+            fail0("a refused move changed the bytes");
+            ok = false;
+        }
+        if (ok) {
+            const int countBefore = doc.undoStack()->count();
+            if (!doc.moveTrack(1, 7)) {
+                fail0("a used-channel move was refused");
+                ok = false;
+            } else if (doc.undoStack()->count() != countBefore + 1) {
+                fail0("the move was not a single undo command");
+                ok = false;
+            }
+        }
+        if (ok) {
+            const auto note = [&doc](int channel) {
+                const auto notes = doc.notesForTrack(channel);
+                return notes.size() == 1 ? int(notes[0].key) : -1;
+            };
+            // 1 -> 7, 4 -> 1, 7 -> 4; names ride along; empties untouched.
+            if (note(7) != 60 || note(1) != 64 || note(4) != 67) {
+                fail0("the used channels did not rotate as a block");
+                ok = false;
+            } else if (doc.trackName(7) != QStringLiteral("Alpha")
+                       || doc.trackName(4) != QStringLiteral("Gamma")
+                       || !doc.trackName(1).isEmpty()) {
+                fail0("names did not follow their tracks through the move");
+                ok = false;
+            } else if (!doc.notesForTrack(0).empty() || !doc.notesForTrack(2).empty()
+                       || !doc.notesForTrack(3).empty()) {
+                fail0("an empty channel gained events in the move");
+                ok = false;
+            }
+        }
+        if (ok && !tracksSorted(doc.smf())) {
+            fail0("events unsorted after the format-0 move");
+            ok = false;
+        }
+        if (ok) {
+            doc.undoStack()->undo();
+            if (doc.smf().write() != named)
+                fail0("undoing the move did not restore the channels");
+            while (doc.undoStack()->canUndo())
+                doc.undoStack()->undo();
+            if (doc.smf().write() != baseline)
+                fail0("format-0 undo-all did not restore the original bytes");
+        }
+    }
+
     std::printf("editcheck: %d songs in %lld ms\n", checked, (long long)timer.elapsed());
     std::printf("editcheck: %s (%d failures)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;

@@ -3,6 +3,8 @@
 #include <QObject>
 #include <QString>
 #include <QUndoStack>
+#include <QVector>
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -256,14 +258,17 @@ public:
     // to chunk 0 so the loop survives. Format 0: removes every event on the
     // track's channel.
     void deleteTrack(int engineTrack);
-    // Reorder (format 1 only): the track's chunk moves so it lands at the
-    // target track's engine slot. Events travel with their chunk untouched —
-    // AGB track order is chunk order, and a track's MIDI channel is its
-    // identity, not its position, so no channel bytes change. When the move
-    // displaces chunk 0, the seq globals (tempo, time signatures, loop
-    // markers) migrate to the new first chunk, where mid2agb and the tempo
-    // lane read them.
-    void moveTrack(int engineTrack, int targetEngine);
+    // Reorder: the track lands at the target track's engine slot. Format 1:
+    // the track's chunk moves, events untouched — AGB track order is chunk
+    // order — and when the move displaces chunk 0, the seq globals (tempo,
+    // time signatures, loop markers) migrate to the new first chunk, where
+    // mid2agb and the tempo lane read them. Format 0: track order is channel
+    // order, so the move renumbers channel bytes instead — the used channels
+    // between the endpoints rotate among themselves (one RemapChannels op;
+    // Channel Prefix metas follow their channel), empty channels stay put,
+    // matching deleteTrack's fixed-slot model. Returns true when a command
+    // was pushed (false: no-op, unmapped slot, or format-0 unused channel).
+    bool moveTrack(int engineTrack, int targetEngine);
 
     // Track display name, exactly as MidiTimeline reads it: format 1 = the
     // chunk's first unprefixed Track Name meta (0x03); format 0 = the first
@@ -284,14 +289,16 @@ public:
 signals:
     // Emitted after every mutation, undo, and redo.
     void documentChanged();
-    // Emitted while a MoveTrack op applies or reverts, before the
-    // documentChanged that follows: the chunk at fromChunk moved to index
-    // toChunk (engine slot fromEngine to toEngine, -1 for a chunk with no
-    // engine slot), the entries between shifting by one. Undo emits with the
-    // endpoints swapped, so receivers holding per-track or per-chunk state
-    // remap it here and stay right across undo/redo. The document is
+    // Emitted while a track-reorder op (MoveTrack or RemapChannels) applies
+    // or reverts, before the documentChanged that follows. fromChunk/toChunk
+    // are the chunk endpoints (both 0 for format 0 — no chunk renumbering).
+    // engineMap has 16 entries: engineMap[t] is where the track at engine
+    // slot t (pre-move numbering) lands — a contiguous rotation for format
+    // 1, a used-channels-only rotation for format 0, identity elsewhere.
+    // Undo emits the inverse, so receivers holding per-track or per-chunk
+    // state remap it here and stay right across undo/redo. The document is
     // mid-mutation when this fires: remap state only, don't read back.
-    void trackMoved(int fromChunk, int toChunk, int fromEngine, int toEngine);
+    void trackMoved(int fromChunk, int toChunk, QVector<int> engineMap);
 
 private:
     friend class SongEditCommand;
@@ -306,10 +313,14 @@ private:
             InsertTrack, // insert trackData as chunk smfTrack
             RemoveTrack, // remove chunk smfTrack (contents recorded on apply)
             SetTrackEnd, // set chunk endTick to event.tick (old recorded on apply)
-            MoveTrack    // move chunk smfTrack so it lands at index smfTrackTo
+            MoveTrack,   // move chunk smfTrack so it lands at index smfTrackTo
+            RemapChannels // format 0: rewrite channel c to chanMap[c] (status
+                          // nibbles and Channel Prefix metas); revert applies
+                          // the inverse permutation
         } type;
         int smfTrack = 0;
         int smfTrackTo = 0; // MoveTrack: the chunk's index after the move
+        std::array<uint8_t, 16> chanMap{}; // RemapChannels: old -> new channel
         size_t index = 0;   // Remove/Modify: target; Insert: recorded on apply
         SmfEvent event;     // Insert: new event; Modify: new content (same tick)
         SmfEvent oldEvent;  // recorded on apply (Remove/Modify)
