@@ -1019,12 +1019,22 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent *event) override
     {
         // Double-click on empty space drops a grid-sized note (committed on
-        // release; dragging before release still sizes it). Anywhere else a
-        // fast click-click behaves as two presses — Qt replaces the second
-        // press with this event.
-        if (event->button() == Qt::LeftButton && m_sv->document()
-            && event->pos().x() >= kKeyboardW && !hitNote(event->pos())) {
+        // release; dragging before release still sizes it); on a note it
+        // deletes that note. Anywhere else a fast click-click behaves as two
+        // presses — Qt replaces the second press with this event.
+        SongDocument *doc = m_sv->document();
+        if (event->button() == Qt::LeftButton && doc
+            && event->pos().x() >= kKeyboardW) {
             setFocus();
+            if (const ViewNote *hit = hitNote(event->pos())) {
+                DocNote note;
+                if (doc->findNote(m_sv->selectedTrack(), hit->startTick,
+                                  hit->key, &note)) {
+                    doc->deleteNotes({note});
+                    m_sv->clearSelection();
+                }
+                return;
+            }
             m_pressPos = m_curPos = event->pos();
             m_pressTick = m_sv->tickAtContentX(event->pos().x() - kKeyboardW);
             m_pressKey = yToKey(event->pos().y());

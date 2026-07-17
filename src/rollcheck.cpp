@@ -16,7 +16,8 @@
 // --rollcheck <projectRoot> <song> [shot.png]: piano-roll gesture check.
 // Drives the roll widget offscreen with synthesized mouse events: the
 // double-click pencil draws at the default velocity (100 on a fresh
-// document), and the Reaper-style latch makes the last clicked or
+// document) and double-clicking an existing note deletes it, the
+// Reaper-style latch makes the last clicked or
 // velocity-dragged note's velocity the default for the next drawn note,
 // and an edge resize snaps to the ruler's absolute grid even when the
 // note's own edge sits off-grid. Ctrl+arrows transpose (Shift: octave)
@@ -245,6 +246,15 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     }
     if (noteC.velocity != 93)
         fail("dragged velocity did not latch into the next draw");
+
+    // Double-click on a note deletes it (the pencil sections above prove
+    // the same event still draws over empty space). Note C goes.
+    sendMouse(roll, QEvent::MouseButtonDblClick, c.center, Qt::LeftButton,
+              Qt::LeftButton);
+    sendMouse(roll, QEvent::MouseButtonRelease, c.center, Qt::LeftButton,
+              Qt::NoButton);
+    if (doc.findNote(track, c.tick, uint8_t(c.key), &noteC))
+        fail("double-click on a note did not delete it");
 
     // Edge resize snaps to the ruler's absolute grid, not to grid-sized
     // offsets from the note's own end: give a note an off-grid duration
@@ -568,20 +578,20 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Fifteen commands: draw, set, draw, nudge, draw, add, two resizes,
-    // the three note-selection presses MERGED into one, the off-grid
-    // behind-the-back move, Ctrl+Left (all the scroll-follow presses
-    // merge into it), two time-selection moves (kept separate by the
-    // clean-index save point), the inline rename, and the mid-song voice
-    // change — plus, when the song has a second track, the header-drag
-    // track move and the editor commit the drop flushes. Undoing them all
-    // must restore the original bytes.
+    // Sixteen commands: draw, set, draw, nudge, draw, the double-click
+    // delete, add, two resizes, the three note-selection presses MERGED
+    // into one, the off-grid behind-the-back move, Ctrl+Left (all the
+    // scroll-follow presses merge into it), two time-selection moves
+    // (kept separate by the clean-index save point), the inline rename,
+    // and the mid-song voice change — plus, when the song has a second
+    // track, the header-drag track move and the editor commit the drop
+    // flushes. Undoing them all must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 15 + (reordered ? (dragRenamed ? 2 : 1) : 0))
+    if (undos != 16 + (reordered ? (dragRenamed ? 2 : 1) : 0))
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");
