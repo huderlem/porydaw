@@ -2,6 +2,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QKeyEvent>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPoint>
 #include <QString>
@@ -401,6 +402,47 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         view.scrollByPx(view.contentX(0.0) - home); // back where it started
     }
 
+    // Inline track rename: renameTrack opens a line editor on the header
+    // row; Return commits (queued past the panel rebuild), Escape discards,
+    // and loop-marker names are refused. isHidden (not isVisible) because
+    // the view is never shown offscreen.
+    {
+        view.renameTrack(track);
+        auto *editor =
+            view.findChild<QLineEdit *>(QStringLiteral("trackRenameEditor"));
+        if (!editor || editor->isHidden()) {
+            fail("rename editor did not open");
+        } else {
+            editor->setText(QStringLiteral("Rolled"));
+            sendKey(editor, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::processEvents(); // the queued document commit
+            if (doc.trackName(track) != QStringLiteral("Rolled"))
+                fail("inline rename did not apply on Return");
+        }
+        view.renameTrack(track); // the rebuilt panel carries a fresh editor
+        editor = view.findChild<QLineEdit *>(QStringLiteral("trackRenameEditor"));
+        if (!editor || editor->isHidden()) {
+            fail("rename editor did not reopen after the rebuild");
+        } else {
+            editor->setText(QStringLiteral("Discarded"));
+            sendKey(editor, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::processEvents();
+            if (doc.trackName(track) != QStringLiteral("Rolled"))
+                fail("Escape did not discard the rename");
+        }
+        view.renameTrack(track);
+        editor = view.findChild<QLineEdit *>(QStringLiteral("trackRenameEditor"));
+        if (editor && !editor->isHidden()) {
+            const int commands = doc.undoStack()->count();
+            editor->setText(QStringLiteral("["));
+            sendKey(editor, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::processEvents();
+            if (doc.trackName(track) != QStringLiteral("Rolled")
+                || doc.undoStack()->count() != commands)
+                fail("loop-marker name was not refused");
+        }
+    }
+
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
@@ -409,18 +451,18 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
-    // Thirteen commands: draw, set, draw, nudge, draw, add, two resizes,
+    // Fourteen commands: draw, set, draw, nudge, draw, add, two resizes,
     // the three note-selection presses MERGED into one, the off-grid
     // behind-the-back move, Ctrl+Left (all the scroll-follow presses
-    // merge into it), and two time-selection moves (kept separate by the
-    // clean-index save point). Undoing them all must restore the
-    // original bytes.
+    // merge into it), two time-selection moves (kept separate by the
+    // clean-index save point), and the inline rename. Undoing them all
+    // must restore the original bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 13)
+    if (undos != 14)
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");

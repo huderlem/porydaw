@@ -11,6 +11,7 @@
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
@@ -18,6 +19,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
@@ -30,6 +32,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <map>
 
 #include "core/mid2agbtables.h"
 #include "core/songdocument.h"
@@ -3383,14 +3386,40 @@ protected:
         m_sv->trackHeaderClicked(m_track, event->modifiers());
     }
 
+public:
+    // Inline rename: a line edit overlaid on the row's name line. Return
+    // commits, Escape cancels (both restore the roll's focus), focus-out
+    // commits Reaper-style. The document edit itself is queued by
+    // commitTrackRename — it rebuilds the header panel, which would delete
+    // this row and the editor mid-signal.
+    void beginRename()
+    {
+        SongDocument *doc = m_sv->document();
+        if (!doc)
+            return;
+        if (!m_editor) {
+            m_editor = new QLineEdit(this);
+            m_editor->setObjectName(QStringLiteral("trackRenameEditor"));
+            m_editor->installEventFilter(this);
+            connect(m_editor, &QLineEdit::editingFinished, this,
+                    [this] { finishRename(true, false); });
+        }
+        m_editor->setText(doc->trackName(m_track));
+        // What an empty name falls back to (mirrors the painted default).
+        m_editor->setPlaceholderText(
+            doc->smf().format == 0 ? SongView::tr("Channel %1").arg(m_track + 1)
+                                   : SongView::tr("Track %1").arg(m_track + 1));
+        m_editor->setGeometry(editorRect());
+        m_editor->show();
+        m_editor->setFocus();
+        m_editor->selectAll();
+    }
+
+protected:
     void mouseDoubleClickEvent(QMouseEvent *) override
     {
         m_sv->selectTrack(m_track);
-        // Queued: the rename rebuilds the header panel, which deletes this
-        // row out from under its own event handler.
-        QMetaObject::invokeMethod(
-            m_sv, [sv = m_sv, t = m_track] { sv->renameTrack(t); },
-            Qt::QueuedConnection);
+        beginRename();
     }
 
     void contextMenuEvent(QContextMenuEvent *event) override
@@ -3406,11 +3435,10 @@ protected:
         QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
         QAction *chosen = menu.exec(event->globalPos());
         // Queued: these edits rebuild the header panel, which deletes this
-        // row out from under its own event handler.
+        // row out from under its own event handler. (Rename just opens the
+        // inline editor — no edit until it commits — so it's direct.)
         if (chosen == renameAction) {
-            QMetaObject::invokeMethod(
-                m_sv, [sv = m_sv, t = m_track] { sv->renameTrack(t); },
-                Qt::QueuedConnection);
+            beginRename();
         } else if (chosen == voiceAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
@@ -3426,11 +3454,58 @@ protected:
         }
     }
 
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == m_editor && event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Escape) {
+                finishRename(false, true);
+                return true;
+            }
+            if (keyEvent->key() == Qt::Key_Return
+                || keyEvent->key() == Qt::Key_Enter) {
+                finishRename(true, true);
+                return true;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void resizeEvent(QResizeEvent *) override
+    {
+        // Rows are born 100px wide and only get their real width on the
+        // deferred layout pass; an open editor must follow.
+        if (m_editor)
+            m_editor->setGeometry(editorRect());
+    }
+
 private:
+    // The row's name line, clear of the color strip and the M/S column.
+    QRect editorRect() const { return QRect(6, 2, width() - 32, 20); }
+
+    void finishRename(bool commit, bool restoreFocus)
+    {
+        // isHidden, not isVisible: the guard must also hold when the view
+        // itself isn't shown (offscreen harnesses). m_finishing blocks the
+        // editingFinished that hide()'s focus-out re-emits.
+        if (!m_editor || m_editor->isHidden() || m_finishing)
+            return;
+        m_finishing = true;
+        const QString text = m_editor->text();
+        m_editor->hide();
+        m_finishing = false;
+        if (restoreFocus)
+            m_sv->focusContent();
+        if (commit)
+            m_sv->commitTrackRename(m_track, text);
+    }
+
     SongView *m_sv;
     int m_track;
     QToolButton *m_mute;
     QToolButton *m_solo;
+    QLineEdit *m_editor = nullptr;
+    bool m_finishing = false;
 };
 
 class TrackHeaderPanel : public QWidget
@@ -3449,12 +3524,14 @@ public:
     {
         qDeleteAll(m_rows);
         m_rows.clear();
+        m_rowByTrack.clear();
         const MidiTimeline *tl = m_sv->timeline();
         if (tl) {
             for (int t = 0; t < 16; t++) {
                 if (!tl->tracks[t].used)
                     continue;
                 auto *row = new TrackHeaderRow(m_sv, t, this);
+                m_rowByTrack[t] = row;
                 QString tip = SongView::tr("%1 notes · %2")
                                   .arg(tl->tracks[t].noteCount)
                                   .arg(m_sv->instrumentLabel(t));
@@ -3487,10 +3564,18 @@ public:
             row->update();
     }
 
+    void beginRename(int track)
+    {
+        const auto it = m_rowByTrack.find(track);
+        if (it != m_rowByTrack.end())
+            it->second->beginRename();
+    }
+
 private:
     SongView *m_sv;
     QVBoxLayout *m_layout;
     std::vector<QWidget *> m_rows;
+    std::map<int, TrackHeaderRow *> m_rowByTrack;
 };
 
 } // namespace songview
@@ -3701,11 +3786,17 @@ void SongView::setEventListVisible(bool visible)
         // The list skips refreshes while its page is hidden; catch up now.
         m_events->refresh();
         m_events->syncTrackSelection();
-        m_events->setFocus();
-    } else {
-        m_roll->setFocus();
     }
+    focusContent();
     emit eventListVisibilityChanged(visible);
+}
+
+void SongView::focusContent()
+{
+    if (eventListVisible())
+        m_events->setFocus();
+    else
+        m_roll->setFocus();
 }
 
 void SongView::addEmptyLane(int track, uint8_t cc)
@@ -4638,21 +4729,28 @@ void SongView::renameTrack(int track)
 {
     if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
         return;
-    bool ok = false;
-    const QString name = QInputDialog::getText(
-        this, tr("Rename Track %1").arg(track + 1),
-        tr("Track name (empty for the default):"), QLineEdit::Normal,
-        m_document->trackName(track), &ok);
-    if (!ok)
+    m_headers->beginRename(track);
+}
+
+void SongView::commitTrackRename(int track, const QString &name)
+{
+    if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
         return;
-    if (nameIsLoopMarker(name.trimmed())) {
-        QMessageBox::warning(
-            this, tr("Rename Track"),
-            tr("\"%1\" is read by the song build as a loop or label marker, "
-               "so it can't be a track name.").arg(name.trimmed()));
+    const QString trimmed = name.trimmed();
+    if (nameIsLoopMarker(trimmed)) {
+        announce(tr("\"%1\" is read by the song build as a loop or label "
+                    "marker, so it can't be a track name.").arg(trimmed));
         return;
     }
-    m_document->renameTrack(track, name); // rebuilds via documentChanged
+    // Queued: the commit arrives from the header row's editor signal, and
+    // the edit rebuilds the header panel — deleting that editor mid-signal.
+    QMetaObject::invokeMethod(
+        this,
+        [this, track, trimmed] {
+            if (m_document)
+                m_document->renameTrack(track, trimmed);
+        },
+        Qt::QueuedConnection);
 }
 
 void SongView::addTrack()

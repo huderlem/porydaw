@@ -177,9 +177,16 @@ public:
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
-    // Prompts for a new name (double-click on a header row). Works in both
-    // SMF formats; refuses names mid2agb would read as loop/label markers.
+    // Inline rename: opens a line editor on the track's header row
+    // (double-click and the context menu land here). commitTrackRename
+    // applies the typed name — queued, since the edit rebuilds the header
+    // panel out from under the editor's own signal — and refuses names
+    // mid2agb would read as loop/label markers, with a status message.
     void renameTrack(int track);
+    void commitTrackRename(int track, const QString &name);
+    // Focus the current editing surface (roll or event list), e.g. after an
+    // inline editor closes.
+    void focusContent();
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
     // barNumber) for every beat, honoring the song's time signature changes.
