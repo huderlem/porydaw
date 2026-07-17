@@ -843,9 +843,13 @@ void EventListView::setDocument(SongDocument *document)
         if (m_document)
             disconnect(m_document, nullptr, this, nullptr);
         m_document = document;
-        if (m_document)
+        m_pendingChunk = -1;
+        if (m_document) {
             connect(m_document, &SongDocument::documentChanged, this,
                     &EventListView::refresh);
+            connect(m_document, &SongDocument::trackMoved, this,
+                    &EventListView::onTrackMoved);
+        }
     }
     rebuildChunkCombo();
     syncTrackSelection();
@@ -868,8 +872,23 @@ void EventListView::refresh()
         // A track add/delete (or file reload) shifted the chunk numbering,
         // so the old combo index may now name a different chunk; re-anchor
         // on the roll's selected track rather than trust the raw index.
+        m_pendingChunk = -1;
         rebuildChunkCombo();
         syncTrackSelection();
+    } else if (m_pendingChunk >= 0) {
+        // A track move permuted the chunk numbering at constant count (the
+        // count check can't see it): follow the anchored chunk to its new
+        // index and refresh the combo's stale Track labels.
+        const int target = m_pendingChunk;
+        m_pendingChunk = -1;
+        rebuildChunkCombo();
+        const int idx = m_chunk->findData(target);
+        if (idx >= 0) {
+            m_syncing = true;
+            m_chunk->setCurrentIndex(idx);
+            m_syncing = false;
+            m_model->setSource(m_document, target);
+        }
     } else {
         const QModelIndex current = m_table->currentIndex();
         QList<int> selectedRows;
@@ -920,6 +939,28 @@ void EventListView::syncTrackSelection()
     m_model->setSource(m_document, chunk);
     updateCountLabel();
     updatePlayRow();
+}
+
+void EventListView::onTrackMoved(int fromChunk, int toChunk)
+{
+    // Remap the anchored chunk through the rotation, into m_pendingChunk
+    // for the documentChanged refresh that follows (the document is
+    // mid-mutation here — no reads, no rebuild yet). Starts from a prior
+    // pending value so moves chain while the page is hidden and refreshes
+    // are skipped.
+    const int cur = m_pendingChunk >= 0 ? m_pendingChunk : currentChunk();
+    if (cur < 0)
+        return;
+    int next = cur;
+    if (cur == fromChunk)
+        next = toChunk;
+    else if (fromChunk < toChunk && cur > fromChunk && cur <= toChunk)
+        next = cur - 1;
+    else if (toChunk < fromChunk && cur >= toChunk && cur < fromChunk)
+        next = cur + 1;
+    // Set even when the index is unchanged: chunks elsewhere in the rotation
+    // swapped occupants, so the combo's Track labels need the rebuild.
+    m_pendingChunk = next;
 }
 
 void EventListView::setPlayheadTick(double tick, bool playing)

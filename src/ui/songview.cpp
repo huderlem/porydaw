@@ -3455,6 +3455,12 @@ public:
         m_editor->selectAll();
     }
 
+    // Reaper-style commit for gestures that will rebuild the panel: header
+    // rows take no focus, so pressing one never gives the editor a
+    // focus-out — without this, the rebuild would destroy the editor and
+    // silently drop the typed name.
+    void commitOpenRename() { finishRename(true, false); }
+
 protected:
     void mouseDoubleClickEvent(QMouseEvent *) override
     {
@@ -3465,6 +3471,10 @@ protected:
     void contextMenuEvent(QContextMenuEvent *event) override
     {
         if (!m_sv->document())
+            return;
+        // A right-click with the left button still down is a mid-drag
+        // cancel (mouseReleaseEvent), not a menu request.
+        if (QApplication::mouseButtons() & Qt::LeftButton)
             return;
         m_sv->selectTrack(m_track);
         QMenu menu(this);
@@ -3686,6 +3696,12 @@ public:
         if (fromIdx < 0 || slot == fromIdx || slot == fromIdx + 1)
             return;
         const int target = m_trackRows[size_t(slot > fromIdx ? slot - 1 : slot)]->track();
+        // The move's rebuild would destroy an open rename editor without a
+        // focus-out (rows take no focus): commit it Reaper-style first. Its
+        // queued commit runs before the queued move below, and renameTrack
+        // renumbers nothing, so both captured track numbers stay valid.
+        for (const auto &entry : m_rowByTrack)
+            entry.second->commitOpenRename();
         // Queued: the edit rebuilds this panel, deleting the dragged row out
         // from under its own mouse-release handler.
         QMetaObject::invokeMethod(
@@ -3721,8 +3737,18 @@ void TrackHeaderRow::mouseMoveEvent(QMouseEvent *event)
     panel->dragRowTo(mapTo(panel, event->pos()));
 }
 
-void TrackHeaderRow::mouseReleaseEvent(QMouseEvent *)
+void TrackHeaderRow::mouseReleaseEvent(QMouseEvent *event)
 {
+    // Only a left release drops the row; any other button mid-drag is a
+    // cancel gesture (matching the ruler's and roll's release handling).
+    if (event->button() != Qt::LeftButton) {
+        if (m_dragging) {
+            m_dragging = false;
+            m_dragArmed = false;
+            static_cast<TrackHeaderPanel *>(parentWidget())->endRowDrag(false);
+        }
+        return;
+    }
     m_dragArmed = false;
     if (!m_dragging)
         return;
@@ -3917,6 +3943,13 @@ void SongView::updateSong(const MidiTimeline *timeline)
 
 void SongView::setDocument(SongDocument *document)
 {
+    if (m_document != document) {
+        if (m_document)
+            disconnect(m_document, &SongDocument::trackMoved, this, nullptr);
+        if (document)
+            connect(document, &SongDocument::trackMoved, this,
+                    &SongView::onTrackMoved);
+    }
     m_document = document;
     m_selection.clear();
     m_headers->rebuild();   // the "+ Add track" button follows editability
@@ -5007,11 +5040,25 @@ void SongView::moveTrack(int from, int to)
     if (!m_document || m_document->smf().format == 0 || from == to
         || m_document->smfTrackFor(from) < 0 || m_document->smfTrackFor(to) < 0)
         return;
+    // The per-track view state follows in onTrackMoved, which the
+    // document's MoveTrack op signals through — undo and redo replay the
+    // same permutation, so the masks stay on their tracks.
+    m_document->moveTrack(from, to); // rebuilds via documentChanged
+    announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
+}
+
+void SongView::onTrackMoved(int, int, int from, int to)
+{
+    // A MoveTrack op is applying or reverting (interactive move, undo, or
+    // redo — the document emits each direction with the endpoints swapped).
     // Format-1 engine slots are contiguous, so the move renumbers every slot
     // between the endpoints; rotate the per-track view state with them
     // (deleteTrack's shift, generalized to both directions). The note
     // selection needs nothing: it is (tick, key) on the selected track, and
-    // the selected track's number moves with its notes.
+    // the selected track's number moves with its notes. The document is
+    // mid-mutation: remap state only, don't read it back.
+    if (from < 0 || to < 0 || from == to)
+        return;
     const auto newIndex = [from, to](int t) {
         if (t == from)
             return to;
@@ -5044,8 +5091,6 @@ void SongView::moveTrack(int from, int to)
     // collapse them like deleteTrack does rather than remap.
     m_trackSelMask = 1u << m_selectedTrack;
     clearTimeSelection();
-    m_document->moveTrack(from, to); // rebuilds via documentChanged
-    announce(tr("Moved track %1 to slot %2").arg(from + 1).arg(to + 1));
 }
 
 void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,

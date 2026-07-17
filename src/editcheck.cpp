@@ -736,6 +736,56 @@ int runEditCheck(const QString &projectRoot)
             }
         }
 
+        // Reordering must not confuse chunk-0 metas that only LOOK like loop
+        // markers: a first-0x03 name of "[" is the track's name and travels
+        // with its chunk (findLoopMarkerEvent skips it; imported files can
+        // carry such names even though renameTrack refuses them), while the
+        // combined "][" marker mid2agb reads stays with chunk 0.
+        if (ok && doc.smf().format != 0 && doc.engineTrackCount() >= 2
+            && doc.smfTrackFor(0) == 0) {
+            const int last = doc.engineTrackCount() - 1;
+            const int indexBefore = doc.undoStack()->index();
+            const uint64_t loopStartBefore = doc.loopTick(false);
+            const uint64_t loopEndBefore = doc.loopTick(true);
+            doc.renameTrack(0, QString()); // the "[" below must be the first 0x03
+            SmfEvent name;
+            name.tick = 0;
+            name.status = 0xFF;
+            name.metaType = 0x03;
+            name.blob = QByteArrayLiteral("[");
+            doc.insertRawEvent(0, name);
+            SmfEvent marker;
+            marker.tick = base;
+            marker.status = 0xFF;
+            marker.metaType = 0x06;
+            marker.blob = QByteArrayLiteral("][");
+            doc.insertRawEvent(0, marker);
+            doc.moveTrack(0, last);
+            mutateAndCheck("events unsorted after marker-name moveTrack");
+            if (ok && doc.trackName(last) != QStringLiteral("[")) {
+                fail("a '['-named track lost its name in the move");
+                ok = false;
+            }
+            if (ok
+                && (doc.loopTick(false) != loopStartBefore
+                    || doc.loopTick(true) != loopEndBefore)) {
+                fail("a '[' track name was misread as a loop marker");
+                ok = false;
+            }
+            bool combinedStayed = false;
+            for (const SmfEvent &ev : doc.smf().tracks[0].events) {
+                if (ev.isMeta() && ev.metaType == 0x06 && ev.blob == "][")
+                    combinedStayed = true;
+            }
+            if (ok && !combinedStayed) {
+                fail("the '][' marker left chunk 0 in the move");
+                ok = false;
+            }
+            while (doc.undoStack()->index() > indexBefore)
+                doc.undoStack()->undo();
+            mutateAndCheck("events unsorted after marker-name undo");
+        }
+
         // Deleting an original track must not lose the loop markers, even
         // when they live in the removed chunk (they get rescued into the seq
         // chunk). Undone right away so the loop/cfg script below still runs

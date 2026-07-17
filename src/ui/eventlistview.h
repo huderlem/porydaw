@@ -59,6 +59,7 @@ private:
     void jumpCursorToRow(int row);
     int currentChunk() const;
     void selectEventRow(int chunk, const SmfEvent &event);
+    void onTrackMoved(int fromChunk, int toChunk);
 
     SongView *m_sv;
     SongDocument *m_document = nullptr;
@@ -70,6 +71,11 @@ private:
     bool m_syncing = false;
     bool m_settingCurrent = false; // programmatic row changes must not
                                    // commit the edit cursor
+    // Where the current chunk landed after track moves (trackMoved remaps
+    // it, chaining while the page is hidden); -1 = no move pending. refresh
+    // consumes it — a reorder keeps the chunk count, so the count heuristic
+    // alone would keep showing the old index's new occupant.
+    int m_pendingChunk = -1;
     double m_playTick = -1.0;      // last playhead tick pushed (-1 = none)
     bool m_playing = false;
 };

@@ -284,6 +284,14 @@ public:
 signals:
     // Emitted after every mutation, undo, and redo.
     void documentChanged();
+    // Emitted while a MoveTrack op applies or reverts, before the
+    // documentChanged that follows: the chunk at fromChunk moved to index
+    // toChunk (engine slot fromEngine to toEngine, -1 for a chunk with no
+    // engine slot), the entries between shifting by one. Undo emits with the
+    // endpoints swapped, so receivers holding per-track or per-chunk state
+    // remap it here and stay right across undo/redo. The document is
+    // mid-mutation when this fires: remap state only, don't read back.
+    void trackMoved(int fromChunk, int toChunk, int fromEngine, int toEngine);
 
 private:
     friend class SongEditCommand;
@@ -313,6 +321,7 @@ private:
     void revertOps(std::vector<EditOp> &ops);
     void pushEdit(const QString &text, std::vector<EditOp> ops);
     void rebuildTrackMap();
+    int engineTrackForChunk(int chunk) const; // -1 = no engine slot
     // Lowest MIDI channel a new track can take: format 0, one with no events;
     // format 1, one no existing engine track uses. -1 when all 16 are taken.
     int freeChannel() const;

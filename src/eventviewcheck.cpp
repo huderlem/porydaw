@@ -151,6 +151,32 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
         fail("meta filter shows the wrong row count");
     filterCombo->setCurrentIndex(0); // FilterAll
 
+    // A track move permutes the chunk numbering at constant count (invisible
+    // to the count-changed re-anchor): the list must follow its anchored
+    // chunk to the new index — and back on undo.
+    if (doc.smf().format != 0 && doc.engineTrackCount() >= 2) {
+        int anchorEngine = -1;
+        for (int e = 0; e < doc.engineTrackCount(); e++) {
+            if (doc.smfTrackFor(e) == chunk)
+                anchorEngine = e;
+        }
+        if (anchorEngine >= 0) {
+            const int target = anchorEngine == doc.engineTrackCount() - 1
+                ? 0
+                : doc.engineTrackCount() - 1;
+            view.moveTrack(anchorEngine, target);
+            const int movedChunk = doc.smfTrackFor(target);
+            if (chunkCombo->currentData().toInt() != movedChunk)
+                fail("chunk combo did not follow the moved track");
+            if (model->rowCount()
+                != int(doc.smf().tracks[movedChunk].events.size()) + 1)
+                fail("event table did not follow the moved track");
+            doc.undoStack()->undo();
+            if (chunkCombo->currentData().toInt() != chunk)
+                fail("undoing the move did not re-anchor the chunk combo");
+        }
+    }
+
     // Playhead marker: exactly the row the play cursor last passed carries a
     // background tint (the last of a same-tick run), the end-of-track row
     // once the playhead passes the end. Row focus commits the edit cursor at

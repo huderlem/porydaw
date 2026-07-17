@@ -28,6 +28,18 @@ bool metaIsTimeSig(const SmfEvent &ev)
     return ev.isMeta() && ev.metaType == 0x58 && ev.blob.size() >= 2;
 }
 
+// Move the chunk at `from` to index `to`, the chunks between shifting by one
+// toward the vacated slot. applyOps and revertOps share it with the endpoints
+// swapped — the mirror lives here, not in two hand-maintained rotates.
+void moveChunk(std::vector<SmfTrack> &tracks, int from, int to)
+{
+    const auto begin = tracks.begin();
+    if (from < to)
+        std::rotate(begin + from, begin + from + 1, begin + to + 1);
+    else
+        std::rotate(begin + to, begin + from, begin + from + 1);
+}
+
 bool cfgSemanticEqual(const SongCfg &a, const SongCfg &b)
 {
     return a.voicegroupArg == b.voicegroupArg && a.masterVolume == b.masterVolume
@@ -261,6 +273,15 @@ uint8_t SongDocument::channelFor(int engineTrack) const
     if (engineTrack < 0 || engineTrack >= int(m_engineChannel.size()))
         return 0;
     return m_engineChannel[engineTrack];
+}
+
+int SongDocument::engineTrackForChunk(int chunk) const
+{
+    for (int t = 0; t < int(m_engineToSmf.size()); t++) {
+        if (m_engineToSmf[t] == chunk)
+            return t;
+    }
+    return -1;
 }
 
 std::vector<DocNote> SongDocument::notesForTrack(int engineTrack) const
@@ -1685,10 +1706,26 @@ void SongDocument::moveTrack(int engineTrack, int targetEngine)
     if (fromChunk == 0 || toChunk == 0) {
         const auto &evs = m_smf.tracks[0].events;
         std::vector<size_t> indices;
+        // Classify exactly as the canonical readers do: tempo as lanePoints
+        // validates it (three data bytes), time signatures via metaIsTimeSig,
+        // and the whole marker family mid2agb understands ("[", "]", "][",
+        // ":" — nameIsLoopMarker, the same set renameTrack refuses). The
+        // chunk's first 0x03 is the track's name, never a marker
+        // (findLoopMarkerEvent and MidiTimeline skip it the same way): it
+        // travels with its chunk.
+        bool nameSeen = false;
         for (size_t i = 0; i < evs.size(); i++) {
             const SmfEvent &ev = evs[i];
-            if ((ev.isMeta() && ev.metaType == 0x51) || metaIsTimeSig(ev)
-                || metaIsLoopMarker(ev, '[') || metaIsLoopMarker(ev, ']')) {
+            if (!ev.isMeta())
+                continue;
+            if (ev.metaType == 0x03 && !nameSeen) {
+                nameSeen = true;
+                continue;
+            }
+            const bool tempo = ev.metaType == 0x51 && ev.blob.size() == 3;
+            const bool marker = ev.metaType >= 0x01 && ev.metaType <= 0x07
+                && nameIsLoopMarker(trackNameText(ev));
+            if (tempo || metaIsTimeSig(ev) || marker) {
                 indices.push_back(i);
                 rescued.push_back(ev);
             }
@@ -1800,16 +1837,15 @@ void SongDocument::applyOps(std::vector<EditOp> &ops)
             track.endTick = op.event.tick;
             break;
         }
-        case EditOp::MoveTrack: {
-            const auto begin = m_smf.tracks.begin();
-            if (op.smfTrack < op.smfTrackTo)
-                std::rotate(begin + op.smfTrack, begin + op.smfTrack + 1,
-                            begin + op.smfTrackTo + 1);
-            else
-                std::rotate(begin + op.smfTrackTo, begin + op.smfTrack,
-                            begin + op.smfTrack + 1);
+        case EditOp::MoveTrack:
+            // The engine mapping is still pre-move here (rebuildTrackMap
+            // runs after the loop), so receivers get the numbering their
+            // state is keyed by.
+            emit trackMoved(op.smfTrack, op.smfTrackTo,
+                            engineTrackForChunk(op.smfTrack),
+                            engineTrackForChunk(op.smfTrackTo));
+            moveChunk(m_smf.tracks, op.smfTrack, op.smfTrackTo);
             break;
-        }
         }
     }
     rebuildTrackMap();
@@ -1843,16 +1879,12 @@ void SongDocument::revertOps(std::vector<EditOp> &ops)
         case EditOp::SetTrackEnd:
             m_smf.tracks[op.smfTrack].endTick = op.oldEndTick;
             break;
-        case EditOp::MoveTrack: {
-            const auto begin = m_smf.tracks.begin();
-            if (op.smfTrackTo < op.smfTrack)
-                std::rotate(begin + op.smfTrackTo, begin + op.smfTrackTo + 1,
-                            begin + op.smfTrack + 1);
-            else
-                std::rotate(begin + op.smfTrack, begin + op.smfTrackTo,
-                            begin + op.smfTrackTo + 1);
+        case EditOp::MoveTrack:
+            emit trackMoved(op.smfTrackTo, op.smfTrack,
+                            engineTrackForChunk(op.smfTrackTo),
+                            engineTrackForChunk(op.smfTrack));
+            moveChunk(m_smf.tracks, op.smfTrackTo, op.smfTrack);
             break;
-        }
         }
     }
     rebuildTrackMap();
