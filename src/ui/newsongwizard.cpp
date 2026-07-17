@@ -225,9 +225,8 @@ public:
 
         auto *layout = new QVBoxLayout(this);
         auto *summary = new QLabel(
-            tr("Format %1, division %2 · %3 chunk(s) → <b>%4 m4a track(s)</b> · peak "
-               "%5 simultaneous note(s)")
-                .arg(a.format)
+            tr("Division %1 · %2 chunk(s) → <b>%3 m4a track(s)</b> · peak "
+               "%4 simultaneous note(s)")
                 .arg(a.division)
                 .arg(a.smfTrackCount)
                 .arg(a.mappedTracks)
@@ -443,13 +442,11 @@ NewSongWizard::NewSongWizard(DecompProject *project, AudioEngine *audio, SmfFile
       m_imported(std::move(imported))
 {
     setWindowTitle(tr("Import MIDI — %1").arg(QFileInfo(sourcePath).fileName()));
-    // Coerce format 0 up front so the analysis, mapping page, and written
-    // .mid all deal in format 1 — one chunk per channel, like every song
-    // porydaw opens.
-    const bool wasFormat0 = m_imported.format == 0;
-    convertToFormat1(&m_imported);
+    // m_imported arrives coerced to format 1 (SmfFile::read), so the
+    // analysis, mapping page, and written .mid all deal in one chunk per
+    // channel, like every song porydaw opens.
     m_analysis = analyzeForImport(m_imported);
-    if (wasFormat0)
+    if (m_imported.wasFormat0)
         m_analysis.warnings.prepend(
             tr("Format 0 file — imported as format 1 (one chunk per channel)."));
     buildPages(sourcePath);

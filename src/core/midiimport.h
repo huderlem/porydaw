@@ -16,7 +16,6 @@
 
 struct ImportTrackInfo {
     int smfTrack = -1;      // chunk index
-    uint8_t channel = 0;    // the track's MIDI channel, as the engine maps it
     QString name;           // track-name meta, if present
     int noteCount = 0;
     // Programs in order of first use; empty means every note plays voice 0
@@ -33,7 +32,6 @@ struct ImportCcUsage {
 };
 
 struct ImportAnalysis {
-    uint16_t format = 1;
     uint16_t division = 24;
     int smfTrackCount = 0;
     int mappedTracks = 0;  // engine tracks (first 16 channel-bearing chunks)

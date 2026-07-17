@@ -54,14 +54,47 @@ struct SmfTrack {
     uint64_t endTick = 0;         // tick of the End-of-track meta
 };
 
+// The marker vocabulary mid2agb reads from ANY text meta (0x01-0x07) in the
+// seq chunk — loop start/end and the segment separators — Channel Prefix
+// notwithstanding. porydaw carves out one exception mid2agb doesn't: a
+// chunk's first unprefixed 0x03 is its NAME even with marker text (imported
+// files can carry such names; renameTrack refuses creating them). A
+// PREFIXED 0x03 with marker text has no name position at all, so every
+// reader classifies it as a marker, agreeing with mid2agb.
+bool smfTextIsMarker(const QString &text);
+// smfTextIsMarker over a meta event's payload (Latin-1, capped at 64 chars,
+// trimmed — the same reading every name consumer uses). False for non-text
+// metas.
+bool smfMetaIsMarker(const SmfEvent &ev);
+
+// MIDI Channel Prefix (meta 0x20) scoping state, shared by every reader and
+// the format-0 conversion so the rule cannot drift between them: a prefix
+// scopes the name metas that follow to its channel, live until the next
+// channel event or prefix. Call observe() on every event in file order and
+// read `channel` (-1 when no prefix is live) when classifying the event.
+struct SmfChannelPrefix {
+    int channel = -1;
+    void observe(const SmfEvent &ev)
+    {
+        if (ev.isChannel())
+            channel = -1;
+        else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1)
+            channel = ev.blob[0] & 0x0F;
+    }
+};
+
 struct SmfFile {
-    uint16_t format = 1;   // 0 or 1
+    uint16_t format = 1;   // always 1 after parse; see wasFormat0
     uint16_t division = 24; // ticks per quarter note (metrical only)
     std::vector<SmfTrack> tracks;
+    bool wasFormat0 = false; // parsed as format 0, coerced by convertToFormat1
 
     // Strict parse: any malformed track data is an error rather than a
     // truncated best-effort load — an editor that half-parses a file would
     // silently drop the rest on save. (mid2agb is equally strict.)
+    // Coerces format 0 to format 1 (convertToFormat1) before returning, so
+    // an unconverted file cannot escape the parse layer; wasFormat0 records
+    // that it happened.
     static bool read(const QByteArray &bytes, SmfFile *out, QString *error);
     static bool readFile(const QString &path, SmfFile *out, QString *error);
 
@@ -77,10 +110,17 @@ struct SmfFile {
 // seq events from the first chunk exclusively), then one chunk per used
 // channel in ascending channel order — the same order mid2agb emits agb
 // tracks for a format-0 file (it scans each chunk for channels 0-15 in
-// turn), so the compiled .s output is unchanged. Channel-Prefix names
-// (0x20 + 0x03 pairs) become ordinary chunk name metas; the prefixes
-// themselves are dropped, the per-channel chunk structure now carrying
-// their meaning. No-op on format-1 input. Everything past the loaders
-// assumes format 1: this runs on every open and import, so format 0 never
-// escapes them.
+// turn), so the compiled .s output is unchanged. Channel-Prefix-scoped text
+// metas (names, instrument names, lyrics) travel to their channel's chunk;
+// the 0x20 prefixes themselves are dropped, the per-channel chunk structure
+// now carrying their meaning. Two preservation rules: marker text stays in
+// the conductor chunk even when prefixed (mid2agb reads markers from the
+// seq chunk regardless of prefixes, so moving one would change the .s; a
+// prefixed marker 0x03 keeps a prefix so readers never mistake it for the
+// conductor's name), and a channel with scoped text but no channel events
+// still emits a chunk (name-only — it never occupies an engine slot or
+// produces an agb track, but dropping it would lose foreign data on
+// save). No-op on format-1
+// input. SmfFile::read calls this, so everything past the parse layer deals
+// in format 1; it stays callable directly for in-memory files.
 void convertToFormat1(SmfFile *smf);

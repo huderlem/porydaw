@@ -59,11 +59,11 @@ struct OtherEvent {
 // file's tempo map (following poryaaaa_render's approach). Once built, the
 // timeline is read-only and safe to hand to the audio thread.
 //
-// Engine track mapping: for SMF Type 1 files, each MTrk chunk that contains
-// channel events gets its own engine track (0-15) in file order, so tracks
-// sharing a MIDI channel stay separate (mid2agb semantics). Chunks with no
-// channel events (e.g. a conductor track) don't consume a slot. For Type 0,
-// the MIDI channel is the engine track.
+// Engine track mapping: each MTrk chunk that contains channel events gets
+// its own engine track (0-15) in file order, so tracks sharing a MIDI
+// channel stay separate (mid2agb semantics). Chunks with no channel events
+// (e.g. a conductor track) don't consume a slot. Input is always format 1 —
+// SmfFile::read coerces format 0 at the parse layer.
 struct SmfFile;
 
 class MidiTimeline

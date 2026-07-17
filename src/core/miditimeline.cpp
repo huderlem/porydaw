@@ -8,7 +8,6 @@ namespace {
 
 struct RawEvent {
     uint64_t tick;
-    uint8_t channel;
     uint16_t smfTrack;
     uint8_t type;
     uint8_t data0;
@@ -82,9 +81,8 @@ std::unique_ptr<MidiTimeline> MidiTimeline::load(const QString &path, double sam
                                                  QString *error)
 {
     SmfFile smf;
-    if (!SmfFile::readFile(path, &smf, error))
+    if (!SmfFile::readFile(path, &smf, error)) // readFile coerces format 0 away
         return nullptr;
-    convertToFormat1(&smf); // build, like all of porydaw, deals in format 1 only
     return build(smf, sampleRate);
 }
 
@@ -103,24 +101,20 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     uint64_t loopEndTick = UINT64_MAX;
 
     for (int t = 0; t < numTracks; t++) {
-        // MIDI Channel Prefix (meta 0x20) state: scopes the name metas that
-        // follow to one channel, live until the next channel event or
-        // prefix. Format 0's per-track naming mechanism — conversion
-        // rewrites those, but a foreign format-1 file may still carry
-        // prefixed 0x03s, and they are never the chunk's name (nor loop
-        // markers).
-        int prefixChannel = -1;
+        // Channel Prefix scoping (SmfChannelPrefix, the shared rule):
+        // format 0's per-track naming mechanism — conversion rewrites
+        // those, but a foreign format-1 file may still carry prefixed
+        // 0x03s, and they are never the chunk's name.
+        SmfChannelPrefix prefix;
         for (const SmfEvent &sev : smf.tracks[t].events) {
             const uint64_t tick = sev.tick;
+            prefix.observe(sev);
 
             if (sev.isChannel()) {
-                prefixChannel = -1;
                 const uint8_t type = sev.typeNibble();
-                const uint8_t chan = sev.channel();
                 auto push = [&](uint8_t playType) {
                     RawEvent ev;
                     ev.tick = tick;
-                    ev.channel = chan;
                     ev.smfTrack = uint16_t(t);
                     ev.type = playType;
                     ev.data0 = sev.data0;
@@ -169,11 +163,14 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                 } else if (metaType == 0x58 && blob.size() >= 2) {
                     timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
                 } else if (metaType == 0x20 && blob.size() >= 1) {
-                    prefixChannel = blob[0] & 0x0F;
-                } else if (metaType == 0x03 && prefixChannel >= 0) {
-                    // A channel-scoped name: not this chunk's, and never
-                    // misread as a loop marker below.
-                } else if (metaType == 0x03 && trackNames[t].isEmpty()) {
+                    // Channel Prefix: scoping handled by `prefix` above.
+                } else if (metaType == 0x03 && prefix.channel >= 0
+                           && !smfMetaIsMarker(sev)) {
+                    // A channel-scoped name: not this chunk's. Marker text
+                    // is exempt — mid2agb reads markers regardless of the
+                    // prefix, so it falls through to the marker check.
+                } else if (metaType == 0x03 && prefix.channel < 0
+                           && trackNames[t].isEmpty()) {
                     const int len = std::min<int>(blob.size(), 64);
                     trackNames[t] = QString::fromLatin1(blob.constData(), len).trimmed();
                 } else if (metaType >= 0x01 && metaType <= 0x07) {

@@ -220,13 +220,12 @@ SongDocument::SongDocument(QObject *parent)
 bool SongDocument::load(const SongInfo &song, QString *error)
 {
     SmfFile smf;
+    // readFile coerces format 0 to format 1 at the parse layer, so every
+    // edit path below deals in one shape: chunks are tracks. Deterministic,
+    // so an untouched file re-converts identically next open; the disk copy
+    // flips to format 1 on the first real edit + save.
     if (!SmfFile::readFile(song.midPath, &smf, error))
         return false;
-    // Format 0 is coerced to format 1 here, once, so every edit path below
-    // deals in one shape: chunks are tracks. Deterministic, so an untouched
-    // file re-converts identically next open; the disk copy flips to format
-    // 1 on the first real edit + save.
-    convertToFormat1(&smf);
 
     m_smf = std::move(smf);
     m_cfg = song.cfg;
@@ -418,17 +417,27 @@ bool SongDocument::findLoopMarkerEvent(bool endMarker, int *smfTrack, size_t *in
 {
     const char marker = endMarker ? ']' : '[';
     for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        // Mirror MidiTimeline::build: the first 0x03 meta is consumed as the
-        // track name and never checked as a loop marker.
+        // Mirror MidiTimeline::build: name metas — the chunk's name (first
+        // unprefixed 0x03, marker text included) and channel-scoped
+        // (prefixed) non-marker 0x03s — are never checked as loop markers;
+        // a prefixed 0x03 carrying marker text has no name position, so it
+        // IS one (mid2agb's reading).
         bool nameSeen = false;
+        SmfChannelPrefix prefix;
         const auto &evs = m_smf.tracks[t].events;
         for (size_t i = 0; i < evs.size(); i++) {
             const SmfEvent &ev = evs[i];
+            prefix.observe(ev);
             if (!ev.isMeta())
                 continue;
-            if (ev.metaType == 0x03 && !nameSeen) {
-                nameSeen = true;
-                continue;
+            if (ev.metaType == 0x03) {
+                if (prefix.channel >= 0) {
+                    if (!smfMetaIsMarker(ev))
+                        continue; // channel-scoped name, not this chunk's
+                } else if (!nameSeen) {
+                    nameSeen = true;
+                    continue;
+                }
             }
             if (metaIsLoopMarker(ev, marker)) {
                 *smfTrack = int(t);
@@ -1541,8 +1550,7 @@ void SongDocument::deleteTrack(int engineTrack)
 
 bool nameIsLoopMarker(const QString &name)
 {
-    return name == QLatin1String("[") || name == QLatin1String("]")
-        || name == QLatin1String("][") || name == QLatin1String(":");
+    return smfTextIsMarker(name);
 }
 
 namespace {
@@ -1557,22 +1565,17 @@ QString trackNameText(const SmfEvent &ev)
 
 // Where the track's display name lives, mirroring MidiTimeline's reader:
 // the chunk's first unprefixed 0x03. An 0x03 scoped to a channel by a MIDI
-// Channel Prefix meta (0x20, live until the next channel event or prefix)
-// was format 0's per-track naming mechanism; conversion rewrites those, but
-// a foreign format-1 file may still carry them — never a chunk name.
-// SIZE_MAX when absent.
+// Channel Prefix (SmfChannelPrefix — format 0's per-track naming mechanism;
+// conversion rewrites those, but a foreign format-1 file may still carry
+// them) is never a chunk name. SIZE_MAX when absent.
 size_t trackNameLoc(const SmfTrack &track)
 {
-    int prefixChannel = -1;
+    SmfChannelPrefix prefix;
     for (size_t i = 0; i < track.events.size(); i++) {
         const SmfEvent &ev = track.events[i];
-        if (ev.isChannel()) {
-            prefixChannel = -1;
-        } else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1) {
-            prefixChannel = ev.blob[0] & 0x0F;
-        } else if (ev.isMeta() && ev.metaType == 0x03 && prefixChannel < 0) {
+        prefix.observe(ev);
+        if (ev.isMeta() && ev.metaType == 0x03 && prefix.channel < 0)
             return i;
-        }
     }
     return SIZE_MAX;
 }
@@ -1651,23 +1654,26 @@ bool SongDocument::moveTrack(int engineTrack, int targetEngine)
         std::vector<size_t> indices;
         // Classify exactly as the canonical readers do: tempo as lanePoints
         // validates it (three data bytes), time signatures via metaIsTimeSig,
-        // and the whole marker family mid2agb understands ("[", "]", "][",
-        // ":" — nameIsLoopMarker, the same set renameTrack refuses). The
-        // chunk's first 0x03 is the track's name, never a marker
-        // (findLoopMarkerEvent and MidiTimeline skip it the same way): it
-        // travels with its chunk.
+        // and the whole marker family mid2agb understands (smfMetaIsMarker,
+        // the same set renameTrack refuses). Name metas — the chunk's name
+        // (first unprefixed 0x03, marker text included) and channel-scoped
+        // non-marker 0x03s, as findLoopMarkerEvent and MidiTimeline classify
+        // them — are never markers: they travel with their chunk.
         bool nameSeen = false;
+        SmfChannelPrefix prefix;
         for (size_t i = 0; i < evs.size(); i++) {
             const SmfEvent &ev = evs[i];
+            prefix.observe(ev);
             if (!ev.isMeta())
                 continue;
-            if (ev.metaType == 0x03 && !nameSeen) {
-                nameSeen = true;
+            if (ev.metaType == 0x03
+                && (prefix.channel >= 0 ? !smfMetaIsMarker(ev) : !nameSeen)) {
+                if (prefix.channel < 0)
+                    nameSeen = true;
                 continue;
             }
             const bool tempo = ev.metaType == 0x51 && ev.blob.size() == 3;
-            const bool marker = ev.metaType >= 0x01 && ev.metaType <= 0x07
-                && nameIsLoopMarker(trackNameText(ev));
+            const bool marker = smfMetaIsMarker(ev);
             if (tempo || metaIsTimeSig(ev) || marker) {
                 indices.push_back(i);
                 rescued.push_back(ev);

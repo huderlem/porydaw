@@ -222,6 +222,7 @@ bool SmfFile::read(const QByteArray &bytes, SmfFile *out, QString *error)
 
     out->format = format;
     out->division = division;
+    out->wasFormat0 = false;
     out->tracks.clear();
     out->tracks.reserve(numTracks);
 
@@ -242,6 +243,10 @@ bool SmfFile::read(const QByteArray &bytes, SmfFile *out, QString *error)
         out->tracks.push_back(std::move(track));
         r.pos = trackEnd;
     }
+    // The parse layer is the one choke point every loader goes through:
+    // coercing here (rather than at each call site) makes "format 0 never
+    // escapes the loaders" true by construction.
+    convertToFormat1(out);
     return true;
 }
 
@@ -316,37 +321,66 @@ bool SmfFile::writeFile(const QString &path, QString *error) const
     return true;
 }
 
+bool smfTextIsMarker(const QString &text)
+{
+    return text == QLatin1String("[") || text == QLatin1String("]")
+        || text == QLatin1String("][") || text == QLatin1String(":");
+}
+
+bool smfMetaIsMarker(const SmfEvent &ev)
+{
+    if (!ev.isMeta() || ev.metaType < 0x01 || ev.metaType > 0x07)
+        return false;
+    const int len = std::min<int>(int(ev.blob.size()), 64);
+    return smfTextIsMarker(QString::fromLatin1(ev.blob.constData(), len).trimmed());
+}
+
 void convertToFormat1(SmfFile *smf)
 {
     if (smf->format != 0)
         return;
     smf->format = 1;
+    smf->wasFormat0 = true;
     if (smf->tracks.empty())
         return;
 
     SmfTrack conductor;
     std::array<SmfTrack, 16> channels;
-    std::array<bool, 16> used{}; // has channel events (a name alone doesn't
-                                 // occupy an engine slot in either format)
     uint64_t endTick = 0;
 
     // A format-0 file has one chunk; out-of-spec extras get the same
     // treatment, merged into the shared buckets.
     for (const SmfTrack &track : smf->tracks) {
         endTick = std::max(endTick, track.endTick);
-        // Channel Prefix (0x20) scopes following name metas to a channel,
-        // live until the next channel event or prefix — the readers'
-        // (MidiTimeline, trackNameLoc) exact rule.
-        int prefixChannel = -1;
+        SmfChannelPrefix prefix; // the readers' exact scoping rule
         for (const SmfEvent &ev : track.events) {
+            prefix.observe(ev);
             if (ev.isChannel()) {
-                prefixChannel = -1;
                 channels[ev.channel()].events.push_back(ev);
-                used[ev.channel()] = true;
             } else if (ev.isMeta() && ev.metaType == 0x20 && ev.blob.size() >= 1) {
-                prefixChannel = ev.blob[0] & 0x0F;
-            } else if (ev.isMeta() && ev.metaType == 0x03 && prefixChannel >= 0) {
-                channels[prefixChannel].events.push_back(ev);
+                // Dropped: the per-channel chunk structure carries its meaning.
+            } else if (ev.isMeta() && ev.metaType == 0x03 && prefix.channel >= 0
+                       && smfMetaIsMarker(ev)) {
+                // A prefixed 0x03 carrying marker text: mid2agb reads it as
+                // a marker from the seq chunk (prefixes don't exempt it),
+                // so it must stay in chunk 0 for the .s to survive — and it
+                // keeps a prefix so every reader still classifies it as
+                // prefixed marker text rather than the conductor's name.
+                SmfEvent pfx;
+                pfx.tick = ev.tick;
+                pfx.status = 0xFF;
+                pfx.metaType = 0x20;
+                pfx.blob = QByteArray(1, char(prefix.channel));
+                conductor.events.push_back(pfx);
+                conductor.events.push_back(ev);
+            } else if (ev.isMeta() && ev.metaType >= 0x01 && ev.metaType <= 0x07
+                       && prefix.channel >= 0 && !smfMetaIsMarker(ev)) {
+                // Channel-scoped text (names, instrument names, lyrics)
+                // travels to its channel's chunk. Marker text is exempt:
+                // mid2agb reads markers from the seq chunk regardless of
+                // prefixes, so it stays in chunk 0 (non-0x03 marker text
+                // needs no prefix there — only 0x03s can be names).
+                channels[prefix.channel].events.push_back(ev);
             } else {
                 conductor.events.push_back(ev);
             }
@@ -361,7 +395,10 @@ void convertToFormat1(SmfFile *smf)
                      });
     smf->tracks.push_back(std::move(conductor));
     for (int c = 0; c < 16; c++) {
-        if (!used[c])
+        // A bucket holding only channel-scoped text (no channel events)
+        // still emits: a name-only chunk never occupies an engine slot or
+        // produces an agb track, but dropping it would lose foreign data.
+        if (channels[c].events.empty())
             continue;
         channels[c].endTick = endTick;
         // Already tick-sorted for a single source chunk; a merge of

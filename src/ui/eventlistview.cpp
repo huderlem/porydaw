@@ -943,8 +943,6 @@ void EventListView::syncTrackSelection()
 
 void EventListView::onTrackMoved(int fromChunk, int toChunk)
 {
-    if (fromChunk == toChunk)
-        return;
     // Remap the anchored chunk through the rotation, into m_pendingChunk
     // for the documentChanged refresh that follows (the document is
     // mid-mutation here — no reads, no rebuild yet). Starts from a prior

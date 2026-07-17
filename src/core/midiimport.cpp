@@ -12,18 +12,17 @@ constexpr int kMaxEngineTracks = 16; // m4a MAX_TRACKS
 constexpr int kDefaultPcmBudget = 5; // pokeemerald m4aSoundInit maxChans
 
 // Mirrors SongDocument::rebuildTrackMap / MidiTimeline::build: the first 16
-// channel-bearing chunks, each tagged with its first channel event's channel
-// (callers convert format 0 away before analysis).
-std::vector<std::pair<int, uint8_t>> engineTrackMap(const SmfFile &smf, int *dropped)
+// channel-bearing chunks, as chunk indices in file order.
+std::vector<int> engineTrackMap(const SmfFile &smf, int *dropped)
 {
-    std::vector<std::pair<int, uint8_t>> map;
+    std::vector<int> map;
     *dropped = 0;
     for (size_t t = 0; t < smf.tracks.size(); t++) {
         for (const SmfEvent &ev : smf.tracks[t].events) {
             if (!ev.isChannel())
                 continue;
             if (int(map.size()) < kMaxEngineTracks)
-                map.push_back({int(t), ev.channel()});
+                map.push_back(int(t));
             else
                 (*dropped)++;
             break;
@@ -37,7 +36,6 @@ std::vector<std::pair<int, uint8_t>> engineTrackMap(const SmfFile &smf, int *dro
 ImportAnalysis analyzeForImport(const SmfFile &smf)
 {
     ImportAnalysis a;
-    a.format = smf.format;
     a.division = smf.division;
     a.smfTrackCount = int(smf.tracks.size());
 
@@ -57,13 +55,17 @@ ImportAnalysis analyzeForImport(const SmfFile &smf)
     std::vector<NoteEdge> edges;
 
     for (int et = 0; et < int(map.size()); et++) {
-        const auto [smfTrack, channel] = map[et];
+        const int smfTrack = map[et];
         ImportTrackInfo info;
         info.smfTrack = smfTrack;
-        info.channel = channel;
 
+        // Name rule mirrors trackNameLoc/MidiTimeline: the chunk's first
+        // unprefixed 0x03 — a Channel-Prefix-scoped 0x03 is never its name.
+        SmfChannelPrefix prefix;
         for (const SmfEvent &ev : smf.tracks[smfTrack].events) {
-            if (ev.isMeta() && ev.metaType == 0x03 && info.name.isEmpty())
+            prefix.observe(ev);
+            if (ev.isMeta() && ev.metaType == 0x03 && info.name.isEmpty()
+                && prefix.channel < 0)
                 info.name = QString::fromLatin1(ev.blob).trimmed();
             if (!ev.isChannel())
                 continue;
