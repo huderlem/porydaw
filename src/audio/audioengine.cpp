@@ -156,6 +156,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
         TimelinePlayer::primeVoices(m_engine.get(), m_timeline, 0);
     }
     resetPreviewEngine();
+    clearTimedPreviews();
 
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -186,6 +187,7 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // playback don't hard-cut the audio.
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
+    clearTimedPreviews();
     // Re-latch controller state from the rebuilt timeline: the edit may have
     // deleted or moved the events behind the engine's current bend/CC values
     // (e.g. clearing a lane), which would otherwise stay latched until stop.
@@ -208,6 +210,7 @@ void AudioEngine::seek(uint64_t samplePos)
     // the landing position.
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
+    clearTimedPreviews();
     m_player.seek(samplePos, m_timeline);
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
@@ -239,6 +242,7 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
     if (m_deviceStarted)
         ma_device_stop(m_device);
     m4a_engine_all_sound_off(m_engine.get());
+    clearTimedPreviews();
     m_voicegroup = voicegroup;
     m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
     // Re-latch program changes: the tracks' instrument state still points
@@ -293,6 +297,19 @@ void AudioEngine::previewNote(uint8_t track, uint8_t key, uint8_t velocity)
                        | (uint32_t(key & 0x7F) << 8) | velocity);
 }
 
+void AudioEngine::previewNoteTimed(uint8_t track, uint8_t key, uint8_t velocity,
+                                   uint32_t durationSamples)
+{
+    if (velocity == 0 || durationSamples == 0)
+        return;
+    const uint32_t w = m_timedWrite.load(std::memory_order_relaxed);
+    if (w - m_timedRead.load(std::memory_order_acquire) >= kTimedRingSize)
+        return;
+    m_timedRing[w % kTimedRingSize] = {uint8_t(track & 0x0F), uint8_t(key & 0x7F),
+                                       velocity, durationSamples};
+    m_timedWrite.store(w + 1, std::memory_order_release);
+}
+
 void AudioEngine::previewVoice(uint8_t voice, uint8_t key, uint8_t velocity)
 {
     m_previewVoiceGen++;
@@ -309,6 +326,7 @@ void AudioEngine::unloadSong()
     m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
     resetPreviewEngine();
+    clearTimedPreviews();
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
     m_player.reset();
@@ -423,6 +441,65 @@ void AudioEngine::applyPreviewNote()
     }
 }
 
+void AudioEngine::applyTimedPreviews(uint32_t frameCount)
+{
+    const uint32_t w = m_timedWrite.load(std::memory_order_acquire);
+    uint32_t r = m_timedRead.load(std::memory_order_relaxed);
+    for (; r != w; r++) {
+        const TimedPreview cmd = m_timedRing[r % kTimedRingSize];
+        // Retrigger a still-sounding key (note-off first — the engine stops
+        // channels by track+key, so duplicates must never stack) and reuse
+        // its slot; otherwise take a free slot, or steal the preview closest
+        // to its own note-off.
+        int slot = -1;
+        for (int i = 0; i < m_timedActiveCount; i++) {
+            if (m_timedActive[i].track == cmd.track && m_timedActive[i].key == cmd.key) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0 && m_timedActiveCount < kTimedMaxActive) {
+            slot = m_timedActiveCount++;
+        } else {
+            if (slot < 0) {
+                slot = 0;
+                for (int i = 1; i < m_timedActiveCount; i++) {
+                    if (m_timedActive[i].remaining < m_timedActive[slot].remaining)
+                        slot = i;
+                }
+            }
+            m4a_engine_note_off(m_engine.get(), m_timedActive[slot].track,
+                                m_timedActive[slot].key);
+        }
+        m4a_engine_note_on(m_engine.get(), cmd.track, cmd.key, cmd.velocity);
+        m_timedActive[slot] = {cmd.track, cmd.key, int64_t(cmd.durationSamples)};
+    }
+    m_timedRead.store(r, std::memory_order_release);
+
+    // Count down and release. Expiry lands at callback granularity, which is
+    // plenty for an audition.
+    for (int i = 0; i < m_timedActiveCount;) {
+        m_timedActive[i].remaining -= frameCount;
+        if (m_timedActive[i].remaining <= 0) {
+            m4a_engine_note_off(m_engine.get(), m_timedActive[i].track,
+                                m_timedActive[i].key);
+            m_timedActive[i] = m_timedActive[--m_timedActiveCount];
+        } else {
+            i++;
+        }
+    }
+}
+
+// Cold: drop queued and sounding timed previews. Callers have already cut or
+// released the engine's sound (or destroyed the engine), so no note-offs are
+// owed; stale entries would otherwise cut a later playback note that lands on
+// the same track and key.
+void AudioEngine::clearTimedPreviews()
+{
+    m_timedRead.store(m_timedWrite.load());
+    m_timedActiveCount = 0;
+}
+
 void AudioEngine::applyPreviewVoice()
 {
     const uint64_t cmd = m_previewVoiceCmd.load();
@@ -450,6 +527,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyTransportTransition();
     applyMuteTransition();
     applyPreviewNote();
+    applyTimedPreviews(frameCount);
     applyPreviewVoice();
 
     // Voice edits: tracks hold a ToneData copy taken at program change, so a

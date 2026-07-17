@@ -7,7 +7,9 @@
 #include <QPoint>
 #include <QString>
 #include <QWidget>
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 #include "core/songdocument.h"
 #include "project/decompproject.h"
@@ -20,7 +22,9 @@
 // Reaper-style latch makes the last clicked or
 // velocity-dragged note's velocity the default for the next drawn note,
 // and an edge resize snaps to the ruler's absolute grid even when the
-// note's own edge sits off-grid. Ctrl+arrows transpose (Shift: octave)
+// note's own edge sits off-grid. A right-drag band auditions each note
+// as it first covers it (self-releasing, Ableton-style) and selects the
+// covered notes on release. Ctrl+arrows transpose (Shift: octave)
 // and nudge the selection along the same absolute grid — both the roll's
 // note selection and a multi-track time selection — and the view follows
 // notes moved out of sight with a minimal scroll (flush at the edge, not
@@ -255,6 +259,52 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
               Qt::NoButton);
     if (doc.findNote(track, c.tick, uint8_t(c.key), &noteC))
         fail("double-click on a note did not delete it");
+
+    // Band-sweep audition: notes audition (self-releasing, duration in
+    // samples) as the right-drag rubber band first covers them — one
+    // audition per covered note, matching the selection the release
+    // commits, and no undo commands.
+    {
+        int auditions = 0;
+        quint32 minDur = UINT32_MAX;
+        auto conn = QObject::connect(
+            &view, &SongView::auditionNoteTimed, &view,
+            [&](int, int, int, quint32 dur) {
+                auditions++;
+                minDur = std::min(minDur, dur);
+            });
+        const int preBandCount = doc.undoStack()->count();
+        const QPoint sweepStart(songview::kKeyboardW + 1, 0);
+        const QPoint sweepEnd(std::max(a.center.x(), b.center.x()) + 4,
+                              std::max(a.center.y(), b.center.y()) + 4);
+        sendMouse(roll, QEvent::MouseButtonPress, sweepStart, Qt::RightButton,
+                  Qt::RightButton);
+        sendMouse(roll, QEvent::MouseMove, a.center + QPoint(4, 4), Qt::NoButton,
+                  Qt::RightButton);
+        if (auditions < 1)
+            fail("sweeping the band over a note did not audition it");
+        sendMouse(roll, QEvent::MouseMove, sweepEnd, Qt::NoButton,
+                  Qt::RightButton);
+        sendMouse(roll, QEvent::MouseButtonRelease, sweepEnd, Qt::RightButton,
+                  Qt::NoButton);
+        QObject::disconnect(conn);
+        const std::vector<SongView::NoteId> &sel = view.selection();
+        if (sel.size() < 2
+            || std::find(sel.begin(), sel.end(),
+                         SongView::NoteId{uint32_t(a.tick), uint8_t(a.key)})
+                   == sel.end()
+            || std::find(sel.begin(), sel.end(),
+                         SongView::NoteId{uint32_t(b.tick), uint8_t(b.key)})
+                   == sel.end())
+            fail("band release did not select the swept notes");
+        if (auditions != int(sel.size()))
+            fail("band sweep auditions did not match the notes it covered");
+        if (auditions > 0 && minDur == 0)
+            fail("band sweep auditioned a zero-length note");
+        if (doc.undoStack()->count() != preBandCount)
+            fail("band sweep pushed an undo command");
+        view.clearSelection(); // the sections below manage their own
+    }
 
     // Edge resize snaps to the ruler's absolute grid, not to grid-sized
     // offsets from the note's own end: give a note an off-grid duration

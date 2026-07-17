@@ -85,6 +85,12 @@ public:
     // previous one, so at most one preview note sounds at a time.
     void previewNote(uint8_t track, uint8_t key, uint8_t velocity);
 
+    // Hot: audition a note for a fixed length (band-sweep chord preview).
+    // Unlike previewNote, timed previews stack polyphonically; the audio
+    // thread sends each note-off itself once the duration elapses.
+    void previewNoteTimed(uint8_t track, uint8_t key, uint8_t velocity,
+                          uint32_t durationSamples);
+
     // Hot: audition a voicegroup entry by program number (SPEC §6.1 voicegroup
     // browser). Runs on a second engine instance (SPEC §3) so the program
     // change never disturbs playback track state. velocity 0 releases.
@@ -139,6 +145,8 @@ private:
     void applyTransportTransition();
     void applyMuteTransition();
     void applyPreviewNote();
+    void applyTimedPreviews(uint32_t frameCount);
+    void clearTimedPreviews();
     void applyPreviewVoice();
     void resetPreviewEngine();
     ToneData *previewVoices() const;
@@ -168,6 +176,21 @@ private:
     // are seen by the audio thread.
     std::atomic<uint32_t> m_previewCmd{0};
     uint8_t m_previewGen = 0; // UI thread only
+    // Timed-preview commands (band-sweep chord audition): a fixed SPSC ring.
+    // The UI thread produces at m_timedWrite; the audio thread consumes at
+    // m_timedRead, starting each note and releasing it when its duration
+    // elapses. A full ring drops the preview, which is harmless.
+    struct TimedPreview {
+        uint8_t track;
+        uint8_t key;
+        uint8_t velocity;
+        uint32_t durationSamples;
+    };
+    static constexpr uint32_t kTimedRingSize = 64;
+    static constexpr int kTimedMaxActive = 24;
+    TimedPreview m_timedRing[kTimedRingSize];
+    std::atomic<uint32_t> m_timedWrite{0}; // UI thread increments
+    std::atomic<uint32_t> m_timedRead{0};  // audio thread increments
     // Voice-preview command: generation<<32 | voice<<16 | key<<8 | velocity.
     std::atomic<uint64_t> m_previewVoiceCmd{0};
     uint8_t m_previewVoiceGen = 0; // UI thread only
@@ -185,6 +208,14 @@ private:
     uint32_t m_appliedPreview = 0;
     int m_previewTrack = -1; // sounding preview note, -1 when none
     int m_previewKey = -1;
+    // Sounding timed previews, counting down to their note-offs.
+    struct ActiveTimed {
+        uint8_t track;
+        uint8_t key;
+        int64_t remaining; // samples until note-off
+    };
+    ActiveTimed m_timedActive[kTimedMaxActive];
+    int m_timedActiveCount = 0;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;

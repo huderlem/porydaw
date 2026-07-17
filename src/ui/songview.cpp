@@ -1069,6 +1069,7 @@ protected:
             && (event->pos() - m_pressPos).manhattanLength()
                    >= QApplication::startDragDistance()) {
             m_drag = m_rightShift ? Drag::TimeSel : Drag::Band;
+            m_bandAud.clear();
         }
         if (m_leftPress && m_drag == Drag::None
             && std::abs(event->pos().x() - m_pressPos.x())
@@ -1197,6 +1198,7 @@ protected:
             sel.endTick = std::max(m_rightAnchorTick, t);
             m_sv->setTimeSelection(sel);
         } else if (m_drag == Drag::Band) {
+            auditionBandEntrants(QRect(m_pressPos, m_curPos).normalized());
             update();
         }
     }
@@ -1227,6 +1229,7 @@ protected:
                 else
                     m_sv->clearTimeSelection();
             } else if (drag == Drag::Band) {
+                m_bandAud.clear();
                 selectBand(QRect(m_pressPos, m_curPos).normalized(),
                            event->modifiers() & Qt::ControlModifier);
             } else if (doc && m_rightHit) {
@@ -1819,6 +1822,25 @@ private:
     }
 
     // Selects the selected track's notes intersecting the band rect.
+    // Ableton-style sweep audition: each note sounds for its own length the
+    // moment the rubber band first covers it, so sweeping across a chord
+    // hears its notes together. A note swept out and back in re-auditions.
+    void auditionBandEntrants(const QRect &band)
+    {
+        std::vector<SongView::NoteId> inBand;
+        for (const ViewNote &note : m_sv->model().notes) {
+            if (note.track != m_sv->selectedTrack()
+                || !noteRect(note).intersects(band))
+                continue;
+            const SongView::NoteId id{note.startTick, note.key};
+            if (std::find(m_bandAud.begin(), m_bandAud.end(), id) == m_bandAud.end())
+                m_sv->auditionTimed(note.track, note.key, note.velocity,
+                                    note.startTick, note.endTick);
+            inBand.push_back(id);
+        }
+        m_bandAud = std::move(inBand);
+    }
+
     void selectBand(const QRect &band, bool additive)
     {
         std::vector<SongView::NoteId> ids = additive
@@ -1859,6 +1881,8 @@ private:
     uint64_t m_rightAnchorTick = 0; // snapped tick of the right press
     bool m_rightHit = false;   // that press landed on a note…
     SongView::NoteId m_rightHitId{}; // …this one
+    std::vector<SongView::NoteId> m_bandAud; // notes the band currently
+                                             // covers; entrants audition
     ViewNote m_velAnchor{};    // pressed note of a velocity drag (a copy)
     int m_velAudEff = -1;      // last effective velocity auditioned mid-drag
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
@@ -4713,6 +4737,22 @@ void SongView::announceNote(const ViewNote &note)
                            .arg(ticks)
                            .arg(mid2agbEffectiveDuration(ticks, m_timeline->ticksPerBeat,
                                                          ext, exact)));
+}
+
+void SongView::auditionTimed(int track, int key, int velocity, uint64_t startTick,
+                             uint64_t endTick)
+{
+    if (!m_timeline || endTick <= startTick)
+        return;
+    uint64_t dur = m_timeline->sampleForTick(endTick) - m_timeline->sampleForTick(startTick);
+    // Safety cap: an unterminated note's span runs to the end of the song,
+    // which is not a useful audition length.
+    const uint64_t cap = uint64_t(m_timeline->sampleRate * 10.0);
+    if (cap > 0)
+        dur = std::min(dur, cap);
+    if (dur > 0)
+        emit auditionNoteTimed(track, key, velocity,
+                               quint32(std::min<uint64_t>(dur, UINT32_MAX)));
 }
 
 void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
