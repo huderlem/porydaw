@@ -1654,7 +1654,7 @@ private:
             const bool ghost = note.track != selected;
             if (ghost != ghostPass)
                 continue;
-            const QRect r = noteRect(note);
+            const QRect r = displayedNoteRect(note);
             if (r.right() < kKeyboardW || r.left() > width())
                 continue;
             if (r.bottom() < 0 || r.top() > height())
@@ -1704,48 +1704,51 @@ private:
         }
     }
 
-    // Dashed outlines of the selected notes at their dragged position/length,
-    // or the pending note of a draw gesture (solid, like the real note).
+    // The pending note of a draw gesture, solid like the real note. (Move and
+    // resize gestures need no extra pass: drawNotes paints the selected notes
+    // at their dragged geometry via displayedNoteRect.)
     void drawDragPreview(QPainter &p, const SongViewModel &model, int selected)
     {
-        if (m_drag == Drag::Draw) {
-            const int x0 = kKeyboardW + m_sv->contentX(double(m_drawTick));
-            const int x1 =
-                kKeyboardW + m_sv->contentX(double(m_drawTick + uint64_t(m_drawDur)));
-            const QRect r(x0, keyToY(m_drawKey) + 1, std::max(2, x1 - x0),
-                          std::max(2, m_sv->keyHeight() - 1));
-            QColor c = SongView::trackColor(selected);
-            c.setAlpha(120 + m_lastVelocity);
-            p.fillRect(r, c);
-            p.setPen(QPen(SongView::trackColor(selected).darker(150), 1));
-            p.drawRect(r.adjusted(0, 0, -1, -1));
+        Q_UNUSED(model);
+        if (m_drag != Drag::Draw)
             return;
+        const int x0 = kKeyboardW + m_sv->contentX(double(m_drawTick));
+        const int x1 =
+            kKeyboardW + m_sv->contentX(double(m_drawTick + uint64_t(m_drawDur)));
+        const QRect r(x0, keyToY(m_drawKey) + 1, std::max(2, x1 - x0),
+                      std::max(2, m_sv->keyHeight() - 1));
+        QColor c = SongView::trackColor(selected);
+        c.setAlpha(120 + m_lastVelocity);
+        p.fillRect(r, c);
+        p.setPen(QPen(SongView::trackColor(selected).darker(150), 1));
+        p.drawRect(r.adjusted(0, 0, -1, -1));
+    }
+
+    // Where the note sits on screen right now: its stored geometry, displaced
+    // by the live move/resize deltas when it's part of the gesture. Mirrors
+    // the clamping applied on release in mouseReleaseEvent.
+    QRect displayedNoteRect(const ViewNote &note) const
+    {
+        const bool dragging = m_drag == Drag::Move || m_drag == Drag::Resize
+            || m_drag == Drag::ResizeLeft;
+        if (!dragging || !m_sv->isSelected(note))
+            return noteRect(note);
+        int64_t tick, endTick;
+        if (m_drag == Drag::ResizeLeft) {
+            // The note-off pins the gesture; only the start moves.
+            endTick = int64_t(note.endTick);
+            tick = std::clamp<int64_t>(int64_t(note.startTick) + m_dTick, 0,
+                                       endTick - 1);
+        } else {
+            tick = std::max<int64_t>(0, int64_t(note.startTick) + m_dTick);
+            endTick = std::max<int64_t>(tick + 1,
+                                        int64_t(note.endTick) + m_dTick + m_dDur);
         }
-        if (m_drag != Drag::Move && m_drag != Drag::Resize && m_drag != Drag::ResizeLeft)
-            return;
-        if (m_dTick == 0 && m_dKey == 0 && m_dDur == 0)
-            return;
-        p.setPen(QPen(palette().color(QPalette::WindowText), 1, Qt::DashLine));
-        for (const ViewNote &note : model.notes) {
-            if (note.track != selected || !m_sv->isSelected(note))
-                continue;
-            int64_t tick, endTick;
-            if (m_drag == Drag::ResizeLeft) {
-                // The note-off pins the gesture; only the start moves.
-                endTick = int64_t(note.endTick);
-                tick = std::clamp<int64_t>(int64_t(note.startTick) + m_dTick, 0,
-                                           endTick - 1);
-            } else {
-                tick = std::max<int64_t>(0, int64_t(note.startTick) + m_dTick);
-                endTick = std::max<int64_t>(tick + 1,
-                                            int64_t(note.endTick) + m_dTick + m_dDur);
-            }
-            const int key = std::clamp(int(note.key) + m_dKey, 0, 127);
-            const int x0 = kKeyboardW + m_sv->contentX(double(tick));
-            const int x1 = kKeyboardW + m_sv->contentX(double(endTick));
-            p.drawRect(QRect(x0, keyToY(key) + 1, std::max(2, x1 - x0),
-                             std::max(2, m_sv->keyHeight() - 1)));
-        }
+        const int key = std::clamp(int(note.key) + m_dKey, 0, 127);
+        const int x0 = kKeyboardW + m_sv->contentX(double(tick));
+        const int x1 = kKeyboardW + m_sv->contentX(double(endTick));
+        return QRect(x0, keyToY(key) + 1, std::max(2, x1 - x0),
+                     std::max(2, m_sv->keyHeight() - 1));
     }
 
     void showNoteMenu(QPoint pos)
