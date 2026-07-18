@@ -356,8 +356,27 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg)
                                  .arg(voice.sustain)
                                  .arg(voice.release));
         item->setData(0, Qt::UserRole, i);
+        markUsedRow(item, m_usedVoices.contains(i));
     }
     populateEditor();
+}
+
+void VoicegroupBrowser::markUsedRow(QTreeWidgetItem *item, bool used)
+{
+    QFont f = item->font(0);
+    f.setBold(used);
+    for (int col = 0; col < item->columnCount(); col++)
+        item->setFont(col, f);
+    item->setToolTip(0, used ? tr("Used by this song") : QString());
+}
+
+void VoicegroupBrowser::setUsedVoices(const QSet<int> &used)
+{
+    if (used == m_usedVoices)
+        return;
+    m_usedVoices = used;
+    for (int i = 0; i < m_tree->topLevelItemCount(); i++)
+        markUsedRow(m_tree->topLevelItem(i), used.contains(i));
 }
 
 void VoicegroupBrowser::setVoicegroupChoices(const QStringList &args)
@@ -429,6 +448,13 @@ void VoicegroupBrowser::selectSlot(int slot)
     if (slot < 0 || slot >= m_tree->topLevelItemCount())
         return;
     m_tree->setCurrentItem(m_tree->topLevelItem(slot));
+}
+
+void VoicegroupBrowser::revealSlot(int slot)
+{
+    selectSlot(slot);
+    if (QTreeWidgetItem *item = m_tree->topLevelItem(slot))
+        m_tree->scrollToItem(item, QAbstractItemView::PositionAtCenter);
 }
 
 void VoicegroupBrowser::pressedVoice(QTreeWidgetItem *item)

@@ -1172,6 +1172,16 @@ void EventListView::showContextMenu(const QPoint &pos)
     // the clicked row, so the two would coincide.)
     QMenu menu(this);
     QAction *insert = menu.addAction(tr("Insert event"));
+    // Jump-from-context on a program-change row: surface its voice in the
+    // voicegroup dock.
+    QAction *showVoice = nullptr;
+    int showProgram = -1;
+    const auto &events = m_document->smf().tracks[chunk].events;
+    if (src >= 0 && size_t(src) < events.size()
+        && typeKindOf(events[src]) == TypeProgram) {
+        showProgram = events[src].data0;
+        showVoice = menu.addAction(tr("Show voice in voicegroup"));
+    }
     menu.addSeparator();
     QAction *del = menu.addAction(deletable > 0
                                       ? tr("Delete %n event(s)", nullptr, deletable)
@@ -1186,6 +1196,8 @@ void EventListView::showContextMenu(const QPoint &pos)
             insertCopyOfRow(idx.row());
         else
             addEvent();
+    } else if (showVoice && chosen == showVoice) {
+        m_sv->revealVoice(showProgram);
     } else if (chosen == del) {
         deleteSelected();
     }

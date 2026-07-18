@@ -1,6 +1,7 @@
 #include <QComboBox>
 #include <QDir>
 #include <QDirIterator>
+#include <QDockWidget>
 #include <QFile>
 #include <QSettings>
 #include <QSpinBox>
@@ -443,6 +444,56 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                   "undone synth edits did not round-trip the .inc");
             check(readFileBytes(synthPath) == synthBytesSaved,
                   "the post-undo save wrote synth definitions");
+        }
+    }
+
+    // Jump-from-context reveal and used-voice marks: rows for programs the
+    // song references render bold, revealTrackVoice raises the dock and
+    // selects the track's current program, and document edits that add or
+    // remove voice changes keep the marks in sync.
+    {
+        QTreeWidget *tree = m_vgBrowser->findChild<QTreeWidget *>();
+        if (check(tree != nullptr, "voicegroup browser has no tree")) {
+            const QSet<int> used = tab->view->usedVoices();
+            check(!used.isEmpty(), "song reports no used voices");
+            int unused = -1;
+            for (int i = 0; i < VOICEGROUP_SIZE && unused < 0; i++) {
+                if (!used.contains(i))
+                    unused = i;
+            }
+            bool marksOk = true;
+            for (int p : used) {
+                const QTreeWidgetItem *item = tree->topLevelItem(p);
+                marksOk = marksOk && item && item->font(0).bold();
+            }
+            check(marksOk, "used voices are not marked bold in the dock");
+            check(unused < 0 || !tree->topLevelItem(unused)->font(0).bold(),
+                  "an unused voice is marked bold");
+
+            // Track-header path: the dock reappears and the track's current
+            // program becomes the selected slot.
+            m_vgDock->hide();
+            const int prog = tab->view->currentProgram(track);
+            check(prog >= 0, "track under test has no program");
+            tab->view->revealTrackVoice(track);
+            check(!m_vgDock->isHidden(), "reveal did not show the voicegroup dock");
+            check(m_vgBrowser->currentSlot() == prog,
+                  "reveal did not select the track's program");
+
+            if (unused >= 0) {
+                // Explicit-program path (the event list's context menu).
+                tab->view->revealVoice(unused);
+                check(m_vgBrowser->currentSlot() == unused,
+                      "revealVoice did not select the requested slot");
+
+                // A new voice change gains the mark; undoing it clears it.
+                tab->doc.addLanePoint(track, DOC_CC_VOICE, 480, unused);
+                check(tree->topLevelItem(unused)->font(0).bold(),
+                      "a new voice change did not gain the used mark");
+                tab->doc.undoStack()->undo();
+                check(!tree->topLevelItem(unused)->font(0).bold(),
+                      "undoing the voice change did not clear the used mark");
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QSet>
 #include <QTreeWidget>
 #include <QWidget>
 #include <functional>
@@ -61,6 +62,14 @@ public:
 
     int currentSlot() const;
     void selectSlot(int slot);
+    // Jump-from-context navigation (track header / event list): select the
+    // slot and scroll it into view. Never takes keyboard focus — Space and
+    // the roll's shortcuts must keep working during playback.
+    void revealSlot(int slot);
+    // The programs the song actually references (first programs + voice
+    // changes); their rows render bold so the handful of voices in play
+    // stands out of the 128.
+    void setUsedVoices(const QSet<int> &used);
     // The source's voice at slot changed outside the editor (an undo/redo,
     // or the owner applying a requested edit): refresh the slot's row, and
     // the editor panel when it currently shows that slot.
@@ -87,6 +96,7 @@ protected:
 private:
     void pressedVoice(QTreeWidgetItem *item);
     void releaseVoice();
+    void markUsedRow(QTreeWidgetItem *item, bool used);
     void populateEditor();
     void commitEdit();
     void updateRow(int slot);
@@ -101,6 +111,7 @@ private:
     QStringList m_vgChoices; // last list handed to setVoicegroupChoices
     QTreeWidget *m_tree = nullptr;
     int m_soundingVoice = -1;
+    QSet<int> m_usedVoices;
 
     const LoadedVoiceGroup *m_vg = nullptr;
     VoicegroupSource *m_source = nullptr;

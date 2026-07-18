@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QHash>
 #include <QList>
+#include <QSet>
 #include <QWidget>
 #include <cstdint>
 #include <functional>
@@ -165,6 +166,18 @@ public:
     int currentProgram(int track) const;
     QString instrumentLabel(int track) const; // "042 name (type)" from the voicegroup
     QString voiceShortName(uint8_t program) const;
+
+    // Jump-from-context: surface the program in the voicegroup dock (the
+    // main window raises it and selects the slot via revealVoiceRequested).
+    // revealTrackVoice resolves the track's program at the display position
+    // (what currentProgram shows in the header) first. Entry points: the
+    // header row's voice line and context menu, and the event list's
+    // program-change rows.
+    void revealVoice(int program);
+    void revealTrackVoice(int track);
+    // Every program the song references: each track's first program plus
+    // all voice changes. Feeds the dock's used-row highlighting.
+    QSet<int> usedVoices() const;
 
     // Modal voicegroup-entry picker with press-and-hold audition. Returns
     // false on cancel; otherwise *outVoice is the chosen entry (0-127).
@@ -415,6 +428,9 @@ signals:
     // Roll/event-list swap (user toggle or applyViewState); the main window
     // mirrors it into the View-menu checkbox.
     void eventListVisibilityChanged(bool visible);
+    // Jump-from-context voice navigation: the main window raises the
+    // voicegroup dock and selects this slot.
+    void revealVoiceRequested(int program);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

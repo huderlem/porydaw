@@ -3443,6 +3443,10 @@ protected:
                                               Qt::ElideRight, textW));
     }
 
+    // The painted voice line (paintEvent's instrument-label rect): a plain
+    // click here also reveals the voice in the voicegroup dock.
+    QRect voiceLineRect() const { return QRect(10, 22, width() - 36, 16); }
+
     void mousePressEvent(QMouseEvent *event) override
     {
         m_sv->trackHeaderClicked(m_track, event->modifiers());
@@ -3451,6 +3455,9 @@ protected:
         m_dragArmed = event->button() == Qt::LeftButton
             && !(event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
             && m_sv->document();
+        m_voiceClickArmed = event->button() == Qt::LeftButton
+            && !(event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))
+            && voiceLineRect().contains(event->pos());
         m_pressPos = event->pos();
     }
 
@@ -3485,7 +3492,9 @@ public:
         if (m_sv->document()) {
             tip += SongView::tr("\nDouble-click to rename · right-click "
                                 "to change voice, duplicate, or delete"
-                                " · drag to reorder");
+                                " · drag to reorder"
+                                "\nClick the voice name to show it in the "
+                                "voicegroup dock");
         }
         setToolTip(tip);
     }
@@ -3535,6 +3544,8 @@ protected:
         m_sv->selectTrack(m_track);
         QMenu menu(this);
         QAction *voiceAction = menu.addAction(SongView::tr("Change voice..."));
+        QAction *showVoiceAction =
+            menu.addAction(SongView::tr("Show voice in voicegroup"));
         QAction *renameAction = menu.addAction(SongView::tr("Rename track..."));
         QAction *duplicateAction = menu.addAction(SongView::tr("Duplicate track"));
         duplicateAction->setEnabled(m_sv->document()->canAddTrack());
@@ -3545,6 +3556,9 @@ protected:
         // inline editor — no edit until it commits — so it's direct.)
         if (chosen == renameAction) {
             beginRename();
+        } else if (chosen == showVoiceAction) {
+            // No document edit — nothing rebuilds, so no queue needed.
+            m_sv->revealTrackVoice(m_track);
         } else if (chosen == voiceAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
@@ -3618,6 +3632,7 @@ private:
     QPoint m_pressPos;
     bool m_dragArmed = false;
     bool m_dragging = false;
+    bool m_voiceClickArmed = false;
 };
 
 class TrackHeaderPanel : public QWidget
@@ -3806,8 +3821,15 @@ void TrackHeaderRow::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
     m_dragArmed = false;
-    if (!m_dragging)
+    const bool voiceClick = m_voiceClickArmed;
+    m_voiceClickArmed = false;
+    if (!m_dragging) {
+        // A completed plain click on the voice line (not a drag, released
+        // where it pressed) surfaces the track's voice in the dock.
+        if (voiceClick && voiceLineRect().contains(event->pos()))
+            m_sv->revealTrackVoice(m_track);
         return;
+    }
     m_dragging = false;
     static_cast<TrackHeaderPanel *>(parentWidget())->endRowDrag(true);
 }
@@ -4946,6 +4968,38 @@ int SongView::currentProgram(int track) const
             prog = vc.program;
     }
     return prog;
+}
+
+void SongView::revealVoice(int program)
+{
+    if (program >= 0 && program < 128)
+        emit revealVoiceRequested(program);
+}
+
+void SongView::revealTrackVoice(int track)
+{
+    if (!m_timeline || track < 0 || track > 15)
+        return;
+    const int prog = currentProgram(track);
+    if (prog < 0) {
+        emit statusMessage(tr("Track %1 has no voice set.").arg(track + 1));
+        return;
+    }
+    revealVoice(prog);
+}
+
+QSet<int> SongView::usedVoices() const
+{
+    QSet<int> used;
+    if (!m_timeline)
+        return used;
+    for (int t = 0; t < 16; t++) {
+        if (m_timeline->tracks[t].used && m_timeline->tracks[t].firstProgram >= 0)
+            used.insert(m_timeline->tracks[t].firstProgram);
+    }
+    for (const VoiceChange &vc : m_model.voices)
+        used.insert(vc.program);
+    return used;
 }
 
 QString SongView::instrumentLabel(int track) const

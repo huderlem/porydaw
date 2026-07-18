@@ -553,6 +553,48 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("voice label did not return to the edit cursor after stop");
     }
 
+    // Jump-from-context: a completed plain click on a header row's voice
+    // line emits revealVoiceRequested with the track's current program (the
+    // main window raises the voicegroup dock and selects the slot). A click
+    // on the name line stays silent, as does a press there that turns into
+    // a reorder drag — and none of it is an edit, so the undo stack must
+    // not move.
+    {
+        (void)view.grab(); // layout pass: rows need real geometry
+        auto *row = view.findChild<QWidget *>(
+            QStringLiteral("trackHeaderRow%1").arg(track));
+        if (!row) {
+            fail("track header row for the edited track not found");
+        } else {
+            int revealed = -1, reveals = 0;
+            const QMetaObject::Connection conn = QObject::connect(
+                &view, &SongView::revealVoiceRequested,
+                [&](int program) { revealed = program; reveals++; });
+            const int preCount = doc.undoStack()->count();
+            const QPoint voicePos(row->width() / 2, 30); // the painted voice line
+            click(row, voicePos);
+            if (reveals != 1 || revealed != view.currentProgram(track))
+                fail("voice-line click did not request the track's program");
+            click(row, QPoint(row->width() / 2, 10)); // the name line
+            if (reveals != 1)
+                fail("a name-line click requested a voice reveal");
+            // A press on the voice line that becomes a reorder drag must
+            // not reveal on release (adjacent drop slot: no move commits).
+            sendMouse(row, QEvent::MouseButtonPress, voicePos, Qt::LeftButton,
+                      Qt::LeftButton);
+            sendMouse(row, QEvent::MouseMove, voicePos + QPoint(0, 25),
+                      Qt::NoButton, Qt::LeftButton);
+            sendMouse(row, QEvent::MouseButtonRelease, voicePos + QPoint(0, 25),
+                      Qt::LeftButton, Qt::NoButton);
+            QCoreApplication::processEvents();
+            if (reveals != 1)
+                fail("a reorder drag from the voice line requested a reveal");
+            if (doc.undoStack()->count() != preCount)
+                fail("voice navigation touched the undo stack");
+            QObject::disconnect(conn);
+        }
+    }
+
     // Header-row drag reorder (format 1 with two or more tracks): press the
     // first row, drag past the second row's center, release — the first two
     // tracks swap slots, the notes and the mute flag following, as ONE undo

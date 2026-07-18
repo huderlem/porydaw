@@ -418,6 +418,16 @@ SongSession *MainWindow::createSession()
             });
     connect(s->view, &SongView::statusMessage, this,
             [this](const QString &text) { statusBar()->showMessage(text, 6000); });
+    // Jump-from-context voice navigation (header voice line, event list):
+    // raise the dock and select the slot. No keyboard focus moves — Space
+    // and the roll's shortcuts keep working.
+    connect(s->view, &SongView::revealVoiceRequested, this, [this, s](int program) {
+        if (s != m_active)
+            return;
+        m_vgDock->show();
+        m_vgDock->raise();
+        m_vgBrowser->revealSlot(program);
+    });
     // A sidecar restore (applyViewState) can flip the view under the menu.
     connect(s->view, &SongView::eventListVisibilityChanged, this, [this, s](bool on) {
         if (s == m_active) {
@@ -966,6 +976,9 @@ void MainWindow::onDocumentChanged(SongSession &session)
         m_vgBrowser->setCurrentVoicegroupArg(cfg.voicegroupArg.isEmpty()
                                                  ? QStringLiteral("_dummy")
                                                  : cfg.voicegroupArg);
+        // Program changes may have been added/removed; refresh the dock's
+        // used-voice marks (no-op when the set is unchanged).
+        m_vgBrowser->setUsedVoices(session.view->usedVoices());
     }
 }
 
@@ -1392,6 +1405,7 @@ void MainWindow::updateVoicegroupBrowser()
                             ? QStringLiteral("_dummy")
                             : session->doc.cfg().voicegroupArg;
     m_vgBrowser->setVoicegroup(session->voicegroup);
+    m_vgBrowser->setUsedVoices(session->view->usedVoices());
     const VgCatalog &catalog = vgCatalog();
     m_vgBrowser->setVoicegroupChoices(catalog.groupArgs);
     m_vgBrowser->setCurrentVoicegroupArg(arg);
