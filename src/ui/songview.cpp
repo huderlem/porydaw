@@ -3494,7 +3494,8 @@ public:
                                 "to change voice, duplicate, or delete"
                                 " · drag to reorder"
                                 "\nClick the voice name to show it in the "
-                                "voicegroup dock");
+                                "voicegroup dock · double-click it to "
+                                "change the voice");
         }
         setToolTip(tip);
     }
@@ -3527,9 +3528,19 @@ public:
     void commitOpenRename() { finishRename(true, false); }
 
 protected:
-    void mouseDoubleClickEvent(QMouseEvent *) override
+    void mouseDoubleClickEvent(QMouseEvent *event) override
     {
         m_sv->selectTrack(m_track);
+        // The voice line opens the voice picker (its single click already
+        // revealed the voice in the dock); anywhere else renames. Queued:
+        // the picked voice's edit rebuilds the header panel, deleting this
+        // row out from under its own event handler.
+        if (voiceLineRect().contains(event->pos())) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->editTrackVoice(t); },
+                Qt::QueuedConnection);
+            return;
+        }
         beginRename();
     }
 

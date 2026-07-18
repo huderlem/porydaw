@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QKeyEvent>
@@ -6,6 +7,7 @@
 #include <QMouseEvent>
 #include <QPoint>
 #include <QString>
+#include <QTimer>
 #include <QWidget>
 #include <algorithm>
 #include <cstdio>
@@ -589,6 +591,43 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             QCoreApplication::processEvents();
             if (reveals != 1)
                 fail("a reorder drag from the voice line requested a reveal");
+            // Double-click routing: on the voice line it opens the modal
+            // voice picker (rejected here by a zero-timer poll so exec
+            // returns), NOT the inline rename; on the name line it still
+            // renames. Neither canceled dialog is an edit.
+            QTimer poll;
+            poll.setInterval(0);
+            bool pickerSeen = false;
+            QObject::connect(&poll, &QTimer::timeout, [&] {
+                if (QDialog *dlg = view.findChild<QDialog *>()) {
+                    pickerSeen = true;
+                    dlg->reject();
+                }
+            });
+            poll.start();
+            sendMouse(row, QEvent::MouseButtonDblClick, voicePos, Qt::LeftButton,
+                      Qt::LeftButton);
+            sendMouse(row, QEvent::MouseButtonRelease, voicePos, Qt::LeftButton,
+                      Qt::NoButton);
+            QCoreApplication::processEvents(); // the queued picker runs here
+            poll.stop();
+            if (!pickerSeen)
+                fail("voice-line double-click did not open the voice picker");
+            auto *renameEditor =
+                view.findChild<QLineEdit *>(QStringLiteral("trackRenameEditor"));
+            if (renameEditor && !renameEditor->isHidden())
+                fail("voice-line double-click opened the rename editor");
+            const QPoint namePos(row->width() / 2, 10);
+            sendMouse(row, QEvent::MouseButtonDblClick, namePos, Qt::LeftButton,
+                      Qt::LeftButton);
+            sendMouse(row, QEvent::MouseButtonRelease, namePos, Qt::LeftButton,
+                      Qt::NoButton);
+            renameEditor =
+                view.findChild<QLineEdit *>(QStringLiteral("trackRenameEditor"));
+            if (!renameEditor || renameEditor->isHidden())
+                fail("name-line double-click no longer opens the rename editor");
+            else
+                sendKey(renameEditor, Qt::Key_Escape, Qt::NoModifier);
             if (doc.undoStack()->count() != preCount)
                 fail("voice navigation touched the undo stack");
             QObject::disconnect(conn);
