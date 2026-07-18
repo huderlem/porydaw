@@ -821,14 +821,29 @@ struct MidiCursors {
     QCursor rightEdge;
 };
 
+// A pixmap cursor's default hotspot is its logical center, which most
+// backends scale to device pixels themselves — but Qt's xcb backend (through
+// at least the current dev branch) forwards the hotspot to X unscaled beside
+// the full device-pixel image, so at DPR > 1 the glyph would hang down-right
+// of the pointer. Hand xcb the center in device pixels; keep the logical
+// default elsewhere (e.g. Windows multiplies by the screen scale itself).
+QCursor centeredCursor(const QPixmap &pm)
+{
+    const qreal dpr = QGuiApplication::platformName() == QLatin1String("xcb")
+                          ? 1.0
+                          : pm.devicePixelRatio();
+    return QCursor(pm, qRound(pm.width() / (2.0 * dpr)),
+                   qRound(pm.height() / (2.0 * dpr)));
+}
+
 MidiCursors loadMidiCursors(qreal devicePixelRatio)
 {
     const QSize cursorSize(24, 24);
     const QIcon leftEdge(QStringLiteral(":/cursors/left-drag.png"));
     const QIcon rightEdge(QStringLiteral(":/cursors/right-drag.png"));
     return {devicePixelRatio,
-            QCursor(leftEdge.pixmap(cursorSize, devicePixelRatio)),
-            QCursor(rightEdge.pixmap(cursorSize, devicePixelRatio))};
+            centeredCursor(leftEdge.pixmap(cursorSize, devicePixelRatio)),
+            centeredCursor(rightEdge.pixmap(cursorSize, devicePixelRatio))};
 }
 
 } // namespace
