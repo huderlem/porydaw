@@ -19,6 +19,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QProxyStyle>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -32,7 +33,9 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <functional>
 #include <map>
+#include <utility>
 
 #include "core/mid2agbtables.h"
 #include "core/songdocument.h"
@@ -239,6 +242,92 @@ void drawGrid(QPainter &p, const SongView *sv, const QRect &rect, int origin)
                             p.drawLine(x, rect.top(), x, rect.bottom());
                         });
 }
+
+/**
+ *  macOS flashes a triggered menu item for 80 ms before hiding the menu.
+ * This overrides that.
+ *  */
+class NoteMenuStyle final : public QProxyStyle {
+public:
+  NoteMenuStyle() : QProxyStyle(QApplication::style()->name()) {}
+
+  int styleHint(StyleHint hint, const QStyleOption *option,
+                const QWidget *widget,
+                QStyleHintReturn *returnData) const override {
+    if (hint == SH_Menu_FlashTriggeredItem)
+      return 0;
+    return QProxyStyle::styleHint(hint, option, widget, returnData);
+  }
+};
+
+enum class NoteMenuChoice {
+  None,
+  Velocity,
+  Copy,
+  Cut,
+  Delete,
+};
+// Kept alive by PianoRoll so opening it does not reconstruct its actions.
+class NoteContextMenu final : public QMenu
+{
+public:
+    // Called when an outside right-click should move the menu to another note.
+    explicit NoteContextMenu(
+        QWidget *parent, std::function<void(QPoint)> onOutsideRightClick)
+        : QMenu(parent),
+          m_onOutsideRightClick(std::move(onOutsideRightClick))
+    {
+        auto *menuStyle = new NoteMenuStyle;
+        menuStyle->setParent(this);
+        setStyle(menuStyle);
+        m_velocityAction = addAction(QString());
+        addSeparator();
+        m_copyAction = addAction(SongView::tr("Copy"));
+        m_copyAction->setShortcut(QKeySequence::Copy);
+        m_cutAction = addAction(SongView::tr("Cut"));
+        m_cutAction->setShortcut(QKeySequence::Cut);
+        m_deleteAction = addAction(SongView::tr("Delete"));
+    }
+
+    void showMenuAt(QPoint globalPos, int velocity)
+    {
+        m_velocityAction->setText(
+            SongView::tr("Set Velocity (%1)").arg(velocity));
+        popup(globalPos);
+    }
+
+    NoteMenuChoice handleAction(QAction *action) const
+    {
+        if (action == m_velocityAction)
+            return NoteMenuChoice::Velocity;
+        if (action == m_copyAction)
+            return NoteMenuChoice::Copy;
+        if (action == m_cutAction)
+            return NoteMenuChoice::Cut;
+        if (action == m_deleteAction)
+            return NoteMenuChoice::Delete;
+        return NoteMenuChoice::None;
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override // If user clicks on a different note while popup is up, refocus, dont close menu
+    {
+        if (event->button() == Qt::RightButton
+            && !rect().contains(event->position().toPoint())) {
+            m_onOutsideRightClick(event->globalPosition().toPoint());
+            event->accept();
+            return;
+        }
+        QMenu::mousePressEvent(event);
+    }
+
+private:
+    std::function<void(QPoint)> m_onOutsideRightClick;
+    QAction *m_velocityAction = nullptr;
+    QAction *m_copyAction = nullptr;
+    QAction *m_cutAction = nullptr;
+    QAction *m_deleteAction = nullptr;
+};
 
 } // namespace
 
@@ -820,8 +909,12 @@ public:
         setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
         setMouseTracking(true);
         setFocusPolicy(Qt::ClickFocus);
+        m_noteMenu = new NoteContextMenu(
+            this, [this](QPoint globalPos) { moveNoteMenu(globalPos); });
+        connect(m_noteMenu, &QMenu::triggered, this, [this](QAction *action) {
+            handleNoteMenuChoice(m_noteMenu->handleAction(action));
+        });
     }
-
     // A mouse gesture is live (pan, note move/resize/velocity/draw, band or
     // time-selection sweep, a still-undecided press, keyboard gliss); the
     // playhead follow-scroll pauses while one runs so the view doesn't jump
@@ -1751,7 +1844,7 @@ private:
                      std::max(2, m_sv->keyHeight() - 1));
     }
 
-    void showNoteMenu(QPoint pos)
+    void showNoteMenu(QPoint localPos)
     {
         SongDocument *doc = m_sv->document();
         if (!doc)
@@ -1759,38 +1852,57 @@ private:
         const std::vector<DocNote> notes = resolveSelection();
         if (notes.empty())
             return;
-        QMenu menu(this);
-        QAction *velocity = menu.addAction(
-            SongView::tr("Set velocity… (%1)").arg(notes.front().velocity));
-        QAction *copy = menu.addAction(SongView::tr("Copy"));
-        copy->setShortcut(QKeySequence::Copy);
-        QAction *cut = menu.addAction(SongView::tr("Cut"));
-        cut->setShortcut(QKeySequence::Cut);
-        QAction *del = menu.addAction(SongView::tr("Delete"));
-        QAction *chosen = menu.exec(mapToGlobal(pos));
-        if (chosen == copy) {
-            copyNotes(notes);
-        } else if (chosen == cut) {
-            copyNotes(notes);
-            doc->deleteNotes(notes);
-            m_sv->clearSelection();
-        } else if (chosen == velocity) {
-            bool ok = false;
-            const int v = QInputDialog::getInt(
-                this, SongView::tr("Note velocity"),
-                SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
-                    .arg(mid2agbEffectiveVelocity(1)),
-                notes.front().velocity, 1, 127, 1, &ok);
-            if (ok) {
-                doc->setNotesVelocity(notes, uint8_t(v));
-                m_lastVelocity = uint8_t(v);
-            }
-        } else if (chosen == del) {
-            doc->deleteNotes(notes);
-            m_sv->clearSelection();
-        }
+        m_noteMenu->showMenuAt(mapToGlobal(localPos), notes.front().velocity);
     }
-
+    void moveNoteMenu(QPoint globalPos)
+    {
+        const QPoint pos = mapFromGlobal(globalPos);
+        const ViewNote *hit = m_sv->document() ? hitNote(pos) : nullptr;
+        if (!hit)
+            return;
+        if (!m_sv->isSelected(*hit))
+            m_sv->setSelection({{hit->startTick, hit->key}});
+        showNoteMenu(pos);
+        update();
+    }
+    void handleNoteMenuChoice(NoteMenuChoice choice)
+    {
+      SongDocument *doc = m_sv->document();
+      if (!doc)
+          return;
+      const auto notes = resolveSelection();
+      if (notes.empty())
+          return;
+      switch (choice) {
+      case NoteMenuChoice::Copy:
+          copyNotes(notes);
+          break;
+      case NoteMenuChoice::Cut:
+          copyNotes(notes);
+          doc->deleteNotes(notes);
+          m_sv->clearSelection();
+          break;
+      case NoteMenuChoice::Velocity: {
+          bool ok = false;
+          const int velocity = QInputDialog::getInt(
+              this, SongView::tr("Note velocity"),
+              SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
+                  .arg(mid2agbEffectiveVelocity(1)),
+              notes.front().velocity, 1, 127, 1, &ok);
+          if (ok) {
+              doc->setNotesVelocity(notes, uint8_t(velocity));
+              m_lastVelocity = uint8_t(velocity);
+          }
+          break;
+      }
+      case NoteMenuChoice::Delete:
+          doc->deleteNotes(notes);
+          m_sv->clearSelection();
+          break;
+      case NoteMenuChoice::None:
+          break;
+      }
+    }
     void drawKeyboard(QPainter &p)
     {
         const int keyH = m_sv->keyHeight();
@@ -1917,6 +2029,7 @@ private:
                                   // clicked/velocity-edited note
     bool m_panning = false;    // middle-drag pan
     QPoint m_panPos;           // last pan sample, global coords
+    NoteContextMenu *m_noteMenu = nullptr;
 };
 
 // ----------------------------------------------------------- AutomationArea

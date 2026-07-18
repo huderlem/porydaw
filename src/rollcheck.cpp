@@ -5,6 +5,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QMenu>
 #include <QPoint>
 #include <QString>
 #include <QTimer>
@@ -227,6 +228,35 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     }
     if (noteB.velocity != 73)
         fail("clicked note's velocity did not latch into the next draw");
+
+    // A right-click on another note while the note menu is open replaces the
+    // popup in one gesture instead of spending the click only dismissing it.
+    sendMouse(roll, QEvent::MouseButtonPress, b.center, Qt::RightButton,
+              Qt::RightButton);
+    sendMouse(roll, QEvent::MouseButtonRelease, b.center, Qt::RightButton,
+              Qt::NoButton);
+    QCoreApplication::processEvents();
+    auto *noteMenu = roll->findChild<QMenu *>();
+    if (!noteMenu || !noteMenu->isVisible()) {
+        fail("right-click did not open the note menu");
+    } else {
+        const QPoint aGlobal = roll->mapToGlobal(a.center);
+        sendMouse(noteMenu, QEvent::MouseButtonPress,
+                  noteMenu->mapFromGlobal(aGlobal), Qt::RightButton,
+                  Qt::RightButton);
+        sendMouse(noteMenu, QEvent::MouseButtonRelease,
+                  noteMenu->mapFromGlobal(aGlobal), Qt::RightButton,
+                  Qt::NoButton);
+        QCoreApplication::processEvents();
+        const std::vector<SongView::NoteId> &selection = view.selection();
+        const SongView::NoteId aId{uint32_t(a.tick), uint8_t(a.key)};
+        if (!noteMenu->isVisible())
+            fail("retargeting hid the open note menu");
+        if (selection.size() != 1 || !(selection.front() == aId))
+            fail("retargeting did not select the new note");
+        noteMenu->hide();
+        QCoreApplication::processEvents();
+    }
 
     // Drag latch: pull note B's velocity handle 20px up (1px = 1 step),
     // 73 -> 93. The latch must follow the dragged value, not the press value.
