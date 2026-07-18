@@ -6,7 +6,6 @@
 #include <QString>
 #include <cstdio>
 
-#include "audio/audioengine.h"
 #include "core/midiimport.h"
 #include "core/smf.h"
 #include "core/songdocument.h"
@@ -19,7 +18,7 @@
 // project — it writes into it. Creates a song, verifies its files and sidecar,
 // registers it (porydaw writes song_table.inc / songs.h / ld_script.ld
 // directly), verifies idempotency and stale-ID correction, and runs an
-// external-MIDI import (analysis + program remap + division rescale),
+// external-MIDI import (analysis + division rescale),
 // compiling both songs through the project's real mid2agb.
 
 namespace {
@@ -299,18 +298,7 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
     check(analysis.tracks.size() == 2 && analysis.tracks[1].programs.size() == 2,
           "import: per-track program usage");
 
-    // Remap program 5 -> 10 on the lead track, then land the song in the
-    // project the same way the wizard does.
     SmfFile imported = external;
-    applyProgramRemaps(&imported, {{analysis.tracks[0].smfTrack, 5, 10}});
-    int remapped = 0;
-    for (const SmfEvent &ev : imported.tracks[1].events) {
-        if (ev.isChannel() && ev.typeNibble() == 0xC)
-            remapped += (ev.data0 == 10) ? 1 : 0;
-    }
-    check(remapped == 1, "import: program remap not applied");
-    // The untouched track keeps its programs.
-    check(imported.tracks[2].events[0].data0 == 20, "import: remap bled across tracks");
 
     // Division rescale onto the 24-clock grid (the wizard's default for a
     // non-multiple-of-24 file). Floor arithmetic matches mid2agb, so the
@@ -333,9 +321,7 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
     // The wizard end of the same option: the analysis page offers the rescale
     // (default on) and songFile() applies it with the Sound page's clock base.
     {
-        AudioEngine audio; // never init()ed — the wizard only touches audio in
-                           // the mapping page's preview, which stays unentered
-        NewSongWizard wizard(&project, &audio, external, QStringLiteral("ext.mid"));
+        NewSongWizard wizard(&project, external, QStringLiteral("ext.mid"));
         auto *rescale = wizard.page(0)->findChild<QCheckBox *>();
         check(rescale && rescale->isChecked(),
               "wizard: rescale checkbox missing or off for division 400");

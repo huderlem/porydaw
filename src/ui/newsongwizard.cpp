@@ -10,15 +10,12 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QPushButton>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
-#include "audio/audioengine.h"
 #include "project/songregistry.h"
-#include "ui/m4asemantics.h"
 
 // ---- Identity: label, constant, music player ------------------------------
 
@@ -280,182 +277,29 @@ private:
     QCheckBox *m_rescale = nullptr;
 };
 
-// ---- Mapping: programs vs. the chosen voicegroup ---------------------------
-
-class MappingPage : public QWizardPage
-{
-public:
-    MappingPage(DecompProject *project, AudioEngine *audio, const ImportAnalysis &a,
-                const SoundPage *sound)
-        : m_project(project), m_audio(audio), m_analysis(a), m_sound(sound)
-    {
-        setTitle(tr("Instrument mapping"));
-        setSubTitle(tr("Each program the file uses, against the chosen voicegroup. "
-                       "Remap any program to a different voice; hold Play to "
-                       "audition."));
-
-        auto *layout = new QVBoxLayout(this);
-        m_vgLabel = new QLabel(this);
-        m_vgLabel->setWordWrap(true);
-        layout->addWidget(m_vgLabel);
-
-        m_tree = new QTreeWidget(this);
-        m_tree->setColumnCount(4);
-        m_tree->setHeaderLabels({tr("Track"), tr("Program"), tr("Voice"), QString()});
-        m_tree->setRootIsDecorated(false);
-        m_tree->header()->setSectionResizeMode(2, QHeaderView::Stretch);
-        layout->addWidget(m_tree, 1);
-    }
-
-    ~MappingPage() override { releaseVoicegroup(); }
-
-    void initializePage() override
-    {
-        releaseVoicegroup();
-        m_rows.clear();
-        m_tree->clear();
-
-        const SongCfg cfg = m_sound->cfg();
-        if (!m_sound->newVoicegroupSelected()) {
-            const QByteArray root = m_project->root().toLocal8Bit();
-            for (const QString &name : DecompProject::voicegroupCandidates(cfg)) {
-                m_vg = voicegroup_load(root.constData(), name.toLocal8Bit().constData(),
-                                       nullptr);
-                if (m_vg)
-                    break;
-            }
-        }
-        if (m_vg) {
-            m_audio->setPreviewVoicegroup(m_vg);
-            m_vgLabel->setText(tr("Voicegroup <b>voicegroup%1</b>:").arg(cfg.voicegroupArg));
-        } else if (m_sound->newVoicegroupSelected()) {
-            m_vgLabel->setText(
-                tr("A new voicegroup <b>voicegroup%1</b> is created with the song — "
-                   "programs are kept as-is; configure its voices in the Voicegroup "
-                   "dock afterwards.")
-                    .arg(cfg.voicegroupArg));
-        } else {
-            m_vgLabel->setText(
-                tr("⚠ Voicegroup \"voicegroup%1\" could not be loaded — voice names "
-                   "and audition are unavailable, but the mapping still applies.")
-                    .arg(cfg.voicegroupArg));
-        }
-
-        for (int et = 0; et < int(m_analysis.tracks.size()); et++) {
-            const ImportTrackInfo &track = m_analysis.tracks[et];
-            for (uint8_t program : track.programs) {
-                auto *item = new QTreeWidgetItem(m_tree);
-                QString trackName = tr("Track %1").arg(et + 1);
-                if (!track.name.isEmpty())
-                    trackName += QStringLiteral(" (%1)").arg(track.name);
-                item->setText(0, trackName);
-                item->setText(1, QString::number(program));
-
-                auto *combo = new QComboBox(m_tree);
-                for (int v = 0; v < VOICEGROUP_SIZE; v++)
-                    combo->addItem(QStringLiteral("%1  %2").arg(v, 3, 10, QLatin1Char('0'))
-                                       .arg(voiceName(v)));
-                combo->setCurrentIndex(program);
-                m_tree->setItemWidget(item, 2, combo);
-
-                auto *play = new QPushButton(tr("Play"), m_tree);
-                play->setEnabled(m_vg != nullptr);
-                connect(play, &QPushButton::pressed, this, [this, combo] {
-                    m_audio->previewVoice(uint8_t(combo->currentIndex()), 60, 112);
-                });
-                connect(play, &QPushButton::released, this, [this, combo] {
-                    m_audio->previewVoice(uint8_t(combo->currentIndex()), 60, 0);
-                });
-                m_tree->setItemWidget(item, 3, play);
-
-                m_rows.push_back({track.smfTrack, program, combo});
-            }
-        }
-        if (m_rows.empty())
-            m_vgLabel->setText(m_vgLabel->text()
-                               + tr("<br>The file has no program changes; every note "
-                                    "plays voice 0."));
-    }
-
-    void cleanupPage() override { releaseVoicegroup(); }
-
-    std::vector<ProgramRemap> remaps() const
-    {
-        std::vector<ProgramRemap> result;
-        for (const Row &row : m_rows) {
-            if (row.combo->currentIndex() != row.program)
-                result.push_back({row.smfTrack, row.program,
-                                  uint8_t(row.combo->currentIndex())});
-        }
-        return result;
-    }
-
-    // Releases only the voicegroup/preview; the mapping rows stay readable —
-    // songFile() collects the remaps after the wizard has finished.
-    void releaseVoicegroup()
-    {
-        if (!m_vg)
-            return;
-        m_audio->setPreviewVoicegroup(nullptr);
-        voicegroup_free(m_vg);
-        m_vg = nullptr;
-    }
-
-private:
-    QString voiceName(int v) const
-    {
-        if (!m_vg)
-            return tr("Voice %1").arg(v);
-        const QString name = QString::fromUtf8(m_vg->voiceNames[v]).trimmed();
-        const QString type = m4aVoiceTypeName(m_vg->voices[v].type);
-        return name.isEmpty() ? type : QStringLiteral("%1 (%2)").arg(name, type);
-    }
-
-    struct Row {
-        int smfTrack;
-        uint8_t program;
-        QComboBox *combo;
-    };
-
-    DecompProject *m_project;
-    AudioEngine *m_audio;
-    ImportAnalysis m_analysis;
-    const SoundPage *m_sound;
-    LoadedVoiceGroup *m_vg = nullptr;
-    QLabel *m_vgLabel;
-    QTreeWidget *m_tree;
-    std::vector<Row> m_rows;
-};
-
 // ---- The wizard -------------------------------------------------------------
 
-NewSongWizard::NewSongWizard(DecompProject *project, AudioEngine *audio, QWidget *parent)
-    : QWizard(parent), m_project(project), m_audio(audio)
+NewSongWizard::NewSongWizard(DecompProject *project, QWidget *parent)
+    : QWizard(parent), m_project(project)
 {
     setWindowTitle(tr("New Song"));
     buildPages(QString());
 }
 
-NewSongWizard::NewSongWizard(DecompProject *project, AudioEngine *audio, SmfFile imported,
+NewSongWizard::NewSongWizard(DecompProject *project, SmfFile imported,
                              const QString &sourcePath, QWidget *parent)
-    : QWizard(parent), m_project(project), m_audio(audio), m_importMode(true),
+    : QWizard(parent), m_project(project), m_importMode(true),
       m_imported(std::move(imported))
 {
     setWindowTitle(tr("Import MIDI — %1").arg(QFileInfo(sourcePath).fileName()));
     // m_imported arrives coerced to format 1 (SmfFile::read), so the
-    // analysis, mapping page, and written .mid all deal in one chunk per
-    // channel, like every song porydaw opens.
+    // analysis and written .mid both deal in one chunk per channel, like
+    // every song porydaw opens.
     m_analysis = analyzeForImport(m_imported);
     if (m_imported.wasFormat0)
         m_analysis.warnings.prepend(
             tr("Format 0 file — imported as format 1 (one chunk per channel)."));
     buildPages(sourcePath);
-}
-
-NewSongWizard::~NewSongWizard()
-{
-    if (m_mapping)
-        m_mapping->releaseVoicegroup();
 }
 
 void NewSongWizard::buildPages(const QString &sourcePath)
@@ -481,18 +325,6 @@ void NewSongWizard::buildPages(const QString &sourcePath)
     addPage(m_identity);
     m_sound = new SoundPage(m_project, m_identity);
     addPage(m_sound);
-
-    if (m_importMode) {
-        m_mapping = new MappingPage(m_project, m_audio, m_analysis, m_sound);
-        addPage(m_mapping);
-    }
-
-    // The preview voicegroup must be released before MainWindow acts on the
-    // result (it loads the new song, which resets the preview engine).
-    connect(this, &QDialog::finished, this, [this](int) {
-        if (m_mapping)
-            m_mapping->releaseVoicegroup();
-    });
 }
 
 QString NewSongWizard::label() const
@@ -525,7 +357,6 @@ SmfFile NewSongWizard::songFile() const
     if (!m_importMode)
         return SongRegistry::blankSong();
     SmfFile smf = m_imported;
-    applyProgramRemaps(&smf, m_mapping->remaps());
     if (m_analysisPage->rescaleSelected())
         rescaleDivision(&smf, m_sound->cfg().extendedClocks ? 48 : 24);
     return smf;

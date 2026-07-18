@@ -7,12 +7,11 @@
 
 #include "core/smf.h"
 
-// External-MIDI import analysis (SPEC.md §6.2): everything the guided mapping
-// pass shows about an arbitrary .mid before it becomes a project song. The
-// file's bytes are kept as-is on import — mid2agb rescales the division and
-// ignores CCs outside its vocabulary — so the pass is a lens plus two
-// optional transforms: program remapping against the chosen voicegroup, and
-// a division rescale onto the m4a clock grid.
+// External-MIDI import analysis (SPEC.md §6.2): everything the import wizard
+// shows about an arbitrary .mid before it becomes a project song. The file's
+// bytes are kept as-is on import — mid2agb rescales the division and ignores
+// CCs outside its vocabulary — so the pass is a lens plus one optional
+// transform: a division rescale onto the m4a clock grid.
 
 struct ImportTrackInfo {
     int smfTrack = -1;      // chunk index
@@ -43,16 +42,6 @@ struct ImportAnalysis {
 };
 
 ImportAnalysis analyzeForImport(const SmfFile &smf);
-
-// One row of the wizard's program-mapping table: rewrite every program-change
-// to `fromProgram` on this track to `toProgram`.
-struct ProgramRemap {
-    int smfTrack = -1;
-    uint8_t fromProgram = 0;
-    uint8_t toProgram = 0;
-};
-
-void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps);
 
 // Rescale every event tick (and each track's end-of-track tick) onto a new
 // division, using the same floor arithmetic as mid2agb's event conversion

@@ -256,25 +256,13 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
         ma_device_start(m_device);
 }
 
-void AudioEngine::setPreviewVoicegroup(LoadedVoiceGroup *voicegroup)
-{
-    if (m_deviceStarted)
-        ma_device_stop(m_device);
-    m_previewOverrideVg = voicegroup;
-    resetPreviewEngine();
-    if (m_deviceStarted)
-        ma_device_start(m_device);
-}
-
 ToneData *AudioEngine::previewVoices() const
 {
-    if (m_previewOverrideVg)
-        return m_previewOverrideVg->voices;
     return m_voicegroup ? m_voicegroup->voices : nullptr;
 }
 
-// Rebuilds the audition instance to match the main engine's settings and the
-// effective preview voicegroup. Cold: callers have stopped the device.
+// Rebuilds the audition instance to match the main engine's settings and
+// voicegroup. Cold: callers have stopped the device.
 void AudioEngine::resetPreviewEngine()
 {
     if (!m_previewEngine)

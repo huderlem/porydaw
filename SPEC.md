@@ -235,10 +235,9 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 - Undo/redo across all document mutations, including `midi.cfg` property
   changes and voicegroup voice edits — song and voicegroup share one undo
   stack and one dirty/save state (they are one document to the user).
-- MIDI file import: open an arbitrary external `.mid`, get a guided mapping pass —
-  channels → tracks (warn > 16 or > polyphony budget), unmapped CCs flagged, program
-  numbers mapped against the chosen voicegroup, then saved into the project as a new
-  song file.
+- MIDI file import: open an arbitrary external `.mid`, get a guided analysis pass —
+  channels → tracks (warn > 16 or > polyphony budget), unmapped CCs flagged — then
+  saved into the project as a new song file.
 
 ### 6.3 New Song flow (write-through registration)
 

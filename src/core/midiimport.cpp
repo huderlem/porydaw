@@ -169,16 +169,3 @@ void rescaleDivision(SmfFile *smf, uint16_t newDivision)
     }
     smf->division = newDivision;
 }
-
-void applyProgramRemaps(SmfFile *smf, const std::vector<ProgramRemap> &remaps)
-{
-    for (const ProgramRemap &r : remaps) {
-        if (r.fromProgram == r.toProgram || r.smfTrack < 0
-            || r.smfTrack >= int(smf->tracks.size()))
-            continue;
-        for (SmfEvent &ev : smf->tracks[r.smfTrack].events) {
-            if (ev.isChannel() && ev.typeNibble() == 0xC && ev.data0 == r.fromProgram)
-                ev.data0 = r.toProgram;
-        }
-    }
-}

@@ -6,41 +6,36 @@
 #include "core/smf.h"
 #include "project/decompproject.h"
 
-class AudioEngine;
 class IdentityPage;
 class SoundPage;
 class AnalysisPage;
-class MappingPage;
 
 // The New Song wizard (SPEC.md §6.3) and the external-MIDI import flow
-// (§6.2) — the same wizard with two extra pages in import mode:
+// (§6.2) — the same wizard with an extra page in import mode:
 //
 //   blank:  Identity -> Sound
-//   import: Analysis -> Identity -> Sound -> Mapping
+//   import: Analysis -> Identity -> Sound
 //
-// The wizard only collects choices (and remaps programs on the imported
-// file); MainWindow writes the .mid + midi.cfg line and registers the song
-// in the three registration files.
+// The wizard only collects choices; MainWindow writes the .mid + midi.cfg
+// line and registers the song in the three registration files.
 class NewSongWizard : public QWizard
 {
     Q_OBJECT
 
 public:
     // Blank new song.
-    NewSongWizard(DecompProject *project, AudioEngine *audio, QWidget *parent = nullptr);
+    NewSongWizard(DecompProject *project, QWidget *parent = nullptr);
     // Import: `imported` is the parsed external file (kept as-is apart from
-    // the mapping page's program remaps and the analysis page's optional
-    // division rescale).
-    NewSongWizard(DecompProject *project, AudioEngine *audio, SmfFile imported,
+    // the analysis page's optional division rescale).
+    NewSongWizard(DecompProject *project, SmfFile imported,
                   const QString &sourcePath, QWidget *parent = nullptr);
-    ~NewSongWizard() override;
 
     QString label() const;
     QString constant() const;
     QString player() const;
     SongCfg cfg() const;
-    // The song to write: the blank template, or the import with remaps and
-    // the optional division rescale applied.
+    // The song to write: the blank template, or the import with the
+    // optional division rescale applied.
     SmfFile songFile() const;
     // Non-empty when the user chose "(create a new voicegroup for this song)"
     // on the Sound page: the voicegroup to create (named after the song; cfg()
@@ -51,7 +46,6 @@ private:
     void buildPages(const QString &sourcePath);
 
     DecompProject *m_project;
-    AudioEngine *m_audio;
     bool m_importMode = false;
     SmfFile m_imported;
     ImportAnalysis m_analysis;
@@ -59,5 +53,4 @@ private:
     IdentityPage *m_identity = nullptr;
     SoundPage *m_sound = nullptr;
     AnalysisPage *m_analysisPage = nullptr;
-    MappingPage *m_mapping = nullptr;
 };

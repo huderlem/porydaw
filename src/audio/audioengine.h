@@ -103,11 +103,6 @@ public:
     // from the next note on (applied at the next callback boundary).
     void refreshVoices() { m_refreshVoicesCmd.fetch_add(1); }
 
-    // Cold: point voice previews at a different voicegroup (the import
-    // wizard's mapping page). NOT owned — the caller must call this again
-    // with nullptr (restoring the song's voicegroup) before freeing it.
-    void setPreviewVoicegroup(LoadedVoiceGroup *voicegroup);
-
     bool songLoaded() const { return m_timeline != nullptr; }
     const MidiTimeline *timeline() const { return m_timeline; }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
@@ -167,7 +162,6 @@ private:
     SongSettings m_settings;
     // Audition instance: voice previews only, mixed on top of the main engine.
     std::unique_ptr<M4AEngine> m_previewEngine;
-    LoadedVoiceGroup *m_previewOverrideVg = nullptr; // not owned
 
     // Hot control state (UI writes, audio thread reads)
     std::atomic<int> m_transport{static_cast<int>(Transport::Stopped)};
