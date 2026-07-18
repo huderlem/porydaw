@@ -2848,10 +2848,13 @@ private:
     // to the data by default; everything else keeps the full axis.
     static int laneRangeDefault(uint8_t cc) { return cc == 0x01 ? 0 : 127; }
 
-    // Auto-fit rung: the smallest of 32/64/127 that holds the lane's data.
-    // Coarse rungs keep the scale from twitching while points are edited.
+    // Auto-fit rung: the smallest of 16/32/64/127 that holds the lane's
+    // data. Coarse rungs keep the scale from twitching while points are
+    // edited. 16 is the floor because typical MOD curves live in 0..15.
     static int laneAutoMax(int dataMax)
     {
+        if (dataMax <= 16)
+            return 16;
         if (dataMax <= 32)
             return 32;
         if (dataMax <= 64)
