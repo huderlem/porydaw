@@ -41,6 +41,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
 int runLoopCheck();
 // primecheck.cpp; audition voice-priming check (self-contained, no project needed).
 int runPrimeCheck();
+// transportcheck.cpp; playback-start halts ringing auditions (self-contained,
+// no project needed; SKIPs without an audio device).
+int runTransportCheck();
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -99,6 +102,8 @@ int main(int argc, char *argv[])
         return runLoopCheck();
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
+    if (args.contains(QStringLiteral("--transportcheck")))
+        return runTransportCheck();
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));
     if (editCheck >= 0 && editCheck + 1 < args.size())
         return runEditCheck(args[editCheck + 1]);
