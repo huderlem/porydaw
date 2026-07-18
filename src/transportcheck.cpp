@@ -12,12 +12,13 @@
 // --transportcheck: starting playback halts ringing auditions (self-contained,
 // needs a working audio output device — SKIPs cleanly without one). A
 // slow-release voice keeps ringing long after a timed preview's note-off, and
-// without the transport-side halt that tail (or a preview still counting
+// without the transport-side hard cut that tail (or a preview still counting
 // down) persists into song playback. Plays a synthesized song with NO notes,
 // so the engine's active-channel telemetry isolates the previews: after
-// play() the count must drop to zero. Covers both transitions — from Stopped
-// (hard cut of an already-released slow tail) and from Paused (release of a
-// still-counting-down preview on a fast-release voice).
+// play() the count must drop to zero. Covers every entry into Playing — from
+// Stopped, and from Paused both as Space reaches it (seek + play with an
+// already-released tail ringing; Space toggles pause, so this is how
+// playback usually starts) and with a preview still counting down.
 
 namespace {
 
@@ -33,10 +34,9 @@ SmfEvent channelEvent(uint64_t tick, uint8_t status, uint8_t data0, uint8_t data
     return ev;
 }
 
-// Two voiced tracks and no notes: track 0 = program 0 (release 254, a tail
-// that rings for ~12 s), track 1 = program 1 (release 165, dead in ~0.2 s
-// after note-off). The late CC stretches lengthSamples so playback doesn't
-// auto-stop under the checks.
+// Two voiced tracks and no notes: both use program 0 (release 254, a tail
+// that rings for ~12 s — only a hard cut can silence it promptly). The late
+// CC stretches lengthSamples so playback doesn't auto-stop under the checks.
 SmfFile buildSilentSong()
 {
     SmfFile smf;
@@ -90,9 +90,8 @@ struct TestVoicegroup {
             v.attack = 255;
             v.decay = 0;
             v.sustain = 255;
-            v.release = 165; // fast: (env * 165) >> 8 per frame
+            v.release = 254; // slow: (env * 254) >> 8 per frame, ~12 s ring
         }
-        vg.voices[0].release = 254; // slow: rings for ~12 s after note-off
     }
 };
 
@@ -140,24 +139,44 @@ int runTransportCheck()
 
     const auto active = [&] { return engine.activePcmChannels(); };
 
-    // Stopped → Playing: audition a short note on the slow-release voice,
-    // let its countdown expire, and confirm the tail is still ringing —
-    // the reported symptom — then start playback and require silence.
-    engine.previewNoteTimed(0, 60, 127, uint32_t(0.15 * engine.sampleRate()));
-    if (!waitFor([&] { return active() >= 1; }, 2000)) {
-        fail("timed preview never sounded");
-    } else {
+    // A short audition whose note-off has already gone out, leaving a
+    // ringing slow-release tail — the reported symptom. Fails the whole
+    // check if the preview never sounds or the tail dies early (the
+    // control expectation changed).
+    const auto ringingTail = [&](uint8_t track) {
+        engine.previewNoteTimed(track, 60, 127, uint32_t(0.15 * engine.sampleRate()));
+        if (!waitFor([&] { return active() >= 1; }, 2000)) {
+            fail("timed preview never sounded");
+            return false;
+        }
         QThread::msleep(400); // note-off sent; the slow release rings on
-        if (active() < 1)
+        if (active() < 1) {
             fail("slow-release tail died early (control expectation changed?)");
+            return false;
+        }
+        return true;
+    };
+
+    // Stopped → Playing: the ringing tail must be cut when playback starts.
+    if (ringingTail(0)) {
         engine.play();
         if (!waitFor([&] { return active() == 0; }, 2000))
             fail("audition tail persisted after playback started from stop");
     }
 
-    // Paused → Playing: audition mid-pause with a long countdown on the
-    // fast-release voice; resuming must release it (it dies in ~0.2 s)
-    // rather than letting it sound over the song for the full duration.
+    // Paused → Playing, the Space path (pause, audition, seek + play):
+    // Space toggles pause and restarts from the edit cursor, so this is how
+    // playback usually starts — the tail must be cut here too.
+    engine.pause();
+    if (ringingTail(0)) {
+        engine.seek(0);
+        engine.play();
+        if (!waitFor([&] { return active() == 0; }, 2000))
+            fail("audition tail persisted after Space-style seek + play from pause");
+    }
+
+    // Paused → Playing with the preview still counting down: resuming must
+    // cut it rather than let it sound over the song for the full duration.
     engine.pause();
     engine.previewNoteTimed(1, 64, 127, uint32_t(60.0 * engine.sampleRate()));
     if (!waitFor([&] { return active() >= 1; }, 2000)) {

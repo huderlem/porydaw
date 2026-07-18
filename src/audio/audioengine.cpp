@@ -396,31 +396,25 @@ void AudioEngine::applyTransportTransition()
             m4a_engine_all_notes_off(m_engine.get(), track);
         break;
     case Transport::Playing:
-        // Halt auditions before the song sounds: a preview still counting
-        // down (or a held previewNote) must not play over the song, and its
-        // eventual note-off could cut a playback note on the same track and
-        // key. Queued-but-unstarted previews are dropped the same way.
-        for (int i = 0; i < m_timedActiveCount; i++)
-            m4a_engine_note_off(m_engine.get(), m_timedActive[i].track,
-                                m_timedActive[i].key);
+        // Halt auditions before the song sounds. A hard cut, and on every
+        // entry into Playing (Space toggles pause, so playback usually
+        // starts from Paused): a note-off alone leaves a slow-release
+        // voice's audition ringing over the song for seconds. Nothing
+        // legitimate dies — both Stopped and Paused released the song's own
+        // notes when they were entered, so only fading tails and previews
+        // can be sounding here. Preview bookkeeping is dropped with the
+        // sound (queued-but-unstarted previews too) so no stale note-off
+        // can later cut a playback note on the same track and key.
+        m4a_engine_all_sound_off(m_engine.get());
         m_timedActiveCount = 0;
         m_timedRead.store(m_timedWrite.load(std::memory_order_acquire),
                           std::memory_order_release);
-        if (m_previewKey >= 0) {
-            m4a_engine_note_off(m_engine.get(), m_previewTrack, uint8_t(m_previewKey));
-            m_previewTrack = -1;
-            m_previewKey = -1;
-        }
+        m_previewTrack = -1;
+        m_previewKey = -1;
         // No player reset here: the Stopped transition already rewound to 0,
         // and a seek() between stop and play deliberately moves the start.
-        if (m_appliedTransport == static_cast<int>(Transport::Stopped)) {
-            // From silence, cut hard: a slow-release voice's audition tail
-            // (already note-off'd, still ringing) would otherwise persist
-            // into playback. From Paused, tails keep ringing — they are the
-            // paused song's own notes fading into the resume.
-            m4a_engine_all_sound_off(m_engine.get());
+        if (m_appliedTransport == static_cast<int>(Transport::Stopped))
             m4a_engine_reset_poly_stats(m_engine.get());
-        }
         break;
     }
     m_appliedTransport = t;
