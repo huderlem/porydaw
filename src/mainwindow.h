@@ -193,6 +193,7 @@ private:
     // any voicegroup write.
     struct VgCatalog {
         bool valid = false;
+        QStringList groupArgs; // the -G choices (SongRegistry::voicegroupArgs)
         QStringList directSound;
         QStringList progWave;
         QList<QPair<QString, QString>> keysplits;

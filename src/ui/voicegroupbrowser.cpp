@@ -114,9 +114,38 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(2);
 
-    m_title = new QLabel(tr("No song loaded"), this);
-    m_title->setContentsMargins(4, 2, 4, 0);
-    layout->addWidget(m_title);
+    // The song's voicegroup (mid2agb -G), shown as the symbol it forms:
+    // a fixed "voicegroup" prefix and the editable arg. Picking or typing
+    // another arg re-targets the song (an undoable cfg edit, via the owner).
+    auto *vgRow = new QWidget(this);
+    auto *vgLayout = new QHBoxLayout(vgRow);
+    vgLayout->setContentsMargins(4, 2, 4, 0);
+    vgLayout->setSpacing(2);
+    vgLayout->addWidget(new QLabel(tr("voicegroup"), vgRow));
+    m_vgCombo = new QComboBox(vgRow);
+    m_vgCombo->setObjectName(QStringLiteral("vgArgCombo"));
+    m_vgCombo->setEditable(true);
+    m_vgCombo->setInsertPolicy(QComboBox::NoInsert);
+    m_vgCombo->setEnabled(false);
+    m_vgCombo->lineEdit()->setPlaceholderText(tr("No song loaded"));
+    m_vgCombo->setToolTip(
+        tr("The song's voicegroup (mid2agb -G): appended to \"voicegroup\" "
+           "to form the symbol, e.g. \"_abandoned_ship\" → "
+           "voicegroup_abandoned_ship. Changing it is undoable."));
+    vgLayout->addWidget(m_vgCombo, 1);
+    layout->addWidget(vgRow);
+
+    const auto commitVgArg = [this] {
+        if (m_updating || !m_vgCombo->isEnabled())
+            return;
+        const QString arg = m_vgCombo->currentText().trimmed();
+        if (arg == m_vgArg)
+            return;
+        m_vgArg = arg;
+        emit voicegroupChangeRequested(arg);
+    };
+    connect(m_vgCombo, &QComboBox::activated, this, commitVgArg);
+    connect(m_vgCombo->lineEdit(), &QLineEdit::editingFinished, this, commitVgArg);
 
     m_tree = new QTreeWidget(this);
     m_tree->setColumnCount(3);
@@ -266,7 +295,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // a mouse target — keyboard focus on it would also swallow Space.
     m_newButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
-             m_tree, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
+             m_tree, m_vgCombo, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,
              m_synthPhaseSpin, m_sweepTimeSpin, m_sweepDirCombo, m_sweepShiftSpin,
              m_attackSpin, m_decaySpin, m_sustainSpin, m_releaseSpin}) {
@@ -291,19 +320,24 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     populateEditor();
 }
 
-void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString &title)
+void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg)
 {
     releaseVoice();
     m_vg = vg;
     if (!vg)
         m_source = nullptr; // a cleared voicegroup invalidates the source too
     m_tree->clear();
+    m_vgCombo->setEnabled(vg != nullptr);
+    m_vgCombo->lineEdit()->setPlaceholderText(vg ? QStringLiteral("_dummy")
+                                                 : tr("No song loaded"));
     if (!vg) {
-        m_title->setText(tr("No song loaded"));
+        m_updating = true;
+        m_vgArg.clear();
+        m_vgCombo->setCurrentText(QString());
+        m_updating = false;
         populateEditor();
         return;
     }
-    m_title->setText(title.isEmpty() ? tr("Voicegroup") : title);
 
     for (int i = 0; i < VOICEGROUP_SIZE; i++) {
         const ToneData &voice = vg->voices[i];
@@ -324,6 +358,29 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg, const QString 
         item->setData(0, Qt::UserRole, i);
     }
     populateEditor();
+}
+
+void VoicegroupBrowser::setVoicegroupChoices(const QStringList &args)
+{
+    if (args == m_vgChoices)
+        return;
+    m_vgChoices = args;
+    m_updating = true;
+    const QString text = m_vgCombo->currentText();
+    m_vgCombo->clear();
+    m_vgCombo->addItems(args);
+    m_vgCombo->setCurrentText(text);
+    m_updating = false;
+}
+
+void VoicegroupBrowser::setCurrentVoicegroupArg(const QString &arg)
+{
+    m_vgArg = arg;
+    if (m_vgCombo->currentText() == arg)
+        return;
+    m_updating = true;
+    m_vgCombo->setCurrentText(arg);
+    m_updating = false;
 }
 
 void VoicegroupBrowser::setSource(VoicegroupSource *source,

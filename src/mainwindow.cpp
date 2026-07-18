@@ -328,6 +328,22 @@ void MainWindow::buildUi()
             &MainWindow::onVoiceEditRequested);
     connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
             &MainWindow::newVoicegroup);
+    // The dock's voicegroup selector: same undoable cfg edit as Song
+    // Settings; onDocumentChanged does the actual swap (and, on a
+    // not-found arg, keeps the old voicegroup with a status message).
+    connect(m_vgBrowser, &VoicegroupBrowser::voicegroupChangeRequested, this,
+            [this](const QString &arg) {
+                if (!m_active)
+                    return;
+                SongCfg cfg = m_active->doc.cfg();
+                // "_dummy" IS the empty arg's meaning; don't write it out.
+                if (arg == cfg.voicegroupArg
+                    || (cfg.voicegroupArg.isEmpty()
+                        && arg == QLatin1String("_dummy")))
+                    return;
+                cfg.voicegroupArg = arg;
+                m_active->doc.setCfg(cfg);
+            });
     m_vgDock->setWidget(m_vgBrowser);
     addDockWidget(Qt::LeftDockWidgetArea, m_vgDock);
 
@@ -943,8 +959,14 @@ void MainWindow::onDocumentChanged(SongSession &session)
     session.timeline = std::move(timeline);
     session.view->updateSong(session.timeline.get());
     updateTabTitle(session);
-    if (active)
+    if (active) {
         updateWindowTitle();
+        // Keep the dock's voicegroup selector on the cfg even when no swap
+        // ran (the arg's voicegroup wasn't found, or its change was undone).
+        m_vgBrowser->setCurrentVoicegroupArg(cfg.voicegroupArg.isEmpty()
+                                                 ? QStringLiteral("_dummy")
+                                                 : cfg.voicegroupArg);
+    }
 }
 
 void MainWindow::saveSong()
@@ -1369,9 +1391,10 @@ void MainWindow::updateVoicegroupBrowser()
     const QString arg = session->doc.cfg().voicegroupArg.isEmpty()
                             ? QStringLiteral("_dummy")
                             : session->doc.cfg().voicegroupArg;
-    m_vgBrowser->setVoicegroup(session->voicegroup,
-                               QStringLiteral("voicegroup%1").arg(arg));
+    m_vgBrowser->setVoicegroup(session->voicegroup);
     const VgCatalog &catalog = vgCatalog();
+    m_vgBrowser->setVoicegroupChoices(catalog.groupArgs);
+    m_vgBrowser->setCurrentVoicegroupArg(arg);
     m_vgBrowser->setSource(
         session->vgSource.get(), catalog.directSound, catalog.progWave,
         catalog.keysplits, catalog.drumkits, catalog.typicalAdsr, catalog.synths,
@@ -1414,6 +1437,7 @@ const MainWindow::VgCatalog &MainWindow::vgCatalog()
 {
     if (!m_vgCatalog.valid) {
         const QString root = m_project.root();
+        m_vgCatalog.groupArgs = SongRegistry::voicegroupArgs(root);
         m_vgCatalog.directSound = VoicegroupSource::directSoundSymbols(root);
         m_vgCatalog.progWave = VoicegroupSource::progWaveSymbols(root);
         m_vgCatalog.keysplits = VoicegroupSource::keysplitInstruments(root);
@@ -1706,9 +1730,10 @@ void MainWindow::newVoicegroup()
         return;
     }
     invalidateVgCatalog();
+    updateVoicegroupBrowser(); // the selector's choices now include it
     statusBar()->showMessage(
-        tr("Created sound/voicegroups/%1.inc — assign it to a song in Song "
-           "Settings (voicegroup _%1).")
+        tr("Created sound/voicegroups/%1.inc — assign it with the voicegroup "
+           "selector above the instrument list (voicegroup _%1).")
             .arg(name),
         10000);
 }

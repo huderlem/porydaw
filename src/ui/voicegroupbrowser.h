@@ -30,7 +30,13 @@ public:
 
     // vg may be nullptr (no song loaded). Not owned; the caller must clear it
     // (setVoicegroup(nullptr)) before the voicegroup is freed.
-    void setVoicegroup(const LoadedVoiceGroup *vg, const QString &title = QString());
+    void setVoicegroup(const LoadedVoiceGroup *vg);
+
+    // The selector at the top of the dock: the project's -G args (editable,
+    // so unknown/new symbols still work) and the song's current one. Choices
+    // are kept if the list is unchanged; the current arg never emits back.
+    void setVoicegroupChoices(const QStringList &args);
+    void setCurrentVoicegroupArg(const QString &arg);
 
     // The editable source model behind the displayed voicegroup, or nullptr
     // when none could be located (editor shows why). Not owned; clear before
@@ -70,6 +76,10 @@ signals:
     // the voicegroup needs a reload from rendered source to audition.
     void voiceEditRequested(int slot, const VgVoice &voice, bool structural);
     void newVoicegroupRequested();
+    // The user picked/typed a different voicegroup arg in the selector. The
+    // browser does not switch anything itself: the owner commits it as an
+    // undoable cfg edit and reflects it back via setCurrentVoicegroupArg.
+    void voicegroupChangeRequested(const QString &arg);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -86,7 +96,9 @@ private:
     // no set_synth entry) classify from the loaded ToneData.
     bool synthDescFor(const VgVoice &voice, int slot, VgSynthDesc *desc) const;
 
-    QLabel *m_title = nullptr;
+    QComboBox *m_vgCombo = nullptr;
+    QString m_vgArg;         // the arg the selector currently stands at
+    QStringList m_vgChoices; // last list handed to setVoicegroupChoices
     QTreeWidget *m_tree = nullptr;
     int m_soundingVoice = -1;
 

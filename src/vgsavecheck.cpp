@@ -197,6 +197,37 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
               "undoing the replayed voice edit did not return to clean");
         check(readFileBytes(vgPath) == vgBytesOriginal,
               "voicegroup file changed during the -G switch round trip");
+
+        // 5b. The dock's voicegroup selector drives the same switch as an
+        // undoable cfg edit, and undo refreshes the selector's text.
+        QComboBox *vgCombo =
+            m_vgBrowser->findChild<QComboBox *>(QStringLiteral("vgArgCombo"));
+        if (check(vgCombo != nullptr, "no voicegroup selector in the dock")) {
+            const QString originalArg = tab->doc.cfg().voicegroupArg;
+            const QString shown = originalArg.isEmpty()
+                                      ? QStringLiteral("_dummy")
+                                      : originalArg;
+            check(vgCombo->isEnabled() && vgCombo->currentText() == shown,
+                  "dock selector does not show the song's voicegroup");
+            check(vgCombo->findText(otherArg) >= 0,
+                  "dock selector is missing a known voicegroup arg");
+            vgCombo->setCurrentText(otherArg);
+            QMetaObject::invokeMethod(vgCombo, "activated", Qt::DirectConnection,
+                                      Q_ARG(int, 0));
+            check(tab->doc.cfg().voicegroupArg == otherArg && tab->doc.isDirty(),
+                  "dock selector did not commit an undoable -G switch");
+            check(tab->vgSource && tab->vgSource->loadName() != vgLoadName,
+                  "dock selector switch did not swap the voicegroup source");
+            tab->doc.undoStack()->undo(); // the selector's -G switch
+            check(tab->doc.cfg().voicegroupArg == originalArg
+                      && !tab->doc.isDirty(),
+                  "undoing the dock selector switch did not restore the cfg");
+            check(vgCombo->currentText() == shown,
+                  "undo did not refresh the dock selector's text");
+            check(tab->vgSource && tab->vgSource->loadName() == vgLoadName,
+                  "undoing the dock selector switch did not reopen the old "
+                  "voicegroup");
+        }
     }
 
     // 6. The dock's editor widgets feed the same pipeline: spinning the
@@ -291,7 +322,10 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 if (combo->itemText(i) == QStringLiteral("Sawtooth"))
                     waveCombo = combo;
             }
-            if (combo->isEditable())
+            // The dock's voicegroup selector is editable too; the symbol
+            // combo is the editable one inside the editor panel.
+            if (combo->isEditable()
+                && combo->objectName() != QLatin1String("vgArgCombo"))
                 symbolCombo = combo;
         }
         QSpinBox *dutySpin = nullptr, *stepSpin = nullptr, *depthSpin = nullptr,
