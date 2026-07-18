@@ -3,12 +3,12 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QContextMenuEvent>
-#include <QDialog>
 #include <QCursor>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QFontMetrics>
-#include <QIcon>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -810,7 +810,13 @@ private:
     QComboBox *m_feelCombo = nullptr; // straight / triplet
 };
 
+namespace {
+
+// The edge cursors are baked pixmaps, so they carry the screen DPR they were
+// rendered at. Qt 6.2 has no QEvent::DevicePixelRatioChange; the hover path
+// re-bakes them whenever the widget's DPR no longer matches.
 struct MidiCursors {
+    qreal dpr;
     QCursor leftEdge;
     QCursor rightEdge;
 };
@@ -820,9 +826,12 @@ MidiCursors loadMidiCursors(qreal devicePixelRatio)
     const QSize cursorSize(24, 24);
     const QIcon leftEdge(QStringLiteral(":/cursors/left-drag.png"));
     const QIcon rightEdge(QStringLiteral(":/cursors/right-drag.png"));
-    return {QCursor(leftEdge.pixmap(cursorSize, devicePixelRatio)),
+    return {devicePixelRatio,
+            QCursor(leftEdge.pixmap(cursorSize, devicePixelRatio)),
             QCursor(rightEdge.pixmap(cursorSize, devicePixelRatio))};
 }
+
+} // namespace
 
 // ---------------------------------------------------------------- PianoRoll
 
@@ -852,13 +861,6 @@ public:
     }
 
 protected:
-    bool event(QEvent *event) override
-    {
-        if (event->type() == QEvent::DevicePixelRatioChange)
-            m_cursors = loadMidiCursors(devicePixelRatioF());
-        return QWidget::event(event);
-    }
-
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
@@ -1106,6 +1108,8 @@ protected:
         if (m_drag == Drag::None) {
             // Hover cursor: resize handle at note left/right edges, velocity
             // handle across the top strip (when zoomed in enough).
+            if (m_cursors.dpr != devicePixelRatioF())
+                m_cursors = loadMidiCursors(devicePixelRatioF());
             const ViewNote *hit =
                 m_sv->document() && event->pos().x() >= kKeyboardW ? hitNote(event->pos())
                                                                    : nullptr;

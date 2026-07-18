@@ -105,7 +105,6 @@ qt_add_resources(porydaw "cursor_images"
         resources/left-drag@2x.png
         resources/right-drag.png
         resources/right-drag@2x.png
-
 )
 target_include_directories(porydaw PRIVATE
     src

@@ -1,13 +1,13 @@
 #include <QCoreApplication>
 #include <QDialog>
 #include <QElapsedTimer>
-#include <QImage>
 #include <QIcon>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
-#include <QPoint>
 #include <QPixmap>
+#include <QPoint>
 #include <QString>
 #include <QTimer>
 #include <QWidget>
