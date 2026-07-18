@@ -23,7 +23,8 @@
 // velocity-dragged note's velocity the default for the next drawn note,
 // and an edge resize snaps to the ruler's absolute grid even when the
 // note's own edge sits off-grid. A right-drag band auditions each note
-// as it first covers it (self-releasing, Ableton-style) and selects the
+// as it first covers it (Ableton-style; the note's length is the ceiling),
+// releases it when the band leaves it or the drag ends, and selects the
 // covered notes on release. Ctrl+arrows transpose (Shift: octave)
 // and nudge the selection along the same absolute grid — both the roll's
 // note selection and a multi-track time selection — and the view follows
@@ -261,17 +262,21 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         fail("double-click on a note did not delete it");
 
     // Band-sweep audition: notes audition (self-releasing, duration in
-    // samples) as the right-drag rubber band first covers them — one
-    // audition per covered note, matching the selection the release
-    // commits, and no undo commands.
+    // samples) as the right-drag rubber band first covers them, release
+    // early when the band leaves them (velocity-0 emission), re-audition on
+    // re-entry, all release at the drag's end, and no undo commands.
     {
-        int auditions = 0;
+        std::vector<int> onKeys, offKeys;
         quint32 minDur = UINT32_MAX;
         auto conn = QObject::connect(
             &view, &SongView::auditionNoteTimed, &view,
-            [&](int, int, int, quint32 dur) {
-                auditions++;
-                minDur = std::min(minDur, dur);
+            [&](int, int key, int velocity, quint32 dur) {
+                if (velocity > 0) {
+                    onKeys.push_back(key);
+                    minDur = std::min(minDur, dur);
+                } else {
+                    offKeys.push_back(key);
+                }
             });
         const int preBandCount = doc.undoStack()->count();
         const QPoint sweepStart(songview::kKeyboardW + 1, 0);
@@ -281,13 +286,21 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
                   Qt::RightButton);
         sendMouse(roll, QEvent::MouseMove, a.center + QPoint(4, 4), Qt::NoButton,
                   Qt::RightButton);
-        if (auditions < 1)
+        if (std::find(onKeys.begin(), onKeys.end(), a.key) == onKeys.end())
             fail("sweeping the band over a note did not audition it");
+        // Retreat to a band covering nothing: the departed notes' previews
+        // must release now, not ring out their durations.
+        sendMouse(roll, QEvent::MouseMove, sweepStart + QPoint(4, 4),
+                  Qt::NoButton, Qt::RightButton);
+        if (std::find(offKeys.begin(), offKeys.end(), a.key) == offKeys.end())
+            fail("shrinking the band did not release the departed note");
         sendMouse(roll, QEvent::MouseMove, sweepEnd, Qt::NoButton,
                   Qt::RightButton);
         sendMouse(roll, QEvent::MouseButtonRelease, sweepEnd, Qt::RightButton,
                   Qt::NoButton);
         QObject::disconnect(conn);
+        if (std::count(onKeys.begin(), onKeys.end(), a.key) < 2)
+            fail("re-covering a note did not re-audition it");
         const std::vector<SongView::NoteId> &sel = view.selection();
         if (sel.size() < 2
             || std::find(sel.begin(), sel.end(),
@@ -297,9 +310,16 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
                          SongView::NoteId{uint32_t(b.tick), uint8_t(b.key)})
                    == sel.end())
             fail("band release did not select the swept notes");
-        if (auditions != int(sel.size()))
-            fail("band sweep auditions did not match the notes it covered");
-        if (auditions > 0 && minDur == 0)
+        // Every key that auditioned was eventually released (mid-drag or at
+        // the drag's end).
+        auto keySet = [](std::vector<int> keys) {
+            std::sort(keys.begin(), keys.end());
+            keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+            return keys;
+        };
+        if (keySet(onKeys) != keySet(offKeys))
+            fail("band sweep left auditioned keys unreleased");
+        if (!onKeys.empty() && minDur == 0)
             fail("band sweep auditioned a zero-length note");
         if (doc.undoStack()->count() != preBandCount)
             fail("band sweep pushed an undo command");

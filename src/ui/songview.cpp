@@ -1229,7 +1229,7 @@ protected:
                 else
                     m_sv->clearTimeSelection();
             } else if (drag == Drag::Band) {
-                m_bandAud.clear();
+                stopBandAuditions();
                 selectBand(QRect(m_pressPos, m_curPos).normalized(),
                            event->modifiers() & Qt::ControlModifier);
             } else if (doc && m_rightHit) {
@@ -1363,6 +1363,7 @@ protected:
             m_drag = Drag::None;
             m_leftPress = false;
             m_rightPress = false;
+            stopBandAuditions();
             m_sv->clearSelection();
             m_sv->clearTimeSelection();
             update();
@@ -1822,9 +1823,11 @@ private:
     }
 
     // Selects the selected track's notes intersecting the band rect.
-    // Ableton-style sweep audition: each note sounds for its own length the
-    // moment the rubber band first covers it, so sweeping across a chord
-    // hears its notes together. A note swept out and back in re-auditions.
+    // Ableton-style sweep audition: each note sounds the moment the rubber
+    // band first covers it and stops when the band leaves it (its own
+    // length is the ceiling), so sweeping across a chord hears its notes
+    // together without long notes ringing on. A note swept out and back in
+    // re-auditions.
     void auditionBandEntrants(const QRect &band)
     {
         std::vector<SongView::NoteId> inBand;
@@ -1838,7 +1841,26 @@ private:
                                     note.startTick, note.endTick);
             inBand.push_back(id);
         }
+        for (const SongView::NoteId &old : m_bandAud) {
+            if (std::find(inBand.begin(), inBand.end(), old) != inBand.end())
+                continue;
+            // Previews are one-per-key: keep the key sounding while the band
+            // still covers another note of the same pitch.
+            const bool keyCovered =
+                std::any_of(inBand.begin(), inBand.end(),
+                            [&](const SongView::NoteId &id) { return id.key == old.key; });
+            if (!keyCovered)
+                m_sv->auditionTimedOff(m_sv->selectedTrack(), old.key);
+        }
         m_bandAud = std::move(inBand);
+    }
+
+    // Release every preview the band still covers (drag ended or cancelled).
+    void stopBandAuditions()
+    {
+        for (const SongView::NoteId &id : m_bandAud)
+            m_sv->auditionTimedOff(m_sv->selectedTrack(), id.key);
+        m_bandAud.clear();
     }
 
     void selectBand(const QRect &band, bool additive)

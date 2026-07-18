@@ -87,7 +87,9 @@ public:
 
     // Hot: audition a note for a fixed length (band-sweep chord preview).
     // Unlike previewNote, timed previews stack polyphonically; the audio
-    // thread sends each note-off itself once the duration elapses.
+    // thread sends each note-off itself once the duration elapses. velocity
+    // 0 releases that track+key's preview early instead (durationSamples
+    // ignored).
     void previewNoteTimed(uint8_t track, uint8_t key, uint8_t velocity,
                           uint32_t durationSamples);
 

@@ -356,9 +356,17 @@ public:
 
     // Fixed-length audition for the band-sweep chord preview: the note's tick
     // span converts to samples through the display timeline, so the preview
-    // lasts as long as the note does in the song (tempo changes included).
+    // lasts at most as long as the note does in the song (tempo changes
+    // included).
     void auditionTimed(int track, int key, int velocity, uint64_t startTick,
                        uint64_t endTick);
+
+    // Early release for a timed audition (the band no longer covers the
+    // note); the velocity-0 form of the same signal.
+    void auditionTimedOff(int track, int key)
+    {
+        emit auditionNoteTimed(track, key, 0, 0);
+    }
 
     // Child-widget entry point for the statusMessage signal.
     void announce(const QString &text) { emit statusMessage(text); }
@@ -394,6 +402,7 @@ signals:
     void auditionNote(int track, int key, int velocity);
     // Self-releasing audition (band-sweep chord preview); forwarded to
     // AudioEngine::previewNoteTimed, which sends the note-off itself.
+    // velocity 0 releases the track+key's preview early.
     void auditionNoteTimed(int track, int key, int velocity,
                            quint32 durationSamples);
     // Voicegroup-entry audition from the voice picker; routed to

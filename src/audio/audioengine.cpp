@@ -300,7 +300,7 @@ void AudioEngine::previewNote(uint8_t track, uint8_t key, uint8_t velocity)
 void AudioEngine::previewNoteTimed(uint8_t track, uint8_t key, uint8_t velocity,
                                    uint32_t durationSamples)
 {
-    if (velocity == 0 || durationSamples == 0)
+    if (velocity > 0 && durationSamples == 0)
         return;
     const uint32_t w = m_timedWrite.load(std::memory_order_relaxed);
     if (w - m_timedRead.load(std::memory_order_acquire) >= kTimedRingSize)
@@ -447,6 +447,18 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
     uint32_t r = m_timedRead.load(std::memory_order_relaxed);
     for (; r != w; r++) {
         const TimedPreview cmd = m_timedRing[r % kTimedRingSize];
+        if (cmd.velocity == 0) {
+            // Early release: the band no longer covers the note.
+            for (int i = 0; i < m_timedActiveCount; i++) {
+                if (m_timedActive[i].track == cmd.track
+                    && m_timedActive[i].key == cmd.key) {
+                    m4a_engine_note_off(m_engine.get(), cmd.track, cmd.key);
+                    m_timedActive[i] = m_timedActive[--m_timedActiveCount];
+                    break;
+                }
+            }
+            continue;
+        }
         // Retrigger a still-sounding key (note-off first — the engine stops
         // channels by track+key, so duplicates must never stack) and reuse
         // its slot; otherwise take a free slot, or steal the preview closest
