@@ -219,7 +219,11 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   mute/solo, volume/pan mini-controls) beside a shared-timeline piano roll. Selected
   track is editable; other tracks ghosted. Loop region rendered from `[`/`]` markers.
 - **Bottom — Automation lanes:** per-track, addable from the m4a parameter list (§4.2),
-  drawn as line/step editors. Tempo lane always available at the top level.
+  drawn as line/step editors. Tempo lane always available at the top level. 0-based CC
+  lanes have a zoomable value axis (gutter menu → Value range: auto-fit or a fixed
+  0–16/32/64/127 display max, persisted in the sidecar §4.4); MOD auto-fits by default
+  since its musical range is roughly 0–20. Display only — event values are untouched,
+  and data beyond the chosen range grows the axis rather than clipping.
 - **Transport bar:** play/pause/stop, loop toggle, position, tempo display, master
   volume, and a **polyphony meter** fed by the engine's overflow-debug counters
   showing DirectSound channel usage against the project's `maxChans` (dropped/stolen

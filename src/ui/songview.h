@@ -90,6 +90,8 @@ public:
         uint64_t editCursorTick = 0;
         int laneHeight = 48;      // shared automation row height
         QHash<QString, int> laneHeights; // per-row overrides (AutomationArea keys)
+        QHash<QString, int> laneRanges;  // per-lane display max (AutomationArea
+                                         // keys); 0 = auto-fit to the data
         QList<int> splitterSizes; // roll pane, lanes pane
         std::vector<std::pair<int, uint8_t>> emptyLanes; // (track, cc)
         int gridMinDenom = 0;     // snap-grid floor as a note denominator
@@ -108,6 +110,11 @@ public:
     // swapped; once the lane gets its first point the model carries it.
     void addEmptyLane(int track, uint8_t cc);
     void removeEmptyLane(int track, uint8_t cc);
+
+    // Display max for a CC lane's value axis (0 = auto-fit): the lane
+    // menu's "Value range" choice, exposed for the harnesses. View state
+    // only — lane values themselves are untouched.
+    void setLaneDisplayRange(int track, uint8_t cc, int maxValue);
 
     // Raw MIDI event list: an alternative to the piano roll in the same
     // screen space (the ruler, headers, and automation lanes stay). Per-song

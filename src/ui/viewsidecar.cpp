@@ -44,6 +44,9 @@ bool load(const QString &projectRoot, const QString &songLabel,
     const QJsonObject lanes = obj.value(QLatin1String("laneHeights")).toObject();
     for (auto it = lanes.begin(); it != lanes.end(); ++it)
         loaded.laneHeights.insert(it.key(), it.value().toInt());
+    const QJsonObject ranges = obj.value(QLatin1String("laneRanges")).toObject();
+    for (auto it = ranges.begin(); it != ranges.end(); ++it)
+        loaded.laneRanges.insert(it.key(), it.value().toInt());
     for (const QJsonValue &v : obj.value(QLatin1String("splitter")).toArray())
         loaded.splitterSizes.push_back(v.toInt());
     for (const QJsonValue &v : obj.value(QLatin1String("emptyLanes")).toArray()) {
@@ -88,6 +91,12 @@ bool save(const QString &projectRoot, const QString &songLabel,
         for (auto it = state.laneHeights.begin(); it != state.laneHeights.end(); ++it)
             lanes.insert(it.key(), it.value());
         obj.insert(QLatin1String("laneHeights"), lanes);
+    }
+    if (!state.laneRanges.isEmpty()) {
+        QJsonObject ranges;
+        for (auto it = state.laneRanges.begin(); it != state.laneRanges.end(); ++it)
+            ranges.insert(it.key(), it.value());
+        obj.insert(QLatin1String("laneRanges"), ranges);
     }
     QJsonArray splitter;
     for (int size : state.splitterSizes)

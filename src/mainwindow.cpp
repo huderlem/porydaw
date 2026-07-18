@@ -2129,11 +2129,13 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                                            QStringLiteral("MUSIC_PLAYER_BGM"));
         tab->view->setGridMinDenom(8); // non-default grid must round-trip too
         tab->view->setGridFeel(SongView::GridFeel::Triplet);
+        tab->view->setLaneDisplayRange(0, 0x01, 16); // MOD axis zoom, ditto
         const SongView::ViewState saved = tab->view->viewState();
         ok = ViewSidecar::save(m_project.root(), target->label, saved);
         tab->view->zoomAroundContentX(2.0, 0); // knock the view off the state
         tab->view->setGridMinDenom(0);
         tab->view->setGridFeel(SongView::GridFeel::Straight);
+        tab->view->setLaneDisplayRange(0, 0x01, 0); // back to the MOD default
         SongView::ViewState loaded;
         ok = ok && ViewSidecar::load(m_project.root(), target->label, &loaded);
         if (ok) {
@@ -2148,6 +2150,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                 && restored.laneHeight == saved.laneHeight
                 && restored.gridMinDenom == 8
                 && restored.gridTriplet
+                && restored.laneRanges.value(QStringLiteral("cc:0:1"), -1) == 16
                 && SongRegistry::loadRegistrationMeta(m_project.root(), target->label,
                                                       &constant, &player)
                 && constant == QLatin1String("MUS_SELFTEST");
@@ -2155,6 +2158,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         QFile::remove(ViewSidecar::pathFor(m_project.root(), target->label));
         tab->view->setGridMinDenom(0); // don't leak the test grid into a
         tab->view->setGridFeel(SongView::GridFeel::Straight); // shutdown save
+        tab->view->setLaneDisplayRange(0, 0x01, 0); // nor the MOD axis zoom
         if (ok)
             qInfo("selftest: sidecar view-state round trip OK");
         else

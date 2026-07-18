@@ -1941,6 +1941,25 @@ public:
     int laneHeight() const { return m_laneH; }
     const QHash<QString, int> &rowHeightOverrides() const { return m_rowHeights; }
 
+    // Per-lane value-axis zoom (rowKey → display max; 0 = auto-fit). Same
+    // sidecar plumbing as the row heights.
+    const QHash<QString, int> &rowRangeOverrides() const { return m_rowRanges; }
+    void setRowRanges(const QHash<QString, int> &ranges)
+    {
+        m_rowRanges.clear();
+        for (auto it = ranges.begin(); it != ranges.end(); ++it)
+            m_rowRanges.insert(it.key(), std::clamp(it.value(), 0, 127));
+        update();
+    }
+    void setLaneRange(int track, uint8_t cc, int value)
+    {
+        if (value == laneRangeDefault(cc))
+            m_rowRanges.remove(laneKey(track, cc));
+        else
+            m_rowRanges.insert(laneKey(track, cc), std::clamp(value, 0, 127));
+        update();
+    }
+
     // A mouse gesture is live (pan, point/sweep/line edit, row resize,
     // right-press sweep); the playhead follow-scroll pauses while one runs
     // so the view doesn't jump under the cursor.
@@ -2523,9 +2542,14 @@ private:
         case Row::Voice:
             return QStringLiteral("voice:%1").arg(m_sv->selectedTrack());
         case Row::Lane:
-            return QStringLiteral("cc:%1:%2").arg(row.lane->track).arg(row.lane->cc);
+            return laneKey(row.lane->track, row.lane->cc);
         }
         return QString();
+    }
+
+    static QString laneKey(int track, uint8_t cc)
+    {
+        return QStringLiteral("cc:%1:%2").arg(track).arg(cc);
     }
 
     int rowHeight(const Row &row) const
@@ -2667,9 +2691,35 @@ private:
         clear->setEnabled(!empty);
         QAction *del = menu.addAction(empty ? SongView::tr("Remove empty lane")
                                             : SongView::tr("Delete lane"));
+        // Value-axis zoom: display range only, the events keep their values.
+        std::vector<std::pair<QAction *, int>> rangeActions;
+        if (laneRangeZoomable(cc)) {
+            QMenu *range = menu.addMenu(SongView::tr("Value range"));
+            const int current =
+                m_rowRanges.value(laneKey(track, cc), laneRangeDefault(cc));
+            const std::pair<int, QString> options[] = {
+                {0, SongView::tr("Auto (fit to data)")},
+                {16, QStringLiteral("0–16")},
+                {32, QStringLiteral("0–32")},
+                {64, QStringLiteral("0–64")},
+                {127, SongView::tr("0–127 (full)")},
+            };
+            for (const auto &opt : options) {
+                QAction *action = range->addAction(opt.second);
+                action->setCheckable(true);
+                action->setChecked(opt.first == current);
+                rangeActions.emplace_back(action, opt.first);
+            }
+        }
         QAction *chosen = menu.exec(globalPos);
         if (!chosen)
             return;
+        for (const std::pair<QAction *, int> &opt : rangeActions) {
+            if (chosen == opt.first) {
+                setLaneRange(track, cc, opt.second);
+                return;
+            }
+        }
 
         SongDocument *doc = m_sv->document();
         const std::vector<DocLanePoint> points = doc->lanePoints(track, cc);
@@ -2786,6 +2836,29 @@ private:
         return nullptr;
     }
 
+    // Lanes whose value axis can zoom: 0-based CC lanes. Centered lanes
+    // (PAN/TUNE swing around 64) and bend keep their fixed scales.
+    static bool laneRangeZoomable(uint8_t cc)
+    {
+        return cc != LANE_CC_BEND && cc != 0x0A && cc != 0x18;
+    }
+
+    // Default axis mode per CC (0 = auto-fit): MOD is only musical in the
+    // bottom stretch of 0..127 (vibrato past ~20 is cartoony), so it fits
+    // to the data by default; everything else keeps the full axis.
+    static int laneRangeDefault(uint8_t cc) { return cc == 0x01 ? 0 : 127; }
+
+    // Auto-fit rung: the smallest of 32/64/127 that holds the lane's data.
+    // Coarse rungs keep the scale from twitching while points are edited.
+    static int laneAutoMax(int dataMax)
+    {
+        if (dataMax <= 32)
+            return 32;
+        if (dataMax <= 64)
+            return 64;
+        return 127;
+    }
+
     void rowRange(const Row &row, int *minV, int *maxV) const
     {
         *minV = 0;
@@ -2797,6 +2870,17 @@ private:
         } else if (row.kind == Row::Lane && row.lane->cc == LANE_CC_BEND) {
             *minV = -8192;
             *maxV = 8191;
+        } else if (row.kind == Row::Lane && laneRangeZoomable(row.lane->cc)) {
+            // Zoomed value axis: the display max shrinks so a small useful
+            // range (MOD's 0..20, say) gets the row's pixels. Data outside
+            // the chosen range always grows the axis back — points never
+            // draw off-scale, and the gutter label shows the live range.
+            int dataMax = 0;
+            for (const LanePoint &pt : row.lane->points)
+                dataMax = std::max(dataMax, pt.value);
+            const int mode =
+                m_rowRanges.value(rowKey(row), laneRangeDefault(row.lane->cc));
+            *maxV = mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
         }
     }
 
@@ -3180,6 +3264,8 @@ private:
     int m_laneH = kLaneH;       // shared row height; Ctrl+wheel rescales
     int m_laneZoomAccum = 0;    // sub-notch wheel remainder, like zoomKeyHeight
     QHash<QString, int> m_rowHeights; // individual row heights (rowKey → px)
+    QHash<QString, int> m_rowRanges;  // display max per lane (rowKey → value;
+                                      // 0 = auto-fit); absent = CC default
     int m_resizeRow = -1;       // row whose bottom divider is being dragged
     int m_resizeOrigH = 0;
     int m_resizePressY = 0;
@@ -3952,9 +4038,10 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_playing = false;
     m_scrollPx = 0;
     m_events->setPlayheadTick(-1.0, false); // another song's ticks are stale
-    // Lane heights and the snap grid are per-song view state; back to
-    // defaults until a sidecar (applyViewState) says otherwise.
+    // Lane heights/value ranges and the snap grid are per-song view state;
+    // back to defaults until a sidecar (applyViewState) says otherwise.
     m_lanes->setViewHeights(0, {});
+    m_lanes->setRowRanges({});
     m_gridFeel = GridFeel::Straight;
     m_gridMinDenom = 0;
     m_ruler->syncGridControls();
@@ -4098,6 +4185,11 @@ void SongView::removeEmptyLane(int track, uint8_t cc)
     m_lanes->rebuildRows();
 }
 
+void SongView::setLaneDisplayRange(int track, uint8_t cc, int maxValue)
+{
+    m_lanes->setLaneRange(track, cc, maxValue);
+}
+
 void SongView::mergeEmptyLanes()
 {
     bool added = false;
@@ -4143,6 +4235,7 @@ SongView::ViewState SongView::viewState() const
     state.editCursorTick = m_editCursorTick;
     state.laneHeight = m_lanes->laneHeight();
     state.laneHeights = m_lanes->rowHeightOverrides();
+    state.laneRanges = m_lanes->rowRangeOverrides();
     state.splitterSizes = m_splitter->sizes();
     state.emptyLanes = m_emptyLanes;
     state.gridMinDenom = m_gridMinDenom;
@@ -4168,6 +4261,7 @@ void SongView::applyViewState(const ViewState &state)
             m_emptyLanes.push_back(lane);
     mergeEmptyLanes();
     m_lanes->setViewHeights(state.laneHeight, state.laneHeights);
+    m_lanes->setRowRanges(state.laneRanges);
     if (state.selectedTrack >= 0 && state.selectedTrack < 16
         && m_timeline->tracks[state.selectedTrack].used)
         selectTrack(state.selectedTrack);
