@@ -9,16 +9,17 @@
 #include "core/miditimeline.h"
 #include "core/smf.h"
 
-// --transportcheck: starting playback halts ringing auditions (self-contained,
+// --transportcheck: transport transitions halt ringing sound (self-contained,
 // needs a working audio output device — SKIPs cleanly without one). A
-// slow-release voice keeps ringing long after a timed preview's note-off, and
-// without the transport-side hard cut that tail (or a preview still counting
-// down) persists into song playback. Plays a synthesized song with NO notes,
-// so the engine's active-channel telemetry isolates the previews: after
-// play() the count must drop to zero. Covers every entry into Playing — from
-// Stopped, and from Paused both as Space reaches it (seek + play with an
-// already-released tail ringing; Space toggles pause, so this is how
-// playback usually starts) and with a preview still counting down.
+// slow-release voice keeps ringing long after a note-off, so every
+// transition cuts hard: entering Playing halts auditions before the song
+// sounds, and entering Paused falls silent like Stop instead of ringing
+// through the pause. Plays a synthesized song with NO notes, so the engine's
+// active-channel telemetry isolates the previews: after each transition the
+// count must drop to zero. Scenarios: play from Stopped with a ringing tail;
+// pause with a preview sounding; the Space path (pause, audition, seek +
+// play — Space toggles pause, so this is how playback usually starts); and
+// resuming with a preview still counting down.
 
 namespace {
 
@@ -164,10 +165,21 @@ int runTransportCheck()
             fail("audition tail persisted after playback started from stop");
     }
 
+    // Playing → Paused: pausing silences like Stop — a preview sounding
+    // when pause hits must not ring through it.
+    engine.previewNoteTimed(0, 60, 127, uint32_t(60.0 * engine.sampleRate()));
+    if (!waitFor([&] { return active() >= 1; }, 2000)) {
+        fail("timed preview during playback never sounded");
+    } else {
+        engine.pause();
+        if (!waitFor([&] { return active() == 0; }, 2000))
+            fail("pause left the preview ringing");
+    }
+
     // Paused → Playing, the Space path (pause, audition, seek + play):
     // Space toggles pause and restarts from the edit cursor, so this is how
     // playback usually starts — the tail must be cut here too.
-    engine.pause();
+    QThread::msleep(300); // the pause transition drains the preview ring
     if (ringingTail(0)) {
         engine.seek(0);
         engine.play();
@@ -178,6 +190,7 @@ int runTransportCheck()
     // Paused → Playing with the preview still counting down: resuming must
     // cut it rather than let it sound over the song for the full duration.
     engine.pause();
+    QThread::msleep(300); // the pause transition drains the preview ring
     engine.previewNoteTimed(1, 64, 127, uint32_t(60.0 * engine.sampleRate()));
     if (!waitFor([&] { return active() >= 1; }, 2000)) {
         fail("timed preview during pause never sounded");

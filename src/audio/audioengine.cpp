@@ -386,31 +386,22 @@ void AudioEngine::applyTransportTransition()
     if (t == m_appliedTransport)
         return;
 
+    // Every transition cuts hard. Pause and Stop must fall silent — a
+    // note-off alone leaves a slow-release voice ringing for seconds — and
+    // entering Playing must halt auditions before the song sounds (Space
+    // toggles pause, so playback usually starts from Paused, where a
+    // preview can ring or still be counting down). Preview bookkeeping is
+    // dropped with the sound (queued-but-unstarted previews too) so no
+    // stale note-off can later cut a playback note on the same track and
+    // key.
+    cutAllSound();
     switch (static_cast<Transport>(t)) {
     case Transport::Stopped:
-        m4a_engine_all_sound_off(m_engine.get());
         m_player.reset();
         break;
     case Transport::Paused:
-        for (int track = 0; track < MAX_TRACKS; track++)
-            m4a_engine_all_notes_off(m_engine.get(), track);
         break;
     case Transport::Playing:
-        // Halt auditions before the song sounds. A hard cut, and on every
-        // entry into Playing (Space toggles pause, so playback usually
-        // starts from Paused): a note-off alone leaves a slow-release
-        // voice's audition ringing over the song for seconds. Nothing
-        // legitimate dies — both Stopped and Paused released the song's own
-        // notes when they were entered, so only fading tails and previews
-        // can be sounding here. Preview bookkeeping is dropped with the
-        // sound (queued-but-unstarted previews too) so no stale note-off
-        // can later cut a playback note on the same track and key.
-        m4a_engine_all_sound_off(m_engine.get());
-        m_timedActiveCount = 0;
-        m_timedRead.store(m_timedWrite.load(std::memory_order_acquire),
-                          std::memory_order_release);
-        m_previewTrack = -1;
-        m_previewKey = -1;
         // No player reset here: the Stopped transition already rewound to 0,
         // and a seek() between stop and play deliberately moves the start.
         if (m_appliedTransport == static_cast<int>(Transport::Stopped))
@@ -418,6 +409,18 @@ void AudioEngine::applyTransportTransition()
         break;
     }
     m_appliedTransport = t;
+}
+
+// Audio-thread: silence everything at once and drop preview bookkeeping,
+// queued and active.
+void AudioEngine::cutAllSound()
+{
+    m4a_engine_all_sound_off(m_engine.get());
+    m_timedActiveCount = 0;
+    m_timedRead.store(m_timedWrite.load(std::memory_order_acquire),
+                      std::memory_order_release);
+    m_previewTrack = -1;
+    m_previewKey = -1;
 }
 
 void AudioEngine::applyMuteTransition()

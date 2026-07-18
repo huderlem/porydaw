@@ -145,6 +145,7 @@ private:
                              uint32_t frameCount);
     void process(float *interleavedOut, uint32_t frameCount);
     void applyTransportTransition();
+    void cutAllSound();
     void applyMuteTransition();
     void applyPreviewNote();
     void applyTimedPreviews(uint32_t frameCount);
