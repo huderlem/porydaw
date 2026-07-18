@@ -4,8 +4,10 @@
 #include <QComboBox>
 #include <QContextMenuEvent>
 #include <QDialog>
+#include <QCursor>
 #include <QDialogButtonBox>
 #include <QFontMetrics>
+#include <QIcon>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QKeyEvent>
@@ -19,6 +21,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPixmap>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -807,13 +810,29 @@ private:
     QComboBox *m_feelCombo = nullptr; // straight / triplet
 };
 
+struct MidiCursors {
+    QCursor leftEdge;
+    QCursor rightEdge;
+};
+
+MidiCursors loadMidiCursors(qreal devicePixelRatio)
+{
+    const QSize cursorSize(24, 24);
+    const QIcon leftEdge(QStringLiteral(":/cursors/left-drag.png"));
+    const QIcon rightEdge(QStringLiteral(":/cursors/right-drag.png"));
+    return {QCursor(leftEdge.pixmap(cursorSize, devicePixelRatio)),
+            QCursor(rightEdge.pixmap(cursorSize, devicePixelRatio))};
+}
+
 // ---------------------------------------------------------------- PianoRoll
 
 class PianoRoll : public QWidget
 {
 public:
     explicit PianoRoll(SongView *sv)
-        : QWidget(sv), m_sv(sv)
+        : QWidget(sv)
+        , m_sv(sv)
+        , m_cursors(loadMidiCursors(devicePixelRatioF()))
     {
         setObjectName(QStringLiteral("pianoRoll")); // findChild for tests
         setMinimumHeight(120);
@@ -833,6 +852,13 @@ public:
     }
 
 protected:
+    bool event(QEvent *event) override
+    {
+        if (event->type() == QEvent::DevicePixelRatioChange)
+            m_cursors = loadMidiCursors(devicePixelRatioF());
+        return QWidget::event(event);
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
@@ -1083,13 +1109,14 @@ protected:
             const ViewNote *hit =
                 m_sv->document() && event->pos().x() >= kKeyboardW ? hitNote(event->pos())
                                                                    : nullptr;
-            setCursor(hit
-                              && (nearRightEdge(*hit, event->pos())
-                                  || nearLeftEdge(*hit, event->pos()))
-                          ? Qt::SizeHorCursor
-                          : hit && nearVelocityHandle(*hit, event->pos())
-                                ? Qt::SizeVerCursor
-                                : Qt::ArrowCursor);
+            if (hit && nearRightEdge(*hit, event->pos()))
+                setCursor(m_cursors.rightEdge);
+            else if (hit && nearLeftEdge(*hit, event->pos()))
+                setCursor(m_cursors.leftEdge);
+            else if (hit && nearVelocityHandle(*hit, event->pos()))
+                setCursor(Qt::SizeVerCursor);
+            else
+                setCursor(Qt::ArrowCursor);
             return;
         }
 
@@ -1884,6 +1911,7 @@ private:
     }
 
     SongView *m_sv;
+    MidiCursors m_cursors;
     Drag m_drag = Drag::None;
     QPoint m_pressPos;
     QPoint m_curPos;
