@@ -4,7 +4,9 @@
 
 class QComboBox;
 class QLabel;
+class QMenu;
 class QTableView;
+class QToolButton;
 class SongDocument;
 class SongView;
 struct SmfEvent;
@@ -50,7 +52,9 @@ protected:
 private:
     void rebuildChunkCombo();
     void chunkPicked(int comboIndex);
-    void filterPicked();
+    void filterChanged();
+    int filterMask() const;
+    void updateFilterText();
     void addEvent();
     void deleteSelected();
     void showContextMenu(const QPoint &pos);
@@ -66,7 +70,8 @@ private:
     eventlist::EventTableModel *m_model;
     QTableView *m_table;
     QComboBox *m_chunk;
-    QComboBox *m_filter;
+    QToolButton *m_filter;   // opens m_filterMenu; text summarizes the checks
+    QMenu *m_filterMenu;     // one checkable action per event category
     QLabel *m_count;
     bool m_syncing = false;
     bool m_settingCurrent = false; // programmatic row changes must not

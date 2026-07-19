@@ -3,7 +3,9 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QMenu>
 #include <QString>
+#include <QStringList>
 #include <QTableView>
 #include <algorithm>
 #include <cstdio>
@@ -92,8 +94,8 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
 
     auto *table = view.findChild<QTableView *>(QStringLiteral("eventListTable"));
     auto *chunkCombo = view.findChild<QComboBox *>(QStringLiteral("eventListChunk"));
-    auto *filterCombo = view.findChild<QComboBox *>(QStringLiteral("eventListFilter"));
-    if (!table || !chunkCombo || !filterCombo) {
+    auto *filterMenu = view.findChild<QMenu *>(QStringLiteral("eventListFilterMenu"));
+    if (!table || !chunkCombo || !filterMenu) {
         fail("event list widgets not found");
         return failures;
     }
@@ -142,14 +144,37 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
         doc.undoStack()->undo();
     }
 
-    // Filter: the Meta entry must show exactly the chunk's meta events.
+    // Filter checkboxes: any combination of categories can be shown. Check
+    // Meta alone, then Meta + Notes together (the multi-select the old
+    // exclusive combo couldn't express), then restore all.
+    const auto setChecks = [filterMenu](const QStringList &names) {
+        const QList<QAction *> actions = filterMenu->actions();
+        for (QAction *action : actions)
+            action->setChecked(names.contains(action->text()));
+    };
+    const auto &filterEvents = doc.smf().tracks[chunk].events;
     const size_t metas = size_t(std::count_if(
-        doc.smf().tracks[chunk].events.begin(), doc.smf().tracks[chunk].events.end(),
+        filterEvents.begin(), filterEvents.end(),
         [](const SmfEvent &ev) { return ev.isMeta(); }));
-    filterCombo->setCurrentIndex(7); // FilterMeta
+    const size_t notes = size_t(std::count_if(
+        filterEvents.begin(), filterEvents.end(), [](const SmfEvent &ev) {
+            return ev.isChannel()
+                && (ev.typeNibble() == 0x8 || ev.typeNibble() == 0x9);
+        }));
+    setChecks({QStringLiteral("Meta")});
     if (model->rowCount() != int(metas) + 1)
         fail("meta filter shows the wrong row count");
-    filterCombo->setCurrentIndex(0); // FilterAll
+    setChecks({QStringLiteral("Meta"), QStringLiteral("Notes")});
+    if (model->rowCount() != int(metas + notes) + 1)
+        fail("meta+notes filter shows the wrong row count");
+    setChecks({}); // nothing checked hides every event
+    if (model->rowCount() != 1)
+        fail("empty filter still shows events");
+    const QList<QAction *> filterActions = filterMenu->actions();
+    for (QAction *action : filterActions)
+        action->setChecked(true);
+    if (model->rowCount() != int(filterEvents.size()) + 1)
+        fail("all-checked filter does not show every event");
 
     // A track move permutes the chunk numbering at constant count (invisible
     // to the count-changed re-anchor): the list must follow its anchored

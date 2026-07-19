@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMouseEvent>
 #include <QRegularExpression>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
@@ -294,15 +295,16 @@ public:
         ColSummary,
         ColCount
     };
-    enum Filter {
-        FilterAll,
-        FilterNotes,
-        FilterCc,
-        FilterProgram,
-        FilterBend,
-        FilterTouch,
-        FilterSysEx,
-        FilterMeta
+    // Filter bits, one per category; any combination may be shown.
+    enum FilterBit {
+        FilterNotes   = 1 << 0,
+        FilterCc      = 1 << 1,
+        FilterProgram = 1 << 2,
+        FilterBend    = 1 << 3,
+        FilterTouch   = 1 << 4,
+        FilterSysEx   = 1 << 5,
+        FilterMeta    = 1 << 6,
+        FilterAll     = (1 << 7) - 1
     };
 
     explicit EventTableModel(SongView *sv, QObject *parent)
@@ -319,10 +321,10 @@ public:
         endResetModel();
     }
 
-    void setFilter(int filter)
+    void setFilter(int mask)
     {
         beginResetModel();
-        m_filter = filter;
+        m_filter = mask;
         rebuildRows();
         endResetModel();
     }
@@ -392,18 +394,19 @@ public:
         repaint(row);
     }
 
-    static bool filterMatches(int filter, const SmfEvent &ev)
+    static bool filterMatches(int mask, const SmfEvent &ev)
     {
-        const int kind = typeKindOf(ev);
-        switch (filter) {
-        case FilterNotes:   return kind == TypeNoteOff || kind == TypeNoteOn;
-        case FilterCc:      return kind == TypeCc;
-        case FilterProgram: return kind == TypeProgram;
-        case FilterBend:    return kind == TypeBend;
-        case FilterTouch:   return kind == TypePolyTouch || kind == TypeChanTouch;
-        case FilterSysEx:   return kind == TypeSysEx0 || kind == TypeSysEx7;
-        case FilterMeta:    return kind == TypeMeta;
-        default:            return true;
+        switch (typeKindOf(ev)) {
+        case TypeNoteOff:
+        case TypeNoteOn:    return mask & FilterNotes;
+        case TypeCc:        return mask & FilterCc;
+        case TypeProgram:   return mask & FilterProgram;
+        case TypeBend:      return mask & FilterBend;
+        case TypePolyTouch:
+        case TypeChanTouch: return mask & FilterTouch;
+        case TypeSysEx0:
+        case TypeSysEx7:    return mask & FilterSysEx;
+        default:            return mask & FilterMeta;
         }
     }
 
@@ -649,12 +652,31 @@ private:
     SongView *m_sv;
     SongDocument *m_doc = nullptr;
     int m_chunk = -1;
-    int m_filter = FilterAll;
+    int m_filter = FilterAll; // FilterBit mask of the shown categories
     int m_playRow = -1; // display row under the playhead; -1 = none
     std::vector<size_t> m_rows; // display row -> chunk event index (ascending)
 };
 
 namespace {
+
+// A menu whose checkable items toggle without closing it, so several event
+// categories can be checked or unchecked in one visit.
+class CheckMenu : public QMenu
+{
+public:
+    using QMenu::QMenu;
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        QAction *action = actionAt(event->pos());
+        if (action && action->isCheckable()) {
+            action->trigger();
+            return;
+        }
+        QMenu::mouseReleaseEvent(event);
+    }
+};
 
 class EventItemDelegate : public QStyledItemDelegate
 {
@@ -747,16 +769,33 @@ EventListView::EventListView(SongView *sv, QWidget *parent)
     m_chunk->setToolTip(tr("The MIDI file chunk shown (follows the selected track)"));
     bar->addWidget(m_chunk);
 
-    m_filter = new QComboBox(this);
+    // Event-type filter: checkboxes, not an exclusive pick — any combination
+    // of categories can be shown (e.g. program changes + CCs without notes).
+    m_filter = new QToolButton(this);
     m_filter->setObjectName(QStringLiteral("eventListFilter"));
-    m_filter->addItem(tr("All events"));       // EventTableModel::FilterAll
-    m_filter->addItem(tr("Notes"));            // FilterNotes
-    m_filter->addItem(tr("Control changes"));  // FilterCc
-    m_filter->addItem(tr("Program changes"));  // FilterProgram
-    m_filter->addItem(tr("Pitch bends"));      // FilterBend
-    m_filter->addItem(tr("Aftertouch"));       // FilterTouch
-    m_filter->addItem(tr("SysEx"));            // FilterSysEx
-    m_filter->addItem(tr("Meta"));             // FilterMeta
+    m_filter->setAutoRaise(true);
+    m_filter->setPopupMode(QToolButton::InstantPopup);
+    m_filter->setToolTip(tr("Which event types are shown"));
+    m_filterMenu = new CheckMenu(this);
+    m_filterMenu->setObjectName(QStringLiteral("eventListFilterMenu"));
+    const std::pair<QString, int> categories[] = {
+        {tr("Notes"),            EventTableModel::FilterNotes},
+        {tr("Control changes"),  EventTableModel::FilterCc},
+        {tr("Program changes"),  EventTableModel::FilterProgram},
+        {tr("Pitch bends"),      EventTableModel::FilterBend},
+        {tr("Aftertouch"),       EventTableModel::FilterTouch},
+        {tr("SysEx"),            EventTableModel::FilterSysEx},
+        {tr("Meta"),             EventTableModel::FilterMeta},
+    };
+    for (const auto &category : categories) {
+        QAction *action = m_filterMenu->addAction(category.first);
+        action->setCheckable(true);
+        action->setChecked(true);
+        action->setData(category.second);
+        connect(action, &QAction::toggled, this, &EventListView::filterChanged);
+    }
+    m_filter->setMenu(m_filterMenu);
+    updateFilterText();
     bar->addWidget(m_filter);
 
     auto *add = new QToolButton(this);
@@ -816,8 +855,6 @@ EventListView::EventListView(SongView *sv, QWidget *parent)
     // roll's track selection; programmatic sync must not echo back.
     connect(m_chunk, QOverload<int>::of(&QComboBox::activated), this,
             &EventListView::chunkPicked);
-    connect(m_filter, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
-            [this](int) { filterPicked(); });
     connect(m_sv, &SongView::selectedTrackChanged, this,
             [this](int) { syncTrackSelection(); });
 
@@ -1098,11 +1135,45 @@ void EventListView::chunkPicked(int)
     }
 }
 
-void EventListView::filterPicked()
+void EventListView::filterChanged()
 {
-    m_model->setFilter(m_filter->currentIndex());
+    m_model->setFilter(filterMask());
+    updateFilterText();
     updateCountLabel();
     updatePlayRow();
+}
+
+int EventListView::filterMask() const
+{
+    int mask = 0;
+    const QList<QAction *> actions = m_filterMenu->actions();
+    for (QAction *action : actions) {
+        if (action->isChecked())
+            mask |= action->data().toInt();
+    }
+    return mask;
+}
+
+// The button reads as the current selection: "All events", one category's
+// name, "Notes +2", or "No events".
+void EventListView::updateFilterText()
+{
+    const QList<QAction *> actions = m_filterMenu->actions();
+    QStringList checked;
+    for (QAction *action : actions) {
+        if (action->isChecked())
+            checked.append(action->text());
+    }
+    QString text;
+    if (checked.size() == actions.size())
+        text = tr("All events");
+    else if (checked.isEmpty())
+        text = tr("No events");
+    else if (checked.size() == 1)
+        text = checked.first();
+    else
+        text = tr("%1 +%2").arg(checked.first()).arg(checked.size() - 1);
+    m_filter->setText(text);
 }
 
 void EventListView::addEvent()
