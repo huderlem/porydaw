@@ -1958,8 +1958,7 @@ private:
             bool ok = false;
             const int velocity = QInputDialog::getInt(
                 this, SongView::tr("Note velocity"),
-                SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
-                    .arg(mid2agbEffectiveVelocity(1)),
+                SongView::tr("Velocity (1-127):"),
                 notes.front().velocity, 1, 127, 1, &ok);
             if (ok) {
                 doc->setNotesVelocity(notes, uint8_t(velocity));
