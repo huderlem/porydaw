@@ -355,6 +355,38 @@ uint64_t AudioEngine::polyLostTotal() const
     return total;
 }
 
+void AudioEngine::polySnapshot(PolySnapshot *out) const
+{
+    *out = PolySnapshot{};
+    if (!m_engine)
+        return;
+    const M4AEngine *engine = m_engine.get();
+    out->maxPcmChannels = engine->maxPcmChannels;
+    out->invert = engine->polyDebugInvert;
+    // Total first, then the ring: an event published after this line shows up
+    // next poll instead of tearing this one's newest row.
+    out->eventTotal = engine->polyEventTotal;
+    for (int i = 0; i < M4A_POLY_EVENT_CAPACITY; i++)
+        out->events[i] = engine->polyEvents[i];
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        out->drop[t] = engine->polyDropCount[t];
+        out->steal[t] = engine->polyStealCount[t];
+        out->tailCut[t] = engine->polyTailCutCount[t];
+    }
+    for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+        const M4APCMChannel &ch = engine->pcmChannels[i];
+        out->pcm[i] = {(ch.status & CHN_ON) != 0,
+                       (ch.status & (CHN_STOP | CHN_IEC)) != 0,
+                       uint8_t(ch.trackIndex), uint8_t(ch.midiKey)};
+    }
+    for (int i = 0; i < TOTAL_CGB_CHANNELS; i++) {
+        const M4ACGBChannel &ch = engine->cgbChannels[i];
+        out->cgb[i] = {(ch.status & CHN_ON) != 0,
+                       (ch.status & (CHN_STOP | CHN_IEC)) != 0,
+                       uint8_t(ch.trackIndex), uint8_t(ch.midiKey)};
+    }
+}
+
 void AudioEngine::dataCallback(ma_device *device, void *output, const void *, uint32_t frameCount)
 {
     auto *self = static_cast<AudioEngine *>(device->pUserData);
@@ -441,6 +473,8 @@ void AudioEngine::applyPreviewNote()
     const uint8_t key = (cmd >> 8) & 0x7F;
     const uint8_t velocity = cmd & 0xFF;
     if (velocity > 0) {
+        // Live note: no timeline position for any overflow event it causes.
+        m_engine->polyEventClock = M4A_POLY_TICK_NONE;
         m4a_engine_note_on(m_engine.get(), track, key, velocity);
         m_previewTrack = track;
         m_previewKey = key;
@@ -451,6 +485,9 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
 {
     const uint32_t w = m_timedWrite.load(std::memory_order_acquire);
     uint32_t r = m_timedRead.load(std::memory_order_relaxed);
+    // Auditions are live notes: no timeline position for overflow events.
+    if (r != w)
+        m_engine->polyEventClock = M4A_POLY_TICK_NONE;
     for (; r != w; r++) {
         const TimedPreview cmd = m_timedRing[r % kTimedRingSize];
         if (cmd.velocity == 0) {
@@ -540,6 +577,22 @@ void AudioEngine::applyPreviewVoice()
     }
 }
 
+void AudioEngine::applyPolyDebug()
+{
+    // Compared against the live engine field, not an applied-state shadow:
+    // loadSong's engine reinit clears polyDebugInvert, and this re-asserts
+    // the desired mode on the next callback (session-sticky semantics).
+    const bool invert = m_polyInvert.load();
+    if (invert != m_engine->polyDebugInvert)
+        m4a_engine_set_poly_debug_invert(m_engine.get(), invert);
+
+    const uint32_t resetGen = m_polyResetCmd.load();
+    if (resetGen != m_appliedPolyReset) {
+        m_appliedPolyReset = resetGen;
+        m4a_engine_reset_poly_stats(m_engine.get());
+    }
+}
+
 void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 {
     applyTransportTransition();
@@ -547,6 +600,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyPreviewNote();
     applyTimedPreviews(frameCount);
     applyPreviewVoice();
+    applyPolyDebug();
 
     // Voice edits: tracks hold a ToneData copy taken at program change, so a
     // scalar edit isn't heard until the copies are refreshed.

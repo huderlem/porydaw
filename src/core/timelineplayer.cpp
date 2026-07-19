@@ -16,8 +16,12 @@ void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev,
         m4a_engine_note_off(engine, ev.track, ev.data0);
         break;
     case 0x9:
-        if (!((muteMask >> ev.track) & 1))
+        if (!((muteMask >> ev.track) & 1)) {
+            // Timeline position stamped into any poly-overflow event this
+            // note-on triggers (single writer: the thread driving playback).
+            engine->polyEventClock = ev.tick;
             m4a_engine_note_on(engine, ev.track, ev.data0, ev.data1);
+        }
         break;
     case 0xB:
         m4a_engine_cc(engine, ev.track, ev.data0, ev.data1);

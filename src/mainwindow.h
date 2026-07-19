@@ -17,6 +17,7 @@ class QLabel;
 class QTabWidget;
 class QTimer;
 class QUndoGroup;
+class PolyphonyPanel;
 class SmfFile;
 class SongListPanel;
 class SongView;
@@ -115,6 +116,9 @@ private:
     // Points the audio engine at the session's timeline/voicegroup and
     // re-applies its settings and the view's mute/solo masks.
     void attachEngine(SongSession &session);
+    // Pushes the session's timeline/track-name/voice-name context into the
+    // Polyphony dock (null clears it).
+    void updatePolyPanelContext(SongSession *session);
     // A clean session whose voicegroup file changed on disk (saved from
     // another tab) silently follows the disk on activation.
     void maybeRefreshVoicegroup(SongSession &session);
@@ -228,6 +232,8 @@ private:
     QUndoGroup *m_undoGroup = nullptr;
     VoicegroupBrowser *m_vgBrowser = nullptr;
     QDockWidget *m_vgDock = nullptr;
+    PolyphonyPanel *m_polyPanel = nullptr;
+    QDockWidget *m_polyDock = nullptr;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_registerAction = nullptr;

@@ -128,12 +128,49 @@ public:
     void setMuteMask(uint32_t mask) { m_muteMask.store(mask); }
     void setSoloMask(uint32_t mask) { m_soloMask.store(mask); }
 
+    // Hot: polyphony-overflow debug mode — mutes normal playback and plays
+    // only the sounds lost to the polyphony limit (SPEC §6.1 Polyphony dock).
+    // Applied at the callback boundary against the live engine field, so it
+    // re-asserts itself after loadSong reinitializes the engine: the mode is
+    // session-sticky (survives play/stop and song switches) but never
+    // persisted.
+    void setPolyDebugInvert(bool on) { m_polyInvert.store(on); }
+    bool polyDebugInvert() const { return m_polyInvert.load(); }
+    // Hot: zero the overflow counters and event ring at the next callback
+    // boundary (a GUI-thread reset would race the audio thread's writes).
+    void resetPolyStats() { m_polyResetCmd.fetch_add(1); }
+
     // Telemetry.
     uint64_t playheadSamples() const { return m_playhead.load(); }
     int activePcmChannels() const { return m_activePcm.load(); }
     int activeCgbChannels() const { return m_activeCgb.load(); }
     int maxPcmChannels() const { return m_settings.maxPcmChannels; }
     uint64_t polyLostTotal() const; // dropped + stolen + tail-cut, all tracks
+
+    // GUI-thread copy of the engine's polyphony-overflow state (the engine
+    // header documents these fields as safe for lock-free monitor reads).
+    // If more than M4A_POLY_EVENT_CAPACITY events land between two polls the
+    // oldest ring rows may be torn or stale — benign for a debug display;
+    // eventTotal is always exact.
+    struct PolyChannel {
+        bool on = false;
+        bool releasing = false; // CHN_STOP | CHN_IEC: fading out
+        uint8_t track = 0;
+        uint8_t midiKey = 0;
+    };
+    struct PolySnapshot {
+        uint8_t maxPcmChannels = 0;
+        bool invert = false;
+        // Second half of each array is the shadow pool (lost sounds).
+        PolyChannel pcm[TOTAL_PCM_CHANNELS];
+        PolyChannel cgb[TOTAL_CGB_CHANNELS];
+        uint32_t drop[MAX_TRACKS] = {};
+        uint32_t steal[MAX_TRACKS] = {};
+        uint32_t tailCut[MAX_TRACKS] = {};
+        uint32_t eventTotal = 0;
+        M4APolyEvent events[M4A_POLY_EVENT_CAPACITY] = {};
+    };
+    void polySnapshot(PolySnapshot *out) const;
 
 private:
     static void dataCallback(ma_device *device, void *output, const void *input,
@@ -146,6 +183,7 @@ private:
     void applyTimedPreviews(uint32_t frameCount);
     void clearTimedPreviews();
     void applyPreviewVoice();
+    void applyPolyDebug();
     void resetPreviewEngine();
     ToneData *previewVoices() const;
     uint32_t effectiveMuteMask() const;
@@ -193,6 +231,9 @@ private:
     uint8_t m_previewVoiceGen = 0; // UI thread only
     // Refresh-voices command: bumped by the UI, applied at callback boundary.
     std::atomic<uint32_t> m_refreshVoicesCmd{0};
+    // Polyphony-overflow debug: desired invert state + reset command.
+    std::atomic<bool> m_polyInvert{false};
+    std::atomic<uint32_t> m_polyResetCmd{0};
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -216,6 +257,7 @@ private:
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;
+    uint32_t m_appliedPolyReset = 0;
     TimelinePlayer m_player;
 
     // Scratch deinterleave buffers (allocated in init)

@@ -39,6 +39,10 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &screenshotPath = QString());
 // loopcheck.cpp; loop-wrap playback check (self-contained, no project needed).
 int runLoopCheck();
+// polycheck.cpp; polyphony-overflow debugger check: engine counters/tick
+// stamps/invert audibility + offscreen PolyphonyPanel (self-contained, no
+// project needed); the optional path saves the rendered panel.
+int runPolyCheck(const QString &screenshotPath = QString());
 // primecheck.cpp; audition voice-priming check (self-contained, no project needed).
 int runPrimeCheck();
 // transportcheck.cpp; playback-start halts ringing auditions (self-contained,
@@ -100,6 +104,12 @@ int main(int argc, char *argv[])
                            args[tabCheck + 3]);
     if (args.contains(QStringLiteral("--loopcheck")))
         return runLoopCheck();
+    const int polyCheck = args.indexOf(QStringLiteral("--polycheck"));
+    if (polyCheck >= 0) {
+        const QString path =
+            polyCheck + 1 < args.size() ? args[polyCheck + 1] : QString();
+        return runPolyCheck(path);
+    }
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
     if (args.contains(QStringLiteral("--transportcheck")))

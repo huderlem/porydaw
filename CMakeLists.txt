@@ -46,6 +46,7 @@ qt_add_executable(porydaw
     src/vgsavecheck.cpp
     src/exportcheck.cpp
     src/loopcheck.cpp
+    src/polycheck.cpp
     src/primecheck.cpp
     src/transportcheck.cpp
     src/mkcheck.cpp
@@ -85,6 +86,8 @@ qt_add_executable(porydaw
     src/ui/enginesettingsdialog.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
+    src/ui/polyphonypanel.cpp
+    src/ui/polyphonypanel.h
     src/ui/songlistpanel.cpp
     src/ui/songlistpanel.h
     src/ui/songviewmodel.cpp

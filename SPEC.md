@@ -79,7 +79,10 @@ Four layers; dependencies point downward only.
 - Communication via lock-free SPSC queues: UI → audio (transport commands, immutable
   snapshots of the playable event timeline, live-edit "preview note" events) and
   audio → UI (playhead position, polyphony/overflow telemetry from the engine's
-  debug counters).
+  debug counters — the UI takes a lock-free snapshot copy of the counters, channel
+  states, and event ring each tick). The sequencer stamps the engine's
+  `polyEventClock` with each note-on's timeline tick so overflow events carry song
+  positions; live/preview notes stamp a sentinel instead.
 - Document edits during playback swap in a new immutable timeline snapshot; the
   sequencer picks it up at the next tick boundary. No locks on the audio thread.
 
@@ -228,6 +231,15 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   volume, and a **polyphony meter** fed by the engine's overflow-debug counters
   showing DirectSound channel usage against the project's `maxChans` (dropped/stolen
   notes flash a warning — the #1 mystery for newcomers).
+- **Polyphony dock** (View → Polyphony Debugger, hidden by default): the full
+  overflow debugger, mirroring the poryaaaa plugin's Polyphony tab. A live
+  channel-usage grid (real PCM/CGB channels plus the shadow pool of lost sounds), a
+  "Solo overflow (invert audio)" toggle that mutes normal playback and plays only
+  the sounds lost to the polyphony limit (session-sticky: survives play/stop and
+  song switches, never persisted), a per-track overflow table (Dropped / Cut Off /
+  Tail Cut, document track names, red flash on increase, Reset), and a recent-events
+  log where each event carries its bar:beat song position — double-click jumps the
+  edit cursor/playhead there; live preview notes read "live" instead.
 - **Song Settings dialog:** the `midi.cfg` flags presented as friendly controls
   (voicegroup dropdown, reverb slider, master volume, priority, exact-gate toggle).
 

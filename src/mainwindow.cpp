@@ -38,6 +38,7 @@
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#include "ui/polyphonypanel.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
@@ -347,6 +348,39 @@ void MainWindow::buildUi()
     m_vgDock->setWidget(m_vgBrowser);
     addDockWidget(Qt::LeftDockWidgetArea, m_vgDock);
 
+    // Polyphony overflow debugger dock (SPEC §6.1): hidden by default (it's
+    // a diagnostic tool); closable, with a View-menu toggle. The saved
+    // window state restores visibility/placement on later runs.
+    m_polyDock = new QDockWidget(tr("Polyphony"), this);
+    m_polyDock->setObjectName(QStringLiteral("polyphonyDock"));
+    m_polyDock->setFeatures(QDockWidget::DockWidgetMovable
+                            | QDockWidget::DockWidgetClosable);
+    m_polyPanel = new PolyphonyPanel(m_polyDock);
+    connect(m_polyPanel, &PolyphonyPanel::invertToggled, this, [this](bool on) {
+        if (m_audioOk)
+            m_audio.setPolyDebugInvert(on);
+    });
+    connect(m_polyPanel, &PolyphonyPanel::resetRequested, this, [this] {
+        if (m_audioOk)
+            m_audio.resetPolyStats();
+    });
+    connect(m_polyPanel, &PolyphonyPanel::jumpToTick, this, [this](uint64_t tick) {
+        // commitEditCursor's editCursorMoved connect already seeks the
+        // engine while playing/paused; when stopped, playback starts from
+        // the edit cursor.
+        if (!m_active)
+            return;
+        m_active->view->commitEditCursor(tick);
+        m_active->view->ensureTickVisible(tick);
+    });
+    m_polyDock->setWidget(m_polyPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_polyDock);
+    m_polyDock->hide();
+    QAction *polyDockAction = m_polyDock->toggleViewAction();
+    polyDockAction->setText(tr("&Polyphony Debugger"));
+    polyDockAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+    viewMenu->addAction(polyDockAction);
+
     // Song tabs: each open song lives in its own tab with its own view,
     // document, and undo stack.
     m_tabs = new QTabWidget(this);
@@ -518,6 +552,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     if (!session) {
         if (m_audioOk)
             m_audio.unloadSong();
+        m_polyPanel->clearSession();
         m_vgBrowser->setVoicegroup(nullptr);
         updateVgDockTitle();
         m_registerAction->setEnabled(false);
@@ -539,6 +574,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     if (m_audioOk)
         attachEngine(*session);
     updateVoicegroupBrowser();
+    updatePolyPanelContext(session);
 
     bool registered = true;
     if (session->songId >= 0 && session->songId < m_project.songs().size())
@@ -558,6 +594,28 @@ void MainWindow::attachEngine(SongSession &session)
     // loadSong resets the engine's masks; the view remembers the tab's.
     m_audio.setMuteMask(session.view->muteMask());
     m_audio.setSoloMask(session.view->soloMask());
+}
+
+void MainWindow::updatePolyPanelContext(SongSession *session)
+{
+    if (!session) {
+        m_polyPanel->clearSession();
+        return;
+    }
+    m_polyPanel->setTimeline(session->timeline.get());
+    QStringList trackNames;
+    for (int t = 0; t < MAX_TRACKS; t++)
+        trackNames.append(session->doc.trackName(t));
+    m_polyPanel->setTrackNames(trackNames);
+    // Copied out so a voicegroup swap can't leave the panel with a dangling
+    // pointer.
+    QStringList voiceNames;
+    if (session->voicegroup) {
+        for (int v = 0; v < VOICEGROUP_SIZE; v++)
+            voiceNames.append(
+                QString::fromLatin1(session->voicegroup->voiceNames[v]));
+    }
+    m_polyPanel->setVoiceNames(voiceNames);
 }
 
 void MainWindow::maybeRefreshVoicegroup(SongSession &session)
@@ -970,6 +1028,9 @@ void MainWindow::onDocumentChanged(SongSession &session)
     session.view->updateSong(session.timeline.get());
     updateTabTitle(session);
     if (active) {
+        // The timeline was rebuilt, track names may have changed, and the
+        // voicegroup may have been swapped above.
+        updatePolyPanelContext(&session);
         updateWindowTitle();
         // Keep the dock's voicegroup selector on the cfg even when no swap
         // ran (the arg's voicegroup wasn't found, or its change was undone).
@@ -1846,6 +1907,12 @@ void MainWindow::uiTick()
         if (lost > 0)
             poly += tr(" · %1 notes lost").arg(lost);
         m_polyLabel->setText(poly);
+
+        if (m_polyDock->isVisible()) {
+            AudioEngine::PolySnapshot snap;
+            m_audio.polySnapshot(&snap);
+            m_polyPanel->updateSnapshot(snap);
+        }
     }
     updateTransportActions();
 }
