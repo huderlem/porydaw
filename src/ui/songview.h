@@ -5,7 +5,6 @@
 #include <QList>
 #include <QSet>
 #include <QWidget>
-#include <array>
 #include <cstdint>
 #include <functional>
 #include <utility>
@@ -23,8 +22,6 @@ class QKeyEvent;
 class QScrollArea;
 class QScrollBar;
 class QSplitter;
-class QPainter;
-class QRect;
 class QStackedWidget;
 class SongDocument;
 
@@ -230,7 +227,6 @@ public:
     // barNumber) for every beat, honoring the song's time signature changes.
     void forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
                          const std::function<void(uint64_t, bool, int)> &fn) const;
-    void drawGrid(QPainter &p, const QRect &rect, int origin) const;
 
     // --- editing support for the child widgets ---
     // Snap-grid feel and floor (the ruler's grid controls): the zoom-adaptive
@@ -494,7 +490,6 @@ private:
     GridFeel m_gridFeel = GridFeel::Straight;
     int m_gridMinDenom = 0; // note denominator; 0 = clock-grid floor
     std::vector<std::pair<int, uint8_t>> m_emptyLanes; // (track, cc), unsorted
-    std::array<QColor, 3> m_subGridColors;
 
     songview::TimeRuler *m_ruler = nullptr;
     songview::TrackHeaderPanel *m_headers = nullptr;

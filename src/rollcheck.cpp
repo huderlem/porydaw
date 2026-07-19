@@ -256,8 +256,28 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("retargeting hid the open note menu");
         if (selection.size() != 1 || !(selection.front() == aId))
             fail("retargeting did not select the new note");
-        noteMenu->hide();
+
+        // A right-click that hits no note must fall through to QMenu and
+        // dismiss the popup, not be swallowed. The menu hangs below note
+        // A's row, so the first clear row above it is outside the popup
+        // (rows scrolled off the top are fine — nothing to hit there).
+        int clearKey = a.key + 1;
+        while (clearKey <= 127 && occupied(a.tick, a.dur, clearKey))
+            clearKey++;
+        const QPoint clearGlobal = roll->mapToGlobal(
+            a.center - QPoint(0, (clearKey - a.key) * keyH));
+        sendMouse(noteMenu, QEvent::MouseButtonPress,
+                  noteMenu->mapFromGlobal(clearGlobal), Qt::RightButton,
+                  Qt::RightButton);
+        sendMouse(noteMenu, QEvent::MouseButtonRelease,
+                  noteMenu->mapFromGlobal(clearGlobal), Qt::RightButton,
+                  Qt::NoButton);
         QCoreApplication::processEvents();
+        if (noteMenu->isVisible()) {
+            fail("empty-space right-click did not dismiss the note menu");
+            noteMenu->hide();
+            QCoreApplication::processEvents();
+        }
     }
 
     // Drag latch: pull note B's velocity handle 20px up (1px = 1 step),

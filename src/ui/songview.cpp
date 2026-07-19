@@ -216,38 +216,81 @@ void forEachSubGridLine(const SongView *sv, double t0, double t1,
     }
 }
 
+// Vertical bar/beat grid lines inside rect, with zoom-adaptive sub-beat
+// lines at the snap grid's positions fading lighter per subdivision level.
+// Lines are batched per level so each color is a single drawLines() call.
+void drawGrid(QPainter &p, const SongView *sv, const QRect &rect, int origin)
+{
+    if (!sv->timeline())
+        return;
+    const double t0 = std::max(0.0, sv->tickAtContentX(rect.left() - origin));
+    const double t1 = sv->tickAtContentX(rect.right() - origin) + 1;
+    const bool drawBeats = sv->pxPerBeat() >= 10.0;
+    const QColor barColor = sv->palette().color(QPalette::Mid);
+    QColor beatColor = barColor;
+    beatColor.setAlpha(70);
 
-/**
- *  macOS flashes a triggered menu item for 80 ms before hiding the menu.
- * This overrides that.
- *  */
-class NoteMenuStyle final : public QProxyStyle {
+    // Batches 0-2 hold sub-grid levels 1-3 (fading lighter), 3 beats, 4
+    // bars; painted in that order so beats and bars land on top.
+    std::array<QColor, 5> colors = {barColor, barColor, barColor, beatColor,
+                                    barColor};
+    colors[0].setAlpha(48);
+    colors[1].setAlpha(34);
+    colors[2].setAlpha(22);
+    std::array<QVector<QLine>, 5> batches;
+    forEachSubGridLine(sv, t0, t1, [&](uint64_t tick, int level) {
+        const int x = origin + sv->contentX(double(tick));
+        batches[level - 1].append(QLine(x, rect.top(), x, rect.bottom()));
+    });
+    sv->forEachGridLine(uint64_t(t0), uint64_t(t1),
+                        [&](uint64_t tick, bool isBar, int) {
+                            if (!isBar && !drawBeats)
+                                return;
+                            const int x = origin + sv->contentX(double(tick));
+                            batches[isBar ? 4 : 3].append(
+                                QLine(x, rect.top(), x, rect.bottom()));
+                        });
+    for (size_t i = 0; i < batches.size(); ++i) {
+        if (batches[i].isEmpty())
+            continue;
+        p.setPen(colors[i]);
+        p.drawLines(batches[i]);
+    }
+}
+
+// macOS flashes a triggered menu item for 80 ms before hiding the menu;
+// suppress the flash so picking an action feels instant.
+class NoteMenuStyle final : public QProxyStyle
+{
 public:
-  NoteMenuStyle() : QProxyStyle(QApplication::style()->name()) {}
+    NoteMenuStyle() : QProxyStyle(QApplication::style()->name()) {}
 
-  int styleHint(StyleHint hint, const QStyleOption *option,
-                const QWidget *widget,
-                QStyleHintReturn *returnData) const override {
-    if (hint == SH_Menu_FlashTriggeredItem)
-      return 0;
-    return QProxyStyle::styleHint(hint, option, widget, returnData);
-  }
+    int styleHint(StyleHint hint, const QStyleOption *option,
+                  const QWidget *widget,
+                  QStyleHintReturn *returnData) const override
+    {
+        if (hint == SH_Menu_FlashTriggeredItem)
+            return 0;
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
 };
 
 enum class NoteMenuChoice {
-  None,
-  Velocity,
-  Copy,
-  Cut,
-  Delete,
+    None,
+    Velocity,
+    Copy,
+    Cut,
+    Delete,
 };
 // Kept alive by PianoRoll so opening it does not reconstruct its actions.
 class NoteContextMenu final : public QMenu
 {
 public:
-    // Called when an outside right-click should move the menu to another note.
+    // Called when an outside right-click may move the menu to another note;
+    // returns false when the click hit nothing, so the press falls through
+    // to QMenu (which dismisses the popup like any outside click).
     explicit NoteContextMenu(
-        QWidget *parent, std::function<void(QPoint)> onOutsideRightClick)
+        QWidget *parent, std::function<bool(QPoint)> onOutsideRightClick)
         : QMenu(parent),
           m_onOutsideRightClick(std::move(onOutsideRightClick))
     {
@@ -266,7 +309,7 @@ public:
     void showMenuAt(QPoint globalPos, int velocity)
     {
         m_velocityAction->setText(
-            SongView::tr("Set Velocity (%1)").arg(velocity));
+            SongView::tr("Set velocity… (%1)").arg(velocity));
         popup(globalPos);
     }
 
@@ -284,11 +327,13 @@ public:
     }
 
 protected:
-    void mousePressEvent(QMouseEvent *event) override // If user clicks on a different note while popup is up, refocus, dont close menu
+    // A right-click on another note while the popup is open retargets the
+    // menu in one gesture instead of spending the click on dismissal.
+    void mousePressEvent(QMouseEvent *event) override
     {
         if (event->button() == Qt::RightButton
-            && !rect().contains(event->position().toPoint())) {
-            m_onOutsideRightClick(event->globalPosition().toPoint());
+            && !rect().contains(event->position().toPoint())
+            && m_onOutsideRightClick(event->globalPosition().toPoint())) {
             event->accept();
             return;
         }
@@ -296,7 +341,7 @@ protected:
     }
 
 private:
-    std::function<void(QPoint)> m_onOutsideRightClick;
+    std::function<bool(QPoint)> m_onOutsideRightClick;
     QAction *m_velocityAction = nullptr;
     QAction *m_copyAction = nullptr;
     QAction *m_cutAction = nullptr;
@@ -924,11 +969,13 @@ public:
         setMouseTracking(true);
         setFocusPolicy(Qt::ClickFocus);
         m_noteMenu = new NoteContextMenu(
-            this, [this](QPoint globalPos) { moveNoteMenu(globalPos); });
+            this,
+            [this](QPoint globalPos) { return moveNoteMenu(globalPos); });
         connect(m_noteMenu, &QMenu::triggered, this, [this](QAction *action) {
             handleNoteMenuChoice(m_noteMenu->handleAction(action));
         });
     }
+
     // A mouse gesture is live (pan, note move/resize/velocity/draw, band or
     // time-selection sweep, a still-undecided press, keyboard gliss); the
     // playhead follow-scroll pauses while one runs so the view doesn't jump
@@ -970,7 +1017,7 @@ protected:
             }
         }
 
-        m_sv->drawGrid(p, grid, kKeyboardW);
+        drawGrid(p, m_sv, grid, kKeyboardW);
 
         // Notes: ghost pass (unselected tracks), then the selected track.
         const SongViewModel &model = m_sv->model();
@@ -1871,55 +1918,64 @@ private:
             return;
         m_noteMenu->showMenuAt(mapToGlobal(localPos), notes.front().velocity);
     }
-    void moveNoteMenu(QPoint globalPos)
+
+    // Retargets the open note menu to the note under an outside right-click.
+    // Returns false when nothing was hit (empty space, the keyboard strip,
+    // another widget) so the caller can dismiss the popup instead.
+    bool moveNoteMenu(QPoint globalPos)
     {
         const QPoint pos = mapFromGlobal(globalPos);
-        const ViewNote *hit = m_sv->document() ? hitNote(pos) : nullptr;
+        const ViewNote *hit = m_sv->document() && pos.x() >= kKeyboardW
+                                  ? hitNote(pos)
+                                  : nullptr;
         if (!hit)
-            return;
+            return false;
         if (!m_sv->isSelected(*hit))
             m_sv->setSelection({{hit->startTick, hit->key}});
         showNoteMenu(pos);
         update();
+        return true;
     }
+
     void handleNoteMenuChoice(NoteMenuChoice choice)
     {
-      SongDocument *doc = m_sv->document();
-      if (!doc)
-          return;
-      const auto notes = resolveSelection();
-      if (notes.empty())
-          return;
-      switch (choice) {
-      case NoteMenuChoice::Copy:
-          copyNotes(notes);
-          break;
-      case NoteMenuChoice::Cut:
-          copyNotes(notes);
-          doc->deleteNotes(notes);
-          m_sv->clearSelection();
-          break;
-      case NoteMenuChoice::Velocity: {
-          bool ok = false;
-          const int velocity = QInputDialog::getInt(
-              this, SongView::tr("Note velocity"),
-              SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
-                  .arg(mid2agbEffectiveVelocity(1)),
-              notes.front().velocity, 1, 127, 1, &ok);
-          if (ok) {
-              doc->setNotesVelocity(notes, uint8_t(velocity));
-              m_lastVelocity = uint8_t(velocity);
-          }
-          break;
-      }
-      case NoteMenuChoice::Delete:
-          doc->deleteNotes(notes);
-          m_sv->clearSelection();
-          break;
-      case NoteMenuChoice::None:
-          break;
-      }
+        SongDocument *doc = m_sv->document();
+        if (!doc)
+            return;
+        const std::vector<DocNote> notes = resolveSelection();
+        if (notes.empty())
+            return;
+        switch (choice) {
+        case NoteMenuChoice::Copy:
+            copyNotes(notes);
+            break;
+        case NoteMenuChoice::Cut:
+            copyNotes(notes);
+            doc->deleteNotes(notes);
+            m_sv->clearSelection();
+            break;
+        case NoteMenuChoice::Velocity: {
+            bool ok = false;
+            const int velocity = QInputDialog::getInt(
+                this, SongView::tr("Note velocity"),
+                SongView::tr("Velocity (1-127, plays as %1-127 in steps of 4):")
+                    .arg(mid2agbEffectiveVelocity(1)),
+                notes.front().velocity, 1, 127, 1, &ok);
+            if (ok) {
+                doc->setNotesVelocity(notes, uint8_t(velocity));
+                m_lastVelocity = uint8_t(velocity);
+            }
+            break;
+        }
+        case NoteMenuChoice::Delete:
+            doc->deleteNotes(notes);
+            m_sv->clearSelection();
+            break;
+        case NoteMenuChoice::None:
+            break;
+        }
     }
+
     void drawKeyboard(QPainter &p)
     {
         const int keyH = m_sv->keyHeight();
@@ -3308,7 +3364,7 @@ private:
         }
 
         p.setClipRect(plot);
-        m_sv->drawGrid(p, plot, kGutterW);
+        drawGrid(p, m_sv, plot, kGutterW);
 
         if (row.kind == Row::Voice)
             paintVoiceRow(p, plot);
@@ -4071,67 +4127,9 @@ void TrackHeaderRow::mouseReleaseEvent(QMouseEvent *event)
 
 using namespace songview;
 
-// Vertical bar/beat grid lines inside rect, with zoom-adaptive sub-beat
-// lines at the snap grid's positions fading lighter per subdivision level.
-void SongView::drawGrid(QPainter &p, const QRect &rect, int origin) const
-{
-    if (!timeline())
-        return;
-    enum class GridLineBatch : size_t {
-        SubdivisionLevel1,
-        SubdivisionLevel2,
-        SubdivisionLevel3,
-        Beat,
-        Bar,
-        Count,
-    };
-    constexpr auto batchCount = static_cast<size_t>(GridLineBatch::Count);
-    const auto t0 = std::max(0.0, tickAtContentX(rect.left() - origin));
-    const auto t1 = tickAtContentX(rect.right() - origin) + 1;
-    const auto drawBeats = pxPerBeat() >= 10.0;
-    const auto barColor = palette().color(QPalette::Mid);
-    auto beatColor = barColor;
-    beatColor.setAlpha(70);
-    auto lineBatches = std::array<QVector<QLine>, batchCount>{};
-    forEachSubGridLine(this, t0, t1, [&](uint64_t tick, int level) {
-        const auto batch = static_cast<GridLineBatch>(level - 1);
-        const auto batchIndex = static_cast<size_t>(batch);
-        const auto x = origin + contentX(double(tick));
-        lineBatches[batchIndex].append(
-            QLine(x, rect.top(), x, rect.bottom()));
-    });
-    forEachGridLine(uint64_t(t0), uint64_t(t1),
-                    [&](uint64_t tick, bool isBar, int) {
-                        if (!isBar && !drawBeats)
-                            return;
-                        const auto batch = isBar ? GridLineBatch::Bar
-                                                 : GridLineBatch::Beat;
-                        const auto batchIndex = static_cast<size_t>(batch);
-                        const auto x = origin + contentX(double(tick));
-                        lineBatches[batchIndex].append(
-                            QLine(x, rect.top(), x, rect.bottom()));
-                    });
-    const auto colors = std::array{m_subGridColors[0], m_subGridColors[1],
-                                   m_subGridColors[2], beatColor, barColor};
-    for (auto batchIndex = size_t{0}; batchIndex < lineBatches.size();
-         ++batchIndex) {
-        if (lineBatches[batchIndex].isEmpty())
-            continue;
-        p.setPen(colors[batchIndex]);
-        p.drawLines(lineBatches[batchIndex]);
-    }
-}
-
 SongView::SongView(QWidget *parent)
     : QWidget(parent)
 {
-    const auto lineColor = palette().color(QPalette::Mid);
-    m_subGridColors[0] = lineColor;
-    m_subGridColors[0].setAlpha(48);
-    m_subGridColors[1] = lineColor;
-    m_subGridColors[1].setAlpha(34);
-    m_subGridColors[2] = lineColor;
-    m_subGridColors[2].setAlpha(22);
     auto *vbox = new QVBoxLayout(this);
     vbox->setContentsMargins(0, 0, 0, 0);
     vbox->setSpacing(0);
