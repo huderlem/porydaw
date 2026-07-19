@@ -6,6 +6,10 @@ class QCheckBox;
 class QComboBox;
 class QSpinBox;
 
+// m4aSoundInit's selectable DirectSound rates (SOUND_MODE_FREQ_*), shared
+// with the Sample Studio target-rate presets.
+extern const int kGbaMixRates[12];
+
 // Global poryaaaa GBA-accuracy knobs (SPEC §7), persisted per user via
 // QSettings. Unlike Song Settings these never touch the project; reverb
 // stays per-song (midi.cfg -R).

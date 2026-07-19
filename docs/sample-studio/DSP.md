@@ -89,11 +89,17 @@ Let `r = targetRate / sourceRate` (double; `targetRate` is a double — e.g.
 y[n] = ( Σ_{k = ceil(t−W) .. floor(t+W)}  x[k] · h(k − t) )  /  Σ h(k − t)
 h(u) = 2·fc · sinc(2·fc·u) · kaiser(u / W, β)          sinc(v) = sin(πv)/(πv)
 fc   = 0.5 · min(1, r) · ρ         ρ = 0.945  (rolloff)      [cycles/input-sample]
-W    = L / (2·fc)                  L = 24     (sinc lobes per side)
+W    = L / (2·fc)                  L = 56     (sinc lobes per side)
 β    = 8.96                        (Kaiser for A = 90 dB: β = 0.1102·(A − 8.7))
 ```
 
-- 44100→13379: `fc ≈ 0.1434`, `W ≈ 84` input samples per side. Upsampling:
+(L = 56, not the 24 originally drafted: with L = 24 the Kaiser transition
+band — ~±750 Hz at this ratio — straddles the cutoff and drags the sweep top
+of §9 item 1 down ~0.9 dB at 6.0 kHz. L = 56 puts the −0.1 dB point above
+6.0 kHz and moves the stop edge inside the output Nyquist; measured
+−0.0006 dB at 6.0 kHz, −119 dB at 8 kHz. Offline cost is negligible.)
+
+- 44100→13379: `fc ≈ 0.1434`, `W ≈ 195` input samples per side. Upsampling:
   `min(1, r)` pins the cutoff at the source Nyquist.
 - **Per-output tap-sum normalization** (the `/Σh` above) forces exact unity
   DC gain at every fractional position and cleanly handles edges.

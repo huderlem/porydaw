@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "audio/sampleimport.h"
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
 #include "project/samplereg.h"
@@ -1382,21 +1383,28 @@ void MainWindow::importSample()
         settings.value(QStringLiteral("lastSampleDir"), QDir::homePath())
             .toString();
     const QString path = QFileDialog::getOpenFileName(
-        this, tr("Import Sample"), startDir, tr("WAV files (*.wav)"));
+        this, tr("Import Sample"), startDir,
+        tr("Audio files (*.wav *.aif *.aiff);;All files (*)"));
     if (path.isEmpty())
         return;
     settings.setValue(QStringLiteral("lastSampleDir"), QFileInfo(path).path());
 
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly)) {
+    ImportedSample sample;
+    QString error;
+    if (!importAudioFile(path, &sample, &error)) {
         QMessageBox::warning(this, tr("Import Sample"),
-                             tr("Cannot read %1.").arg(path));
+                             tr("%1: %2").arg(QFileInfo(path).fileName(), error));
         return;
     }
-    const QByteArray wavBytes = file.readAll();
-    SampleWavInfo info;
-    QString error;
-    if (!SampleRegistrar::inspectSampleWav(wavBytes, &info, &error)) {
+    if (sample.phaseCancelStereo
+        && QMessageBox::question(
+               this, tr("Import Sample"),
+               tr("The left and right channels of %1 are phase-cancelling — "
+                  "the mono mix may sound hollow.\n\nImport the left channel "
+                  "only instead?")
+                   .arg(QFileInfo(path).fileName()))
+            == QMessageBox::Yes
+        && !importAudioFile(path, &sample, &error, true)) {
         QMessageBox::warning(this, tr("Import Sample"),
                              tr("%1: %2").arg(QFileInfo(path).fileName(), error));
         return;
@@ -1405,7 +1413,7 @@ void MainWindow::importSample()
     const QString root = m_project.root();
     const QStringList symbols = vgCatalog().directSound;
     SampleEditorDialog dialog(
-        path, info,
+        std::move(sample),
         [root, symbols](const QString &name, QString *validationError) {
             return SampleRegistrar::validateSampleName(root, name, symbols,
                                                        validationError);
@@ -1414,10 +1422,10 @@ void MainWindow::importSample()
     if (dialog.exec() != QDialog::Accepted)
         return;
 
-    // Write-through commit (not undoable, like song registration): the .wav
-    // copy plus its direct_sound_data.inc block.
-    if (!SampleRegistrar::registerSample(root, dialog.sampleName(), wavBytes,
-                                         &error)) {
+    // Write-through commit (not undoable, like song registration): the
+    // rendered .wav (FORMATS.md §1) plus its direct_sound_data.inc block.
+    if (!SampleRegistrar::registerSample(root, dialog.sampleName(),
+                                         dialog.wavBytes(), &error)) {
         QMessageBox::warning(this, tr("Import Sample"), error);
         return;
     }

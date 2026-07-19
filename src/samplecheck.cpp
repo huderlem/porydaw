@@ -1,12 +1,24 @@
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileInfo>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QString>
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <vector>
 
+#include "audio/sampledoc.h"
+#include "audio/sampledsp.h"
+#include "audio/sampleimport.h"
+#include "audio/samplewav.h"
 #include "project/samplereg.h"
 #include "project/voicegroupsource.h"
 #include "ui/sampleeditordialog.h"
@@ -15,16 +27,23 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
-// --samplecheck <scratchDir>: prepared-sample import check (Sample Studio
-// phase 1). Builds fully-fresh fake decomp projects under scratchDir — a
+// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-2.
+// Phase 1: builds fully-fresh fake decomp projects under scratchDir — a
 // wav2agb one, a legacy-aif one, a rule-less one, an .inc-less one, and a
 // CRLF-.inc one — then drives probe → inspect → register → loader-resolve
-// end to end and exact-matches every refusal message. scratchDir must not
-// already exist (fully fresh scratches, no stale artifacts).
+// end to end and exact-matches every refusal message. Phase 2: hi-res
+// decoding, the DSP.md resampler/quantizer/normalize acceptance items 1-6,
+// pipeline determinism, the audition==build parity matrix through pory4a's
+// own loader, and metadata round-trips (item 10). scratchDir must not
+// already exist (fully fresh scratches, no stale artifacts). corpusRoot,
+// when given, points at a wav2agb decomp checkout (e.g. pokeemerald) whose
+// sound/direct_sound_samples sc88pro corpus gates the corpus-conditional
+// sections: no-op u8 round-trip, reference-.bin byte equality, stats drift.
 
 namespace {
 
 int failures = 0;
+constexpr double kPi = 3.14159265358979323846;
 
 void expect(bool ok, const char *what)
 {
@@ -70,10 +89,19 @@ void putU32(QByteArray *out, quint32 v)
         char(v >> 24));
 }
 
+quint32 getU32(const QByteArray &b, qsizetype at)
+{
+    return quint32(quint8(b[at])) | quint32(quint8(b[at + 1])) << 8
+        | quint32(quint8(b[at + 2])) << 16 | quint32(quint8(b[at + 3])) << 24;
+}
+
 struct FixtureSpec {
     quint32 rate = 13379;
-    QByteArray samples; // unsigned 8-bit
+    QByteArray samples; // raw data-chunk bytes in the container format
     quint16 channels = 1;
+    quint16 formatTag = 1; // 1 = PCM, 3 = float
+    quint16 bits = 8;
+    bool withSmpl = true;
     quint32 unityKey = 60;
     quint32 pitchFraction = 0;
     int numLoops = 0; // smpl records written (and declared)
@@ -84,41 +112,44 @@ struct FixtureSpec {
     quint32 agbl = 0; // 0 = omit chunk
 };
 
-// A GBA-ready .wav per FORMATS.md §1: fmt/data/smpl/agbp/agbl.
+// A .wav per FORMATS.md §1's chunk vocabulary: fmt/data[/smpl/agbp/agbl].
 QByteArray fixtureWav(const FixtureSpec &spec)
 {
+    const quint16 blockAlign = spec.channels * (spec.bits / 8);
     QByteArray wav("RIFF\0\0\0\0WAVE", 12);
     wav += "fmt ";
     putU32(&wav, 16);
-    putU16(&wav, 1); // PCM
+    putU16(&wav, spec.formatTag);
     putU16(&wav, spec.channels);
     putU32(&wav, spec.rate);
-    putU32(&wav, spec.rate * spec.channels);
-    putU16(&wav, spec.channels); // blockAlign
-    putU16(&wav, 8);
+    putU32(&wav, spec.rate * blockAlign);
+    putU16(&wav, blockAlign);
+    putU16(&wav, spec.bits);
     wav += "data";
     putU32(&wav, quint32(spec.samples.size()));
     wav += spec.samples;
     if (spec.samples.size() & 1)
         wav += '\0'; // RIFF pad byte
-    wav += "smpl";
-    putU32(&wav, quint32(36 + 24 * spec.numLoops));
-    putU32(&wav, 0); // manufacturer
-    putU32(&wav, 0); // product
-    putU32(&wav, 0); // sample period
-    putU32(&wav, spec.unityKey);
-    putU32(&wav, spec.pitchFraction);
-    putU32(&wav, 0); // SMPTE format
-    putU32(&wav, 0); // SMPTE offset
-    putU32(&wav, quint32(spec.numLoops));
-    putU32(&wav, 0); // sampler data
-    for (int i = 0; i < spec.numLoops; i++) {
-        putU32(&wav, quint32(i)); // cue point id
-        putU32(&wav, spec.loopType);
-        putU32(&wav, spec.loopStart);
-        putU32(&wav, spec.loopEndIncl);
-        putU32(&wav, 0); // fraction
-        putU32(&wav, 0); // play count
+    if (spec.withSmpl) {
+        wav += "smpl";
+        putU32(&wav, quint32(36 + 24 * spec.numLoops));
+        putU32(&wav, 0); // manufacturer
+        putU32(&wav, 0); // product
+        putU32(&wav, 0); // sample period
+        putU32(&wav, spec.unityKey);
+        putU32(&wav, spec.pitchFraction);
+        putU32(&wav, 0); // SMPTE format
+        putU32(&wav, 0); // SMPTE offset
+        putU32(&wav, quint32(spec.numLoops));
+        putU32(&wav, 0); // sampler data
+        for (int i = 0; i < spec.numLoops; i++) {
+            putU32(&wav, quint32(i)); // cue point id
+            putU32(&wav, spec.loopType);
+            putU32(&wav, spec.loopStart);
+            putU32(&wav, spec.loopEndIncl);
+            putU32(&wav, 0); // fraction
+            putU32(&wav, 0); // play count
+        }
     }
     if (spec.agbp) {
         wav += "agbp";
@@ -136,6 +167,87 @@ QByteArray fixtureWav(const FixtureSpec &spec)
     wav[6] = char(riffSize >> 16);
     wav[7] = char(riffSize >> 24);
     return wav;
+}
+
+// ---- AIFF fixture (big-endian) ----
+
+void putBe16(QByteArray *out, quint16 v)
+{
+    out->append(char(v >> 8)).append(char(v));
+}
+
+void putBe32(QByteArray *out, quint32 v)
+{
+    out->append(char(v >> 24)).append(char(v >> 16)).append(char(v >> 8))
+        .append(char(v));
+}
+
+// 80-bit IEEE extended float, the COMM sample-rate encoding.
+void putExtended80(QByteArray *out, double v)
+{
+    int exp2 = 0;
+    const double mant = std::frexp(v, &exp2);
+    const quint64 m = quint64(std::ldexp(mant, 64));
+    putBe16(out, quint16(16382 + exp2));
+    for (int i = 7; i >= 0; i--)
+        out->append(char(m >> (i * 8)));
+}
+
+struct AiffSpec {
+    quint16 channels = 1;
+    quint32 numFrames = 0;
+    quint16 sampleSize = 16;
+    double rate = 22050.0;
+    QByteArray ssnd; // big-endian sample bytes
+    int baseNote = 60;
+    int detune = 0; // cents, −50..50
+    bool loop = false;
+    quint32 loopStartPos = 0;
+    quint32 loopEndPos = 0; // exclusive bound, aif2pcm-style
+};
+
+QByteArray fixtureAiff(const AiffSpec &spec)
+{
+    QByteArray aif("FORM\0\0\0\0AIFF", 12);
+    aif += "COMM";
+    putBe32(&aif, 18);
+    putBe16(&aif, spec.channels);
+    putBe32(&aif, spec.numFrames);
+    putBe16(&aif, spec.sampleSize);
+    putExtended80(&aif, spec.rate);
+    if (spec.loop) {
+        aif += "MARK";
+        putBe32(&aif, 2 + 2 * 8);
+        putBe16(&aif, 2); // two markers, empty pascal names (pad to even)
+        putBe16(&aif, 1);
+        putBe32(&aif, spec.loopStartPos);
+        aif += QByteArray("\0\0", 2);
+        putBe16(&aif, 2);
+        putBe32(&aif, spec.loopEndPos);
+        aif += QByteArray("\0\0", 2);
+    }
+    aif += "INST";
+    putBe32(&aif, 20);
+    aif += char(qint8(spec.baseNote));
+    aif += char(qint8(spec.detune));
+    aif += QByteArray(6, '\0'); // low/high note, low/high velocity, gain
+    putBe16(&aif, spec.loop ? 1 : 0); // sustain loop playMode
+    putBe16(&aif, 1);                 // begin marker id
+    putBe16(&aif, 2);                 // end marker id
+    aif += QByteArray(6, '\0');       // release loop, unused
+    aif += "SSND";
+    putBe32(&aif, quint32(8 + spec.ssnd.size()));
+    putBe32(&aif, 0); // offset
+    putBe32(&aif, 0); // block size
+    aif += spec.ssnd;
+    if (spec.ssnd.size() & 1)
+        aif += '\0';
+    const quint32 formSize = quint32(aif.size()) - 8;
+    aif[4] = char(formSize >> 24);
+    aif[5] = char(formSize >> 16);
+    aif[6] = char(formSize >> 8);
+    aif[7] = char(formSize);
+    return aif;
 }
 
 const char *const kWav2AgbRules =
@@ -167,9 +279,57 @@ bool buildWavProject(const QString &root)
                      "placeholder");
 }
 
+// ---- DSP measurement helpers ----
+
+std::vector<float> genSine(double rate, double freq, double seconds,
+                           double amp)
+{
+    std::vector<float> v(size_t(rate * seconds));
+    for (size_t i = 0; i < v.size(); i++)
+        v[i] = float(amp * std::sin(2.0 * kPi * freq * double(i) / rate));
+    return v;
+}
+
+double rmsOf(const std::vector<float> &v, size_t from, size_t to)
+{
+    if (to <= from)
+        return 0.0;
+    double sum = 0.0;
+    for (size_t i = from; i < to; i++)
+        sum += double(v[i]) * double(v[i]);
+    return std::sqrt(sum / double(to - from));
+}
+
+// Hann-windowed single-tone amplitude estimate: immune to partial-cycle
+// leakage, so passband gain measures to well under 0.01 dB.
+double toneAmp(const std::vector<float> &v, double rate, double freq,
+               size_t from, size_t to)
+{
+    double re = 0.0, im = 0.0, wsum = 0.0;
+    const double span = double(to - from);
+    for (size_t i = from; i < to; i++) {
+        const double w =
+            0.5 * (1.0 - std::cos(2.0 * kPi * double(i - from) / span));
+        const double phase = 2.0 * kPi * freq * double(i) / rate;
+        re += double(v[i]) * w * std::cos(phase);
+        im += double(v[i]) * w * std::sin(phase);
+        wsum += w;
+    }
+    return 2.0 * std::sqrt(re * re + im * im) / wsum;
+}
+
+double median(std::vector<double> v)
+{
+    if (v.empty())
+        return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t mid = v.size() / 2;
+    return v.size() & 1 ? v[mid] : 0.5 * (v[mid - 1] + v[mid]);
+}
+
 } // namespace
 
-int runSampleCheck(const QString &scratchDir)
+int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
 {
     if (QDir(scratchDir).exists()) {
         std::fprintf(stderr,
@@ -474,17 +634,691 @@ int runSampleCheck(const QString &scratchDir)
             std::printf("samplecheck: CRLF preservation OK\n");
     }
 
-    // ---- the dialog, offscreen: live validation gates the commit ----
+    // ---- hi-res decoding (phase 2): every container → canonical floats ----
     {
         const int before = failures;
-        SampleWavInfo info;
         QString error;
-        SampleRegistrar::inspectSampleWav(fixture, &info, &error);
+
+        // u8 prepared file: exact (x − 128)/128 floats, agbp-derived true
+        // rate, agbl-corrected loop end, prepared-shape flag.
+        ImportedSample u8s;
+        expect(importAudioBytes(fixture, QStringLiteral("fix/tone8.wav"), &u8s,
+                                &error),
+               "u8 wav imports");
+        bool u8ok = u8s.frameCount() == 64;
+        for (int i = 0; u8ok && i < 64; i++)
+            u8ok = u8s.buffer[size_t(i)] == float((i * 2 - 128) / 128.0);
+        expect(u8ok, "u8 floats are exactly (x-128)/128");
+        expect(u8s.gbaReady && u8s.sourceBits == 8 && u8s.sourceChannels == 1,
+               "u8 prepared shape detected");
+        expect(u8s.baseKey == 58 && std::abs(u8s.fracSemitone - 0.25) < 1e-12,
+               "u8 smpl unity/fraction (standard semantics)");
+        expect(u8s.hasLoop && u8s.loopStart == 8 && u8s.loopEndIncl == 63
+                   && u8s.playLength == 64,
+               "u8 loop end takes the agbl override");
+        expect(u8s.exactPitch == 15000000
+                   && std::abs(u8s.sampleRate - 13240.0948) < 0.01,
+               "u8 sample rate inverted from agbp");
+        expect(u8s.suggestedName == QStringLiteral("tone8"),
+               "suggested name from the basename");
+
+        // s16: x/32768 exactly.
+        FixtureSpec s16;
+        s16.bits = 16;
+        s16.rate = 44100;
+        s16.withSmpl = false;
+        const qint16 s16vals[] = {0, 16384, -32768, 32767};
+        for (const qint16 v : s16vals)
+            putU16(&s16.samples, quint16(v));
+        ImportedSample s16s;
+        expect(importAudioBytes(fixtureWav(s16), QStringLiteral("f/s16.wav"),
+                                &s16s, &error),
+               "s16 wav imports");
+        expect(s16s.frameCount() == 4 && s16s.buffer[0] == 0.0f
+                   && s16s.buffer[1] == 0.5f && s16s.buffer[2] == -1.0f
+                   && s16s.buffer[3] == float(32767.0 / 32768.0),
+               "s16 floats are exactly x/32768");
+        expect(!s16s.gbaReady && s16s.sampleRate == 44100.0
+                   && !s16s.hasLoop && s16s.baseKey == 60,
+               "s16 hi-res defaults");
+
+        // s24: x/8388608 exactly.
+        FixtureSpec s24;
+        s24.bits = 24;
+        s24.withSmpl = false;
+        const qint32 s24vals[] = {0, 8388607, -8388608, -1};
+        for (const qint32 v : s24vals) {
+            s24.samples += char(v & 0xFF);
+            s24.samples += char((v >> 8) & 0xFF);
+            s24.samples += char((v >> 16) & 0xFF);
+        }
+        ImportedSample s24s;
+        expect(importAudioBytes(fixtureWav(s24), QStringLiteral("f/s24.wav"),
+                                &s24s, &error),
+               "s24 wav imports");
+        expect(s24s.frameCount() == 4 && s24s.buffer[0] == 0.0f
+                   && s24s.buffer[1] == float(8388607.0 / 8388608.0)
+                   && s24s.buffer[2] == -1.0f
+                   && s24s.buffer[3] == float(-1.0 / 8388608.0),
+               "s24 floats are exactly x/8388608");
+
+        // float32 passes through; out-of-range clamps with a warning.
+        FixtureSpec f32;
+        f32.formatTag = 3;
+        f32.bits = 32;
+        f32.withSmpl = false;
+        const float f32vals[] = {0.5f, -0.25f, 1.5f, -2.0f};
+        for (const float v : f32vals) {
+            quint32 bits;
+            std::memcpy(&bits, &v, 4);
+            putU32(&f32.samples, bits);
+        }
+        ImportedSample f32s;
+        expect(importAudioBytes(fixtureWav(f32), QStringLiteral("f/f32.wav"),
+                                &f32s, &error),
+               "f32 wav imports");
+        expect(f32s.sourceFloat && f32s.frameCount() == 4
+                   && f32s.buffer[0] == 0.5f && f32s.buffer[1] == -0.25f
+                   && f32s.buffer[2] == 1.0f && f32s.buffer[3] == -1.0f,
+               "f32 passthrough with ±1 clamp");
+        expect(!f32s.warnings.isEmpty(), "clamped floats warn");
+
+        // Stereo: mean downmix; anti-phase flags phase cancellation and the
+        // left-only re-import takes channel 0 verbatim.
+        FixtureSpec st;
+        st.bits = 16;
+        st.channels = 2;
+        st.withSmpl = false;
+        std::vector<qint16> left(200);
+        for (int i = 0; i < 200; i++) {
+            left[size_t(i)] =
+                qint16(std::lround(16000.0 * std::sin(2.0 * kPi * i / 50.0)));
+            putU16(&st.samples, quint16(left[size_t(i)]));
+            putU16(&st.samples, quint16(qint16(-left[size_t(i)])));
+        }
+        ImportedSample sts;
+        expect(importAudioBytes(fixtureWav(st), QStringLiteral("f/st.wav"),
+                                &sts, &error),
+               "anti-phase stereo imports");
+        bool cancelled = sts.frameCount() == 200;
+        for (int i = 0; cancelled && i < 200; i++)
+            cancelled = std::abs(sts.buffer[size_t(i)]) < 1e-6f;
+        expect(cancelled && sts.phaseCancelStereo && sts.sourceChannels == 2,
+               "anti-phase stereo cancels and is flagged");
+        ImportedSample stl;
+        expect(importAudioBytes(fixtureWav(st), QStringLiteral("f/st.wav"),
+                                &stl, &error, true),
+               "left-only re-import works");
+        bool leftOk = stl.frameCount() == 200;
+        for (int i = 0; leftOk && i < 200; i++)
+            leftOk = stl.buffer[size_t(i)] == float(left[size_t(i)] / 32768.0);
+        expect(leftOk && !stl.phaseCancelStereo,
+               "left-only takes channel 0 verbatim");
+        FixtureSpec stIn = st;
+        stIn.samples.clear();
+        for (int i = 0; i < 200; i++) {
+            putU16(&stIn.samples, quint16(left[size_t(i)]));
+            putU16(&stIn.samples, quint16(qint16(left[size_t(i)] / 2)));
+        }
+        ImportedSample stm;
+        expect(importAudioBytes(fixtureWav(stIn), QStringLiteral("f/stm.wav"),
+                                &stm, &error)
+                   && !stm.phaseCancelStereo
+                   && stm.buffer[12]
+                       == float((double(left[12]) + double(left[12] / 2))
+                                / 2.0 / 32768.0),
+               "in-phase stereo mean-downmixes without the flag");
+
+        // AIFF: big-endian 16-bit, extended-80 rate, MARK/INST loop, INST
+        // detune folded into unity/fraction.
+        AiffSpec aif;
+        aif.numFrames = 500;
+        aif.rate = 22050.0;
+        aif.baseNote = 57;
+        aif.detune = -25;
+        aif.loop = true;
+        aif.loopStartPos = 100;
+        aif.loopEndPos = 400;
+        std::vector<qint16> aifVals(500);
+        for (int i = 0; i < 500; i++) {
+            aifVals[size_t(i)] = qint16((i * 37) % 30001 - 15000);
+            putBe16(&aif.ssnd, quint16(aifVals[size_t(i)]));
+        }
+        ImportedSample aifs;
+        expect(importAudioBytes(fixtureAiff(aif), QStringLiteral("f/a.aif"),
+                                &aifs, &error),
+               "aiff imports");
+        bool aifOk = aifs.frameCount() == 500;
+        for (int i = 0; aifOk && i < 500; i++)
+            aifOk = aifs.buffer[size_t(i)]
+                == float(aifVals[size_t(i)] / 32768.0);
+        expect(aifOk, "aiff floats are exactly x/32768 (big-endian)");
+        expect(aifs.sampleRate == 22050.0 && aifs.sourceKind == ImportedSample::Aif,
+               "aiff extended-80 rate");
+        expect(aifs.hasLoop && aifs.loopStart == 100 && aifs.loopEndIncl == 399,
+               "aiff MARK/INST loop (exclusive end converted)");
+        expect(aifs.baseKey == 56 && std::abs(aifs.fracSemitone - 0.75) < 1e-12,
+               "aiff INST detune renormalized into unity/fraction");
+
+        // Refusals.
+        ImportedSample junk;
+        expect(!importAudioBytes(QByteArray("MThd not audio at all"),
+                                 QStringLiteral("f/x.mid"), &junk, &error),
+               "garbage refused");
+        expectError(error,
+                    QStringLiteral("not a supported audio file (WAV and AIFF "
+                                   "sources are supported in this build)."),
+                    "unsupported-format text");
+        QByteArray aifc = fixtureAiff(aif);
+        aifc.replace(8, 4, "AIFC");
+        expect(!importAudioBytes(aifc, QStringLiteral("f/x.aifc"), &junk,
+                                 &error),
+               "AIFC refused");
+        expectError(error,
+                    QStringLiteral("AIFF-C is not supported — export "
+                                   "uncompressed AIFF or WAV."),
+                    "aifc text");
+        if (failures == before)
+            std::printf("samplecheck: hi-res decode OK\n");
+    }
+
+    // ---- resampler (DSP.md §9 items 1-4) ----
+    {
+        const int before = failures;
+        const double srcRate = 44100.0, dstRate = 13379.0;
+        const double r = dstRate / srcRate;
+
+        // 1. Passband: 100 Hz–6.0 kHz within ±0.1 dB of unity.
+        for (const double f :
+             {100.0, 500.0, 1000.0, 2000.0, 4000.0, 5000.0, 5500.0, 6000.0}) {
+            const std::vector<float> in = genSine(srcRate, f, 0.3, 0.5);
+            const qint64 nOut = qint64(std::llround(double(in.size()) * r));
+            const std::vector<float> out = SampleDsp::resampleSinc(
+                in.data(), qint64(in.size()), r, nOut);
+            const double amp = toneAmp(out, dstRate, f, size_t(nOut / 5),
+                                       size_t(nOut * 4 / 5));
+            const double db = 20.0 * std::log10(amp / 0.5);
+            if (std::abs(db) > 0.1) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: passband %.0f Hz off by "
+                             "%.3f dB\n",
+                             f, db);
+                failures++;
+            }
+        }
+
+        // 2. Alias rejection: above-Nyquist input ≤ −80 dB re input.
+        for (const double f : {8000.0, 10000.0, 14000.0}) {
+            const std::vector<float> in = genSine(srcRate, f, 0.3, 0.5);
+            const qint64 nOut = qint64(std::llround(double(in.size()) * r));
+            const std::vector<float> out = SampleDsp::resampleSinc(
+                in.data(), qint64(in.size()), r, nOut);
+            const double rms =
+                rmsOf(out, size_t(nOut / 5), size_t(nOut * 4 / 5));
+            const double inRms = 0.5 / std::sqrt(2.0);
+            if (rms > inRms * 1e-4) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: alias %.0f Hz leaks %.1f dB\n",
+                             f, 20.0 * std::log10(rms / inRms));
+                failures++;
+            }
+        }
+
+        // 3a. DC: constant in → same constant (±1e-4) away from the edges.
+        {
+            std::vector<float> in(size_t(srcRate * 0.2), 0.25f);
+            const qint64 nOut = qint64(std::llround(double(in.size()) * r));
+            const std::vector<float> out = SampleDsp::resampleSinc(
+                in.data(), qint64(in.size()), r, nOut);
+            bool flat = true;
+            for (qint64 i = 100; i < nOut - 100; i++)
+                flat = flat && std::abs(double(out[size_t(i)]) - 0.25) <= 1e-4;
+            expect(flat, "constant input passes at unity DC gain");
+        }
+
+        // 3b. Impulse response symmetric (linear phase) at ratio 1/2.
+        {
+            std::vector<float> in(4000, 0.0f);
+            in[2000] = 1.0f;
+            const std::vector<float> out =
+                SampleDsp::resampleSinc(in.data(), 4000, 0.5, 2000);
+            bool symmetric = true;
+            for (int d = 1; d <= 500; d++)
+                symmetric = symmetric
+                    && std::abs(double(out[size_t(1000 + d)])
+                                - double(out[size_t(1000 - d)]))
+                        <= 2e-6;
+            expect(symmetric && out[1000] > 0.1,
+                   "impulse response is symmetric about the center");
+        }
+
+        // 3c. 1 kHz in → spectral peak at 1000 ± 0.5 Hz out.
+        {
+            const std::vector<float> in = genSine(srcRate, 1000.0, 1.2, 0.5);
+            const qint64 nOut = qint64(std::llround(double(in.size()) * r));
+            const std::vector<float> out = SampleDsp::resampleSinc(
+                in.data(), qint64(in.size()), r, nOut);
+            double bestF = 0.0, bestAmp = -1.0;
+            for (double f = 998.0; f <= 1002.0; f += 0.05) {
+                const double amp = toneAmp(out, dstRate, f, 0, size_t(nOut));
+                if (amp > bestAmp) {
+                    bestAmp = amp;
+                    bestF = f;
+                }
+            }
+            expect(std::abs(bestF - 1000.0) <= 0.5,
+                   "1 kHz spectral peak lands within ±0.5 Hz");
+        }
+
+        // 4. Identity bypass: equal rates → bit-exact passthrough.
+        {
+            std::vector<float> in(size_t(5000));
+            quint32 rng = 12345;
+            for (auto &v : in) {
+                rng = rng * 1664525u + 1013904223u;
+                v = float(double(rng) / 4294967296.0 - 0.5);
+            }
+            const std::vector<float> out = SampleDsp::resampleSinc(
+                in.data(), qint64(in.size()), 1.0, qint64(in.size()));
+            expect(std::memcmp(in.data(), out.data(),
+                               in.size() * sizeof(float))
+                       == 0,
+                   "identity ratio is a bit-exact passthrough");
+        }
+        if (failures == before)
+            std::printf("samplecheck: resampler OK\n");
+    }
+
+    // ---- quantizer (DSP.md §9 item 5, synthetic half) ----
+    {
+        const int before = failures;
+        const struct {
+            double in;
+            int out;
+        } vectors[] = {
+            {1.0, 127},           {-1.0, -128},
+            {127.5 / 128.0, 127}, {-127.5 / 128.0, -128},
+            {127.0 / 128.0, 127}, {-127.0 / 128.0, -127},
+            {0.5, 64},            {-0.5, -64},
+            {1e-9, 0},            {-1e-9, -1}, // floor, not truncate
+            {0.0, 0},
+        };
+        bool vecOk = true;
+        for (const auto &v : vectors)
+            vecOk = vecOk && SampleDsp::quantizeToAgb8(v.in) == v.out;
+        expect(vecOk, "quantizer matches clamp(floor(x*128), -128, 127)");
+
+        bool u8Round = true;
+        for (int v = 0; v < 256; v++)
+            u8Round = u8Round
+                && SampleDsp::quantizeToAgb8((v - 128) / 128.0) == v - 128;
+        expect(u8Round, "u8 → float → s8 is the identity for all 256 values");
+
+        std::vector<float> noise(size_t(2000));
+        quint32 rng = 999;
+        for (auto &v : noise) {
+            rng = rng * 1664525u + 1013904223u;
+            v = float(double(rng) / 4294967296.0 - 0.5);
+        }
+        expect(SampleDsp::quantizeBuffer(noise, true)
+                   == SampleDsp::quantizeBuffer(noise, true),
+               "dither uses a fixed seed — renders are deterministic");
+        expect(SampleDsp::quantizeBuffer(noise, true)
+                   != SampleDsp::quantizeBuffer(noise, false),
+               "dither actually perturbs the output");
+
+        // Zero-crossing snap: sign changes at 4 and 8.
+        const float zx[] = {0.5f, 0.5f, 0.5f, 0.5f, -0.5f, -0.5f,
+                            -0.5f, -0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+        expect(SampleDsp::nearestZeroCrossing(zx, 12, 5) == 4
+                   && SampleDsp::nearestZeroCrossing(zx, 12, 7) == 8
+                   && SampleDsp::nearestZeroCrossing(zx, 12, 0) == 4,
+               "nearest zero crossing snaps to the closest sign change");
+        // Marker mapping: crop offset then ratio, rounded.
+        expect(SampleDsp::mapMarker(2000, 500, 0.5) == 750
+                   && SampleDsp::mapMarker(2001, 0, 13379.0 / 44100.0) == 607,
+               "marker mapping crops then scales");
+        if (failures == before)
+            std::printf("samplecheck: quantizer OK\n");
+    }
+
+    // ---- normalization (DSP.md §9 item 6, synthetic half) ----
+    {
+        const int before = failures;
+        QString warning;
+
+        // Looped tone with a comfortable crest: RMS lands on target.
+        std::vector<float> tone = genSine(13379.0, 440.0, 0.5, 0.11);
+        double gain = SampleDsp::normalizeGain(tone.data(),
+                                               qint64(tone.size()), true, 0,
+                                               &warning);
+        for (auto &v : tone)
+            v = float(double(v) * gain);
+        const double rms = rmsOf(tone, 0, tone.size());
+        expect(std::abs(20.0 * std::log10(rms / SampleDsp::kTargetLoopRms))
+                   < 0.1,
+               "looped normalize lands within 0.1 dB of the target RMS");
+        expect(warning.isEmpty(), "clean tone normalizes without warnings");
+
+        // High crest: the peak cap engages and is never exceeded.
+        std::vector<float> crest = genSine(13379.0, 440.0, 0.5, 0.05);
+        crest[100] = 0.9f;
+        gain = SampleDsp::normalizeGain(crest.data(), qint64(crest.size()),
+                                        true, 0, &warning);
+        double peak = 0.0;
+        for (const auto &v : crest)
+            peak = std::max(peak, std::abs(double(v) * gain));
+        expect(peak <= SampleDsp::kPeakCeiling + 1e-9
+                   && std::abs(peak - SampleDsp::kPeakCeiling) < 1e-6,
+               "peak cap engages on high-crest material");
+
+        // One-shot: pure peak normalize.
+        std::vector<float> hit = genSine(13379.0, 200.0, 0.1, 0.4);
+        gain = SampleDsp::normalizeGain(hit.data(), qint64(hit.size()), false,
+                                        0, &warning);
+        peak = 0.0;
+        for (const auto &v : hit)
+            peak = std::max(peak, std::abs(double(v) * gain));
+        expect(std::abs(peak - SampleDsp::kPeakCeiling) < 1e-6,
+               "one-shot normalizes to the peak ceiling");
+
+        // Near-silent input refuses auto-normalize.
+        std::vector<float> quiet(1000, 0.01f);
+        gain = SampleDsp::normalizeGain(quiet.data(), 1000, false, 0,
+                                        &warning);
+        expect(gain == 1.0
+                   && warning
+                       == QStringLiteral(
+                           "silent sample — auto-normalize skipped."),
+               "silent sample refuses auto-normalize");
+        if (failures == before)
+            std::printf("samplecheck: normalization OK\n");
+    }
+
+    // ---- the parity fixture: hi-res 16-bit source used from here on ----
+    FixtureSpec hiSpec;
+    hiSpec.bits = 16;
+    hiSpec.rate = 44100;
+    hiSpec.numLoops = 1;
+    hiSpec.loopStart = 2000;
+    hiSpec.loopEndIncl = 9999;
+    for (int i = 0; i < 12000; i++) {
+        const double v = 0.5 * std::sin(2.0 * kPi * 220.5 * i / 44100.0);
+        putU16(&hiSpec.samples, quint16(qint16(std::lround(v * 32000.0))));
+    }
+    ImportedSample hiRes;
+    {
+        QString error;
+        if (!importAudioBytes(fixtureWav(hiSpec),
+                              QStringLiteral("fix/hires_tone.wav"), &hiRes,
+                              &error)) {
+            std::fprintf(stderr, "samplecheck: FAIL: hi-res fixture import: %s\n",
+                         qUtf8Printable(error));
+            return 1;
+        }
+    }
+
+    // ---- pipeline determinism: two fresh documents → identical bytes ----
+    {
+        const int before = failures;
+        SampleEditParams p = SampleDocument::defaultParams(hiRes);
+        p.cropStart = 100;
+        p.cropEnd = 11500;
+        p.targetRate = 13379.0;
+        p.baseKey = 59;
+        p.fineTuneCents = 10.0;
+        p.ditherOn = true;
+        SampleDocument docA(hiRes), docB(hiRes);
+        docA.setParams(p);
+        docB.setParams(p);
+        const ProcessedSample &a = docA.processed();
+        const ProcessedSample &b = docB.processed();
+        expect(a.s8 == b.s8 && a.freq == b.freq && a.size == b.size
+                   && a.loopStart == b.loopStart
+                   && a.pitchFraction == b.pitchFraction,
+               "two renders of the same params are byte-identical");
+        // A no-op params round trip re-renders identically too.
+        SampleEditParams q = p;
+        q.baseKey = 60;
+        docA.setParams(q);
+        docA.processed();
+        docA.setParams(p);
+        expect(docA.processed().s8 == b.s8,
+               "param round-trip re-renders identically");
+        if (failures == before)
+            std::printf("samplecheck: pipeline determinism OK\n");
+    }
+
+    // ---- retune vectors (FORMATS.md §3, independently precomputed) ----
+    {
+        const int before = failures;
+        FixtureSpec flat;
+        flat.rate = 44100;
+        flat.withSmpl = false;
+        flat.samples = QByteArray(64, char(0x80));
+        ImportedSample flatSrc;
+        QString error;
+        importAudioBytes(fixtureWav(flat), QStringLiteral("f/flat.wav"),
+                         &flatSrc, &error);
+        const struct {
+            double rate;
+            int key;
+            double cents;
+            quint32 agbp;
+        } vectors[] = {
+            {13379.0, 60, 0.0, 13700096},  {13379.0, 72, 0.0, 6850048},
+            {13379.0, 57, 0.0, 16292252},  {13379.0, 58, 25.0, 15157369},
+            {3344.75, 60, 0.0, 3425024},   {44100.0, 69, 50.0, 26086940},
+            {6689.5, 60, 0.0, 6850048},
+        };
+        for (const auto &v : vectors) {
+            SampleDocument doc(flatSrc);
+            SampleEditParams p = doc.params();
+            p.targetRate = v.rate;
+            p.baseKey = v.key;
+            p.fineTuneCents = v.cents;
+            doc.setParams(p);
+            if (doc.processed().freq != v.agbp) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: retune (%g Hz, key %d, %g "
+                             "cents): agbp %u, want %u\n",
+                             v.rate, v.key, v.cents, doc.processed().freq,
+                             v.agbp);
+                failures++;
+            }
+        }
+        if (failures == before)
+            std::printf("samplecheck: retune vectors OK\n");
+    }
+
+    // ---- parity matrix: in-memory render == loader-decoded project file
+    // (the audition == build invariant), plus metadata round-trip ----
+    {
+        const int before = failures;
+        struct Case {
+            const char *name;
+            SampleEditParams params;
+        };
+        const SampleEditParams d = SampleDocument::defaultParams(hiRes);
+        std::vector<Case> cases;
+        {
+            SampleEditParams p = d; // downsample, loop, auto-normalize, fades
+            p.targetRate = 13379.0;
+            cases.push_back({"pm_a", p});
+        }
+        {
+            SampleEditParams p = d; // one-shot crop + retune
+            p.loopOn = false;
+            p.cropStart = 500;
+            p.cropEnd = 8500;
+            p.baseKey = 58;
+            p.fineTuneCents = 25.0;
+            p.targetRate = 13379.0;
+            cases.push_back({"pm_b", p});
+        }
+        {
+            SampleEditParams p = d; // fractional rate, bare pipeline
+            p.targetRate = 6689.5;
+            p.normalizeMode = SampleEditParams::NormalizeOff;
+            p.dcRemove = SampleEditParams::Off;
+            p.fadeIn = false;
+            p.fadeOut = false;
+            cases.push_back({"pm_c", p});
+        }
+        {
+            SampleEditParams p = d; // identity rate, explicit looped gain
+            p.normalizeMode = SampleEditParams::NormalizeLooped;
+            cases.push_back({"pm_d", p});
+        }
+        {
+            SampleEditParams p = d; // dithered
+            p.targetRate = 13379.0;
+            p.ditherOn = true;
+            p.normalizeMode = SampleEditParams::NormalizeOff;
+            cases.push_back({"pm_e", p});
+        }
+        {
+            SampleEditParams p = d; // one-shot, odd output length (pad byte)
+            p.loopOn = false;
+            p.targetRate = 26758.0;
+            p.normalizeMode = SampleEditParams::NormalizeOff;
+            p.dcRemove = SampleEditParams::Off;
+            p.fadeIn = false;
+            p.fadeOut = false;
+            cases.push_back({"pm_f", p});
+        }
+
+        std::vector<ProcessedSample> renders;
+        QString vgText = QStringLiteral("voicegroup_parity::\n");
+        for (const Case &c : cases) {
+            SampleDocument doc(hiRes);
+            doc.setParams(c.params);
+            renders.push_back(doc.processed());
+            const QByteArray bytes = writeSampleWav(renders.back());
+            QString error;
+            if (!SampleRegistrar::registerSample(
+                    root, QLatin1String(c.name), bytes, &error)) {
+                std::fprintf(stderr, "samplecheck: FAIL: register %s: %s\n",
+                             c.name, qUtf8Printable(error));
+                failures++;
+                continue;
+            }
+            vgText += QStringLiteral(
+                          "\tvoice_directsound 60, 0, DirectSoundWaveData_%1, "
+                          "255, 0, 255, 0\n")
+                          .arg(QLatin1String(c.name));
+
+            // Metadata round-trip (DSP.md §9 item 10) on the written bytes.
+            SampleWavInfo info;
+            const bool inspected =
+                SampleRegistrar::inspectSampleWav(bytes, &info, &error);
+            const ProcessedSample &p = renders.back();
+            expect(inspected, "export re-inspects");
+            if (inspected) {
+                expect(info.agbPitch == p.freq && info.agbLoopEnd == p.size
+                           && info.numSamples == p.size
+                           && info.sampleRate == p.declaredRate
+                           && info.midiKey == quint32(p.unityNote)
+                           && info.pitchFraction == p.pitchFraction,
+                       "smpl/agbp/agbl re-parse to identical values");
+                expect(info.loopEnabled == p.looped
+                           && (!p.looped
+                               || (info.loopStart == p.loopStart
+                                   && info.loopEndIncl == p.size - 1)),
+                       "loop record re-parses (inclusive end n-1)");
+                expect(info.waveFreq == p.freq && info.waveSize == p.size
+                           && info.waveLoopStart == p.loopStart,
+                       "derived WaveData projection matches the render");
+                // Unity/fraction reconstruct m_exact with frac ∈ [0, 1).
+                const double frac =
+                    double(info.pitchFraction) / 4294967296.0;
+                const double exact =
+                    double(c.params.baseKey) + c.params.fineTuneCents / 100.0;
+                expect(frac >= 0.0 && frac < 1.0
+                           && std::abs((double(info.midiKey) + frac) - exact)
+                               < 1e-6,
+                       "unity/fraction reconstruct the exact key");
+            }
+        }
+
+        // Loop nudge geometry for pm_a: Lout = round(8000·r0) = 2427,
+        // S_out = round(2000·2427/8000) = 607, n = 3034.
+        expect(renders[0].looped && renders[0].loopStart == 607
+                   && renders[0].size == 3034
+                   && renders[0].declaredRate == 13379,
+               "looped resample nudges the ratio onto an integer loop");
+        // pm_f: odd data length exercises the RIFF pad byte.
+        expect(renders[5].size == 7281, "odd-length one-shot render");
+        {
+            const QByteArray bytes = writeSampleWav(renders[5]);
+            // Chunk order fmt/data/smpl/agbp/agbl with a pad byte after data.
+            const qsizetype dataAt = 12 + 8 + 16;
+            expect(bytes.mid(12, 4) == "fmt " && bytes.mid(dataAt, 4) == "data"
+                       && getU32(bytes, dataAt + 4) == 7281
+                       && bytes[dataAt + 8 + 7281] == '\0'
+                       && bytes.mid(dataAt + 8 + 7281 + 1, 4) == "smpl"
+                       && bytes.mid(dataAt + 8 + 7281 + 1 + 8 + 36, 4)
+                           == "agbp"
+                       && bytes.mid(dataAt + 8 + 7281 + 1 + 8 + 36 + 12, 4)
+                           == "agbl",
+                   "writer chunk order and RIFF pad byte");
+        }
+
+        writeFile(root
+                      + QStringLiteral(
+                          "/sound/voicegroups/voicegroup_parity.inc"),
+                  vgText.toUtf8());
+        const QByteArray rootUtf8 = root.toLocal8Bit();
+        LoadedVoiceGroup *vg =
+            voicegroup_load(rootUtf8.constData(), "voicegroup_parity", nullptr);
+        if (!vg) {
+            std::fprintf(stderr,
+                         "samplecheck: FAIL: parity voicegroup_load failed\n");
+            failures++;
+        } else {
+            for (size_t i = 0; i < cases.size(); i++) {
+                const ProcessedSample &p = renders[i];
+                const WaveData *wd = vg->voices[i].wav;
+                if (!wd || !wd->data) {
+                    std::fprintf(stderr,
+                                 "samplecheck: FAIL: %s did not resolve\n",
+                                 cases[i].name);
+                    failures++;
+                    continue;
+                }
+                const bool headerOk = wd->freq == p.freq
+                    && wd->loopStart == p.loopStart && wd->size == p.size
+                    && wd->status == (p.looped ? 0x4000 : 0);
+                const bool bytesOk = headerOk
+                    && std::memcmp(wd->data, p.s8.constData(), p.size) == 0;
+                if (!headerOk || !bytesOk) {
+                    std::fprintf(stderr,
+                                 "samplecheck: FAIL: %s loader parity "
+                                 "(header %d bytes %d)\n",
+                                 cases[i].name, int(headerOk), int(bytesOk));
+                    failures++;
+                }
+            }
+            voicegroup_free(vg);
+        }
+        if (failures == before)
+            std::printf("samplecheck: parity matrix OK\n");
+    }
+
+    // ---- the dialog, offscreen: pipeline controls + commit validation ----
+    {
+        const int before = failures;
+        ImportedSample prepared;
+        QString error;
+        expect(importAudioFile(root
+                                   + QStringLiteral(
+                                       "/sound/direct_sound_samples/"
+                                       "samplecheck_tone.wav"),
+                               &prepared, &error),
+               "prepared sample re-imports from the project");
         const QStringList symbols = VoicegroupSource::directSoundSymbols(root);
         SampleEditorDialog dialog(
-            root + QStringLiteral("/sound/direct_sound_samples/"
-                                  "samplecheck_tone.wav"),
-            info, [&](const QString &name, QString *validationError) {
+            prepared, [&](const QString &name, QString *validationError) {
                 return SampleRegistrar::validateSampleName(root, name, symbols,
                                                            validationError);
             });
@@ -494,8 +1328,19 @@ int runSampleCheck(const QString &scratchDir)
             dialog.findChild<QPushButton *>(QStringLiteral("sampleAddButton"));
         auto *status =
             dialog.findChild<QLabel *>(QStringLiteral("sampleNameStatus"));
-        expect(nameEdit && addButton && status, "dialog widgets found");
-        if (nameEdit && addButton && status) {
+        auto *baseKey =
+            dialog.findChild<QSpinBox *>(QStringLiteral("sampleBaseKey"));
+        auto *loopOn =
+            dialog.findChild<QCheckBox *>(QStringLiteral("sampleLoopOn"));
+        auto *rateCombo =
+            dialog.findChild<QComboBox *>(QStringLiteral("sampleRateCombo"));
+        auto *fineTune = dialog.findChild<QDoubleSpinBox *>(
+            QStringLiteral("sampleFineTune"));
+        expect(nameEdit && addButton && status && baseKey && loopOn
+                   && rateCombo && fineTune,
+               "dialog widgets found");
+        if (nameEdit && addButton && status && baseKey && loopOn && rateCombo
+            && fineTune) {
             // Prefill comes from the source basename — here a collision.
             expect(nameEdit->text() == QStringLiteral("samplecheck_tone"),
                    "name prefilled from the source file");
@@ -514,9 +1359,144 @@ int runSampleCheck(const QString &scratchDir)
                    "sampleName returns the edited name");
             nameEdit->setText(QStringLiteral("Bad Name"));
             expect(!addButton->isEnabled(), "bad grammar disables the commit");
+            nameEdit->setText(QStringLiteral("fresh_tone"));
+
+            // Prepared-shape defaults: byte-faithful no-op pipeline, source
+            // agbp carried verbatim.
+            const ProcessedSample &initial = dialog.document()->processed();
+            expect(initial.freq == 15000000 && initial.size == 64
+                       && initial.looped && initial.loopStart == 8,
+                   "prepared defaults keep the source header verbatim");
+            expect(baseKey->value() == 58
+                       && std::abs(fineTune->value() - 25.0) < 1e-9,
+                   "key/cents prefilled from smpl");
+            bool dataFaithful = true;
+            for (int i = 0; i < 64; i++)
+                dataFaithful = dataFaithful
+                    && initial.s8[i] == char(qint8(i * 2 - 128));
+            expect(dataFaithful, "prepared defaults render the data verbatim");
+
+            // Editing the key drops the verbatim agbp and recomputes.
+            baseKey->setValue(59);
+            expect(dialog.document()->params().baseKey == 59
+                       && dialog.document()->params().exactPitchOverride == 0
+                       && dialog.document()->processed().freq != 15000000,
+                   "key edit flows into the render and drops the override");
+            baseKey->setValue(58);
+            expect(dialog.document()->processed().freq == 15000000,
+                   "restoring the source key restores the verbatim agbp");
+
+            // Loop off: the render becomes a one-shot of the crop.
+            loopOn->setChecked(false);
+            expect(!dialog.document()->processed().looped
+                       && dialog.document()->processed().size == 64,
+                   "loop toggle renders a one-shot");
+
+            // Free-entry rate: parsed as a double, declared rate rounds.
+            rateCombo->setEditText(QStringLiteral("6689.5"));
+            expect(dialog.document()->params().targetRate == 6689.5
+                       && dialog.document()->processed().declaredRate == 6690,
+                   "free-entry target rate flows into the render");
+            expect(dialog.document()->params().exactPitchOverride == 0,
+                   "rate edit drops the verbatim agbp");
+
+            // Crop and normalize controls flow through too.
+            rateCombo->setCurrentIndex(0); // back to "keep source"
+            auto *cropEnd = dialog.findChild<QSpinBox *>(
+                QStringLiteral("sampleCropEnd"));
+            auto *normalize = dialog.findChild<QComboBox *>(
+                QStringLiteral("sampleNormalizeMode"));
+            expect(cropEnd && normalize, "crop/normalize widgets found");
+            if (cropEnd && normalize) {
+                cropEnd->setValue(32);
+                expect(dialog.document()->processed().size == 32,
+                       "crop end trims the one-shot render");
+                normalize->setCurrentIndex(2); // One-shot (peak)
+                expect(dialog.document()->params().normalizeMode
+                               == SampleEditParams::NormalizeOneShot
+                           && dialog.document()->processed().normalizeGain
+                               != 1.0,
+                       "normalize mode applies gain to the render");
+            }
         }
         if (failures == before)
             std::printf("samplecheck: dialog validation OK\n");
+    }
+
+    // ---- corpus-conditional: the sc88pro reference set (item 5/6 halves) ----
+    if (!corpusRoot.isEmpty()) {
+        const int before = failures;
+        const QString samplesDir =
+            corpusRoot + QStringLiteral("/sound/direct_sound_samples");
+        const QStringList names =
+            QDir(samplesDir)
+                .entryList({QStringLiteral("sc88pro_*.wav")}, QDir::Files,
+                           QDir::Name);
+        expect(!names.isEmpty(), "corpus has sc88pro samples");
+        int compared = 0;
+        std::vector<double> peaks, loopRmsList;
+        for (const QString &name : names) {
+            const QString wavPath = samplesDir + QLatin1Char('/') + name;
+            const QString binPath = wavPath.left(wavPath.size() - 4)
+                + QStringLiteral(".bin");
+            const QByteArray bin = readFileBytes(binPath);
+            ImportedSample src;
+            QString error;
+            if (!importAudioFile(wavPath, &src, &error)) {
+                std::fprintf(stderr, "samplecheck: FAIL: corpus import %s: %s\n",
+                             qUtf8Printable(name), qUtf8Printable(error));
+                failures++;
+                continue;
+            }
+            SampleDocument doc(src);
+            const ProcessedSample &p = doc.processed();
+
+            double peak = 0.0;
+            for (const char b : p.s8)
+                peak = std::max(peak, std::abs(double(qint8(b))));
+            peaks.push_back(peak);
+            if (p.looped) {
+                double sum = 0.0;
+                for (quint32 i = p.loopStart; i < p.size; i++)
+                    sum += double(qint8(p.s8[int(i)]))
+                        * double(qint8(p.s8[int(i)]));
+                loopRmsList.push_back(
+                    std::sqrt(sum / double(p.size - p.loopStart)));
+            }
+            if (bin.size() < 16)
+                continue; // no built artifact for this file — skip parity
+            const quint32 flags = getU32(bin, 0);
+            const bool ok = p.freq == getU32(bin, 4)
+                && p.loopStart == getU32(bin, 8) && p.size == getU32(bin, 12)
+                && p.looped == bool(flags & 0x40000000u)
+                && bin.size() >= 16 + int(p.size)
+                && std::memcmp(bin.constData() + 16, p.s8.constData(), p.size)
+                    == 0;
+            if (!ok) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: corpus .bin parity: %s\n",
+                             qUtf8Printable(name));
+                failures++;
+            } else {
+                compared++;
+            }
+        }
+        std::printf("samplecheck: corpus: %d/%d files .bin-compared\n",
+                    compared, int(names.size()));
+        expect(compared > 0, "at least one corpus .bin compared");
+        // Stats drift detection: medians stay inside the recorded IQRs
+        // (DSP.md §5.1).
+        const double peakMedian = median(peaks);
+        const double rmsMedian = median(loopRmsList);
+        expect(peakMedian >= 117.0 && peakMedian <= 127.0,
+               "corpus peak median inside the recorded IQR");
+        expect(rmsMedian >= 37.9 && rmsMedian <= 50.7,
+               "corpus loop-RMS median inside the recorded IQR");
+        if (failures == before)
+            std::printf("samplecheck: corpus round-trip OK\n");
+    } else {
+        std::printf(
+            "samplecheck: corpus sections SKIPPED (no corpus root given)\n");
     }
 
     std::printf("samplecheck: %s\n", failures == 0 ? "PASS" : "FAIL");

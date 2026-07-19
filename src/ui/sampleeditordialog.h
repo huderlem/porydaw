@@ -4,18 +4,22 @@
 
 #include <functional>
 
-#include "project/samplereg.h"
+#include "audio/sampledoc.h"
 
+class QCheckBox;
+class QComboBox;
+class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
-// The Sample Studio dialog (docs/sample-studio/PLAN.md §5), at its phase-1
-// scope: a prepared (already GBA-ready) .wav is shown read-only — header
-// format, smpl/agbp pitch metadata, loop, ROM cost — with a live-validated
-// name field and an "Add to Project" commit. Pure view: the dialog collects
-// the name; MainWindow does the writes on accept. Later phases grow the
-// editing pipeline around this shell.
+// The Sample Studio dialog (docs/sample-studio/PLAN.md §5), at its phase-2
+// scope: any decoded source runs through the non-destructive DSP.md pipeline
+// with numeric controls for crop/loop/key/rate/normalize, a live output
+// readout, and a live-validated name field. Pure view: the dialog renders
+// and hands out the export bytes; MainWindow does the writes on accept.
+// The waveform view, engine audition, and loop suggestion land in phase 3.
 class SampleEditorDialog : public QDialog
 {
     Q_OBJECT
@@ -25,17 +29,39 @@ public:
     // (SampleRegistrar::validateSampleName bound to the project).
     using NameValidator = std::function<bool(const QString &, QString *)>;
 
-    SampleEditorDialog(const QString &sourcePath, const SampleWavInfo &info,
-                       NameValidator validator, QWidget *parent = nullptr);
+    SampleEditorDialog(ImportedSample sample, NameValidator validator,
+                       QWidget *parent = nullptr);
 
     // The validated registration name (valid whenever the dialog accepts).
     QString sampleName() const;
 
+    // The current render, exported per FORMATS.md §1 — what "Add to
+    // Project" commits.
+    QByteArray wavBytes();
+
+    // The pipeline document behind the controls (harness introspection).
+    SampleDocument *document() { return &m_doc; }
+
 private:
+    void applyParamsFromUi();
+    void refreshOutputs();
     void validateName();
 
-    SampleWavInfo m_info;
+    SampleDocument m_doc;
     NameValidator m_validator;
+    bool m_updatingUi = false;
+
+    QSpinBox *m_cropStart;
+    QSpinBox *m_cropEnd;
+    QCheckBox *m_loopOn;
+    QSpinBox *m_loopStart;
+    QSpinBox *m_loopEnd;
+    QSpinBox *m_baseKey;
+    QDoubleSpinBox *m_fineTune;
+    QComboBox *m_rateCombo;
+    QComboBox *m_normalizeMode;
+    QLabel *m_gainReadout;
+    QLabel *m_outputSummary;
     QLineEdit *m_nameEdit;
     QLabel *m_nameStatus;
     QPushButton *m_addButton;

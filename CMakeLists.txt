@@ -57,6 +57,15 @@ qt_add_executable(porydaw
     src/audio/miniaudio_impl.c
     src/audio/wavexport.cpp
     src/audio/wavexport.h
+    src/audio/sampledata.h
+    src/audio/sampledsp.cpp
+    src/audio/sampledsp.h
+    src/audio/sampleimport.cpp
+    src/audio/sampleimport.h
+    src/audio/sampledoc.cpp
+    src/audio/sampledoc.h
+    src/audio/samplewav.cpp
+    src/audio/samplewav.h
     src/core/mid2agbtables.cpp
     src/core/mid2agbtables.h
     src/core/miditimeline.cpp
@@ -117,6 +126,7 @@ qt_add_resources(porydaw "cursor_images"
 target_include_directories(porydaw PRIVATE
     src
     ${PORYAAAA_DIR}/third_party
+    external/dr_libs
 )
 target_link_libraries(porydaw PRIVATE Qt6::Widgets poryaaaa_engine)
 if(UNIX AND NOT APPLE)
