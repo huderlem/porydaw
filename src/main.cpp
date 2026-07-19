@@ -48,6 +48,10 @@ int runPrimeCheck();
 // transportcheck.cpp; playback-start halts ringing auditions (self-contained,
 // no project needed; SKIPs without an audio device).
 int runTransportCheck();
+// samplecheck.cpp; prepared-sample import check (Sample Studio phase 1):
+// builds fully-fresh fake decomp projects under the given (nonexistent)
+// scratch dir.
+int runSampleCheck(const QString &scratchDir);
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -110,6 +114,9 @@ int main(int argc, char *argv[])
             polyCheck + 1 < args.size() ? args[polyCheck + 1] : QString();
         return runPolyCheck(path);
     }
+    const int sampleCheck = args.indexOf(QStringLiteral("--samplecheck"));
+    if (sampleCheck >= 0 && sampleCheck + 1 < args.size())
+        return runSampleCheck(args[sampleCheck + 1]);
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
     if (args.contains(QStringLiteral("--transportcheck")))

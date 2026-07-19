@@ -36,8 +36,10 @@
 
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
+#include "project/samplereg.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#include "ui/sampleeditordialog.h"
 #include "ui/polyphonypanel.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
@@ -240,6 +242,12 @@ void MainWindow::buildUi()
         if (m_active)
             m_active->view->setEventListVisible(on);
     });
+
+    // Tools menu: project-level utilities that aren't song-scoped.
+    QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
+    m_importSampleAction = toolsMenu->addAction(tr("Import &Sample..."), this,
+                                                &MainWindow::importSample);
+    m_importSampleAction->setEnabled(false);
 
     // Transport toolbar
     QToolBar *transport = addToolBar(tr("Transport"));
@@ -814,6 +822,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
 
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
+    m_importSampleAction->setEnabled(true);
     updateWindowTitle();
     populateSongList();
     m_songList->setCurrentSong(-1);
@@ -1354,6 +1363,71 @@ void MainWindow::importMidi()
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
                      wizard.player(), wizard.cfg(), wizard.newVoicegroupName());
+}
+
+void MainWindow::importSample()
+{
+    if (!m_project.isOpen())
+        return;
+    // Refuse before the file dialog: a legacy-aif or unwired project can't
+    // take samples no matter which file is picked.
+    const SampleFormatProbe probe =
+        SampleRegistrar::probeSampleFormat(m_project.root());
+    if (!probe.ok()) {
+        QMessageBox::warning(this, tr("Import Sample"), probe.refusal);
+        return;
+    }
+    QSettings settings;
+    const QString startDir =
+        settings.value(QStringLiteral("lastSampleDir"), QDir::homePath())
+            .toString();
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import Sample"), startDir, tr("WAV files (*.wav)"));
+    if (path.isEmpty())
+        return;
+    settings.setValue(QStringLiteral("lastSampleDir"), QFileInfo(path).path());
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Import Sample"),
+                             tr("Cannot read %1.").arg(path));
+        return;
+    }
+    const QByteArray wavBytes = file.readAll();
+    SampleWavInfo info;
+    QString error;
+    if (!SampleRegistrar::inspectSampleWav(wavBytes, &info, &error)) {
+        QMessageBox::warning(this, tr("Import Sample"),
+                             tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+        return;
+    }
+
+    const QString root = m_project.root();
+    const QStringList symbols = vgCatalog().directSound;
+    SampleEditorDialog dialog(
+        path, info,
+        [root, symbols](const QString &name, QString *validationError) {
+            return SampleRegistrar::validateSampleName(root, name, symbols,
+                                                       validationError);
+        },
+        this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    // Write-through commit (not undoable, like song registration): the .wav
+    // copy plus its direct_sound_data.inc block.
+    if (!SampleRegistrar::registerSample(root, dialog.sampleName(), wavBytes,
+                                         &error)) {
+        QMessageBox::warning(this, tr("Import Sample"), error);
+        return;
+    }
+    invalidateVgCatalog();
+    updateVoicegroupBrowser();
+    statusBar()->showMessage(
+        tr("Imported %1 — DirectSoundWaveData_%1 is now available to "
+           "voicegroups")
+            .arg(dialog.sampleName()),
+        8000);
 }
 
 void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,

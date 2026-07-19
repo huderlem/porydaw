@@ -67,6 +67,7 @@ private slots:
     void openEngineSettings();
     void newSong();
     void importMidi();
+    void importSample();
     void registerLoadedSong();
     void uiTick();
     void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural);
@@ -236,6 +237,7 @@ private:
     QDockWidget *m_polyDock = nullptr;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
+    QAction *m_importSampleAction = nullptr;
     QAction *m_registerAction = nullptr;
     QAction *m_closeTabAction = nullptr;
     QAction *m_goToStartAction = nullptr;
