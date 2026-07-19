@@ -62,6 +62,12 @@ int main(int argc, char *argv[])
     // the widgets are audited for dark palettes.
     app.styleHints()->setColorScheme(Qt::ColorScheme::Light);
 #endif
+    // Fusion everywhere: the native windows11 style paints item-view
+    // selections as low-contrast accent-colored per-cell pills and has
+    // sticky-hover repaint bugs. Set after QApplication so it also wins
+    // over -style/QT_STYLE_OVERRIDE — released binaries should look the
+    // same on every machine.
+    QApplication::setStyle(QStringLiteral("fusion"));
     QApplication::setApplicationName("porydaw");
     QApplication::setApplicationVersion("0.1.0");
     QApplication::setOrganizationName("huderlem");
