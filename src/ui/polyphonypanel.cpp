@@ -3,12 +3,14 @@
 #include <algorithm>
 
 #include <QCheckBox>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QListWidget>
 #include <QPainter>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -19,6 +21,12 @@ namespace {
 
 constexpr int kLogCap = 500;      // event-log rows kept
 constexpr qint64 kFlashMs = 1000; // row flash fade time
+
+// Panel width at which the overflow table moves to the right of the channel
+// grid (roughly the grid's five-per-row hint plus the table column) instead
+// of stretching, hilariously wide, across the whole dock.
+constexpr int kWideLayoutMinWidth = 600;
+constexpr int kOverflowColumnWidth = 320; // table column width in wide mode
 
 // Cell colors matching the CLAP plugin's channel_cell(): free (dark), active
 // (green), releasing (amber), lost sound playing on a shadow channel (blue).
@@ -89,9 +97,15 @@ public:
 
     bool hasHeightForWidth() const override { return true; }
     int heightForWidth(int width) const override { return layoutHeight(width); }
+    // The hint height must track the actual width: the vertical policy is
+    // Fixed, so a hint computed at the default width would cap the widget at
+    // that height even when a narrower dock wraps the cells into more rows,
+    // clipping the bottom ones.
     QSize sizeHint() const override
     {
-        return QSize(kCellW * 5 + kGap * 4, layoutHeight(kCellW * 5 + kGap * 4));
+        const int defaultW = kCellW * 5 + kGap * 4;
+        return QSize(defaultW,
+                     layoutHeight(m_hintWidth > 0 ? m_hintWidth : defaultW));
     }
     QSize minimumSizeHint() const override
     {
@@ -99,6 +113,15 @@ public:
     }
 
 protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        if (m_hintWidth != event->size().width()) {
+            m_hintWidth = event->size().width();
+            updateGeometry();
+        }
+    }
+
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
@@ -189,6 +212,7 @@ private:
     }
 
     AudioEngine::PolySnapshot m_snap;
+    int m_hintWidth = 0; // last laid-out width; sizeHint wraps to it
 };
 
 PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
@@ -205,18 +229,30 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     connect(m_invert, &QCheckBox::toggled, this, &PolyphonyPanel::invertToggled);
     layout->addWidget(m_invert);
 
-    auto *usageLabel = new QLabel(tr("Channel usage"), this);
+    // The usage and overflow sections live in a grid so they can stack when
+    // the panel is narrow and sit side by side when it is wide (resizeEvent
+    // switches the arrangement).
+    m_usageBox = new QWidget(this);
+    auto *usageLayout = new QVBoxLayout(m_usageBox);
+    usageLayout->setContentsMargins(0, 0, 0, 0);
+    usageLayout->setSpacing(6);
+    auto *usageLabel = new QLabel(tr("Channel usage"), m_usageBox);
     usageLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
-    layout->addWidget(usageLabel);
-    m_grid = new PolyChannelGrid(this);
-    layout->addWidget(m_grid);
+    usageLayout->addWidget(usageLabel);
+    m_grid = new PolyChannelGrid(m_usageBox);
+    usageLayout->addWidget(m_grid);
+    usageLayout->addStretch();
 
+    m_overflowBox = new QWidget(this);
+    auto *overflowLayout = new QVBoxLayout(m_overflowBox);
+    overflowLayout->setContentsMargins(0, 0, 0, 0);
+    overflowLayout->setSpacing(6);
     auto *tableHeader = new QHBoxLayout;
-    auto *tableLabel = new QLabel(tr("Overflow by track"), this);
+    auto *tableLabel = new QLabel(tr("Overflow by track"), m_overflowBox);
     tableLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
     tableHeader->addWidget(tableLabel);
     tableHeader->addStretch();
-    m_reset = new QPushButton(tr("Reset"), this);
+    m_reset = new QPushButton(tr("Reset"), m_overflowBox);
     connect(m_reset, &QPushButton::clicked, this, [this] {
         // The engine reset lands at the next audio callback; the log and
         // flash state clear immediately (the eventTotal drop the next
@@ -228,9 +264,9 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
         emit resetRequested();
     });
     tableHeader->addWidget(m_reset);
-    layout->addLayout(tableHeader);
+    overflowLayout->addLayout(tableHeader);
 
-    m_table = new QTableWidget(0, 4, this);
+    m_table = new QTableWidget(0, 4, m_overflowBox);
     m_table->setHorizontalHeaderLabels(
         {tr("Track"), tr("Dropped"), tr("Cut Off"), tr("Tail Cut")});
     const QString columnHelp[4] = {
@@ -255,10 +291,15 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     m_table->setSelectionMode(QAbstractItemView::NoSelection);
     m_table->setFocusPolicy(Qt::NoFocus);
     m_table->setMinimumHeight(90);
-    layout->addWidget(m_table, 1);
-    m_tableEmpty = new QLabel(tr("No overflow recorded"), this);
+    overflowLayout->addWidget(m_table, 1);
+    m_tableEmpty = new QLabel(tr("No overflow recorded"), m_overflowBox);
     m_tableEmpty->setEnabled(false);
-    layout->addWidget(m_tableEmpty);
+    overflowLayout->addWidget(m_tableEmpty);
+
+    m_bodyGrid = new QGridLayout;
+    m_bodyGrid->setSpacing(6);
+    layout->addLayout(m_bodyGrid, 1);
+    setWideLayout(false);
 
     auto *logLabel = new QLabel(tr("Recent events"), this);
     logLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
@@ -269,6 +310,30 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     connect(m_log, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item) { activateLogRow(m_log->row(item)); });
     layout->addWidget(m_log, 2);
+}
+
+void PolyphonyPanel::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    const bool wide = event->size().width() >= kWideLayoutMinWidth;
+    if (wide != m_wideLayout)
+        setWideLayout(wide);
+}
+
+void PolyphonyPanel::setWideLayout(bool wide)
+{
+    m_bodyGrid->removeWidget(m_usageBox);
+    m_bodyGrid->removeWidget(m_overflowBox);
+    m_bodyGrid->addWidget(m_usageBox, 0, 0);
+    m_bodyGrid->addWidget(m_overflowBox, wide ? 0 : 1, wide ? 1 : 0);
+    // The grid column soaks up extra width (cells re-flow into fewer rows);
+    // the table keeps a sane fixed-ish width beside it. Stacked, the table
+    // row takes the extra height instead, as before.
+    m_bodyGrid->setColumnStretch(0, 1);
+    m_bodyGrid->setColumnMinimumWidth(1, wide ? kOverflowColumnWidth : 0);
+    m_bodyGrid->setRowStretch(0, wide ? 1 : 0);
+    m_bodyGrid->setRowStretch(1, wide ? 0 : 1);
+    m_wideLayout = wide;
 }
 
 void PolyphonyPanel::setTimeline(const MidiTimeline *timeline)
@@ -309,6 +374,26 @@ void PolyphonyPanel::clearRuntimeState()
 bool PolyphonyPanel::invertChecked() const
 {
     return m_invert->isChecked();
+}
+
+bool PolyphonyPanel::wideLayoutActive() const
+{
+    return m_wideLayout;
+}
+
+QRect PolyphonyPanel::usageSectionRect() const
+{
+    return m_usageBox->geometry();
+}
+
+QRect PolyphonyPanel::overflowSectionRect() const
+{
+    return m_overflowBox->geometry();
+}
+
+bool PolyphonyPanel::gridFullyVisible() const
+{
+    return m_grid->height() >= m_grid->heightForWidth(m_grid->width());
 }
 
 int PolyphonyPanel::logRowCount() const

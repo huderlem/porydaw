@@ -7,6 +7,7 @@
 #include "audio/audioengine.h"
 
 class QCheckBox;
+class QGridLayout;
 class QLabel;
 class QListWidget;
 class QListWidgetItem;
@@ -47,6 +48,10 @@ public:
     int logRowCount() const;
     QString logRowText(int row) const;
     void activateLogRow(int row); // same path as a double-click
+    bool wideLayoutActive() const;
+    QRect usageSectionRect() const;
+    QRect overflowSectionRect() const;
+    bool gridFullyVisible() const;
 
 signals:
     void invertToggled(bool on);
@@ -55,13 +60,23 @@ signals:
     // lost note (track + midiKey identify it; see SongView::revealNote).
     void jumpToEvent(uint64_t tick, int track, int midiKey);
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void appendEvent(const M4APolyEvent &ev);
     void refreshTable(const AudioEngine::PolySnapshot &snap);
     void clearRuntimeState();
+    // Stacked sections when narrow, overflow table beside the channel grid
+    // when the panel is at least kWideLayoutMinWidth wide.
+    void setWideLayout(bool wide);
 
     QCheckBox *m_invert = nullptr;
     PolyChannelGrid *m_grid = nullptr;
+    QWidget *m_usageBox = nullptr;
+    QWidget *m_overflowBox = nullptr;
+    QGridLayout *m_bodyGrid = nullptr;
+    bool m_wideLayout = false;
     QTableWidget *m_table = nullptr;
     QLabel *m_tableEmpty = nullptr;
     QPushButton *m_reset = nullptr;

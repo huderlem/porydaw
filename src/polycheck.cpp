@@ -1,3 +1,5 @@
+#include <QCoreApplication>
+#include <QFileInfo>
 #include <QImage>
 #include <QString>
 #include <QStringList>
@@ -438,6 +440,38 @@ int runWidgetStage(const QString &screenshotPath)
     check(!image.isNull(), "panel renders offscreen");
     if (!screenshotPath.isEmpty())
         image.save(screenshotPath);
+
+    // Responsive layout: shown so resizes deliver real layout passes. At a
+    // sliver width the sections stack and the channel grid still gets the
+    // full height its wrapped cell rows need (its hint used to be pinned to
+    // the five-per-row width, clipping the extra rows); at a wide width the
+    // overflow table moves beside the grid instead of stretching across.
+    panel.show();
+    auto settle = [] {
+        for (int i = 0; i < 3; i++)
+            QCoreApplication::processEvents();
+    };
+    panel.resize(180, 980);
+    settle();
+    check(!panel.wideLayoutActive(), "narrow panel stacks the sections");
+    check(panel.overflowSectionRect().top() >= panel.usageSectionRect().bottom(),
+          "stacked: overflow table sits below the channel grid");
+    check(panel.gridFullyVisible(),
+          "narrow grid tall enough for all wrapped cell rows");
+    panel.resize(900, 600);
+    settle();
+    check(panel.wideLayoutActive(), "wide panel goes side by side");
+    check(panel.overflowSectionRect().left() >= panel.usageSectionRect().right(),
+          "wide: overflow table sits right of the channel grid");
+    check(panel.gridFullyVisible(), "wide grid shows all cell rows");
+    if (!screenshotPath.isEmpty()) {
+        QImage wideImage(panel.size(), QImage::Format_ARGB32_Premultiplied);
+        wideImage.fill(Qt::white);
+        panel.render(&wideImage);
+        QFileInfo info(screenshotPath);
+        wideImage.save(info.path() + QLatin1Char('/') + info.completeBaseName()
+                       + QStringLiteral("-wide.") + info.suffix());
+    }
 
     return failures;
 }
