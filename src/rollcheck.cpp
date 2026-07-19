@@ -748,6 +748,46 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         std::printf("rollcheck: wrote %s\n", qUtf8Printable(screenshotPath));
     }
 
+    // Polyphony-dock jump target: revealNote selects the losing track and
+    // the lost note itself (the last note on (track, key) starting at or
+    // before the event tick), without touching the undo stack.
+    {
+        const auto &notes = view.model().notes;
+        if (notes.empty()) {
+            fail("no notes in the view model for revealNote");
+        } else {
+            const ViewNote target = notes[notes.size() / 2];
+            if (!view.revealNote(target.track, target.key, target.startTick))
+                fail("revealNote did not find the note");
+            if (view.selectedTrack() != int(target.track))
+                fail("revealNote did not select the track");
+            const auto &sel = view.selection();
+            if (sel.size() != 1
+                || !(sel[0] == SongView::NoteId{target.startTick, target.key}))
+                fail("revealNote did not select the note");
+
+            // A key the track never plays: no note found, but the track
+            // selection sticks (the dock still switches context).
+            bool used[128] = {};
+            for (const ViewNote &note : notes) {
+                if (note.track == target.track)
+                    used[note.key] = true;
+            }
+            int freeKey = -1;
+            for (int k = 0; k < 128 && freeKey < 0; k++) {
+                if (!used[k])
+                    freeKey = k;
+            }
+            if (freeKey >= 0) {
+                if (view.revealNote(target.track, uint8_t(freeKey),
+                                    target.startTick))
+                    fail("revealNote found a note on an unused key");
+                if (view.selectedTrack() != int(target.track))
+                    fail("revealNote miss dropped the track selection");
+            }
+        }
+    }
+
     // Sixteen commands: draw, set, draw, nudge, draw, the double-click
     // delete, add, two resizes, the three note-selection presses MERGED
     // into one, the off-grid behind-the-back move, Ctrl+Left (all the

@@ -329,7 +329,8 @@ void PolyphonyPanel::activateLogRow(int row)
         return;
     const QVariant tick = item->data(Qt::UserRole);
     if (tick.isValid())
-        emit jumpToTick(tick.toULongLong());
+        emit jumpToEvent(tick.toULongLong(), item->data(Qt::UserRole + 1).toInt(),
+                         item->data(Qt::UserRole + 2).toInt());
 }
 
 void PolyphonyPanel::updateSnapshot(const AudioEngine::PolySnapshot &snap)
@@ -391,8 +392,11 @@ void PolyphonyPanel::appendEvent(const M4APolyEvent &ev)
     }
     auto *item = new QListWidgetItem(text);
     item->setForeground(color);
-    if (ev.tick != M4A_POLY_TICK_NONE)
+    if (ev.tick != M4A_POLY_TICK_NONE) {
         item->setData(Qt::UserRole, qulonglong(ev.tick));
+        item->setData(Qt::UserRole + 1, int(ev.trackIndex));
+        item->setData(Qt::UserRole + 2, int(ev.midiKey));
+    }
     m_log->insertItem(0, item);
 }
 

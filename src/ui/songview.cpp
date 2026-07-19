@@ -5033,6 +5033,27 @@ void SongView::selectTrack(int track)
     emit selectedTrackChanged(track);
 }
 
+bool SongView::revealNote(int track, uint8_t key, uint64_t tick)
+{
+    if (track < 0 || track > 15)
+        return false;
+    selectTrack(track);
+    // Notes are sorted by startTick, so the last match is the note that was
+    // sounding (or had just finished fading) at the event's position.
+    const ViewNote *found = nullptr;
+    for (const ViewNote &note : m_model.notes) {
+        if (note.startTick > tick)
+            break;
+        if (note.track == track && note.key == key)
+            found = &note;
+    }
+    if (!found)
+        return false;
+    setSelection({NoteId{found->startTick, found->key}});
+    ensureKeyVisible(key);
+    return true;
+}
+
 uint32_t SongView::trackSelectionMask() const
 {
     uint32_t used = 0;

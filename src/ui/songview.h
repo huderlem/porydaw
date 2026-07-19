@@ -149,6 +149,12 @@ public:
 
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
+    // Reveal a polyphony-overflow event's note: select its track, select the
+    // last note on (track, key) starting at or before tick — the lost note (a
+    // dropped note starts exactly there, a stolen one spans it, a cut tail
+    // ended just before) — and scroll the key into view. Returns whether a
+    // note was found and selected (the track selection sticks either way).
+    bool revealNote(int track, uint8_t key, uint64_t tick);
     // Multi-track scope for time-range operations: the selected track plus
     // any Ctrl/Shift-clicked header rows (always contains the selected
     // track, intersected with used tracks).

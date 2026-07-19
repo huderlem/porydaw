@@ -51,7 +51,9 @@ public:
 signals:
     void invertToggled(bool on);
     void resetRequested();
-    void jumpToTick(uint64_t tick);
+    // Double-clicked event row: jump the edit cursor to tick and reveal the
+    // lost note (track + midiKey identify it; see SongView::revealNote).
+    void jumpToEvent(uint64_t tick, int track, int midiKey);
 
 private:
     void appendEvent(const M4APolyEvent &ev);

@@ -364,15 +364,18 @@ void MainWindow::buildUi()
         if (m_audioOk)
             m_audio.resetPolyStats();
     });
-    connect(m_polyPanel, &PolyphonyPanel::jumpToTick, this, [this](uint64_t tick) {
-        // commitEditCursor's editCursorMoved connect already seeks the
-        // engine while playing/paused; when stopped, playback starts from
-        // the edit cursor.
-        if (!m_active)
-            return;
-        m_active->view->commitEditCursor(tick);
-        m_active->view->ensureTickVisible(tick);
-    });
+    connect(m_polyPanel, &PolyphonyPanel::jumpToEvent, this,
+            [this](uint64_t tick, int track, int midiKey) {
+                // commitEditCursor's editCursorMoved connect already seeks
+                // the engine while playing/paused; when stopped, playback
+                // starts from the edit cursor. revealNote selects the losing
+                // track and the lost note itself.
+                if (!m_active)
+                    return;
+                m_active->view->revealNote(track, uint8_t(midiKey), tick);
+                m_active->view->commitEditCursor(tick);
+                m_active->view->ensureTickVisible(tick);
+            });
     m_polyDock->setWidget(m_polyPanel);
     addDockWidget(Qt::RightDockWidgetArea, m_polyDock);
     m_polyDock->hide();

@@ -239,7 +239,8 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   song switches, never persisted), a per-track overflow table (Dropped / Cut Off /
   Tail Cut, document track names, red flash on increase, Reset), and a recent-events
   log where each event carries its bar:beat song position — double-click jumps the
-  edit cursor/playhead there; live preview notes read "live" instead.
+  edit cursor/playhead there and selects the losing track and the lost note in the
+  roll; live preview notes read "live" instead.
 - **Song Settings dialog:** the `midi.cfg` flags presented as friendly controls
   (voicegroup dropdown, reverb slider, master volume, priority, exact-gate toggle).
 

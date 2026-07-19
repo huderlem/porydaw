@@ -335,10 +335,12 @@ int runWidgetStage(const QString &screenshotPath)
     panel.setVoiceNames(voiceNames);
 
     uint64_t jumpedTo = UINT64_MAX;
-    int jumps = 0;
-    QObject::connect(&panel, &PolyphonyPanel::jumpToTick,
-                     [&jumpedTo, &jumps](uint64_t tick) {
+    int jumpTrack = -1, jumpKey = -1, jumps = 0;
+    QObject::connect(&panel, &PolyphonyPanel::jumpToEvent,
+                     [&](uint64_t tick, int track, int midiKey) {
                          jumpedTo = tick;
+                         jumpTrack = track;
+                         jumpKey = midiKey;
                          jumps++;
                      });
 
@@ -375,7 +377,8 @@ int runWidgetStage(const QString &screenshotPath)
           "steal row: position, track, note, voice name, thief");
 
     panel.activateLogRow(2);
-    check(jumps == 1 && jumpedTo == 96, "double-click jumps to the event tick");
+    check(jumps == 1 && jumpedTo == 96 && jumpTrack == 2 && jumpKey == 60,
+          "double-click jumps with the event's tick, track, and key");
     panel.activateLogRow(0);
     check(jumps == 1, "live rows don't jump");
 
