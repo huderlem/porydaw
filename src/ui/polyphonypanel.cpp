@@ -11,6 +11,8 @@
 #include <QPainter>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QTableWidget>
 #include <QVBoxLayout>
 
@@ -80,9 +82,7 @@ class PolyChannelGrid : public QWidget
 public:
     explicit PolyChannelGrid(QWidget *parent = nullptr) : QWidget(parent)
     {
-        QSizePolicy policy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-        policy.setHeightForWidth(true);
-        setSizePolicy(policy);
+        setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     }
 
     void setSnapshot(const AudioEngine::PolySnapshot &snap)
@@ -95,12 +95,14 @@ public:
         update();
     }
 
-    bool hasHeightForWidth() const override { return true; }
-    int heightForWidth(int width) const override { return layoutHeight(width); }
     // The hint height must track the actual width: the vertical policy is
     // Fixed, so a hint computed at the default width would cap the widget at
     // that height even when a narrower dock wraps the cells into more rows,
-    // clipping the bottom ones.
+    // clipping the bottom ones. Deliberately NOT height-for-width: the panel
+    // sits in a QScrollArea, and hfw would make the scroll area treat the
+    // whole content's preferred height as its minimum, scrolling instead of
+    // letting the table and log compress first.
+    int heightForWidth(int width) const override { return layoutHeight(width); }
     QSize sizeHint() const override
     {
         const int defaultW = kCellW * 5 + kGap * 4;
@@ -219,11 +221,23 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
 {
     m_clock.start();
 
-    auto *layout = new QVBoxLayout(this);
+    // Everything lives on a scrollable content widget: a short main window
+    // squeezes the table and log down to their minimums first (normal layout
+    // behavior), and once even the minimums don't fit, the scrollbar keeps
+    // the bottom of the panel reachable instead of clipping it off-window.
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    m_scroll = new QScrollArea(this);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    m_scroll->viewport()->setAutoFillBackground(false); // keep the dock look
+    outer->addWidget(m_scroll);
+    auto *content = new QWidget;
+    auto *layout = new QVBoxLayout(content);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(6);
 
-    m_invert = new QCheckBox(tr("Solo overflow (invert audio)"), this);
+    m_invert = new QCheckBox(tr("Solo overflow (invert audio)"), content);
     m_invert->setToolTip(tr("Mutes normal playback and makes ONLY the sounds "
                             "lost to the polyphony limit audible."));
     connect(m_invert, &QCheckBox::toggled, this, &PolyphonyPanel::invertToggled);
@@ -232,7 +246,7 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     // The usage and overflow sections live in a grid so they can stack when
     // the panel is narrow and sit side by side when it is wide (resizeEvent
     // switches the arrangement).
-    m_usageBox = new QWidget(this);
+    m_usageBox = new QWidget(content);
     auto *usageLayout = new QVBoxLayout(m_usageBox);
     usageLayout->setContentsMargins(0, 0, 0, 0);
     usageLayout->setSpacing(6);
@@ -243,7 +257,7 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     usageLayout->addWidget(m_grid);
     usageLayout->addStretch();
 
-    m_overflowBox = new QWidget(this);
+    m_overflowBox = new QWidget(content);
     auto *overflowLayout = new QVBoxLayout(m_overflowBox);
     overflowLayout->setContentsMargins(0, 0, 0, 0);
     overflowLayout->setSpacing(6);
@@ -301,15 +315,17 @@ PolyphonyPanel::PolyphonyPanel(QWidget *parent) : QWidget(parent)
     layout->addLayout(m_bodyGrid, 1);
     setWideLayout(false);
 
-    auto *logLabel = new QLabel(tr("Recent events"), this);
+    auto *logLabel = new QLabel(tr("Recent events"), content);
     logLabel->setStyleSheet(QStringLiteral("font-weight: bold;"));
     layout->addWidget(logLabel);
-    m_log = new QListWidget(this);
+    m_log = new QListWidget(content);
     m_log->setSelectionMode(QAbstractItemView::SingleSelection);
     m_log->setToolTip(tr("Double-click an event to jump to its position."));
     connect(m_log, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem *item) { activateLogRow(m_log->row(item)); });
     layout->addWidget(m_log, 2);
+
+    m_scroll->setWidget(content);
 }
 
 void PolyphonyPanel::resizeEvent(QResizeEvent *event)
@@ -394,6 +410,11 @@ QRect PolyphonyPanel::overflowSectionRect() const
 bool PolyphonyPanel::gridFullyVisible() const
 {
     return m_grid->height() >= m_grid->heightForWidth(m_grid->width());
+}
+
+int PolyphonyPanel::vScrollRange() const
+{
+    return m_scroll->verticalScrollBar()->maximum();
 }
 
 int PolyphonyPanel::logRowCount() const

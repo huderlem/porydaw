@@ -430,10 +430,18 @@ int runWidgetStage(const QString &screenshotPath)
     }
     check(panel.logRowCount() == 500, "log capped at 500 rows");
 
-    // Paint smoke test (offscreen). Re-feed the first snapshot so a saved
-    // screenshot shows real rows and the shadow grid (snap.invert).
+    // Paint smoke test. Re-feed the first snapshot so a saved screenshot
+    // shows real rows and the shadow grid (snap.invert). Shown + settled
+    // first: the scroll area only lays its content out through real layout
+    // passes, which hidden widgets don't get.
     panel.updateSnapshot(snapshotWithEvents({}));
     panel.updateSnapshot(snap);
+    panel.show();
+    auto settle = [] {
+        for (int i = 0; i < 3; i++)
+            QCoreApplication::processEvents();
+    };
+    settle();
     QImage image(panel.size(), QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::white);
     panel.render(&image);
@@ -441,16 +449,11 @@ int runWidgetStage(const QString &screenshotPath)
     if (!screenshotPath.isEmpty())
         image.save(screenshotPath);
 
-    // Responsive layout: shown so resizes deliver real layout passes. At a
-    // sliver width the sections stack and the channel grid still gets the
-    // full height its wrapped cell rows need (its hint used to be pinned to
-    // the five-per-row width, clipping the extra rows); at a wide width the
-    // overflow table moves beside the grid instead of stretching across.
-    panel.show();
-    auto settle = [] {
-        for (int i = 0; i < 3; i++)
-            QCoreApplication::processEvents();
-    };
+    // Responsive layout: at a sliver width the sections stack and the
+    // channel grid still gets the full height its wrapped cell rows need
+    // (its hint used to be pinned to the five-per-row width, clipping the
+    // extra rows); at a wide width the overflow table moves beside the grid
+    // instead of stretching across.
     panel.resize(180, 980);
     settle();
     check(!panel.wideLayoutActive(), "narrow panel stacks the sections");
@@ -472,6 +475,24 @@ int runWidgetStage(const QString &screenshotPath)
         wideImage.save(info.path() + QLatin1Char('/') + info.completeBaseName()
                        + QStringLiteral("-wide.") + info.suffix());
     }
+    // Short window: once the sections are squeezed to their minimums the
+    // panel scrolls instead of clipping the bottom off-window; tall windows
+    // never show the scrollbar.
+    panel.resize(380, 240);
+    settle();
+    check(panel.gridFullyVisible(), "short window: grid keeps its height");
+    check(panel.vScrollRange() > 0, "short window: panel scrolls to the bottom");
+    if (!screenshotPath.isEmpty()) {
+        QImage shortImage(panel.size(), QImage::Format_ARGB32_Premultiplied);
+        shortImage.fill(Qt::white);
+        panel.render(&shortImage);
+        QFileInfo info(screenshotPath);
+        shortImage.save(info.path() + QLatin1Char('/') + info.completeBaseName()
+                        + QStringLiteral("-short.") + info.suffix());
+    }
+    panel.resize(380, 980);
+    settle();
+    check(panel.vScrollRange() == 0, "tall window: no scrollbar");
 
     return failures;
 }

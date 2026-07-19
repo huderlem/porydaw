@@ -12,6 +12,7 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QScrollArea;
 class QTableWidget;
 class MidiTimeline;
 class PolyChannelGrid;
@@ -52,6 +53,7 @@ public:
     QRect usageSectionRect() const;
     QRect overflowSectionRect() const;
     bool gridFullyVisible() const;
+    int vScrollRange() const; // >0 when the content scrolls (short window)
 
 signals:
     void invertToggled(bool on);
@@ -73,6 +75,7 @@ private:
 
     QCheckBox *m_invert = nullptr;
     PolyChannelGrid *m_grid = nullptr;
+    QScrollArea *m_scroll = nullptr;
     QWidget *m_usageBox = nullptr;
     QWidget *m_overflowBox = nullptr;
     QGridLayout *m_bodyGrid = nullptr;
