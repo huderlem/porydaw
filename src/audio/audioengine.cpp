@@ -473,8 +473,10 @@ void AudioEngine::applyPreviewNote()
     const uint8_t key = (cmd >> 8) & 0x7F;
     const uint8_t velocity = cmd & 0xFF;
     if (velocity > 0) {
-        // Live note: no timeline position for any overflow event it causes.
+        // Live note: no timeline position for any overflow event it causes,
+        // and it stays audible in the solo-overflow invert mode.
         m_engine->polyEventClock = M4A_POLY_TICK_NONE;
+        m_engine->auditionNote = true;
         m4a_engine_note_on(m_engine.get(), track, key, velocity);
         m_previewTrack = track;
         m_previewKey = key;
@@ -485,9 +487,12 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
 {
     const uint32_t w = m_timedWrite.load(std::memory_order_acquire);
     uint32_t r = m_timedRead.load(std::memory_order_relaxed);
-    // Auditions are live notes: no timeline position for overflow events.
-    if (r != w)
+    // Auditions are live notes: no timeline position for overflow events,
+    // and they stay audible in the solo-overflow invert mode.
+    if (r != w) {
         m_engine->polyEventClock = M4A_POLY_TICK_NONE;
+        m_engine->auditionNote = true;
+    }
     for (; r != w; r++) {
         const TimedPreview cmd = m_timedRing[r % kTimedRingSize];
         if (cmd.velocity == 0) {

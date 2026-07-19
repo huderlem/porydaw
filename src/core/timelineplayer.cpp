@@ -19,7 +19,9 @@ void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev,
         if (!((muteMask >> ev.track) & 1)) {
             // Timeline position stamped into any poly-overflow event this
             // note-on triggers (single writer: the thread driving playback).
+            // Sequenced notes are not auditions: they mute in invert mode.
             engine->polyEventClock = ev.tick;
+            engine->auditionNote = false;
             m4a_engine_note_on(engine, ev.track, ev.data0, ev.data1);
         }
         break;

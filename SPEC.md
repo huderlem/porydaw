@@ -236,7 +236,8 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   channel-usage grid (real PCM/CGB channels plus the shadow pool of lost sounds), a
   "Solo overflow (invert audio)" toggle that mutes normal playback and plays only
   the sounds lost to the polyphony limit (session-sticky: survives play/stop and
-  song switches, never persisted), a per-track overflow table (Dropped / Cut Off /
+  song switches, never persisted; note auditions are exempt and stay audible, so
+  the lost note under investigation can be struck against the inverted output), a per-track overflow table (Dropped / Cut Off /
   Tail Cut, document track names, red flash on increase, Reset), and a recent-events
   log where each event carries its bar:beat song position — double-click jumps the
   edit cursor/playhead there and selects the losing track and the lost note in the

@@ -255,6 +255,10 @@ int runEngineStage()
     m4a_engine_set_voicegroup(&engine, vg.voices);
     engine.maxPcmChannels = 1;
     m4a_engine_set_poly_debug_invert(&engine, true);
+    // A stale audition flag (say, from a preview struck just before play)
+    // must be cleared by the sequenced dispatch path, or this render's
+    // pre-overflow silence assertion fails.
+    engine.auditionNote = true;
     RenderResult inverted = renderSong(&engine, *timeline);
     check(inverted.maxBeforeSteal < 1e-6f, "invert: silent before the overflow");
     check(inverted.maxAfterSteal > 1e-4f, "invert: lost sound audible after it");
@@ -266,6 +270,27 @@ int runEngineStage()
             shadowCleared = false;
     }
     check(shadowCleared, "disabling invert clears the shadow pool");
+    m4a_engine_destroy(&engine);
+
+    // ---- Audition notes stay audible in invert mode (the preview paths
+    // set auditionNote so the user can hear the note under investigation) ----
+    m4a_engine_init(&engine, float(kSampleRate));
+    m4a_engine_set_voicegroup(&engine, vg.voices);
+    engine.maxPcmChannels = 1;
+    m4a_engine_set_poly_debug_invert(&engine, true);
+    m4a_engine_program_change(&engine, 0, 0);
+    engine.polyEventClock = M4A_POLY_TICK_NONE;
+    engine.auditionNote = true;
+    m4a_engine_note_on(&engine, 0, 60, 100);
+    {
+        float bufL[500], bufR[500], peak = 0.0f;
+        for (int chunk = 0; chunk < 8; chunk++) {
+            m4a_engine_process(&engine, bufL, bufR, 500);
+            for (int i = 0; i < 500; i++)
+                peak = std::max({peak, std::fabs(bufL[i]), std::fabs(bufR[i])});
+        }
+        check(peak > 1e-4f, "invert: audition note stays audible");
+    }
     m4a_engine_destroy(&engine);
 
     return failures;
