@@ -10,20 +10,46 @@ namespace songview {
 
 namespace {
 
-constexpr int kGlowWidth = 7;
-constexpr int kPlayheadHalfWidth = kGlowWidth;
-constexpr int kLineWidth = 1;
-constexpr int kTriangleHalfWidth = 4;
-constexpr int kTriangleHeight = 8;
+// Paused = centered on the bar, dimmer. Playing = 1 unit less radius and
+// left-trailing only. Core is 1px in both states.
+constexpr qreal kLineWidth = 1.0;
+constexpr qreal kPeakPlaying = 0.13;
+constexpr qreal kPeakPaused = 0.06;
 
 const QPainterPath kPlayheadTriangle = [] {
     QPainterPath path;
-    path.moveTo(-kTriangleHalfWidth, 0);
-    path.lineTo(kTriangleHalfWidth, 0);
-    path.lineTo(0, kTriangleHeight);
+    path.moveTo(-kPlayheadTriangleHalfWidth, 0);
+    path.lineTo(kPlayheadTriangleHalfWidth, 0);
+    path.lineTo(0, kPlayheadTriangleHeight);
     path.closeSubpath();
     return path;
 }();
+
+// Quadratic bloom: t=0 outer (α=0) → t=1 at the bar (α=peak).
+void setQuadStops(QLinearGradient &g, const QColor &color, qreal peakAlpha)
+{
+    QColor stopColor = color;
+    for (int i = 0; i <= 8; ++i) {
+        const qreal t = qreal(i) / 8.0;
+        stopColor.setAlphaF(peakAlpha * t * t);
+        g.setColorAt(t, stopColor);
+    }
+}
+
+void paintGlow(QPainter &painter, qreal x, int top, int height, qreal left,
+               qreal right, const QColor &color, qreal peakAlpha)
+{
+    if (left > 0.0) {
+        QLinearGradient gradient(x - left, 0, x, 0);
+        setQuadStops(gradient, color, peakAlpha);
+        painter.fillRect(QRectF(x - left, top, left, height), gradient);
+    }
+    if (right > 0.0) {
+        QLinearGradient gradient(x + right, 0, x, 0);
+        setQuadStops(gradient, color, peakAlpha);
+        painter.fillRect(QRectF(x, top, right, height), gradient);
+    }
+}
 
 } // namespace
 
@@ -38,28 +64,6 @@ PlayheadOverlay::PlayheadOverlay(QWidget *owner, const Surfaces &surfaces,
     Q_ASSERT(m_surfaces.roll);
     Q_ASSERT(m_surfaces.lanes);
     Q_ASSERT(m_surfaces.strip);
-
-    QColor transparent = color;
-    transparent.setAlpha(0);
-    QColor stoppedGlowColor = color;
-    stoppedGlowColor.setAlphaF(color.alphaF() * 0.2);
-    QColor playingGlowColor = color;
-    playingGlowColor.setAlphaF(color.alphaF() * 0.3);
-    QColor glowAt15Percent = playingGlowColor;
-    glowAt15Percent.setAlphaF(playingGlowColor.alphaF() * 0.15);
-    QColor glowAt75Percent = playingGlowColor;
-    glowAt75Percent.setAlphaF(playingGlowColor.alphaF() * 0.75);
-    QLinearGradient playingGlow(0, 0, kGlowWidth, 0);
-    playingGlow.setColorAt(0, transparent);
-    playingGlow.setColorAt(0.5, glowAt15Percent);
-    playingGlow.setColorAt(0.75, glowAt75Percent);
-    playingGlow.setColorAt(1.0 - 1.0 / kGlowWidth, playingGlowColor);
-    m_playingGlow = QBrush(playingGlow);
-    QLinearGradient stoppedGlow(0, 0, kGlowWidth, 0);
-    stoppedGlow.setColorAt(0, transparent);
-    stoppedGlow.setColorAt(0.5, stoppedGlowColor);
-    stoppedGlow.setColorAt(0.65, transparent);
-    m_stoppedGlow = QBrush(stoppedGlow);
 
     setAttribute(Qt::WA_TransparentForMouseEvents);
     setAttribute(Qt::WA_NoSystemBackground);
@@ -82,23 +86,23 @@ PlayheadOverlay::PlayheadOverlay(QWidget *owner, const Surfaces &surfaces,
 
 void PlayheadOverlay::setPlayhead(qreal timelineX, bool visible, bool playing)
 {
-    const qreal oldX = m_playheadX;
+    const qreal oldX = qreal(m_timelineOrigin) + m_timelineX;
     const bool oldVisible = m_visible;
     const bool oldPlaying = m_playing;
 
     m_timelineX = timelineX;
-    m_playheadX = qreal(m_timelineOrigin) + timelineX;
     m_visible = visible;
     m_playing = playing;
+    const qreal newX = qreal(m_timelineOrigin) + m_timelineX;
 
-    if (oldX == m_playheadX && oldVisible == m_visible && oldPlaying == m_playing)
+    if (oldX == newX && oldVisible == m_visible && oldPlaying == m_playing)
         return;
 
     QRegion dirty;
     if (oldVisible)
         dirty += playheadRegion(oldX);
     if (m_visible)
-        dirty += playheadRegion(m_playheadX);
+        dirty += playheadRegion(newX);
     if (!dirty.isEmpty())
         update(dirty);
 }
@@ -130,37 +134,32 @@ void PlayheadOverlay::paintEvent(QPaintEvent *)
     painter.setRenderHint(QPainter::Antialiasing);
 
     const int playheadTop = m_playheadGeometry.top();
-    const qreal glowOffset = m_playing ? kGlowWidth : kGlowWidth / 2.0;
-    const qreal glowStartX = m_playheadX - glowOffset;
-    const QBrush &glow = m_playing ? m_playingGlow : m_stoppedGlow;
-    painter.save();
-    painter.translate(glowStartX, playheadTop);
-    painter.fillRect(0, 0, kGlowWidth, m_playheadGeometry.height(), glow);
-    painter.restore();
+    const int height = m_playheadGeometry.height();
+    const qreal playheadX = qreal(m_timelineOrigin) + m_timelineX;
+    const qreal leftExtent =
+        m_playing ? qreal(kPlayheadGlowRadius - 1) : qreal(kPlayheadGlowRadius);
+    const qreal rightExtent = m_playing ? 0.0 : qreal(kPlayheadGlowRadius);
+    const qreal peak = m_playing ? kPeakPlaying : kPeakPaused;
+    paintGlow(painter, playheadX, playheadTop, height, leftExtent, rightExtent,
+              m_color, peak);
 
-    painter.setPen(QPen(m_color, kLineWidth));
-    painter.drawLine(QPointF(m_playheadX, playheadTop),
-                     QPointF(m_playheadX, m_playheadGeometry.bottom()));
+    QPen core(m_color, kLineWidth, Qt::SolidLine, Qt::FlatCap);
+    painter.setPen(core);
+    painter.drawLine(QPointF(playheadX, playheadTop),
+                     QPointF(playheadX, m_playheadGeometry.bottom()));
 
-    painter.save();
     painter.setClipRect(m_triangleClip, Qt::ReplaceClip);
     const bool trianglePointsUp = !m_surfaces.roll->isVisible();
-    painter.translate(m_playheadX, playheadTop
-                                      + (trianglePointsUp ? kTriangleHeight : 0));
+    painter.translate(
+        playheadX, playheadTop + (trianglePointsUp ? kPlayheadTriangleHeight : 0));
     if (trianglePointsUp)
         painter.scale(1.0, -1.0);
     painter.fillPath(kPlayheadTriangle, m_color);
-    painter.restore();
 }
 
-QRect PlayheadOverlay::surfaceGeometry(const QWidget *surface, QWidget *owner) const
+QRect PlayheadOverlay::visibleSurfaceRect(const QWidget *surface, QWidget *owner,
+                                          int origin) const
 {
-    return QRect(surface->mapTo(owner, QPoint(0, 0)), surface->size());
-}
-
-QRect PlayheadOverlay::visibleSurfaceRegion(const QWidget *surface, int origin) const
-{
-    const QWidget *owner = parentWidget();
     if (origin >= surface->width())
         return {};
     QPoint offset = surface->mapTo(owner, QPoint(0, 0));
@@ -183,10 +182,12 @@ QRegion PlayheadOverlay::playheadRegion(qreal x) const
         return {};
 
     constexpr qreal kAntialiasPadding = 1.0;
+    // Max extent is the paused centered bloom (radius each side).
     const QRect bounds =
-        QRectF(x - kPlayheadHalfWidth - kAntialiasPadding,
+        QRectF(x - kPlayheadGlowRadius - kAntialiasPadding,
                m_playheadGeometry.top(),
-               kPlayheadHalfWidth * 2.0 + kAntialiasPadding * 2.0,
+               2.0 * kPlayheadGlowRadius + kPlayheadTriangleHalfWidth
+                   + kAntialiasPadding * 2.0,
                m_playheadGeometry.height())
             .toAlignedRect()
             .intersected(m_playheadGeometry);
@@ -198,18 +199,19 @@ void PlayheadOverlay::synchronizeGeometry()
     QWidget *owner = parentWidget();
     Q_ASSERT(owner);
 
-    const QRect rulerGeometry = surfaceGeometry(m_surfaces.ruler, owner);
+    const QRect rulerGeometry(m_surfaces.ruler->mapTo(owner, QPoint(0, 0)),
+                              m_surfaces.ruler->size());
     const int playheadTop = rulerGeometry.bottom() + 1;
     const QRect playheadGeometry(0, playheadTop, owner->width(),
                                  owner->height() - playheadTop);
     const QRect rulerVisible =
-        visibleSurfaceRegion(m_surfaces.ruler, m_surfaces.rulerOrigin);
+        visibleSurfaceRect(m_surfaces.ruler, owner, m_surfaces.rulerOrigin);
     const QRect triangleClip(rulerVisible.left(), playheadTop,
-                             rulerVisible.width(), kTriangleHeight + 1);
+                             rulerVisible.width(), kPlayheadTriangleHeight + 1);
     const QRegion visibleSurfaces =
-        QRegion(visibleSurfaceRegion(m_surfaces.roll, m_surfaces.rollOrigin))
-        + visibleSurfaceRegion(m_surfaces.lanes, m_surfaces.lanesOrigin)
-        + visibleSurfaceRegion(m_surfaces.strip, m_surfaces.stripOrigin);
+        QRegion(visibleSurfaceRect(m_surfaces.roll, owner, m_surfaces.rollOrigin))
+        + visibleSurfaceRect(m_surfaces.lanes, owner, m_surfaces.lanesOrigin)
+        + visibleSurfaceRect(m_surfaces.strip, owner, m_surfaces.stripOrigin);
     const int timelineOrigin =
         m_surfaces.ruler->mapTo(owner, QPoint(m_surfaces.rulerOrigin, 0)).x();
     const bool overlayGeometryChanged = geometry() != owner->rect();
@@ -220,7 +222,8 @@ void PlayheadOverlay::synchronizeGeometry()
         || m_timelineOrigin != timelineOrigin;
     if (!overlayGeometryChanged && !surfaceGeometryChanged)
         return;
-    const QRegion oldDirty = m_visible ? playheadRegion(m_playheadX) : QRegion();
+    const qreal oldX = qreal(m_timelineOrigin) + m_timelineX;
+    const QRegion oldDirty = m_visible ? playheadRegion(oldX) : QRegion();
 
     if (overlayGeometryChanged)
         setGeometry(owner->rect());
@@ -229,16 +232,13 @@ void PlayheadOverlay::synchronizeGeometry()
     m_playheadGeometry = playheadGeometry;
     m_triangleClip = triangleClip;
     m_timelineOrigin = timelineOrigin;
-    m_playheadX = qreal(m_timelineOrigin) + m_timelineX;
 
-    if (overlayGeometryChanged || surfaceGeometryChanged) {
-        const QRegion dirty =
-            (oldDirty | (m_visible ? playheadRegion(m_playheadX) : QRegion()))
-                - rulerGeometry;
-        if (!dirty.isEmpty())
-            update(dirty);
-        raise();
-    }
+    const qreal newX = qreal(m_timelineOrigin) + m_timelineX;
+    const QRegion dirty =
+        (oldDirty | (m_visible ? playheadRegion(newX) : QRegion())) - rulerGeometry;
+    if (!dirty.isEmpty())
+        update(dirty);
+    raise();
 }
 
 } // namespace songview

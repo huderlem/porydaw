@@ -280,7 +280,10 @@ QStringList playheadOverlayCheckFailures(SongView &view,
           probe.clear();
           view.setPlayheadSample(secondSample, true);
           processPaints();
-          const int maxPlayheadExposureWidth = secondX - firstX + 16;
+          // Dirty strip: move delta + full glow diameter + full triangle width.
+          const int maxPlayheadExposureWidth =
+              secondX - firstX + 2 * songview::kPlayheadGlowRadius
+              + 2 * songview::kPlayheadTriangleHalfWidth;
           const bool overlayPaintedBroadly =
               probe.repaintedBroadly(marker, maxPlayheadExposureWidth);
           const bool anotherWidgetPaintedBroadly =
@@ -326,7 +329,8 @@ QStringList playheadOverlayCheckFailures(SongView &view,
                        playheadX > eventListArea.right()) {
               fail("could not map playhead into the event list");
             } else {
-              const int triangleHeight = std::min(9, eventListArea.height());
+              const int triangleHeight = std::min(
+                  songview::kPlayheadTriangleHeight + 1, eventListArea.height());
               const QRect triangleArea(eventListArea.left(), eventListArea.top(),
                                        eventListArea.width(), triangleHeight);
               const QRect eventListBody(eventListArea.left(),

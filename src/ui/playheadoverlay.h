@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QBrush>
 #include <QColor>
 #include <QRegion>
 #include <QWidget>
@@ -9,6 +8,10 @@ class QEvent;
 class QPaintEvent;
 
 namespace songview {
+constexpr int kPlayheadGlowRadius = 10;
+constexpr int kPlayheadTriangleHalfWidth = 4;
+constexpr int kPlayheadTriangleHeight = 8;
+
 
 class PlayheadOverlay final : public QWidget
 {
@@ -34,20 +37,17 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
-    QRect surfaceGeometry(const QWidget *surface, QWidget *owner) const;
-    QRect visibleSurfaceRegion(const QWidget *surface, int origin) const;
+    QRect visibleSurfaceRect(const QWidget *surface, QWidget *owner,
+                             int origin) const;
     QRegion playheadRegion(qreal x) const;
     void synchronizeGeometry();
 
     Surfaces m_surfaces;
     QColor m_color;
-    QBrush m_playingGlow;
-    QBrush m_stoppedGlow;
     QRegion m_visibleSurfaceRegion;
     QRect m_playheadGeometry;
     QRect m_triangleClip;
     qreal m_timelineX = 0.0;
-    qreal m_playheadX = 0.0;
     int m_timelineOrigin = 0;
     bool m_visible = false;
     bool m_playing = false;
