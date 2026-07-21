@@ -27,6 +27,7 @@
 #include "audio/samplewav.h"
 #include "project/samplereg.h"
 #include "project/voicegroupsource.h"
+#include "samplecheck_fixtures.h"
 #include "ui/sampleeditordialog.h"
 #include "ui/waveformview.h"
 
@@ -34,7 +35,7 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
-// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-3.
+// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-4.
 // Phase 1: builds fully-fresh fake decomp projects under scratchDir — a
 // wav2agb one, a legacy-aif one, a rule-less one, an .inc-less one, and a
 // CRLF-.inc one — then drives probe → inspect → register → loader-resolve
@@ -47,6 +48,9 @@ extern "C" {
 // invariants against a bare M4AEngine, and offscreen driving of the editor
 // (waveform handle drags, suggest chips, pitch prefill, the dialog-local
 // undo stack) ending in a commit that re-runs the phase-1 assertions.
+// Phase 4: embedded MP3/FLAC/Ogg-Vorbis fixtures decode with expected
+// structure and content, Ogg-Opus/corrupt-stream refusals exact-match, and
+// a compressed source renders through the unchanged pipeline.
 // scratchDir must not already exist (fully fresh scratches, no stale
 // artifacts). corpusRoot, when given, points at a wav2agb decomp checkout
 // (e.g. pokeemerald) whose sound/direct_sound_samples sc88pro corpus gates
@@ -898,8 +902,9 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                                  QStringLiteral("f/x.mid"), &junk, &error),
                "garbage refused");
         expectError(error,
-                    QStringLiteral("not a supported audio file (WAV and AIFF "
-                                   "sources are supported in this build)."),
+                    QStringLiteral("not a supported audio file (WAV, AIFF, "
+                                   "MP3, FLAC, and Ogg Vorbis sources are "
+                                   "supported)."),
                     "unsupported-format text");
         QByteArray aifc = fixtureAiff(aif);
         aifc.replace(8, 4, "AIFC");
@@ -2066,6 +2071,171 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
         if (failures == before)
             std::printf("samplecheck: editor phase-3 OK\n");
+    }
+
+    // ---- compressed formats (phase 4): dr_mp3 / dr_flac / stb_vorbis ----
+    // Fixtures are embedded (samplecheck_fixtures.h, regenerate with
+    // docs/sample-studio/tools/make_fixtures.py): a 440 Hz amp-0.5 sine per
+    // codec. FLAC is lossless, so its decode is asserted bit-exact against
+    // a golden FNV-1a hash; the lossy codecs get exact structure (length /
+    // rate / channels — deterministic for the vendored decoders) plus
+    // tone-amplitude tolerance. Regenerating the fixtures with a different
+    // encoder invalidates the goldens — the failure output prints actuals.
+    {
+        const int before = failures;
+        QString error;
+        auto expectCount = [](qint64 got, qint64 want, const char *what) {
+            if (got != want) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: %s (want %lld, got %lld)\n",
+                             what, (long long)want, (long long)got);
+                failures++;
+            }
+        };
+        auto hashFloats = [](const std::vector<float> &v) {
+            quint64 h = 1469598103934665603ull;
+            for (const float f : v) {
+                quint32 bits;
+                std::memcpy(&bits, &f, 4);
+                for (int i = 0; i < 4; i++) {
+                    h ^= (bits >> (8 * i)) & 0xFF;
+                    h *= 1099511628211ull;
+                }
+            }
+            return h;
+        };
+
+        // MP3 (mono): dr_mp3 honors the LAME gapless (delay/padding) info,
+        // so the decode comes back at exactly the source's 5512 frames.
+        const QByteArray mp3Bytes(reinterpret_cast<const char *>(kFixtureMp3),
+                                  qsizetype(kFixtureMp3Len));
+        ImportedSample mp3;
+        expect(importAudioBytes(mp3Bytes, QStringLiteral("f/tone.mp3"), &mp3,
+                                &error),
+               "mp3 fixture decodes");
+        expect(mp3.sourceKind == ImportedSample::Mp3
+                   && mp3.sourceChannels == 1 && mp3.sourceBits == 0
+                   && !mp3.hasPitchMetadata && !mp3.hasLoop && !mp3.gbaReady
+                   && mp3.sampleRate == 22050.0
+                   && mp3.playLength == mp3.frameCount(),
+               "mp3 structure and metadata defaults");
+        expectCount(mp3.frameCount(), 5512, "mp3 decoded length");
+        if (mp3.frameCount() > 3000) {
+            const double amp =
+                toneAmp(mp3.buffer, 22050.0, 440.0, 1024,
+                        size_t(mp3.frameCount()) - 1024);
+            expect(std::abs(amp - 0.5) < 0.05, "mp3 tone amplitude near 0.5");
+        }
+
+        // FLAC (24-bit mono): lossless — the decode equals the source sine
+        // to within one 24-bit quantization step, and bit-exactly matches
+        // the golden hash.
+        const QByteArray flacBytes(
+            reinterpret_cast<const char *>(kFixtureFlac),
+            qsizetype(kFixtureFlacLen));
+        ImportedSample flac;
+        expect(importAudioBytes(flacBytes, QStringLiteral("f/tone.flac"),
+                                &flac, &error),
+               "flac fixture decodes");
+        expect(flac.sourceKind == ImportedSample::Flac
+                   && flac.sourceChannels == 1 && flac.sourceBits == 24
+                   && !flac.hasPitchMetadata && !flac.hasLoop
+                   && flac.sampleRate == 22050.0,
+               "flac structure and metadata defaults");
+        expectCount(flac.frameCount(), 5512, "flac decoded length");
+        if (flac.frameCount() == 5512) {
+            const std::vector<float> ref =
+                genSine(22050.0, 440.0, 0.25, 0.5);
+            double maxDiff = 0.0;
+            for (size_t i = 0; i < ref.size(); i++)
+                maxDiff = std::max(
+                    maxDiff, std::abs(double(flac.buffer[i]) - double(ref[i])));
+            expect(maxDiff < 3e-7, "flac decode matches the source sine");
+            const quint64 h = hashFloats(flac.buffer);
+            if (h != 0x6c3d054141a6aae7ull) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: flac decode hash "
+                             "(got 0x%llx)\n",
+                             (unsigned long long)h);
+                failures++;
+            }
+        }
+
+        // Ogg Vorbis (stereo, R = 0.8·L, in-phase): mean downmix lands at
+        // amp 0.45 with no phase-cancel flag; left-only re-import recovers
+        // the full 0.5.
+        const QByteArray oggBytes(reinterpret_cast<const char *>(kFixtureOgg),
+                                  qsizetype(kFixtureOggLen));
+        ImportedSample ogg;
+        expect(importAudioBytes(oggBytes, QStringLiteral("f/tone.ogg"), &ogg,
+                                &error),
+               "ogg fixture decodes");
+        expect(ogg.sourceKind == ImportedSample::Ogg
+                   && ogg.sourceChannels == 2 && ogg.sourceBits == 0
+                   && !ogg.hasPitchMetadata && !ogg.hasLoop
+                   && !ogg.phaseCancelStereo && ogg.sampleRate == 22050.0,
+               "ogg structure and metadata defaults");
+        expectCount(ogg.frameCount(), 5512, "ogg decoded length");
+        if (ogg.frameCount() > 3000) {
+            const double amp =
+                toneAmp(ogg.buffer, 22050.0, 440.0, 512,
+                        size_t(ogg.frameCount()) - 512);
+            expect(std::abs(amp - 0.45) < 0.05,
+                   "ogg stereo mean-downmix amplitude near 0.45");
+            ImportedSample left;
+            expect(importAudioBytes(oggBytes, QStringLiteral("f/tone.ogg"),
+                                    &left, &error, true)
+                       && !left.warnings.isEmpty(),
+                   "ogg left-only re-import decodes with the warning");
+            const double lamp =
+                toneAmp(left.buffer, 22050.0, 440.0, 512,
+                        size_t(left.frameCount()) - 512);
+            expect(std::abs(lamp - 0.5) < 0.05,
+                   "ogg left-only amplitude near 0.5");
+        }
+
+        // Downstream is untouched: a compressed source runs the ordinary
+        // pipeline to final s8 bytes.
+        if (flac.frameCount() > 0) {
+            SampleDocument doc(flac);
+            doc.setParams(SampleDocument::defaultParams(flac));
+            const ProcessedSample &out = doc.processed();
+            expect(!out.s8.isEmpty() && out.size == quint32(out.s8.size())
+                       && out.freq > 0,
+                   "flac source renders through the pipeline");
+        }
+
+        // Refusals: Ogg that is not Vorbis (Opus), and corrupt streams
+        // behind valid magics.
+        const QByteArray opusBytes(
+            reinterpret_cast<const char *>(kFixtureOpus),
+            qsizetype(kFixtureOpusLen));
+        ImportedSample junk;
+        expect(!importAudioBytes(opusBytes, QStringLiteral("f/tone.opus"),
+                                 &junk, &error),
+               "ogg opus refused");
+        expectError(error,
+                    QStringLiteral("cannot decode the Ogg file — only Ogg "
+                                   "Vorbis is supported (Opus and other "
+                                   "codecs are not)."),
+                    "opus refusal text");
+        QByteArray badMp3 = QByteArray("ID3\x04", 4);
+        badMp3 += QByteArray(6, '\0');
+        badMp3 += QByteArray(64, '\0');
+        expect(!importAudioBytes(badMp3, QStringLiteral("f/bad.mp3"), &junk,
+                                 &error),
+               "sync-less mp3 refused");
+        expectError(error,
+                    QStringLiteral("the MP3 file is corrupt or truncated."),
+                    "mp3 corrupt text");
+        expect(!importAudioBytes(QByteArray("fLaC") + QByteArray(64, 'x'),
+                                 QStringLiteral("f/bad.flac"), &junk, &error),
+               "corrupt flac refused");
+        expectError(error,
+                    QStringLiteral("the FLAC file is corrupt or truncated."),
+                    "flac corrupt text");
+        if (failures == before)
+            std::printf("samplecheck: compressed formats OK\n");
     }
 
     // ---- corpus-conditional: the sc88pro reference set (item 5/6 halves) ----

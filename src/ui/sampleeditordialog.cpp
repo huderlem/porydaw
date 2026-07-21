@@ -40,12 +40,23 @@ QString sourceLine(const ImportedSample &s)
     case ImportedSample::Aif:
         kind = QStringLiteral("AIFF");
         break;
+    case ImportedSample::Mp3:
+        kind = QStringLiteral("MP3");
+        break;
+    case ImportedSample::Flac:
+        kind = QStringLiteral("FLAC");
+        break;
+    case ImportedSample::Ogg:
+        kind = QStringLiteral("Ogg Vorbis");
+        break;
     default:
         kind = QStringLiteral("audio");
         break;
     }
-    QString text = QStringLiteral("%1-bit %2, %3 channel%4, %5 Hz, %6 samples")
-                       .arg(s.sourceBits)
+    // Lossy sources have no container bit depth (sourceBits 0).
+    if (s.sourceBits > 0)
+        kind = QStringLiteral("%1-bit %2").arg(s.sourceBits).arg(kind);
+    QString text = QStringLiteral("%1, %2 channel%3, %4 Hz, %5 samples")
                        .arg(kind)
                        .arg(s.sourceChannels)
                        .arg(s.sourceChannels == 1 ? QString()

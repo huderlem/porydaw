@@ -1391,7 +1391,8 @@ void MainWindow::importSampleForSlot(int slot)
             .toString();
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Import Sample"), startDir,
-        tr("Audio files (*.wav *.aif *.aiff);;All files (*)"));
+        tr("Audio files (*.wav *.aif *.aiff *.mp3 *.flac *.ogg);;"
+           "All files (*)"));
     if (path.isEmpty())
         return;
     settings.setValue(QStringLiteral("lastSampleDir"), QFileInfo(path).path());

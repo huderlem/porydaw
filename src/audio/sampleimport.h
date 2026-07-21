@@ -6,9 +6,11 @@
 
 // Hi-res sample decoding front door (docs/sample-studio/PLAN.md §2
 // SampleImport): any supported source file → an immutable ImportedSample,
-// dispatching on sniffed magic, never extension. Phase 2 decodes .wav
-// (vendored dr_wav) and .aif (small in-house reader cribbed from pory4a's
-// load_aif_from_path, kept hi-res); compressed formats arrive in phase 4.
+// dispatching on sniffed magic, never extension. Containers: .wav (vendored
+// dr_wav) and .aif (small in-house reader cribbed from pory4a's
+// load_aif_from_path, kept hi-res); compressed sources via vendored dr_mp3 /
+// dr_flac / stb_vorbis — decode-only, no pitch or loop metadata, so the
+// editor prefills from pitch detection.
 //
 // Stereo sources downmix by arithmetic channel mean; when the full-file L/R
 // correlation is negative the sample carries a warning and the caller may

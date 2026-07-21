@@ -57,6 +57,7 @@ qt_add_executable(porydaw
     src/audio/auditionslots.cpp
     src/audio/auditionslots.h
     src/audio/miniaudio_impl.c
+    src/audio/stb_vorbis_impl.c
     src/audio/wavexport.cpp
     src/audio/wavexport.h
     src/audio/sampledata.h
@@ -131,6 +132,7 @@ target_include_directories(porydaw PRIVATE
     src
     ${PORYAAAA_DIR}/third_party
     external/dr_libs
+    external/stb
 )
 target_link_libraries(porydaw PRIVATE Qt6::Widgets poryaaaa_engine)
 if(UNIX AND NOT APPLE)

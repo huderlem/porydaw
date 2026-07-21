@@ -12,7 +12,27 @@
 #define DR_WAV_NO_STDIO
 #include "dr_wav.h"
 
+#define DR_MP3_IMPLEMENTATION
+#define DR_MP3_NO_STDIO
+#include "dr_mp3.h"
+
+#define DR_FLAC_IMPLEMENTATION
+#define DR_FLAC_NO_STDIO
+#include "dr_flac.h"
+
+// Implementation lives in stb_vorbis_impl.c; only the memory API is used.
+#define STB_VORBIS_HEADER_ONLY
+#define STB_VORBIS_NO_STDIO
+#include "stb_vorbis.c"
+
 namespace {
+
+// Decoded-size backstop for compressed containers, whose headers can claim
+// (or whose streams can expand to) arbitrarily many frames. Counted over
+// interleaved samples (frames × channels) so channel count can't multiply
+// the allocation: 2^26 samples ≈ 512 MiB of double staging, ~50 minutes of
+// mono at 22 kHz — far beyond any plausible instrument sample.
+constexpr qint64 kMaxImportSamples = qint64(1) << 26;
 
 bool fail(QString *error, const QString &message)
 {
@@ -425,6 +445,145 @@ bool decodeAif(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
     return true;
 }
 
+// ---- Compressed formats (phase 4): decode-only, no pitch/loop metadata ----
+// All three decode to interleaved hi-res floats and run through the same
+// downmix as the PCM containers; nothing downstream changes (PLAN.md §6).
+
+bool decodeMp3(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
+               QString *error)
+{
+    drmp3 mp3;
+    if (!drmp3_init_memory(&mp3, bytes.constData(), size_t(bytes.size()),
+                           nullptr))
+        return fail(error,
+                    QStringLiteral("the MP3 file is corrupt or truncated."));
+    const int channels = int(mp3.channels);
+
+    // MP3 has no reliable frame count up front — decode in chunks.
+    std::vector<float> pcm;
+    std::vector<float> chunk(4096 * size_t(channels));
+    for (;;) {
+        const drmp3_uint64 read =
+            drmp3_read_pcm_frames_f32(&mp3, 4096, chunk.data());
+        if (read == 0)
+            break;
+        pcm.insert(pcm.end(), chunk.begin(),
+                   chunk.begin() + size_t(read) * size_t(channels));
+        if (qint64(pcm.size()) > kMaxImportSamples) {
+            drmp3_uninit(&mp3);
+            return fail(error, QStringLiteral(
+                            "the MP3 file is too long to import."));
+        }
+    }
+    const quint32 rate = mp3.sampleRate;
+    drmp3_uninit(&mp3);
+    if (pcm.empty())
+        return fail(error, QStringLiteral("no audio data."));
+
+    // Lossy decoders can overshoot ±1.0 slightly; clamp to the canonical
+    // scale without a warning (inherent to the codec, not source authoring).
+    std::vector<double> interleaved(pcm.size());
+    for (size_t i = 0; i < pcm.size(); i++)
+        interleaved[i] = qBound(-1.0, double(pcm[i]), 1.0);
+
+    downmix(interleaved, channels, leftOnly, out);
+    out->sourceKind = ImportedSample::Mp3;
+    out->sourceChannels = channels;
+    out->sampleRate = double(rate);
+    out->playLength = out->frameCount();
+    return true;
+}
+
+bool decodeFlac(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
+                QString *error)
+{
+    drflac *flac = drflac_open_memory(bytes.constData(),
+                                      size_t(bytes.size()), nullptr);
+    if (!flac)
+        return fail(error,
+                    QStringLiteral("the FLAC file is corrupt or truncated."));
+    const int channels = int(flac->channels);
+    const quint64 frames = flac->totalPCMFrameCount;
+    if (channels < 1 || frames == 0) {
+        drflac_close(flac);
+        return fail(error, QStringLiteral("no audio data."));
+    }
+    if (qint64(frames) > kMaxImportSamples / channels) {
+        drflac_close(flac);
+        return fail(error,
+                    QStringLiteral("the FLAC file is too long to import."));
+    }
+
+    // dr_flac's s32 output is scaled up to fill 32 bits regardless of the
+    // stream's bit depth, so one divisor covers 16- and 24-bit sources.
+    std::vector<drflac_int32> raw(size_t(frames) * size_t(channels));
+    const quint64 read = drflac_read_pcm_frames_s32(flac, frames, raw.data());
+    const int bits = int(flac->bitsPerSample);
+    const quint32 rate = flac->sampleRate;
+    drflac_close(flac);
+    if (read < frames)
+        return fail(error,
+                    QStringLiteral("the FLAC file is corrupt or truncated."));
+
+    std::vector<double> interleaved(raw.size());
+    for (size_t i = 0; i < raw.size(); i++)
+        interleaved[i] = double(raw[i]) / 2147483648.0;
+
+    downmix(interleaved, channels, leftOnly, out);
+    out->sourceKind = ImportedSample::Flac;
+    out->sourceChannels = channels;
+    out->sourceBits = bits;
+    out->sampleRate = double(rate);
+    out->playLength = out->frameCount();
+    return true;
+}
+
+bool decodeOgg(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
+               QString *error)
+{
+    int err = 0;
+    stb_vorbis *v = stb_vorbis_open_memory(
+        reinterpret_cast<const unsigned char *>(bytes.constData()),
+        int(bytes.size()), &err, nullptr);
+    if (!v)
+        return fail(error, QStringLiteral(
+                        "cannot decode the Ogg file — only Ogg Vorbis is "
+                        "supported (Opus and other codecs are not)."));
+    const stb_vorbis_info info = stb_vorbis_get_info(v);
+    const int channels = info.channels;
+
+    std::vector<float> pcm;
+    std::vector<float> chunk(4096 * size_t(channels));
+    for (;;) {
+        const int read = stb_vorbis_get_samples_float_interleaved(
+            v, channels, chunk.data(), int(chunk.size()));
+        if (read <= 0)
+            break;
+        pcm.insert(pcm.end(), chunk.begin(),
+                   chunk.begin() + size_t(read) * size_t(channels));
+        if (qint64(pcm.size()) > kMaxImportSamples) {
+            stb_vorbis_close(v);
+            return fail(error, QStringLiteral(
+                            "the Ogg file is too long to import."));
+        }
+    }
+    const unsigned rate = info.sample_rate;
+    stb_vorbis_close(v);
+    if (pcm.empty())
+        return fail(error, QStringLiteral("no audio data."));
+
+    std::vector<double> interleaved(pcm.size());
+    for (size_t i = 0; i < pcm.size(); i++)
+        interleaved[i] = qBound(-1.0, double(pcm[i]), 1.0);
+
+    downmix(interleaved, channels, leftOnly, out);
+    out->sourceKind = ImportedSample::Ogg;
+    out->sourceChannels = channels;
+    out->sampleRate = double(rate);
+    out->playLength = out->frameCount();
+    return true;
+}
+
 } // namespace
 
 bool importAudioBytes(const QByteArray &bytes, const QString &sourcePath,
@@ -447,10 +606,20 @@ bool importAudioBytes(const QByteArray &bytes, const QString &sourcePath,
                && bytes.mid(8, 4) == "AIFC") {
         return fail(error, QStringLiteral("AIFF-C is not supported — export "
                                           "uncompressed AIFF or WAV."));
+    } else if (bytes.size() >= 4 && bytes.startsWith("fLaC")) {
+        ok = decodeFlac(bytes, leftChannelOnly, out, error);
+    } else if (bytes.size() >= 4 && bytes.startsWith("OggS")) {
+        ok = decodeOgg(bytes, leftChannelOnly, out, error);
+    } else if (bytes.size() >= 4
+               && (bytes.startsWith("ID3")
+                   || (quint8(bytes[0]) == 0xFF
+                       && (quint8(bytes[1]) & 0xE0) == 0xE0))) {
+        ok = decodeMp3(bytes, leftChannelOnly, out, error);
     } else {
         return fail(error,
-                    QStringLiteral("not a supported audio file (WAV and AIFF "
-                                   "sources are supported in this build)."));
+                    QStringLiteral("not a supported audio file (WAV, AIFF, "
+                                   "MP3, FLAC, and Ogg Vorbis sources are "
+                                   "supported)."));
     }
     if (ok)
         finishDiagnostics(out);
