@@ -13,6 +13,17 @@ namespace {
 constexpr int kGlowWidth = 7;
 constexpr int kPlayheadHalfWidth = kGlowWidth;
 constexpr int kLineWidth = 1;
+constexpr int kTriangleHalfWidth = 4;
+constexpr int kTriangleHeight = 8;
+
+const QPainterPath kPlayheadTriangle = [] {
+    QPainterPath path;
+    path.moveTo(-kTriangleHalfWidth, 0);
+    path.lineTo(kTriangleHalfWidth, 0);
+    path.lineTo(0, kTriangleHeight);
+    path.closeSubpath();
+    return path;
+}();
 
 } // namespace
 
@@ -69,14 +80,14 @@ PlayheadOverlay::PlayheadOverlay(QWidget *owner, const Surfaces &surfaces,
     show();
 }
 
-void PlayheadOverlay::setPlayhead(qreal contentX, bool visible, bool playing)
+void PlayheadOverlay::setPlayhead(qreal timelineX, bool visible, bool playing)
 {
     const qreal oldX = m_playheadX;
     const bool oldVisible = m_visible;
     const bool oldPlaying = m_playing;
 
-    m_playheadContentX = contentX;
-    m_playheadX = qreal(m_timelineOrigin) + contentX;
+    m_timelineX = timelineX;
+    m_playheadX = qreal(m_timelineOrigin) + timelineX;
     m_visible = visible;
     m_playing = playing;
 
@@ -110,8 +121,8 @@ bool PlayheadOverlay::eventFilter(QObject *, QEvent *event)
 
 void PlayheadOverlay::paintEvent(QPaintEvent *)
 {
-    if (!m_visible || m_visibleSurfaceRegion.isEmpty()
-        || m_playheadGeometry.isEmpty())
+    if (!m_visible || m_playheadGeometry.isEmpty()
+        || (m_visibleSurfaceRegion.isEmpty() && m_triangleClip.isEmpty()))
         return;
 
     QPainter painter(this);
@@ -131,28 +142,30 @@ void PlayheadOverlay::paintEvent(QPaintEvent *)
     painter.drawLine(QPointF(m_playheadX, playheadTop),
                      QPointF(m_playheadX, m_playheadGeometry.bottom()));
 
-    QPainterPath triangle;
-    triangle.moveTo(m_playheadX - 4, playheadTop);
-    triangle.lineTo(m_playheadX + 4, playheadTop);
-    triangle.lineTo(m_playheadX, playheadTop + 8);
-    triangle.closeSubpath();
-    painter.fillPath(triangle, m_color);
+    painter.save();
+    painter.setClipRect(m_triangleClip, Qt::ReplaceClip);
+    const bool trianglePointsUp = !m_surfaces.roll->isVisible();
+    painter.translate(m_playheadX, playheadTop
+                                      + (trianglePointsUp ? kTriangleHeight : 0));
+    if (trianglePointsUp)
+        painter.scale(1.0, -1.0);
+    painter.fillPath(kPlayheadTriangle, m_color);
+    painter.restore();
 }
 
-QRect PlayheadOverlay::surfaceGeometry(const QWidget *surface) const
+QRect PlayheadOverlay::surfaceGeometry(const QWidget *surface, QWidget *owner) const
 {
-    const QWidget *owner = parentWidget();
     return QRect(surface->mapTo(owner, QPoint(0, 0)), surface->size());
 }
 
-QRegion PlayheadOverlay::visibleSurfaceRegion(const QWidget *surface, int origin) const
+QRect PlayheadOverlay::visibleSurfaceRegion(const QWidget *surface, int origin) const
 {
     const QWidget *owner = parentWidget();
     if (origin >= surface->width())
         return {};
-
-    QRegion visible(QRect(surface->mapTo(owner, QPoint(origin, 0)),
-                          QSize(surface->width() - origin, surface->height())));
+    QPoint offset = surface->mapTo(owner, QPoint(0, 0));
+    QRect visible(offset + QPoint(origin, 0),
+                  QSize(surface->width() - origin, surface->height()));
     for (const QWidget *widget = surface; widget; widget = widget->parentWidget()) {
         if (!widget->isVisible())
             return {};
@@ -177,7 +190,7 @@ QRegion PlayheadOverlay::playheadRegion(qreal x) const
                m_playheadGeometry.height())
             .toAlignedRect()
             .intersected(m_playheadGeometry);
-    return QRegion(bounds).intersected(m_visibleSurfaceRegion);
+    return QRegion(bounds).intersected(m_visibleSurfaceRegion + m_triangleClip);
 }
 
 void PlayheadOverlay::synchronizeGeometry()
@@ -185,18 +198,16 @@ void PlayheadOverlay::synchronizeGeometry()
     QWidget *owner = parentWidget();
     Q_ASSERT(owner);
 
-    const QRegion oldVisibleSurfaceRegion = m_visibleSurfaceRegion;
-    const bool eventListVisible = !m_surfaces.roll->isVisibleTo(owner);
-    const QRect rollGeometry = surfaceGeometry(m_surfaces.roll);
-    const QRect topGeometry =
-        eventListVisible ? surfaceGeometry(m_surfaces.ruler) : rollGeometry;
-    const QRect playheadGeometry(0, topGeometry.top(), owner->width(),
-                                 owner->height() - topGeometry.top());
+    const QRect rulerGeometry = surfaceGeometry(m_surfaces.ruler, owner);
+    const int playheadTop = rulerGeometry.bottom() + 1;
+    const QRect playheadGeometry(0, playheadTop, owner->width(),
+                                 owner->height() - playheadTop);
+    const QRect rulerVisible =
+        visibleSurfaceRegion(m_surfaces.ruler, m_surfaces.rulerOrigin);
+    const QRect triangleClip(rulerVisible.left(), playheadTop,
+                             rulerVisible.width(), kTriangleHeight + 1);
     const QRegion visibleSurfaces =
-        (eventListVisible
-             ? visibleSurfaceRegion(m_surfaces.ruler, m_surfaces.rulerOrigin)
-             : QRegion())
-        + visibleSurfaceRegion(m_surfaces.roll, m_surfaces.rollOrigin)
+        QRegion(visibleSurfaceRegion(m_surfaces.roll, m_surfaces.rollOrigin))
         + visibleSurfaceRegion(m_surfaces.lanes, m_surfaces.lanesOrigin)
         + visibleSurfaceRegion(m_surfaces.strip, m_surfaces.stripOrigin);
     const int timelineOrigin =
@@ -205,18 +216,27 @@ void PlayheadOverlay::synchronizeGeometry()
     const bool surfaceGeometryChanged =
         m_playheadGeometry != playheadGeometry
         || m_visibleSurfaceRegion != visibleSurfaces
+        || m_triangleClip != triangleClip
         || m_timelineOrigin != timelineOrigin;
+    if (!overlayGeometryChanged && !surfaceGeometryChanged)
+        return;
+    const QRegion oldDirty = m_visible ? playheadRegion(m_playheadX) : QRegion();
 
     if (overlayGeometryChanged)
         setGeometry(owner->rect());
 
     m_visibleSurfaceRegion = visibleSurfaces;
     m_playheadGeometry = playheadGeometry;
+    m_triangleClip = triangleClip;
     m_timelineOrigin = timelineOrigin;
-    m_playheadX = qreal(m_timelineOrigin) + m_playheadContentX;
+    m_playheadX = qreal(m_timelineOrigin) + m_timelineX;
 
     if (overlayGeometryChanged || surfaceGeometryChanged) {
-        update(oldVisibleSurfaceRegion.united(m_visibleSurfaceRegion));
+        const QRegion dirty =
+            (oldDirty | (m_visible ? playheadRegion(m_playheadX) : QRegion()))
+                - rulerGeometry;
+        if (!dirty.isEmpty())
+            update(dirty);
         raise();
     }
 }

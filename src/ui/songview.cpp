@@ -4224,7 +4224,6 @@ SongView::SongView(QWidget *parent)
     playheadSurfaces.stripOrigin = kGutterW;
     m_playheadOverlay =
         new PlayheadOverlay(this, playheadSurfaces, playheadColor());
-    syncPlayheadOverlay();
 
     m_hbar = new QScrollBar(Qt::Horizontal, this);
     auto *hbarRow = new QHBoxLayout;
@@ -5163,10 +5162,10 @@ bool SongView::userGestureActive() const
 void SongView::syncPlayheadOverlay()
 {
     if (m_playheadOverlay) {
-        const qreal playheadX =
+        const qreal timelineX =
             m_playheadTick * m_pxPerTick - qreal(m_scrollPx);
         m_playheadOverlay->setPlayhead(
-            playheadX, m_timeline != nullptr, m_playing);
+            timelineX, m_timeline != nullptr, m_playing);
     }
 }
 

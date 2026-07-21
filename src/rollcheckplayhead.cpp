@@ -165,6 +165,24 @@ bool hasPlayheadRedLine(const QImage &image, qreal devicePixelRatio,
     return false;
 }
 
+int playheadRedWidth(const QImage &image, qreal devicePixelRatio,
+                     qreal logicalX, int logicalY,
+                     const QColor &playheadColor)
+{
+    const int left = std::max(
+        0, qFloor((logicalX - 4.0) * devicePixelRatio));
+    const int right = std::min(
+        image.width() - 1, qCeil((logicalX + 4.0) * devicePixelRatio));
+    const int y = std::clamp(qRound(logicalY * devicePixelRatio),
+                             0, image.height() - 1);
+    int width = 0;
+    for (int x = left; x <= right; ++x) {
+        if (isCompositedPlayheadRed(image.pixelColor(x, y), playheadColor))
+            ++width;
+    }
+    return width;
+}
+
 void processPaints()
 {
     QCoreApplication::sendPostedEvents(nullptr, QEvent::UpdateRequest);
@@ -254,7 +272,7 @@ QStringList playheadOverlayCheckFailures(SongView &view,
             if (hasPlayheadRedLine(composedPixmap.toImage(),
                                    composedPixmap.devicePixelRatio(), playheadX,
                                    rulerArea, playheadColor)) {
-              fail("playhead overpainted the time ruler");
+              fail("playhead rendered in the time ruler");
             }
           }
           view.setPlayheadSample(firstSample, true);
@@ -308,9 +326,16 @@ QStringList playheadOverlayCheckFailures(SongView &view,
                        playheadX > eventListArea.right()) {
               fail("could not map playhead into the event list");
             } else {
+              const int triangleHeight = std::min(9, eventListArea.height());
+              const QRect triangleArea(eventListArea.left(), eventListArea.top(),
+                                       eventListArea.width(), triangleHeight);
+              const QRect eventListBody(eventListArea.left(),
+                                        eventListArea.top() + triangleHeight,
+                                        eventListArea.width(),
+                                        eventListArea.height() - triangleHeight);
               const bool overpaintedEventList =
                   hasPlayheadRedLine(composedImage, composedDpr, playheadX,
-                                     eventListArea, playheadColor);
+                                     eventListBody, playheadColor);
               const QRect aboveEventList(0, 0, view.width(),
                                          eventListArea.top());
               const QRect belowEventList(
@@ -321,12 +346,25 @@ QStringList playheadOverlayCheckFailures(SongView &view,
                                      aboveEventList, playheadColor) ||
                   hasPlayheadRedLine(composedImage, composedDpr, playheadX,
                                      belowEventList, playheadColor);
-              if (overpaintedEventList) {
-                fail("playhead overpainted the event list");
-              }
               if (!hasPlayheadRedLine(composedImage, composedDpr, playheadX,
-                                      rulerArea, playheadColor)) {
-                fail("playhead did not extend into the event-list time ruler");
+                                      triangleArea, playheadColor)) {
+                fail("playhead triangle did not render below the time ruler");
+              }
+              const int triangleTopWidth =
+                  playheadRedWidth(composedImage, composedDpr, playheadX,
+                                   triangleArea.top(), playheadColor);
+              const int triangleBottomWidth =
+                  playheadRedWidth(composedImage, composedDpr, playheadX,
+                                   triangleArea.bottom(), playheadColor);
+              if (triangleBottomWidth <= triangleTopWidth) {
+                fail("playhead triangle did not point up in the event list");
+              }
+              if (overpaintedEventList) {
+                fail("playhead line overpainted the event list");
+              }
+              if (hasPlayheadRedLine(composedImage, composedDpr, playheadX,
+                                     rulerArea, playheadColor)) {
+                fail("playhead rendered in the event-list time ruler");
               }
               if (!renderedOnTimeline) {
                 fail("playhead overlay did not render on visible timeline "
