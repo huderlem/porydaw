@@ -169,7 +169,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_uiTimer = new QTimer(this);
     m_playheadTimer = new QTimer(this);
 
-    m_uiTimer->setInterval(100);
+    m_uiTimer->setInterval(33);
     connect(m_uiTimer, &QTimer::timeout, this, &MainWindow::uiTick);
     m_uiTimer->start();
     m_playheadTimer->setTimerType(Qt::PreciseTimer);
