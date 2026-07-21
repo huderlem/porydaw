@@ -1,12 +1,18 @@
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 #include <QDockWidget>
 #include <QFile>
+#include <QLineEdit>
+#include <QMouseEvent>
+#include <QPointer>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <cstdio>
+
+#include "ui/songview.h"
 
 #include "mainwindow.h"
 #include "project/songregistry.h"
@@ -493,6 +499,94 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 tab->doc.undoStack()->undo();
                 check(!tree->topLevelItem(unused)->font(0).bold(),
                       "undoing the voice change did not clear the used mark");
+            }
+        }
+    }
+
+    // 9. A structural commit fired from inside a track header's own mouse
+    // press must not free that header row mid-event: clicking a header
+    // focuses the roll (selectTrack), which fires the symbol box's
+    // editingFinished, and a changed symbol reloads the voicegroup — which
+    // rebuilds the header panel while the clicked row's mousePressEvent is
+    // still on the stack. The row has to survive its own press (deferred
+    // deletion), or this is a use-after-free crash.
+    {
+        show();
+        activateWindow();
+        QCoreApplication::processEvents();
+        m_vgBrowser->revealSlot(dsSlot);
+        const VgVoice preTypo = *tab->vgSource->voiceAt(dsSlot);
+        QComboBox *symbolCombo = nullptr;
+        for (QComboBox *combo : m_vgBrowser->findChildren<QComboBox *>()) {
+            if (combo->isEditable()
+                && combo->objectName() != QLatin1String("vgArgCombo"))
+                symbolCombo = combo;
+        }
+        int otherTrack = -1;
+        const MidiTimeline *tl = tab->view->timeline();
+        for (int t = 0; t < 16 && otherTrack < 0 && tl; t++) {
+            if (t != tab->view->selectedTrack() && tl->tracks[t].used)
+                otherTrack = t;
+        }
+        if (check(symbolCombo && otherTrack >= 0,
+                  "no symbol box or second track for the mid-press commit")) {
+            QLineEdit *edit = symbolCombo->lineEdit();
+            edit->setFocus();
+            QCoreApplication::processEvents();
+            if (check(edit->hasFocus(), "symbol box did not take focus")) {
+                const QString typo = preTypo.symbol + QStringLiteral("x");
+                edit->setText(typo);
+                QPointer<QWidget> row = tab->view->findChild<QWidget *>(
+                    QStringLiteral("trackHeaderRow%1").arg(otherTrack));
+                if (check(row != nullptr, "no header row for the other track")) {
+                    const QPoint pos(5, 5);
+                    QMouseEvent press(QEvent::MouseButtonPress, QPointF(pos),
+                                      QPointF(row->mapToGlobal(pos)),
+                                      Qt::LeftButton, Qt::LeftButton,
+                                      Qt::NoModifier);
+                    QCoreApplication::sendEvent(row, &press);
+                    check(!row.isNull(),
+                          "header rebuild freed the row inside its own press");
+                    check(tab->view->selectedTrack() == otherTrack,
+                          "the header click did not select its track");
+                    check(tab->vgSource->voiceAt(dsSlot)
+                              && tab->vgSource->voiceAt(dsSlot)->symbol == typo,
+                          "the mid-press symbol edit did not commit");
+                    if (!row.isNull()) {
+                        QMouseEvent release(QEvent::MouseButtonRelease,
+                                            QPointF(pos),
+                                            QPointF(row->mapToGlobal(pos)),
+                                            Qt::LeftButton, Qt::NoButton,
+                                            Qt::NoModifier);
+                        QCoreApplication::sendEvent(row, &release);
+                    }
+                }
+                QCoreApplication::processEvents(); // deferred row deletion
+                // The rebuilt panel is functional: its fresh rows select.
+                QWidget *fresh = tab->view->findChild<QWidget *>(
+                    QStringLiteral("trackHeaderRow%1").arg(track));
+                if (check(fresh != nullptr, "no rebuilt header row")
+                    && track != otherTrack) {
+                    QMouseEvent press(QEvent::MouseButtonPress, QPointF(QPoint(5, 5)),
+                                      QPointF(fresh->mapToGlobal(QPoint(5, 5))),
+                                      Qt::LeftButton, Qt::LeftButton,
+                                      Qt::NoModifier);
+                    QCoreApplication::sendEvent(fresh, &press);
+                    QMouseEvent release(QEvent::MouseButtonRelease,
+                                        QPointF(QPoint(5, 5)),
+                                        QPointF(fresh->mapToGlobal(QPoint(5, 5))),
+                                        Qt::LeftButton, Qt::NoButton,
+                                        Qt::NoModifier);
+                    QCoreApplication::sendEvent(fresh, &release);
+                    QCoreApplication::processEvents();
+                    check(tab->view->selectedTrack() == track,
+                          "a rebuilt header row did not select its track");
+                }
+                tab->doc.undoStack()->undo(); // the typo'd symbol
+                check(tab->vgSource->voiceAt(dsSlot)
+                          && tab->vgSource->voiceAt(dsSlot)->symbol
+                              == preTypo.symbol,
+                      "undo did not restore the typo'd symbol");
             }
         }
     }

@@ -3945,7 +3945,23 @@ public:
         // A document edit mid-drag rebuilds the rows, deleting the dragged
         // one out from under its own gesture; abandon the drag first.
         endRowDrag(false);
-        qDeleteAll(m_rows);
+        // Deferred deletion: a rebuild can arrive from inside a row's own
+        // mouse press (clicking a header focuses the roll, which fires an
+        // editor field's editingFinished; a structural voice commit then
+        // swaps the voicegroup into every view). Freeing the rows here
+        // would leave that row's event handler running on freed memory.
+        // Keep them parented (their mouse handlers cast parentWidget())
+        // but hidden and anonymous until the event loop collects them.
+        for (QWidget *row : m_rows) {
+            row->hide();
+            // Anonymous, children included: name lookups (the rename
+            // editor, harness hooks) must only ever see the live rows.
+            row->setObjectName(QString());
+            for (QWidget *child : row->findChildren<QWidget *>())
+                child->setObjectName(QString());
+            m_layout->removeWidget(row);
+            row->deleteLater();
+        }
         m_rows.clear();
         m_rowByTrack.clear();
         m_trackRows.clear();
