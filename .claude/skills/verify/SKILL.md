@@ -42,6 +42,30 @@ byte-conservative edits. (`mus_abandoned_ship` is a vanilla pokeemerald
 label — pick a label from the project's own `song_table.inc` if using a
 different project.)
 
+## Full sweep + AddressSanitizer
+
+`tools/run_checks.sh` runs EVERY harness against fresh scratches — use it
+for the pre-push ritual instead of hand-running flags:
+
+```bash
+tools/run_checks.sh build/porydaw "$DECOMP_PROJECT" [songsmk-fork]
+```
+
+The third argument is a songs.mk-only fork checkout for `--mkcheck`
+(skipped with a note if omitted); `PORYDAW_SAMPLE_CORPUS=<built tree>`
+adds samplecheck's corpus pass. For memory-bug detection (use-after-free
+from mid-event widget rebuilds passes SILENTLY in a normal build), run the
+sweep on the ASAN build — CI does this on every push (`asan-checks` job):
+
+```bash
+cmake -B build-asan -DPORYDAW_ASAN=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build-asan -j"$(nproc)"
+tools/run_checks.sh build-asan/porydaw "$DECOMP_PROJECT"
+```
+
+The script defaults `ASAN_OPTIONS=detect_leaks=0` (Qt's process-lifetime
+allocations drown real leaks).
+
 ## Driving a widget the harnesses don't cover
 
 Pattern (used for the voicegroup browser's editor panel): a standalone

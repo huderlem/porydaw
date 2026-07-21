@@ -12,6 +12,16 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# AddressSanitizer build for the harness sweep (tools/run_checks.sh): memory
+# bugs abort with a stack trace instead of corrupting silently. GCC/Clang
+# only. Use a separate build dir, e.g.:
+#   cmake -B build-asan -DPORYDAW_ASAN=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+option(PORYDAW_ASAN "Build with AddressSanitizer" OFF)
+if(PORYDAW_ASAN)
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
 # ---- poryaaaa engine core (MIT, statically linked) ----

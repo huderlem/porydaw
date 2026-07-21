@@ -28,3 +28,46 @@ jobs:
 
       - name: Build
         run: cmake --build build --config Release
+
+  # The harness sweep on an AddressSanitizer build: every --*check flag runs
+  # against fresh scratch copies of vanilla pokeemerald, so memory bugs
+  # (use-after-free from mid-event widget rebuilds, etc.) abort with a stack
+  # trace instead of passing silently. mkcheck is skipped here (it needs a
+  # songs.mk-only fork) and samplecheck runs without its corpus pass (that
+  # needs a fully built ROM tree) — both still run in local sweeps.
+  asan-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.9.*'
+          cache: true
+
+      - name: Start a dummy audio server
+        # The engine prefers PulseAudio; a headless daemon with a null sink
+        # keeps every audio-dependent harness happy. Best-effort: without
+        # it, miniaudio's own null backend is the fallback.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pulseaudio
+          pulseaudio -D --exit-idle-time=-1 || true
+          pactl load-module module-null-sink sink_name=ci || true
+
+      - name: Fetch pokeemerald
+        run: |
+          git clone --depth 1 https://github.com/pret/pokeemerald "$RUNNER_TEMP/pokeemerald"
+          make -C "$RUNNER_TEMP/pokeemerald/tools/mid2agb"
+
+      - name: Configure
+        run: cmake -B build-asan -DPORYDAW_ASAN=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build-asan -j"$(nproc)"
+
+      - name: Run harnesses
+        run: tools/run_checks.sh build-asan/porydaw "$RUNNER_TEMP/pokeemerald"
