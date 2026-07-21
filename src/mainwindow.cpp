@@ -173,7 +173,9 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_uiTimer, &QTimer::timeout, this, &MainWindow::uiTick);
     m_uiTimer->start();
     m_playheadTimer->setTimerType(Qt::PreciseTimer);
-    m_playheadTimer->setInterval(16);
+    // 60hz is 16.6 ms; Qt can tick faster than this, making the playhead move
+    // faster than 60hz and wasting time.
+    m_playheadTimer->setInterval(17);
     connect(m_playheadTimer, &QTimer::timeout, this, &MainWindow::synchronizePlayhead);
 
     updateTransportActions();
@@ -2288,8 +2290,11 @@ void MainWindow::uiTick()
 
 void MainWindow::synchronizePlayhead()
 {
-    if (!m_audioOk || !m_active || !m_audio.songLoaded())
+    if (!m_audioOk || !m_active || !m_audio.songLoaded()) {
+        // This also runs synchronously from activateSession(nullptr).
+        m_playheadTimer->stop();
         return;
+    }
 
     const bool playing = m_audio.transport() == Transport::Playing;
     m_active->view->setPlayheadSample(m_audio.playheadSamples(), playing);
@@ -2648,6 +2653,14 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             qInfo("selftest: sidecar view-state round trip OK");
         else
             qWarning("selftest: sidecar view-state round trip FAILED");
+    }
+    if (ok) {
+        destroySession(tab);
+        ok = !m_playheadTimer->isActive();
+        if (ok)
+            qInfo("selftest: closing final tab stopped playhead timer");
+        else
+            qWarning("selftest: closing final tab left playhead timer active");
     }
     stopPlayback();
     qInfo("selftest: %s", ok ? "PASS" : "FAIL");
