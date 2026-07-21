@@ -39,7 +39,7 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
-// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-5.
+// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-6.
 // Phase 1: builds fully-fresh fake decomp projects under scratchDir — a
 // wav2agb one, a legacy-aif one, a rule-less one, an .inc-less one, and a
 // CRLF-.inc one — then drives probe → inspect → register → loader-resolve
@@ -61,6 +61,14 @@ extern "C" {
 // flagging, ROM-sample and terminator skip, instrument/preset grouping
 // labels), reader/front-door refusals exact-match, and the zone picker
 // driven offscreen (grouping, search filter, selection arming OK).
+// Phase 6: the DSP.md §9 item-8 integration (a committed looped sample
+// renders ≥ 4 loop wraps through m4a_channel with wrap steps in family
+// with the loop body), and provenance — sidecar field round-trip, the
+// reopen-re-render-equals-committed-bytes acceptance, source hash-mismatch
+// detection, the committed-.wav fallback's byte-faithful no-op render,
+// updateSample's in-place overwrite (.inc untouched) with exact-match
+// refusals, and the editor dialog's edit mode (locked name, Save Sample,
+// params baseline off the undo stack).
 // scratchDir must not already exist (fully fresh scratches, no stale
 // artifacts). corpusRoot, when given, points at a wav2agb decomp checkout
 // (e.g. pokeemerald) whose sound/direct_sound_samples sc88pro corpus gates
@@ -2526,6 +2534,276 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
         if (failures == before)
             std::printf("samplecheck: soundfont OK\n");
+    }
+
+    // ---- loop through the engine (DSP.md §9 item 8, phase 6): a committed
+    // looped sample renders ≥ 4 loop wraps through m4a_channel and the wrap
+    // steps stay in family with the loop body ----
+    {
+        const int before = failures;
+        // A cleanly loopable render: the fixture loop is 40 exact 220.5 Hz
+        // periods (2000..9999 at 44100), resampled onto the GBA mix ladder.
+        SampleEditParams p = SampleDocument::defaultParams(hiRes);
+        p.targetRate = 13379.0;
+        SampleDocument doc(hiRes);
+        doc.setParams(p);
+        const ProcessedSample &out = doc.processed();
+        expect(out.looped && out.size > out.loopStart + 100,
+               "engine-loop fixture renders looped");
+        QString error;
+        expect(SampleRegistrar::registerSample(
+                   root, QStringLiteral("engineloop_tone"),
+                   writeSampleWav(out), &error),
+               "engine-loop sample registers");
+        writeFile(root
+                      + QStringLiteral(
+                          "/sound/voicegroups/voicegroup_engineloop.inc"),
+                  "voicegroup_engineloop::\n"
+                  "\tvoice_directsound 60, 0, "
+                  "DirectSoundWaveData_engineloop_tone, 255, 0, 255, 0\n");
+        const QByteArray rootUtf8 = root.toLocal8Bit();
+        LoadedVoiceGroup *vg = voicegroup_load(rootUtf8.constData(),
+                                               "voicegroup_engineloop",
+                                               nullptr);
+        if (!vg) {
+            std::fprintf(stderr,
+                         "samplecheck: FAIL: engineloop voicegroup_load\n");
+            failures++;
+        } else {
+            // Render at the sample's effective rate with the PCM mix
+            // following the host rate: the channel steps ~1 source sample
+            // per output sample and the only smoothing is m4a_channel's own
+            // linear interpolation, including its wrap across the loop seam.
+            auto *engine = new M4AEngine();
+            m4a_engine_init(engine, float(out.freq) / 1024.0f);
+            m4a_engine_set_pcm_mix_rate(engine, 0.0f);
+            m4a_engine_set_voicegroup(engine, vg->voices);
+            m4a_engine_program_change(engine, 0, 0);
+            m4a_engine_note_on(engine, 0, 60, 127);
+            const M4APCMChannel *ch = nullptr;
+            for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+                if (engine->pcmChannels[i].status & CHN_ON)
+                    ch = &engine->pcmChannels[i];
+            }
+            expect(ch != nullptr, "engine-loop note keys a channel");
+            int wraps = 0;
+            double maxBodyStep = 0.0, maxWrapStep = 0.0, peak = 0.0;
+            if (ch) {
+                float l = 0.0f, r = 0.0f;
+                double prev = 0.0;
+                bool prevValid = false;
+                qint32 prevCount = ch->count;
+                // A wrap influences the interpolated output for a couple of
+                // samples (seam interpolation, then the mix upsampler's
+                // one-sample memory) — classify that whole window as wrap.
+                int wrapWindow = 0;
+                for (int i = 0; i < 400000 && wraps < 5; i++) {
+                    m4a_engine_process(engine, &l, &r, 1);
+                    if (ch->count > prevCount) {
+                        wraps++;
+                        wrapWindow = 2;
+                    }
+                    prevCount = ch->count;
+                    const double v = double(l);
+                    if (wraps >= 1) { // fully inside the loop region
+                        if (prevValid) {
+                            const double step = std::abs(v - prev);
+                            if (wrapWindow > 0)
+                                maxWrapStep = qMax(maxWrapStep, step);
+                            else
+                                maxBodyStep = qMax(maxBodyStep, step);
+                        }
+                        peak = qMax(peak, std::abs(v));
+                        prevValid = true;
+                    }
+                    if (wrapWindow > 0)
+                        wrapWindow--;
+                    prev = v;
+                }
+            }
+            expect(wraps >= 5, "at least 4 full loop wraps rendered");
+            // 1 LSB in output units: the loop region's peak s8 value maps to
+            // the rendered peak (the envelope is constant at full sustain).
+            int maxS8 = 1;
+            for (quint32 i = out.loopStart; i < out.size; i++)
+                maxS8 = qMax(maxS8,
+                             std::abs(int(qint8(out.s8.at(qsizetype(i))))));
+            const double lsb = peak / double(maxS8);
+            expect(peak > 0.0
+                       && maxWrapStep <= maxBodyStep + 2.0 * lsb + 1e-9,
+                   "loop-wrap steps stay within body steps + 2 LSB");
+            m4a_engine_destroy(engine);
+            delete engine;
+            voicegroup_free(vg);
+        }
+        if (failures == before)
+            std::printf("samplecheck: engine loop integration OK\n");
+    }
+
+    // ---- provenance sidecar + edit-in-place (phase 6): sidecar round-trip,
+    // hash guard, committed-.wav fallback, updateSample, edit-mode dialog ----
+    {
+        const int before = failures;
+        // The "external" hi-res source file the sidecar points back at.
+        const QString sourcePath =
+            scratchDir + QStringLiteral("/sources/hires_tone.wav");
+        const QByteArray sourceBytes = fixtureWav(hiSpec);
+        writeFile(sourcePath, sourceBytes);
+
+        // Commit a non-trivial render of it, exactly as MainWindow does.
+        SampleEditParams p = SampleDocument::defaultParams(hiRes);
+        p.cropStart = 150;
+        p.targetRate = 13379.0;
+        p.baseKey = 59;
+        p.fineTuneCents = 25.0;
+        SampleDocument doc(hiRes);
+        doc.setParams(p);
+        const QByteArray committed = writeSampleWav(doc.processed());
+        QString error;
+        expect(SampleRegistrar::registerSample(
+                   root, QStringLiteral("provenance_tone"), committed, &error),
+               "provenance sample registers");
+        SampleSidecar sc;
+        sc.sourcePath = sourcePath;
+        sc.sourceSha256 = SampleRegistrar::sourceHashHex(sourceBytes);
+        sc.params = p;
+        expect(SampleRegistrar::writeSampleSidecar(
+                   root, QStringLiteral("provenance_tone"), sc, &error),
+               "sidecar writes");
+
+        SampleSidecar back;
+        expect(SampleRegistrar::readSampleSidecar(
+                   root, QStringLiteral("provenance_tone"), &back),
+               "sidecar reads back");
+        expect(back.version == 1 && back.sourcePath == sc.sourcePath
+                   && back.sourceSha256 == sc.sourceSha256
+                   && back.leftOnly == sc.leftOnly
+                   && back.sf2Zone == sc.sf2Zone && back.params == sc.params,
+               "sidecar round-trips every field");
+
+        // PLAN §6 acceptance: reopen from the sidecar, re-render, and the
+        // bytes equal the committed .wav exactly.
+        {
+            const QByteArray reread = readFileBytes(back.sourcePath);
+            expect(SampleRegistrar::sourceHashHex(reread) == back.sourceSha256,
+                   "sidecar hash matches the untouched source");
+            ImportedSample reopened;
+            expect(importAudioBytes(reread, back.sourcePath, &reopened,
+                                    &error, back.leftOnly),
+                   "sidecar source re-imports");
+            SampleDocument redoc(reopened);
+            redoc.setParams(back.params);
+            expect(writeSampleWav(redoc.processed()) == committed,
+                   "sidecar re-render equals the committed bytes");
+        }
+
+        // A touched source is detectable (the edit flow offers re-import).
+        writeFile(sourcePath, sourceBytes + QByteArray(4, '\0'));
+        expect(SampleRegistrar::sourceHashHex(readFileBytes(sourcePath))
+                   != back.sourceSha256,
+               "a touched source no longer matches the sidecar hash");
+        writeFile(sourcePath, sourceBytes);
+
+        // Missing-sidecar fallback: the committed 8-bit .wav re-imports
+        // GBA-ready and its no-op default render is byte-faithful.
+        {
+            ImportedSample fallback;
+            expect(importAudioBytes(committed,
+                                    QStringLiteral("x/provenance_tone.wav"),
+                                    &fallback, &error),
+                   "committed .wav re-imports");
+            expect(fallback.gbaReady, "committed .wav re-imports GBA-ready");
+            SampleDocument fdoc(fallback);
+            fdoc.setParams(SampleDocument::defaultParams(fallback));
+            expect(writeSampleWav(fdoc.processed()) == committed,
+                   "no-op fallback render is byte-identical");
+        }
+
+        // updateSample overwrites the .wav in place and leaves the .inc
+        // byte-identical; refusals for anything not updatable exact-match.
+        SampleEditParams p2 = p;
+        p2.fineTuneCents = 40.0;
+        doc.setParams(p2);
+        const QByteArray updated = writeSampleWav(doc.processed());
+        expect(updated != committed, "updated render differs");
+        const QByteArray incBefore = readFileBytes(incPath);
+        expect(SampleRegistrar::updateSample(
+                   root, QStringLiteral("provenance_tone"), updated, &error),
+               "updateSample succeeds");
+        expect(readFileBytes(incPath) == incBefore,
+               "update leaves the .inc byte-identical");
+        expect(readFileBytes(root
+                             + QStringLiteral("/sound/direct_sound_samples/"
+                                              "provenance_tone.wav"))
+                   == updated,
+               "update replaces the .wav bytes");
+        expect(!SampleRegistrar::updateSample(
+                   root, QStringLiteral("never_registered"), updated, &error),
+               "updating an unregistered sample refuses");
+        expectError(error,
+                    QStringLiteral(
+                        "DirectSoundWaveData_never_registered is not "
+                        "registered in this project; use Import Sample to "
+                        "add new samples."),
+                    "unregistered-update refusal text");
+        // A symbol registered without a .wav source (a .bin-only legacy
+        // sample) refuses too. Appended after the byte-identity assertions
+        // above so it can't disturb them.
+        {
+            QFile inc(incPath);
+            inc.open(QIODevice::Append);
+            inc.write("\n\t.align 2\nDirectSoundWaveData_binonly::\n"
+                      "\t.incbin \"sound/direct_sound_samples/binonly.bin\"\n");
+        }
+        expect(!SampleRegistrar::updateSample(root, QStringLiteral("binonly"),
+                                              updated, &error),
+               "updating a .wav-less symbol refuses");
+        expectError(error,
+                    QStringLiteral(
+                        "binonly.wav does not exist in "
+                        "sound/direct_sound_samples — only samples with a "
+                        ".wav source can be updated."),
+                    "wav-less-update refusal text");
+
+        // The dialog in edit mode: locked name, "Save Sample" commit, and
+        // sidecar params applied as the baseline (not an undo entry).
+        {
+            SampleEditorDialog dialog(
+                hiRes, [](const QString &candidate, QString *err) {
+                    if (candidate == QStringLiteral("provenance_tone"))
+                        return true;
+                    if (err)
+                        *err = QStringLiteral("the sample keeps its "
+                                              "registered name.");
+                    return false;
+                });
+            dialog.setEditTarget(QStringLiteral("provenance_tone"));
+            dialog.applyParamsExternal(p);
+            dialog.show();
+            QApplication::processEvents();
+            auto *nameEdit = dialog.findChild<QLineEdit *>(
+                QStringLiteral("sampleNameEdit"));
+            auto *addButton = dialog.findChild<QPushButton *>(
+                QStringLiteral("sampleAddButton"));
+            expect(nameEdit && nameEdit->isReadOnly()
+                       && nameEdit->text()
+                           == QStringLiteral("provenance_tone"),
+                   "edit mode locks the name");
+            expect(addButton && addButton->isEnabled()
+                       && addButton->text() == QStringLiteral("Save Sample"),
+                   "edit mode arms Save Sample");
+            expect(dialog.document()->params() == p
+                       && dialog.undoStack()->count() == 0,
+                   "sidecar params are the baseline, not an undo entry");
+        }
+
+        SampleRegistrar::removeSampleSidecar(root,
+                                             QStringLiteral("provenance_tone"));
+        expect(!SampleRegistrar::readSampleSidecar(
+                   root, QStringLiteral("provenance_tone"), &back),
+               "removed sidecar no longer reads");
+        if (failures == before)
+            std::printf("samplecheck: provenance sidecar OK\n");
     }
 
     // ---- corpus-conditional: the sc88pro reference set (item 5/6 halves) ----

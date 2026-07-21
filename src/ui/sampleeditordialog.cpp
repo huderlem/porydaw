@@ -500,6 +500,18 @@ QByteArray SampleEditorDialog::wavBytes()
     return writeSampleWav(m_doc.processed());
 }
 
+void SampleEditorDialog::setEditTarget(const QString &name)
+{
+    m_nameEdit->setText(name);
+    m_nameEdit->setReadOnly(true);
+    m_nameEdit->setToolTip(
+        tr("The sample keeps its registered name; renaming is not supported "
+           "here."));
+    m_addButton->setText(tr("Save Sample"));
+    setWindowTitle(tr("Edit Sample — %1").arg(name));
+    validateName();
+}
+
 void SampleEditorDialog::done(int result)
 {
     stopAudition();
@@ -660,7 +672,10 @@ void SampleEditorDialog::validateName()
     const bool ok = m_validator && m_validator(m_nameEdit->text(), &error);
     m_addButton->setEnabled(ok);
     m_nameStatus->setText(
-        ok ? tr("Registers as DirectSoundWaveData_%1").arg(m_nameEdit->text())
+        ok ? (m_nameEdit->isReadOnly()
+                  ? tr("Saves over DirectSoundWaveData_%1's sample data")
+                  : tr("Registers as DirectSoundWaveData_%1"))
+                 .arg(m_nameEdit->text())
            : error);
 }
 

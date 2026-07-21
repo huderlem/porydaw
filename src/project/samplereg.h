@@ -4,6 +4,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "audio/sampledata.h"
+
 // DirectSound sample registration for wav2agb-pipeline decomp projects
 // (docs/sample-studio/FORMATS.md §4): verbatim-copy a prepared .wav into
 // sound/direct_sound_samples/ and append its registration block to
@@ -50,6 +52,22 @@ struct SampleWavInfo {
     bool waveLooped = false;
 };
 
+// Provenance sidecar for a committed sample (.porydaw/samples/<name>.json,
+// docs/sample-studio/PLAN.md §3): which source file it came from (content
+// hash guards against edits behind porydaw's back, plus the decode choices
+// that aren't in the params) and the full edit parameters, so "Edit sample…"
+// reopens the hi-res source exactly where the user left it. The project is
+// canonical without it — a missing sidecar means re-importing the committed
+// 8-bit .wav.
+struct SampleSidecar {
+    int version = 1;
+    QString sourcePath;   // absolute path of the imported source file
+    QString sourceSha256; // hex SHA-256 of the source file's bytes
+    bool leftOnly = false; // stereo source imported as left channel only
+    int sf2Zone = -1;      // .sf2 zone index; -1 for ordinary audio files
+    SampleEditParams params;
+};
+
 class SampleRegistrar
 {
 public:
@@ -82,4 +100,25 @@ public:
     // are QSaveFile-atomic and the .inc gains exactly one block.
     static bool registerSample(const QString &projectRoot, const QString &name,
                                const QByteArray &wavBytes, QString *error);
+
+    // Overwrites an already-registered sample's .wav in place ("Edit
+    // sample…" commit). The registration block is untouched — the symbol
+    // must already exist, and only .wav-sourced samples can be updated.
+    static bool updateSample(const QString &projectRoot, const QString &name,
+                             const QByteArray &wavBytes, QString *error);
+
+    // Provenance sidecar plumbing. Reads validate the version and required
+    // fields; writes are QSaveFile-atomic. The sidecar is auxiliary — a
+    // failed write must not fail the commit that triggered it.
+    static QString sampleSidecarPath(const QString &projectRoot,
+                                     const QString &name);
+    static QString sourceHashHex(const QByteArray &sourceBytes);
+    static bool writeSampleSidecar(const QString &projectRoot,
+                                   const QString &name,
+                                   const SampleSidecar &sidecar,
+                                   QString *error);
+    static bool readSampleSidecar(const QString &projectRoot,
+                                  const QString &name, SampleSidecar *sidecar);
+    static void removeSampleSidecar(const QString &projectRoot,
+                                    const QString &name);
 };

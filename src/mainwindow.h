@@ -71,6 +71,10 @@ private slots:
     // Sample Studio entry (slot >= 0: browser-initiated — after the commit
     // the new sample is auto-assigned to that voice slot as an undo command).
     void importSampleForSlot(int slot);
+    // "Edit sample…" reopen (PLAN.md §6 phase 6): the slot's committed
+    // sample, from its provenance sidecar (hi-res source + saved params) when
+    // it checks out, else from the committed 8-bit .wav.
+    void editSampleForSlot(int slot);
     void registerLoadedSong();
     void uiTick();
     void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural);

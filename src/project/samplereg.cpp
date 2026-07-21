@@ -2,9 +2,13 @@
 
 #include "voicegroupsource.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <cmath>
@@ -352,4 +356,155 @@ bool SampleRegistrar::registerSample(const QString &projectRoot,
         return false;
     }
     return true;
+}
+
+bool SampleRegistrar::updateSample(const QString &projectRoot,
+                                   const QString &name,
+                                   const QByteArray &wavBytes, QString *error)
+{
+    const SampleFormatProbe probe = probeSampleFormat(projectRoot);
+    if (!probe.ok()) {
+        if (error)
+            *error = probe.refusal;
+        return false;
+    }
+    const QString symbol = QStringLiteral("DirectSoundWaveData_") + name;
+    if (!VoicegroupSource::directSoundSymbols(projectRoot).contains(symbol)) {
+        if (error)
+            *error = QStringLiteral(
+                         "%1 is not registered in this project; use Import "
+                         "Sample to add new samples.")
+                         .arg(symbol);
+        return false;
+    }
+    const QString wavPath =
+        probe.samplesDir + QStringLiteral("/%1.wav").arg(name);
+    if (!QFile::exists(wavPath)) {
+        if (error)
+            *error = QStringLiteral(
+                         "%1.wav does not exist in sound/direct_sound_samples "
+                         "— only samples with a .wav source can be updated.")
+                         .arg(name);
+        return false;
+    }
+    QSaveFile wavOut(wavPath);
+    if (!wavOut.open(QIODevice::WriteOnly)
+        || wavOut.write(wavBytes) != wavBytes.size() || !wavOut.commit()) {
+        if (error)
+            *error = QStringLiteral("cannot write %1.").arg(wavPath);
+        return false;
+    }
+    return true;
+}
+
+QString SampleRegistrar::sampleSidecarPath(const QString &projectRoot,
+                                           const QString &name)
+{
+    return projectRoot + QStringLiteral("/.porydaw/samples/%1.json").arg(name);
+}
+
+QString SampleRegistrar::sourceHashHex(const QByteArray &sourceBytes)
+{
+    return QString::fromLatin1(
+        QCryptographicHash::hash(sourceBytes, QCryptographicHash::Sha256)
+            .toHex());
+}
+
+bool SampleRegistrar::writeSampleSidecar(const QString &projectRoot,
+                                         const QString &name,
+                                         const SampleSidecar &sidecar,
+                                         QString *error)
+{
+    const QString path = sampleSidecarPath(projectRoot, name);
+    QDir().mkpath(QFileInfo(path).path());
+    QJsonObject source;
+    source.insert(QStringLiteral("path"), sidecar.sourcePath);
+    source.insert(QStringLiteral("sha256"), sidecar.sourceSha256);
+    source.insert(QStringLiteral("leftOnly"), sidecar.leftOnly);
+    source.insert(QStringLiteral("sf2Zone"), sidecar.sf2Zone);
+    const SampleEditParams &p = sidecar.params;
+    QJsonObject params;
+    params.insert(QStringLiteral("cropStart"), double(p.cropStart));
+    params.insert(QStringLiteral("cropEnd"), double(p.cropEnd));
+    params.insert(QStringLiteral("loopOn"), p.loopOn);
+    params.insert(QStringLiteral("loopStart"), double(p.loopStart));
+    params.insert(QStringLiteral("loopEnd"), double(p.loopEnd));
+    params.insert(QStringLiteral("baseKey"), p.baseKey);
+    params.insert(QStringLiteral("fineTuneCents"), p.fineTuneCents);
+    params.insert(QStringLiteral("targetRate"), p.targetRate);
+    params.insert(QStringLiteral("normalizeMode"), int(p.normalizeMode));
+    params.insert(QStringLiteral("dcRemove"), int(p.dcRemove));
+    params.insert(QStringLiteral("fadeIn"), p.fadeIn);
+    params.insert(QStringLiteral("fadeOut"), p.fadeOut);
+    params.insert(QStringLiteral("crossfadeOn"), p.crossfadeOn);
+    params.insert(QStringLiteral("ditherOn"), p.ditherOn);
+    params.insert(QStringLiteral("exactPitchOverride"),
+                  double(p.exactPitchOverride));
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), sidecar.version);
+    root.insert(QStringLiteral("source"), source);
+    root.insert(QStringLiteral("params"), params);
+
+    QSaveFile out(path);
+    if (!out.open(QIODevice::WriteOnly) || !out.write(QJsonDocument(root).toJson())
+        || !out.commit()) {
+        if (error)
+            *error = QStringLiteral("cannot write %1.").arg(path);
+        return false;
+    }
+    return true;
+}
+
+bool SampleRegistrar::readSampleSidecar(const QString &projectRoot,
+                                        const QString &name,
+                                        SampleSidecar *sidecar)
+{
+    QFile in(sampleSidecarPath(projectRoot, name));
+    if (!in.open(QIODevice::ReadOnly))
+        return false;
+    const QJsonObject root = QJsonDocument::fromJson(in.readAll()).object();
+    if (root.value(QStringLiteral("version")).toInt() != 1)
+        return false;
+    const QJsonObject source = root.value(QStringLiteral("source")).toObject();
+    const QJsonObject params = root.value(QStringLiteral("params")).toObject();
+    if (source.isEmpty() || params.isEmpty())
+        return false;
+    SampleSidecar sc;
+    sc.version = 1;
+    sc.sourcePath = source.value(QStringLiteral("path")).toString();
+    sc.sourceSha256 = source.value(QStringLiteral("sha256")).toString();
+    sc.leftOnly = source.value(QStringLiteral("leftOnly")).toBool();
+    sc.sf2Zone = source.value(QStringLiteral("sf2Zone")).toInt(-1);
+    if (sc.sourcePath.isEmpty() || sc.sourceSha256.isEmpty())
+        return false;
+    SampleEditParams &p = sc.params;
+    p.cropStart = qint64(params.value(QStringLiteral("cropStart")).toDouble());
+    p.cropEnd = qint64(params.value(QStringLiteral("cropEnd")).toDouble());
+    p.loopOn = params.value(QStringLiteral("loopOn")).toBool();
+    p.loopStart = qint64(params.value(QStringLiteral("loopStart")).toDouble());
+    p.loopEnd = qint64(params.value(QStringLiteral("loopEnd")).toDouble());
+    p.baseKey = params.value(QStringLiteral("baseKey")).toInt(60);
+    p.fineTuneCents = params.value(QStringLiteral("fineTuneCents")).toDouble();
+    p.targetRate = params.value(QStringLiteral("targetRate")).toDouble();
+    p.normalizeMode = SampleEditParams::NormalizeMode(
+        qBound(0, params.value(QStringLiteral("normalizeMode")).toInt(),
+               int(SampleEditParams::NormalizeOff)));
+    p.dcRemove = SampleEditParams::Toggle(
+        qBound(0, params.value(QStringLiteral("dcRemove")).toInt(),
+               int(SampleEditParams::Off)));
+    p.fadeIn = params.value(QStringLiteral("fadeIn")).toBool(true);
+    p.fadeOut = params.value(QStringLiteral("fadeOut")).toBool(true);
+    p.crossfadeOn = params.value(QStringLiteral("crossfadeOn")).toBool();
+    p.ditherOn = params.value(QStringLiteral("ditherOn")).toBool();
+    p.exactPitchOverride = quint32(
+        params.value(QStringLiteral("exactPitchOverride")).toDouble());
+    if (sidecar)
+        *sidecar = sc;
+    return true;
+}
+
+void SampleRegistrar::removeSampleSidecar(const QString &projectRoot,
+                                          const QString &name)
+{
+    QFile::remove(sampleSidecarPath(projectRoot, name));
 }

@@ -64,6 +64,11 @@ public:
     // Undo/redo plumbing: apply a parameter set and re-sync every control.
     void applyParamsExternal(const SampleEditParams &params);
 
+    // "Edit sample…" reopen (PLAN.md §6 phase 6): the sample is already
+    // registered as <name>, so the name is fixed (renames would need .inc
+    // surgery — out of scope) and the commit button reads "Save Sample".
+    void setEditTarget(const QString &name);
+
 protected:
     void done(int result) override; // silence the audition on any close
 

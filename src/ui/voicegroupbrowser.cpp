@@ -203,6 +203,13 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     symbolLayout->addWidget(m_newSampleButton);
     connect(m_newSampleButton, &QPushButton::clicked, this,
             [this] { emit newSampleRequested(currentSlot()); });
+    m_editSampleButton = new QPushButton(tr("Edit…"), m_symbolRow);
+    m_editSampleButton->setObjectName(QStringLiteral("vgEditSampleButton"));
+    m_editSampleButton->setToolTip(
+        tr("Reopen this voice's sample in Sample Studio."));
+    symbolLayout->addWidget(m_editSampleButton);
+    connect(m_editSampleButton, &QPushButton::clicked, this,
+            [this] { emit editSampleRequested(currentSlot()); });
     addRow(tr("Sample"), m_symbolRow, &m_symbolLabel);
 
     // The sweep byte is the GB NR10 register: three packed fields, edited
@@ -308,6 +315,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // a mouse target — keyboard focus on it would also swallow Space.
     m_newButton->setFocusPolicy(Qt::NoFocus);
     m_newSampleButton->setFocusPolicy(Qt::NoFocus);
+    m_editSampleButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_vgCombo, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,
@@ -636,8 +644,10 @@ void VoicegroupBrowser::populateEditor()
                                                    : m_sampleChoices);
         }
         m_symbolCombo->setCurrentText(voice->symbol);
-        m_newSampleButton->setVisible(!synth && !wave && !drumkit
-                                      && macroIsDsFamily(voice->macro));
+        const bool sampleVoice = !synth && !wave && !drumkit
+            && macroIsDsFamily(voice->macro);
+        m_newSampleButton->setVisible(sampleVoice);
+        m_editSampleButton->setVisible(sampleVoice);
     }
     m_synthWaveCombo->setCurrentIndex(std::clamp(synthDesc.waveform, 0, 2));
     m_synthDutySpin->setValue(synthDesc.baseDuty);
