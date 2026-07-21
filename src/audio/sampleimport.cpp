@@ -224,6 +224,7 @@ bool decodeWav(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
     out->baseKey = hasSmpl ? int(unity) : 60;
     out->fracSemitone = double(pitchFraction) / 4294967296.0;
     out->exactPitch = agbp;
+    out->hasPitchMetadata = hasSmpl || agbp != 0;
 
     // The agbl override pins the playable length; a loop's exclusive end is
     // the sample end (FORMATS.md §1.2, CONTEXT.md §3.1).
@@ -294,6 +295,7 @@ bool decodeAif(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
     double sampleRate = 0.0;
     qint64 ssndDataStart = 0, ssndDataBytes = 0;
     int baseNote = 60, detuneCents = 0;
+    bool instFound = false;
     bool haveSustainLoop = false;
     quint16 loopStartId = 0, loopEndId = 0;
     std::vector<std::pair<quint16, quint32>> markers;
@@ -327,6 +329,7 @@ bool decodeAif(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
         } else if (std::memcmp(hdr, "INST", 4) == 0 && chunkLen >= 20) {
             baseNote = qBound(0, int(qint8(data[at])), 127);
             detuneCents = qBound(-50, int(qint8(data[at + 1])), 50);
+            instFound = true;
             const int loopType = beU16(data + at + 8);
             if (loopType) {
                 loopStartId = beU16(data + at + 10);
@@ -385,6 +388,7 @@ bool decodeAif(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
     const double exactKey = double(baseNote) + double(detuneCents) / 100.0;
     out->baseKey = int(std::floor(exactKey));
     out->fracSemitone = exactKey - std::floor(exactKey);
+    out->hasPitchMetadata = instFound;
 
     // Resolve the sustain loop exactly as pory4a's loader does: the end
     // marker's position bounds the sample (exclusive), the smaller position

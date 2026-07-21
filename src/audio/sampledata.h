@@ -31,6 +31,11 @@ struct ImportedSample {
     // full frame count (the engine never plays past a nonzero agbl).
     qint64 playLength = 0;
     quint32 exactPitch = 0;    // source agbp word verbatim (0 = absent)
+    // The container carried real pitch metadata (smpl / AIFF INST / agbp);
+    // false means baseKey 60 is a mere default and the editor should prefill
+    // from pitch detection instead (DSP.md §4 — never silently applied
+    // otherwise).
+    bool hasPitchMetadata = false;
     QString suggestedName;     // sanitized from the source basename
     QString sourcePath;
     SourceKind sourceKind = Wav;

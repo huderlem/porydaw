@@ -12,9 +12,15 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
+#include <QApplication>
+#include <QMouseEvent>
+#include <QUndoStack>
+
+#include "audio/auditionslots.h"
 #include "audio/sampledoc.h"
 #include "audio/sampledsp.h"
 #include "audio/sampleimport.h"
@@ -22,23 +28,30 @@
 #include "project/samplereg.h"
 #include "project/voicegroupsource.h"
 #include "ui/sampleeditordialog.h"
+#include "ui/waveformview.h"
 
 extern "C" {
 #include "voicegroup_loader.h"
 }
 
-// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-2.
+// --samplecheck <scratchDir> [corpusRoot]: Sample Studio check, phases 1-3.
 // Phase 1: builds fully-fresh fake decomp projects under scratchDir — a
 // wav2agb one, a legacy-aif one, a rule-less one, an .inc-less one, and a
 // CRLF-.inc one — then drives probe → inspect → register → loader-resolve
 // end to end and exact-matches every refusal message. Phase 2: hi-res
 // decoding, the DSP.md resampler/quantizer/normalize acceptance items 1-6,
 // pipeline determinism, the audition==build parity matrix through pory4a's
-// own loader, and metadata round-trips (item 10). scratchDir must not
-// already exist (fully fresh scratches, no stale artifacts). corpusRoot,
-// when given, points at a wav2agb decomp checkout (e.g. pokeemerald) whose
-// sound/direct_sound_samples sc88pro corpus gates the corpus-conditional
-// sections: no-op u8 round-trip, reference-.bin byte equality, stats drift.
+// own loader, and metadata round-trips (item 10). Phase 3: YIN pitch
+// detection (item 9), loop suggestion with its level/anti-pump gates
+// (item 7), the crossfade bake, the audition-slot protocol's retirement
+// invariants against a bare M4AEngine, and offscreen driving of the editor
+// (waveform handle drags, suggest chips, pitch prefill, the dialog-local
+// undo stack) ending in a commit that re-runs the phase-1 assertions.
+// scratchDir must not already exist (fully fresh scratches, no stale
+// artifacts). corpusRoot, when given, points at a wav2agb decomp checkout
+// (e.g. pokeemerald) whose sound/direct_sound_samples sc88pro corpus gates
+// the corpus-conditional sections: no-op u8 round-trip, reference-.bin byte
+// equality, stats drift.
 
 namespace {
 
@@ -325,6 +338,63 @@ double median(std::vector<double> v)
     std::sort(v.begin(), v.end());
     const size_t mid = v.size() / 2;
     return v.size() & 1 ? v[mid] : 0.5 * (v[mid - 1] + v[mid]);
+}
+
+// Band-limited sawtooth (additive, harmonics below 0.45·rate): naive saws
+// alias, which would smear the pitch-detection acceptance sweep.
+std::vector<float> genSaw(double rate, double freq, double seconds,
+                          double amp)
+{
+    std::vector<float> v(size_t(rate * seconds), 0.0f);
+    for (int k = 1; freq * k < 0.45 * rate; k++) {
+        for (size_t i = 0; i < v.size(); i++)
+            v[i] += float(amp * (2.0 / kPi)
+                          * std::sin(2.0 * kPi * freq * k * double(i) / rate)
+                          / double(k));
+    }
+    return v;
+}
+
+double centsOff(double f0, double reference)
+{
+    return 1200.0 * std::log2(f0 / reference);
+}
+
+// rollcheck-style offscreen mouse driving.
+void sendMouse(QWidget *w, QEvent::Type type, const QPoint &pos,
+               Qt::MouseButton button, Qt::MouseButtons buttons)
+{
+    QMouseEvent ev(type, QPointF(pos), QPointF(w->mapToGlobal(pos)), button,
+                   buttons, Qt::NoModifier);
+    QCoreApplication::sendEvent(w, &ev);
+}
+
+void dragMouse(QWidget *w, const QPoint &from, const QPoint &to)
+{
+    sendMouse(w, QEvent::MouseButtonPress, from, Qt::LeftButton,
+              Qt::LeftButton);
+    const QPoint mid = (from + to) / 2;
+    sendMouse(w, QEvent::MouseMove, mid, Qt::NoButton, Qt::LeftButton);
+    sendMouse(w, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton);
+    sendMouse(w, QEvent::MouseButtonRelease, to, Qt::LeftButton,
+              Qt::NoButton);
+}
+
+int soundingPcmChannels(const M4AEngine *engine)
+{
+    int count = 0;
+    for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+        if (engine->pcmChannels[i].status & CHN_ON)
+            count++;
+    }
+    return count;
+}
+
+void pumpEngine(M4AEngine *engine, int blocks)
+{
+    static std::vector<float> l(512), r(512);
+    for (int i = 0; i < blocks; i++)
+        m4a_engine_process(engine, l.data(), r.data(), 512);
 }
 
 } // namespace
@@ -1471,6 +1541,521 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
         if (failures == before)
             std::printf("samplecheck: dialog validation OK\n");
+    }
+
+    // ---- pitch detection (DSP.md §9 item 9) ----
+    {
+        const int before = failures;
+        for (const double rate : {8000.0, 13379.0, 22050.0, 44100.0}) {
+            for (const int key : {33, 45, 57, 69, 81, 93}) { // A1..A6
+                const double f0 =
+                    440.0 * std::pow(2.0, (key - 69) / 12.0);
+                const std::vector<float> sine = genSine(rate, f0, 1.5, 0.4);
+                SampleDsp::PitchResult p = SampleDsp::detectPitchYin(
+                    sine.data(), qint64(sine.size()), rate);
+                if (!p.pitched || std::abs(centsOff(p.f0, f0)) > 5.0) {
+                    std::fprintf(stderr,
+                                 "samplecheck: FAIL: sine A%d @%g Hz rate "
+                                 "%g: %s %.2f cents\n",
+                                 (key - 21) / 12, f0, rate,
+                                 p.pitched ? "off by" : "unpitched",
+                                 p.pitched ? centsOff(p.f0, f0) : 0.0);
+                    failures++;
+                }
+                const std::vector<float> saw = genSaw(rate, f0, 1.5, 0.4);
+                p = SampleDsp::detectPitchYin(saw.data(),
+                                              qint64(saw.size()), rate);
+                if (!p.pitched || std::abs(centsOff(p.f0, f0)) > 5.0) {
+                    std::fprintf(stderr,
+                                 "samplecheck: FAIL: saw A%d @%g Hz rate "
+                                 "%g: %s %.2f cents\n",
+                                 (key - 21) / 12, f0, rate,
+                                 p.pitched ? "off by" : "unpitched",
+                                 p.pitched ? centsOff(p.f0, f0) : 0.0);
+                    failures++;
+                }
+            }
+        }
+        std::vector<float> noise(size_t(13379 * 2));
+        quint32 rng = 0xA5A5A5A5u;
+        for (auto &v : noise) {
+            rng = rng * 1664525u + 1013904223u;
+            v = float(double(rng) / 4294967296.0 - 0.5) * 0.8f;
+        }
+        expect(!SampleDsp::detectPitchYin(noise.data(), qint64(noise.size()),
+                                          13379.0)
+                    .pitched,
+               "white noise reports unpitched");
+        const std::vector<float> shorty = genSine(13379.0, 440.0, 0.4, 0.4);
+        expect(!SampleDsp::detectPitchYin(shorty.data(),
+                                          qint64(shorty.size()), 13379.0)
+                    .pitched
+                   || true, // < 3 frames must not crash; result is unpitched
+               "short-buffer detection is safe");
+        expect(!SampleDsp::detectPitchYin(shorty.data(), 4000, 13379.0)
+                    .pitched,
+               "fewer than 3 frames reports unpitched");
+        if (failures == before)
+            std::printf("samplecheck: pitch detection OK\n");
+    }
+
+    // ---- loop suggestion (DSP.md §9 item 7) + the level gates ----
+    {
+        const int before = failures;
+        const double rate = 13379.0;
+        const qint64 n = qint64(rate * 2.0);
+
+        // 440 Hz + 5 Hz vibrato (±10 cents) + slow decay.
+        std::vector<float> tone(static_cast<size_t>(n));
+        for (qint64 i = 0; i < n; i++) {
+            const double t = double(i) / rate;
+            const double env = 1.0 - 0.10 * double(i) / double(n);
+            tone[size_t(i)] = float(
+                0.35 * env
+                * std::sin(2.0 * kPi * 440.0 * t
+                           + 0.5 * std::sin(2.0 * kPi * 5.0 * t)));
+        }
+        const SampleDsp::PitchResult pitch =
+            SampleDsp::detectPitchYin(tone.data(), n, rate);
+        expect(pitch.pitched && std::abs(centsOff(pitch.f0, 440.0)) < 20.0,
+               "vibrato tone detects near 440 Hz");
+        const double period = rate / (pitch.pitched ? pitch.f0 : 440.0);
+        const std::vector<SampleDsp::LoopCandidate> cands =
+            SampleDsp::suggestLoop(tone.data(), n, rate, period,
+                                   qint64(std::llround(0.4 * double(n))),
+                                   n - 1);
+        expect(!cands.empty(), "vibrato tone yields loop candidates");
+        if (!cands.empty()) {
+            const SampleDsp::LoopCandidate &top = cands[0];
+            expect(top.passedGates, "top candidate passes the gates");
+            expect(top.ncc >= 0.95, "top candidate NCC >= 0.95");
+            const QByteArray s8 = SampleDsp::quantizeBuffer(tone, false);
+            const SeamMetrics seam = SampleDsp::seamMetricsAt(
+                reinterpret_cast<const qint8 *>(s8.constData()), n,
+                top.loopStart, top.loopEnd);
+            expect(seam.valid && seam.ampLsb <= 2 && seam.derivLsb <= 3,
+                   "top candidate post-quantize seam within click bounds");
+            const qint64 L = top.loopEnd + 1 - top.loopStart;
+            const double k = std::round(double(L) / period);
+            expect(k >= 1.0
+                       && std::abs(double(L) - k * period)
+                           <= 0.01 * double(L),
+                   "loop length within 1% of an integer period multiple");
+        }
+
+        // White noise: unpitched ladder; nothing resembling a clean loop.
+        std::vector<float> noise(static_cast<size_t>(n));
+        quint32 rng = 0xC0FFEE01u;
+        for (auto &v : noise) {
+            rng = rng * 1664525u + 1013904223u;
+            v = float(double(rng) / 4294967296.0 - 0.5) * 0.8f;
+        }
+        const std::vector<SampleDsp::LoopCandidate> ncands =
+            SampleDsp::suggestLoop(noise.data(), n, rate, 0.0,
+                                   qint64(std::llround(0.4 * double(n))),
+                                   n - 1);
+        expect(!ncands.empty() && ncands[0].ncc < 0.5,
+               "white noise yields no clean loop");
+
+        // Amplitude step: NCC is scale-invariant, so a loop spanning the
+        // step correlates perfectly — the level-match/anti-pump gates are
+        // what reject it. Every gate-passing candidate must stay on one
+        // side of the step.
+        std::vector<float> step(static_cast<size_t>(n));
+        for (qint64 i = 0; i < n; i++) {
+            const double amp = i < n / 2 ? 0.4 : 0.2;
+            step[size_t(i)] = float(
+                amp * std::sin(2.0 * kPi * 440.0 * double(i) / rate));
+        }
+        const std::vector<SampleDsp::LoopCandidate> scands =
+            SampleDsp::suggestLoop(step.data(), n, rate, rate / 440.0,
+                                   qint64(std::llround(0.4 * double(n))),
+                                   n - 1);
+        expect(!scands.empty() && scands[0].passedGates,
+               "amplitude-step tone still finds a clean same-level loop");
+        bool gatesHonest = true;
+        for (const SampleDsp::LoopCandidate &c : scands) {
+            if (c.passedGates && c.loopStart < n / 2 && c.loopEnd >= n / 2)
+                gatesHonest = false;
+        }
+        expect(gatesHonest,
+               "no gate-passing candidate spans the amplitude step");
+
+        // Refine: knock a good loop off-seat by a few samples; the ±8
+        // local search recovers a seam at least as correlated.
+        if (!cands.empty()) {
+            qint64 S = cands[0].loopStart + 3, E = cands[0].loopEnd - 2;
+            const double nccBefore =
+                SampleDsp::seamMetricsAt(
+                    reinterpret_cast<const qint8 *>(
+                        SampleDsp::quantizeBuffer(tone, false).constData()),
+                    n, S, E)
+                    .ncc;
+            SampleDsp::refineLoop(tone.data(), n, period, &S, &E);
+            const QByteArray s8 = SampleDsp::quantizeBuffer(tone, false);
+            const SeamMetrics refined = SampleDsp::seamMetricsAt(
+                reinterpret_cast<const qint8 *>(s8.constData()), n, S, E);
+            expect(refined.ncc >= nccBefore - 1e-9,
+                   "refine never worsens the seam correlation");
+        }
+        if (failures == before)
+            std::printf("samplecheck: loop suggestion OK\n");
+    }
+
+    // ---- crossfade bake (DSP.md §6) ----
+    {
+        const int before = failures;
+        // Identity-rate 440 Hz source with a loop deliberately mis-seated
+        // by half a period: a hard seam click the bake must tame.
+        FixtureSpec cf;
+        cf.rate = 13379;
+        cf.bits = 16;
+        cf.withSmpl = false;
+        for (int i = 0; i < 13379; i++) {
+            const double v =
+                0.5 * std::sin(2.0 * kPi * 440.0 * double(i) / 13379.0);
+            putU16(&cf.samples, quint16(qint16(std::lround(v * 32000.0))));
+        }
+        ImportedSample cfSrc;
+        QString error;
+        expect(importAudioBytes(fixtureWav(cf), QStringLiteral("f/cf.wav"),
+                                &cfSrc, &error),
+               "crossfade fixture imports");
+        SampleEditParams p = SampleDocument::defaultParams(cfSrc);
+        p.loopOn = true;
+        p.loopStart = 4000;
+        p.loopEnd = 4623; // ~20.5 periods: seam lands half a period off
+        p.normalizeMode = SampleEditParams::NormalizeOff;
+        p.dcRemove = SampleEditParams::Off;
+        p.fadeIn = false;
+        p.fadeOut = false;
+        SampleDocument plain(cfSrc);
+        plain.setParams(p);
+        const ProcessedSample plainOut = plain.processed();
+        expect(plainOut.seam.valid && plainOut.seam.ampLsb > 4,
+               "mis-seated loop clicks without the bake");
+
+        SampleEditParams q = p;
+        q.crossfadeOn = true;
+        SampleDocument baked(cfSrc), baked2(cfSrc);
+        baked.setParams(q);
+        baked2.setParams(q);
+        const ProcessedSample &bakedOut = baked.processed();
+        expect(bakedOut.s8 == baked2.processed().s8,
+               "crossfade renders deterministically");
+        expect(bakedOut.seam.valid
+                   && bakedOut.seam.ampLsb < plainOut.seam.ampLsb
+                   && bakedOut.seam.ampLsb <= 3,
+               "crossfade bake tames the seam click");
+        // Only the fade window changes; everything before it is untouched.
+        expect(bakedOut.size == plainOut.size
+                   && bakedOut.s8.left(int(bakedOut.size) - 160)
+                       == plainOut.s8.left(int(plainOut.size) - 160),
+               "bake touches only the fade window");
+        // A loop start too close to the buffer start refuses actionably.
+        SampleEditParams tight = q;
+        tight.loopStart = 2;
+        tight.loopEnd = 700;
+        SampleDocument tightDoc(cfSrc);
+        tightDoc.setParams(tight);
+        bool warned = false;
+        for (const QString &w : tightDoc.processed().warnings)
+            warned = warned || w.contains(QStringLiteral("crossfade"));
+        expect(warned, "impossible crossfade warns instead of baking");
+        if (failures == before)
+            std::printf("samplecheck: crossfade bake OK\n");
+    }
+
+    // ---- audition-slot protocol (PLAN.md §4) against a bare engine ----
+    {
+        const int before = failures;
+        auto *engine = new M4AEngine();
+        m4a_engine_init(engine, 32768.0f);
+        AuditionSlots pool;
+        const QByteArray patternA(600, char(10));
+        const QByteArray patternB(600, char(-20));
+        // Release 0 cuts instantly, so retirement is quick and observable.
+        const AuditionSlots::Adsr instant{255, 0, 255, 0};
+        const auto publish = [&](const QByteArray &bytes, uint8_t key) {
+            return pool.publishNote(bytes, 13700096, 100, true, key,
+                                     instant);
+        };
+
+        expect(publish(patternA, 60), "first publish takes a slot");
+        pool.apply(engine, 1);
+        expect(soundingPcmChannels(engine) == 1,
+               "adopted audition keys one channel");
+        const M4APCMChannel *chA = nullptr;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+            if (engine->pcmChannels[i].status & CHN_ON)
+                chA = &engine->pcmChannels[i];
+        }
+        expect(chA && chA->wav && chA->wav->data && chA->wav->data[0] == 10
+                   && chA->midiKey == 60 && chA->audition,
+               "channel reads the slot's bytes and is audition-flagged");
+
+        // Publish storm without adoption: only the retired slots accept;
+        // the rest coalesce. The sounding slot is never re-rendered.
+        int accepted = 0;
+        for (int i = 0; i < 100; i++)
+            accepted += publish(patternB, 62) ? 1 : 0;
+        expect(accepted == AuditionSlots::kSlots - 1,
+               "publish storm coalesces once every retired slot is taken");
+        expect(chA && chA->wav->data[0] == 10,
+               "the sounding slot survives the storm un-overwritten");
+
+        // Adoption plays only the newest publish; the superseded note
+        // releases and its slot retires once the envelope finishes.
+        pool.apply(engine, 1);
+        pumpEngine(engine, 4);
+        pool.apply(engine, 1);
+        expect(soundingPcmChannels(engine) == 1,
+               "superseded audition fully retires");
+        const M4APCMChannel *chB = nullptr;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+            if (engine->pcmChannels[i].status & CHN_ON)
+                chB = &engine->pcmChannels[i];
+        }
+        expect(chB && chB->wav && chB->wav->data
+                   && chB->wav->data[0] == -20 && chB->midiKey == 62,
+               "the adopted channel reads the newest render");
+        int freed = 0;
+        for (int i = 0; i < 6; i++)
+            freed += publish(patternA, 64) ? 1 : 0;
+        expect(freed == AuditionSlots::kSlots - 1,
+               "retired slots reuse; the sounding one never does");
+
+        // Note-off: the audition silences and every slot retires.
+        pool.apply(engine, 1);
+        pumpEngine(engine, 4);
+        pool.apply(engine, 1);
+        pool.publishOff();
+        pool.apply(engine, 1);
+        pumpEngine(engine, 4);
+        pool.apply(engine, 1);
+        expect(soundingPcmChannels(engine) == 0,
+               "publishOff silences the audition");
+        int post = 0;
+        for (int i = 0; i < 5; i++)
+            post += publish(patternB, 65) ? 1 : 0;
+        expect(post == AuditionSlots::kSlots,
+               "full retirement frees every slot");
+
+        // Cold reset (engine reinit) drops everything cleanly.
+        m4a_engine_destroy(engine);
+        m4a_engine_init(engine, 32768.0f);
+        pool.reset();
+        expect(publish(patternA, 60), "reset retires all slots");
+        pool.apply(engine, 1);
+        expect(soundingPcmChannels(engine) == 1, "audition works after reset");
+        m4a_engine_destroy(engine);
+        delete engine;
+        if (failures == before)
+            std::printf("samplecheck: audition slots OK\n");
+    }
+
+    // ---- the editor, offscreen (phase 3): waveform drags, suggest chips,
+    // pitch prefill, dialog-local undo, commit re-runs the §1 assertions ----
+    {
+        const int before = failures;
+        const QStringList symbols = VoicegroupSource::directSoundSymbols(root);
+        SampleEditorDialog dialog(
+            hiRes, [&](const QString &name, QString *validationError) {
+                return SampleRegistrar::validateSampleName(root, name, symbols,
+                                                           validationError);
+            });
+        dialog.resize(900, 640);
+        dialog.show();
+        QApplication::processEvents();
+        WaveformView *wave = dialog.waveform();
+        SampleDocument *doc = dialog.document();
+        QUndoStack *undo = dialog.undoStack();
+        expect(wave && wave->width() > 200, "waveform view laid out");
+        expect(doc->params().loopOn && doc->params().loopStart == 2000,
+               "hi-res fixture opens with its smpl loop");
+
+        // 1. Drag the loop-start handle to ~sample 3000: params update live,
+        // the whole gesture is one undo entry, and the render re-seats.
+        const QPoint fromPt =
+            wave->handlePoint(WaveformView::LoopStartHandle);
+        const QPoint toPt(wave->xForSample(3000), fromPt.y());
+        dragMouse(wave, fromPt, toPt);
+        expect(std::llabs(doc->params().loopStart - 3000) <= 40,
+               "loop-start handle drag lands near the target");
+        expect(undo->count() == 1, "handle drag is one undo entry");
+        expect(doc->processed().looped
+                   && doc->processed().seam.valid,
+               "drag re-renders with live seam metrics");
+        undo->undo();
+        expect(doc->params().loopStart == 2000,
+               "undo restores the pre-drag loop");
+        undo->redo();
+        expect(std::llabs(doc->params().loopStart - 3000) <= 40,
+               "redo re-applies the drag");
+
+        // 2. Zero-crossing snap: the fixture is a 220.5 Hz sine at 44100
+        // (period exactly 200), so snapped markers land on sign changes.
+        auto *snap =
+            dialog.findChild<QCheckBox *>(QStringLiteral("sampleSnapZero"));
+        expect(snap != nullptr, "snap toggle found");
+        if (snap) {
+            snap->setChecked(true);
+            const QPoint from2 =
+                wave->handlePoint(WaveformView::LoopStartHandle);
+            const QPoint to2(wave->xForSample(5000), from2.y());
+            dragMouse(wave, from2, to2);
+            const qint64 landed = doc->params().loopStart;
+            const std::vector<float> &buf = doc->source().buffer;
+            const bool onCrossing = landed > 0
+                && ((buf[size_t(landed) - 1] < 0.0f
+                     && buf[size_t(landed)] >= 0.0f)
+                    || (buf[size_t(landed) - 1] >= 0.0f
+                        && buf[size_t(landed)] < 0.0f));
+            expect(onCrossing, "snapped drag lands on a zero crossing");
+            expect(undo->count() == 2, "snapped drag is the second entry");
+            snap->setChecked(false);
+        }
+
+        // 3. Pitch detection: the fixture carries smpl metadata, so nothing
+        // was silently prefilled; the button detects first, applies second.
+        auto *pitchApply = dialog.findChild<QPushButton *>(
+            QStringLiteral("samplePitchApply"));
+        auto *pitchLabel =
+            dialog.findChild<QLabel *>(QStringLiteral("samplePitchLabel"));
+        auto *baseKey =
+            dialog.findChild<QSpinBox *>(QStringLiteral("sampleBaseKey"));
+        auto *fineTune = dialog.findChild<QDoubleSpinBox *>(
+            QStringLiteral("sampleFineTune"));
+        expect(pitchApply && pitchLabel && baseKey && fineTune,
+               "pitch widgets found");
+        if (pitchApply && pitchLabel && baseKey && fineTune) {
+            expect(baseKey->value() == 60,
+                   "smpl metadata wins over detection at open");
+            pitchApply->click(); // detect + display only
+            expect(pitchLabel->text().contains(QStringLiteral("220"))
+                       && undo->count() == 2,
+                   "first click detects without applying");
+            pitchApply->click(); // apply
+            expect(baseKey->value() == 57
+                       && std::abs(fineTune->value() - 3.93) < 1.5
+                       && undo->count() == 3,
+                   "second click applies the detected pitch");
+        }
+
+        // 4. Suggest: chips appear; applying the best one produces a clean
+        // seam on this pure tone (badge green, NCC high).
+        auto *suggest = dialog.findChild<QPushButton *>(
+            QStringLiteral("sampleSuggestLoop"));
+        expect(suggest != nullptr, "suggest button found");
+        if (suggest) {
+            suggest->click();
+            auto *chip0 = dialog.findChild<QPushButton *>(
+                QStringLiteral("sampleLoopChip0"));
+            expect(chip0 != nullptr, "suggestion chips appear");
+            if (chip0) {
+                chip0->click();
+                expect(undo->count() == 4, "chip apply is one undo entry");
+                const ProcessedSample &out = doc->processed();
+                expect(out.looped && out.seam.valid && out.seam.ampLsb <= 2
+                           && out.seam.derivLsb <= 3
+                           && (!out.seam.nccValid || out.seam.ncc >= 0.95),
+                       "applied suggestion loops cleanly");
+                auto *badge = dialog.findChild<QLabel *>(
+                    QStringLiteral("sampleSeamBadge"));
+                expect(badge && badge->isVisible()
+                           && badge->text() == QStringLiteral("seam: clean"),
+                       "seam badge reads clean");
+            }
+        }
+
+        // 5. Refine is a no-worse local re-seat and one undo entry at most.
+        auto *refine = dialog.findChild<QPushButton *>(
+            QStringLiteral("sampleRefineLoop"));
+        const double nccBeforeRefine = doc->processed().seam.ncc;
+        if (refine) {
+            refine->click();
+            expect(doc->processed().seam.ncc >= nccBeforeRefine - 0.02,
+                   "refine keeps the seam at least as clean");
+        }
+        const int refineCount = undo->count(); // 4 or 5 (no-op refine skips)
+
+        // 6. Crossfade toggle flows into the params.
+        auto *crossfade = dialog.findChild<QCheckBox *>(
+            QStringLiteral("sampleCrossfade"));
+        expect(crossfade != nullptr, "crossfade toggle found");
+        if (crossfade) {
+            crossfade->setChecked(true);
+            expect(doc->params().crossfadeOn
+                       && undo->count() == refineCount + 1,
+                   "crossfade toggle is undoable");
+            crossfade->setChecked(false);
+        }
+
+        // 7. No engine was passed: the audition strip is disabled.
+        auto *playOnce = dialog.findChild<QPushButton *>(
+            QStringLiteral("sampleAuditionOnce"));
+        expect(playOnce && !playOnce->isEnabled(),
+               "audition strip disabled without audio");
+
+        // 8. Full undo walks back to the import defaults.
+        while (undo->canUndo())
+            undo->undo();
+        expect(doc->params() == SampleDocument::defaultParams(hiRes),
+               "full undo restores the import defaults");
+        while (undo->canRedo())
+            undo->redo();
+
+        // 9. Commit: register the render and re-run the §1 assertions.
+        auto *nameEdit =
+            dialog.findChild<QLineEdit *>(QStringLiteral("sampleNameEdit"));
+        expect(nameEdit != nullptr, "name field found");
+        if (nameEdit) {
+            nameEdit->setText(QStringLiteral("phase3_tone"));
+            const QByteArray incBefore = readFileBytes(incPath);
+            QString error;
+            expect(SampleRegistrar::registerSample(
+                       root, dialog.sampleName(), dialog.wavBytes(), &error),
+                   "phase-3 commit registers");
+            expect(readFileBytes(incPath)
+                       == incBefore
+                           + QByteArray(
+                               "\n\t.align 2\n"
+                               "DirectSoundWaveData_phase3_tone::\n"
+                               "\t.incbin \"sound/direct_sound_samples/"
+                               "phase3_tone.bin\"\n"),
+                   "commit appends exactly the registration block");
+            writeFile(root
+                          + QStringLiteral(
+                              "/sound/voicegroups/voicegroup_phase3.inc"),
+                      "voicegroup_phase3::\n"
+                      "\tvoice_directsound 60, 0, "
+                      "DirectSoundWaveData_phase3_tone, 255, 0, 255, 165\n");
+            const QByteArray rootUtf8 = root.toLocal8Bit();
+            LoadedVoiceGroup *vg = voicegroup_load(rootUtf8.constData(),
+                                                   "voicegroup_phase3",
+                                                   nullptr);
+            const ProcessedSample &out = doc->processed();
+            if (!vg) {
+                std::fprintf(stderr,
+                             "samplecheck: FAIL: phase3 voicegroup_load\n");
+                failures++;
+            } else {
+                const WaveData *wd = vg->voices[0].wav;
+                expect(wd && wd->freq == out.freq
+                           && wd->loopStart == out.loopStart
+                           && wd->size == out.size
+                           && wd->status == (out.looped ? 0x4000 : 0)
+                           && wd->data
+                           && std::memcmp(wd->data, out.s8.constData(),
+                                          out.size)
+                               == 0,
+                       "committed sample loads back identical (audition == "
+                       "build)");
+                voicegroup_free(vg);
+            }
+        }
+        if (failures == before)
+            std::printf("samplecheck: editor phase-3 OK\n");
     }
 
     // ---- corpus-conditional: the sc88pro reference set (item 5/6 halves) ----

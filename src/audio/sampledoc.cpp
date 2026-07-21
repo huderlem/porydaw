@@ -1,5 +1,6 @@
 #include "sampledoc.h"
 
+#include <algorithm>
 #include <cmath>
 
 #include "sampledsp.h"
@@ -7,45 +8,6 @@
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
-
-// Post-quantize seam click metrics (DSP.md §6), against the engine's
-// linear-interpolated wrap s[size−1] → s[loopStart]. NCC window W = 128
-// (the unpitched default until phase 3's pitch detection), shrunk to fit.
-SeamMetrics seamMetrics(const QByteArray &s8, qint64 loopStart)
-{
-    SeamMetrics seam;
-    const qint64 n = s8.size();
-    const qint64 S = loopStart, E = n - 1;
-    const qint64 loopLen = n - S;
-    if (loopLen < 2 || S + 1 >= n || E < 1)
-        return seam;
-    const auto at = [&](qint64 i) {
-        if (i >= n)
-            i = S + (i - S) % loopLen; // playback continues from the start
-        return double(qint8(s8[int(i)]));
-    };
-    seam.valid = true;
-    seam.ampLsb = int(std::abs(at(S) - (at(E) + (at(E) - at(E - 1)))));
-    seam.derivLsb = int(std::abs((at(S + 1) - at(S)) - (at(E) - at(E - 1))));
-
-    qint64 W = qMin<qint64>(128, loopLen / 2);
-    W = qMin(W, S); // the pre-loop-start window needs S − W ≥ 0
-    if (W >= 2) {
-        double ab = 0.0, aa = 0.0, bb = 0.0;
-        for (qint64 i = 0; i < 2 * W; i++) {
-            const double a = at(E + 1 - W + i);
-            const double b = at(S - W + i);
-            ab += a * b;
-            aa += a * a;
-            bb += b * b;
-        }
-        if (aa > 0.0 && bb > 0.0) {
-            seam.ncc = ab / std::sqrt(aa * bb);
-            seam.nccValid = true;
-        }
-    }
-    return seam;
-}
 
 } // namespace
 
@@ -202,7 +164,60 @@ ProcessedSample SampleDocument::render() const
         }
     }
 
-    // [7] Crossfade bake lands with the loop tooling in phase 3.
+    // [7] Crossfade bake at the seam (DSP.md §6): the loop end morphs into
+    // the material preceding the loop start, so end → start is continuous by
+    // construction. The fade length follows the pitch period implied by the
+    // unity note (the sample sounds f₀ = 440·2^((key−69)/12) at unity);
+    // the law is picked from the pre-bake seam NCC — linear on correlated
+    // material (equal-power would bump +3 dB), equal-power otherwise.
+    const double exactKey = double(p.baseKey) + p.fineTuneCents / 100.0;
+    if (p.crossfadeOn && loopOn) {
+        const double f0 = 440.0 * std::pow(2.0, (exactKey - 69.0) / 12.0);
+        const double period = f0 > 0.0 ? outputRate / f0 : 0.0;
+        const qint64 loopLen = nOut - loopStartOut;
+        qint64 F = std::max<qint64>(qint64(std::llround(4.0 * period)), 64);
+        F = std::min(F, qint64(std::llround(
+                            std::min(double(loopLen) / 4.0,
+                                     0.050 * outputRate))));
+        F = std::min(F, loopStartOut); // needs F samples before the start
+        if (F >= 4) {
+            const qint64 S = loopStartOut, E = nOut - 1;
+            double ab = 0.0, aa = 0.0, bb = 0.0;
+            const qint64 W = std::min<qint64>({128, S, loopLen / 2});
+            const auto wrapped = [&](qint64 j) {
+                return double(grid[size_t(j >= nOut ? S + (j - nOut) : j)]);
+            };
+            for (qint64 i = 0; W >= 2 && i < 2 * W; i++) {
+                const double a = wrapped(E + 1 - W + i);
+                const double b = double(grid[size_t(S - W + i)]);
+                ab += a * b;
+                aa += a * a;
+                bb += b * b;
+            }
+            const double ncc =
+                (aa > 0.0 && bb > 0.0) ? ab / std::sqrt(aa * bb) : 0.0;
+            const bool linear = ncc > 0.9;
+            for (qint64 i = 0; i < F; i++) {
+                // w runs 1 → exactly 0, so the final sample x[E] becomes
+                // x[S−1] — the sequence then continues into x[S] exactly as
+                // the source did, end → start continuous by construction.
+                const double t = double(i + 1) / double(F);
+                const double w = linear
+                    ? 1.0 - t
+                    : std::cos(kPi * t / 2.0) * std::cos(kPi * t / 2.0);
+                const qint64 idx = E - F + 1 + i;
+                // One loop length back: idx − L = S − F + i.
+                const qint64 src = S - F + i;
+                grid[size_t(idx)] = float(w * double(grid[size_t(idx)])
+                                          + (1.0 - w)
+                                              * double(grid[size_t(src)]));
+            }
+        } else {
+            out.warnings += QStringLiteral(
+                "loop start too close to the sample start for a crossfade "
+                "bake — skipped.");
+        }
+    }
 
     // [8] Micro fades (DSP.md §7). The fade-in never reaches into the loop
     // region; the fade-out only exists for one-shots and ends at exactly 0.
@@ -229,7 +244,6 @@ ProcessedSample SampleDocument::render() const
     out.loopStart = loopOn ? quint32(loopStartOut) : 0;
 
     // Pitch metadata (FORMATS.md §3): retune via the unity note, never DSP.
-    const double exactKey = double(p.baseKey) + p.fineTuneCents / 100.0;
     out.outputRate = outputRate;
     out.effectiveRate =
         outputRate * std::pow(2.0, (60.0 - exactKey) / 12.0);
@@ -243,7 +257,9 @@ ProcessedSample SampleDocument::render() const
         quint32(qMin<qint64>(qint64(std::llround(fracScaled)), 4294967295LL));
     out.normalizeGain = gain;
     if (loopOn)
-        out.seam = seamMetrics(out.s8, loopStartOut);
+        out.seam = SampleDsp::seamMetricsAt(
+            reinterpret_cast<const qint8 *>(out.s8.constData()), nOut,
+            loopStartOut, nOut - 1);
     out.preview = std::move(grid);
     return out;
 }

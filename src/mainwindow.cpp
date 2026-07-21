@@ -338,6 +338,8 @@ void MainWindow::buildUi()
             &MainWindow::onVoiceEditRequested);
     connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
             &MainWindow::newVoicegroup);
+    connect(m_vgBrowser, &VoicegroupBrowser::newSampleRequested, this,
+            &MainWindow::importSampleForSlot);
     // The dock's voicegroup selector: same undoable cfg edit as Song
     // Settings; onDocumentChanged does the actual swap (and, on a
     // not-found arg, keeps the old voicegroup with a status message).
@@ -1368,6 +1370,11 @@ void MainWindow::importMidi()
 
 void MainWindow::importSample()
 {
+    importSampleForSlot(-1);
+}
+
+void MainWindow::importSampleForSlot(int slot)
+{
     if (!m_project.isOpen())
         return;
     // Refuse before the file dialog: a legacy-aif or unwired project can't
@@ -1412,12 +1419,25 @@ void MainWindow::importSample()
 
     const QString root = m_project.root();
     const QStringList symbols = vgCatalog().directSound;
+    // Browser-initiated: audition with the destination voice's envelope
+    // when that slot already holds a DirectSound-family voice.
+    AuditionSlots::Adsr destAdsr;
+    bool hasDestAdsr = false;
+    if (slot >= 0 && m_active && m_active->vgSource) {
+        const VgVoice *dest = m_active->vgSource->voiceAt(slot);
+        if (dest && !vgMacroIsCgb(dest->macro)) {
+            destAdsr = {uint8_t(dest->attack), uint8_t(dest->decay),
+                        uint8_t(dest->sustain), uint8_t(dest->release)};
+            hasDestAdsr = true;
+        }
+    }
     SampleEditorDialog dialog(
         std::move(sample),
         [root, symbols](const QString &name, QString *validationError) {
             return SampleRegistrar::validateSampleName(root, name, symbols,
                                                        validationError);
         },
+        m_audioOk ? &m_audio : nullptr, hasDestAdsr ? &destAdsr : nullptr,
         this);
     if (dialog.exec() != QDialog::Accepted)
         return;
@@ -1431,6 +1451,26 @@ void MainWindow::importSample()
     }
     invalidateVgCatalog();
     updateVoicegroupBrowser();
+
+    // Browser-initiated: point the requesting slot's voice at the new sample
+    // via the session undo stack — the file creation above is write-through,
+    // but the voice assignment stays undoable (PLAN.md §3).
+    if (slot >= 0 && m_active && m_active->vgSource) {
+        VgVoice voice;
+        voice.macro = VgMacro::DirectSound;
+        voice.key = 60;
+        voice.pan = 0;
+        voice.symbol =
+            QStringLiteral("DirectSoundWaveData_") + dialog.sampleName();
+        const VgAdsr adsr = vgDefaultAdsr(vgCatalog().typicalAdsr,
+                                          voice.macro, voice.symbol);
+        voice.attack = adsr.attack;
+        voice.decay = adsr.decay;
+        voice.sustain = adsr.sustain;
+        voice.release = adsr.release;
+        onVoiceEditRequested(slot, voice, true);
+        m_vgBrowser->revealSlot(slot);
+    }
     statusBar()->showMessage(
         tr("Imported %1 — DirectSoundWaveData_%1 is now available to "
            "voicegroups")

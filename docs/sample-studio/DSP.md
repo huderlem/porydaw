@@ -258,7 +258,12 @@ scale-invariant, add explicit gates:
 2. Candidate ends: coarse grid every 4 samples over `[A + L, B]`;
    `S = E + 1 − L`.
 3. Coarse NCC (window W/2) on the ×4 grid → keep top 200 → full-W NCC at
-   1-sample resolution over ±4 around each survivor → apply gates.
+   1-sample resolution over ±4 around each survivor → apply gates. The
+   gates also pre-filter the top-200 pool (they are O(1) via the energy
+   prefix): on steady material near-perfect NCC is abundant, and an ungated
+   pool can fill entirely with level-mismatched candidates that the fine
+   pass then throws away. Gate-failing candidates go to a small side pool
+   used only when nothing passes anywhere (the best-effort case below).
 4. Score = `0.6·NCC + 0.2·(1 − |ΔRMS_dB|/1.5) + 0.2·log(L)/log(L_max)`
    (mild long-loop preference). Dedupe candidates whose S and E are both
    within P/2 of a better-scoring one. **Return top 5** for the UI.
@@ -285,11 +290,16 @@ round(min(L/4, 50 ms)))`; require `S ≥ F` (shrink F otherwise). For
 `i ∈ [0, F)`:
 
 ```
-x[E−F+1+i] ← w(i)·x[E−F+1+i] + (1−w(i))·x[S−F+1+i]
+x[E−F+1+i] ← w(i)·x[E−F+1+i] + (1−w(i))·x[S−F+i]
 ```
 
-— the loop end morphs into the material preceding the loop start, making
-end→start continuous by construction. Law auto-selected by seam NCC:
+— each faded sample blends with the material exactly one loop length back
+(`(E−F+1+i) − L = S−F+i`), and `w` runs 1 → exactly 0, so the final sample
+`x[E]` lands on `x[S−1]`: the loop end morphs into the material preceding
+the loop start, making end→start continuous by construction. (An earlier
+draft wrote the source index as `S−F+1+i`; that is off by one — it makes
+`x[E]` morph into `x[S]` itself, so the wrap plays `x[S]` twice and the
+first-order seam error becomes one full sample slope instead of ~0.) Law auto-selected by seam NCC:
 **linear** when NCC > 0.9 (correlated material — equal-power would bump
 +3 dB), **equal-power** (`w = cos²`) otherwise. It is a pipeline stage
 (destructive-with-preview): undo = toggle off and re-render.

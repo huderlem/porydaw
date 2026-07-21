@@ -54,6 +54,8 @@ qt_add_executable(porydaw
     src/sessioncheck.cpp
     src/audio/audioengine.cpp
     src/audio/audioengine.h
+    src/audio/auditionslots.cpp
+    src/audio/auditionslots.h
     src/audio/miniaudio_impl.c
     src/audio/wavexport.cpp
     src/audio/wavexport.h
@@ -94,6 +96,8 @@ qt_add_executable(porydaw
     src/ui/newsongwizard.h
     src/ui/sampleeditordialog.cpp
     src/ui/sampleeditordialog.h
+    src/ui/waveformview.cpp
+    src/ui/waveformview.h
     src/ui/voicegroupbrowser.cpp
     src/ui/voicegroupbrowser.h
     src/ui/enginesettingsdialog.cpp

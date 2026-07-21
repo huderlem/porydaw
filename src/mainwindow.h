@@ -68,6 +68,9 @@ private slots:
     void newSong();
     void importMidi();
     void importSample();
+    // Sample Studio entry (slot >= 0: browser-initiated — after the commit
+    // the new sample is auto-assigned to that voice slot as an undo command).
+    void importSampleForSlot(int slot);
     void registerLoadedSong();
     void uiTick();
     void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural);

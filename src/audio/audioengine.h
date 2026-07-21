@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "audio/auditionslots.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
 
@@ -97,6 +98,20 @@ public:
     // browser). Runs on a second engine instance (SPEC §3) so the program
     // change never disturbs playback track state. velocity 0 releases.
     void previewVoice(uint8_t voice, uint8_t key, uint8_t velocity);
+
+    // Hot: Sample Studio in-memory sample audition (PLAN.md §4). Plays the
+    // rendered s8 bytes through the audition engine instance on a dedicated
+    // track, so an unregistered sample is heard with the engine's real
+    // fetch/loop/envelope math. A new publish releases the previous
+    // audition. Returns false when every slot is still busy (the caller
+    // coalesces — retry on the next re-render).
+    bool auditionSample(const QByteArray &s8, uint32_t freq,
+                        uint32_t loopStart, bool looped, uint8_t key,
+                        const AuditionSlots::Adsr &adsr)
+    {
+        return m_audition.publishNote(s8, freq, loopStart, looped, key, adsr);
+    }
+    void auditionSampleOff() { m_audition.publishOff(); }
 
     // Hot: re-copy every track's cached instrument from the voicegroup, so a
     // voice edit made through voiceForEdit is heard by already-playing tracks
@@ -198,8 +213,13 @@ private:
     const MidiTimeline *m_timeline = nullptr; // not owned (the active song tab's)
     LoadedVoiceGroup *m_voicegroup = nullptr; // not owned (the active song tab's)
     SongSettings m_settings;
-    // Audition instance: voice previews only, mixed on top of the main engine.
+    // Audition instance: voice previews and sample auditions, mixed on top
+    // of the main engine.
     std::unique_ptr<M4AEngine> m_previewEngine;
+    // Sample Studio audition slots (PLAN.md §4), played on the audition
+    // instance's track 1 (previewVoice owns track 0).
+    static constexpr int kAuditionTrack = 1;
+    AuditionSlots m_audition;
 
     // Hot control state (UI writes, audio thread reads)
     std::atomic<int> m_transport{static_cast<int>(Transport::Stopped)};

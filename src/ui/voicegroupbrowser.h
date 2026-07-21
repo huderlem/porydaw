@@ -85,6 +85,11 @@ signals:
     // the voicegroup needs a reload from rendered source to audition.
     void voiceEditRequested(int slot, const VgVoice &voice, bool structural);
     void newVoicegroupRequested();
+    // "New sample…" beside the DirectSound sample combo: create a sample via
+    // Sample Studio and point this slot's voice at it. The browser stays a
+    // pure view — MainWindow opens the dialog, writes the files, and applies
+    // the voice assignment as an undo command.
+    void newSampleRequested(int slot);
     // The user picked/typed a different voicegroup arg in the selector. The
     // browser does not switch anything itself: the owner commits it as an
     // undoable cfg edit and reflects it back via setCurrentVoicegroupArg.
@@ -134,7 +139,9 @@ private:
     QWidget *m_editor = nullptr;
     QLabel *m_notice = nullptr;
     QComboBox *m_typeCombo = nullptr;
+    QWidget *m_symbolRow = nullptr;
     QComboBox *m_symbolCombo = nullptr;
+    QPushButton *m_newSampleButton = nullptr;
     QWidget *m_sweepRow = nullptr;
     QSpinBox *m_sweepTimeSpin = nullptr;
     QComboBox *m_sweepDirCombo = nullptr;

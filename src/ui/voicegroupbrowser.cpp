@@ -187,10 +187,23 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
         m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
     addRow(tr("Type"), m_typeCombo, &m_typeLabel);
 
-    m_symbolCombo = new QComboBox(m_editor);
+    m_symbolRow = new QWidget(m_editor);
+    auto *symbolLayout = new QHBoxLayout(m_symbolRow);
+    symbolLayout->setContentsMargins(0, 0, 0, 0);
+    symbolLayout->setSpacing(2);
+    m_symbolCombo = new QComboBox(m_symbolRow);
     m_symbolCombo->setEditable(true);
     m_symbolCombo->setInsertPolicy(QComboBox::NoInsert);
-    addRow(tr("Sample"), m_symbolCombo, &m_symbolLabel);
+    symbolLayout->addWidget(m_symbolCombo, 1);
+    // Sample Studio entry (SPEC §6.2): visible on DirectSound sample voices.
+    m_newSampleButton = new QPushButton(tr("New…"), m_symbolRow);
+    m_newSampleButton->setObjectName(QStringLiteral("vgNewSampleButton"));
+    m_newSampleButton->setToolTip(
+        tr("Import a new sample and assign it to this voice."));
+    symbolLayout->addWidget(m_newSampleButton);
+    connect(m_newSampleButton, &QPushButton::clicked, this,
+            [this] { emit newSampleRequested(currentSlot()); });
+    addRow(tr("Sample"), m_symbolRow, &m_symbolLabel);
 
     // The sweep byte is the GB NR10 register: three packed fields, edited
     // separately (value = 16*time + 8*direction + shift).
@@ -294,6 +307,7 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     // filter refuses Space on their behalf (see eventFilter). The button is
     // a mouse target — keyboard focus on it would also swallow Space.
     m_newButton->setFocusPolicy(Qt::NoFocus);
+    m_newSampleButton->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_vgCombo, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,
@@ -499,7 +513,7 @@ void VoicegroupBrowser::setEditorRowsVisible(VgMacro macro, bool synth, bool vis
         field->setVisible(on);
     };
     showRow(m_typeLabel, m_typeCombo, visible);
-    showRow(m_symbolLabel, m_symbolCombo, visible && vgMacroHasSymbol(macro));
+    showRow(m_symbolLabel, m_symbolRow, visible && vgMacroHasSymbol(macro));
     showRow(m_sweepLabel, m_sweepRow, visible && macroIsSquare1(macro));
     showRow(m_dutyLabel, m_dutyCombo,
             visible && (macroIsSquare1(macro) || macroIsSquare2(macro)));
@@ -622,6 +636,8 @@ void VoicegroupBrowser::populateEditor()
                                                    : m_sampleChoices);
         }
         m_symbolCombo->setCurrentText(voice->symbol);
+        m_newSampleButton->setVisible(!synth && !wave && !drumkit
+                                      && macroIsDsFamily(voice->macro));
     }
     m_synthWaveCombo->setCurrentIndex(std::clamp(synthDesc.waveform, 0, 2));
     m_synthDutySpin->setValue(synthDesc.baseDuty);
