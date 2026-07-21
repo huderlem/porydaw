@@ -800,6 +800,28 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         expect(aifs.baseKey == 56 && std::abs(aifs.fracSemitone - 0.75) < 1e-12,
                "aiff INST detune renormalized into unity/fraction");
 
+        // A data chunk claiming ~2 GB in a 108-byte file must never drive a
+        // header-sized allocation: dr_wav clamps the chunk to the actual
+        // buffer (its onTell validation), and decodeWav's own guard backs
+        // that up, so the import succeeds with exactly the real frames.
+        FixtureSpec lying;
+        lying.bits = 16;
+        lying.withSmpl = false;
+        for (int i = 0; i < 32; i++)
+            putU16(&lying.samples, quint16(i));
+        QByteArray lyingWav = fixtureWav(lying);
+        const qsizetype dataSizeAt = 12 + 8 + 16 + 4; // data chunk size field
+        lyingWav[dataSizeAt] = char(0xF0);
+        lyingWav[dataSizeAt + 1] = char(0xFF);
+        lyingWav[dataSizeAt + 2] = char(0xFF);
+        lyingWav[dataSizeAt + 3] = char(0x7F);
+        ImportedSample lied;
+        expect(importAudioBytes(lyingWav, QStringLiteral("f/lying.wav"),
+                                &lied, &error)
+                   && lied.frameCount() == 32
+                   && lied.buffer[1] == float(1.0 / 32768.0),
+               "lying data-chunk size clamps to the real bytes");
+
         // Refusals.
         ImportedSample junk;
         expect(!importAudioBytes(QByteArray("MThd not audio at all"),
@@ -1085,6 +1107,23 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         docA.setParams(p);
         expect(docA.processed().s8 == b.s8,
                "param round-trip re-renders identically");
+
+        // Seam metrics: a mid-buffer loop start forms the NCC window; a
+        // loop starting at 0 has no pre-start context, so ncc is flagged
+        // invalid (amp/slope stay valid) and readouts must not show 0%.
+        SampleEditParams mid = SampleDocument::defaultParams(hiRes);
+        SampleDocument docMid(hiRes);
+        docMid.setParams(mid);
+        expect(docMid.processed().seam.valid
+                   && docMid.processed().seam.nccValid,
+               "mid-buffer loop start gets a valid NCC");
+        SampleEditParams zero = mid;
+        zero.loopStart = 0;
+        SampleDocument docZero(hiRes);
+        docZero.setParams(zero);
+        expect(docZero.processed().seam.valid
+                   && !docZero.processed().seam.nccValid,
+               "loop-from-0 seam flags NCC as unformable");
         if (failures == before)
             std::printf("samplecheck: pipeline determinism OK\n");
     }
@@ -1392,16 +1431,27 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                        && dialog.document()->processed().size == 64,
                    "loop toggle renders a one-shot");
 
-            // Free-entry rate: parsed as a double, declared rate rounds.
+            // Free-entry rate applies on commit (editingFinished), not per
+            // keystroke — every apply is a full synchronous render.
             rateCombo->setEditText(QStringLiteral("6689.5"));
+            expect(dialog.document()->params().targetRate
+                       != 6689.5,
+                   "typing a rate does not re-render per keystroke");
+            rateCombo->lineEdit()->editingFinished();
             expect(dialog.document()->params().targetRate == 6689.5
                        && dialog.document()->processed().declaredRate == 6690,
-                   "free-entry target rate flows into the render");
+                   "committed target rate flows into the render");
             expect(dialog.document()->params().exactPitchOverride == 0,
                    "rate edit drops the verbatim agbp");
 
-            // Crop and normalize controls flow through too.
-            rateCombo->setCurrentIndex(0); // back to "keep source"
+            // Crop and normalize controls flow through too. The index is
+            // still 0 (free entry only changed the text), so bounce it to
+            // fire currentIndexChanged and restore "keep source".
+            rateCombo->setCurrentIndex(1);
+            rateCombo->setCurrentIndex(0);
+            expect(dialog.document()->params().targetRate
+                       == dialog.document()->source().sampleRate,
+                   "preset pick applies and restores the source rate");
             auto *cropEnd = dialog.findChild<QSpinBox *>(
                 QStringLiteral("sampleCropEnd"));
             auto *normalize = dialog.findChild<QComboBox *>(

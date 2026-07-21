@@ -96,6 +96,10 @@ struct SeamMetrics {
     int ampLsb = 0;   // first-order continuation error at the wrap
     int derivLsb = 0; // slope mismatch across the wrap
     double ncc = 0.0; // normalized cross-correlation of the seam windows
+    // The NCC window needs pre-loop-start context; loops starting at (or
+    // within a sample of) the buffer start have none, so ncc is meaningless
+    // there — readouts must not show "match 0%" for a possibly clean seam.
+    bool nccValid = false;
 };
 
 // The deterministic render: final signed-8 bytes plus the GBA header fields

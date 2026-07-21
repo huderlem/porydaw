@@ -118,11 +118,20 @@ bool decodeWav(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
         drwav_uninit(&wav);
         return fail(error, QStringLiteral("no audio data."));
     }
+    const double declaredRate = double(wav.sampleRate);
 
     // Decode the container's native frames and convert on the canonical
     // scale ourselves — dr_wav's own u8 float conversion is (x/255)·2 − 1,
     // not the (x − 128)/128 that DSP.md §2's bit-exact round-trip needs.
+    // dr_wav clamps a lying data-chunk size to the actual buffer (its
+    // onTell validation); this bound is the backstop so the allocation can
+    // never be header-sized even if that vendored behavior changes.
     const size_t bytesPerFrame = size_t(bits / 8) * size_t(channels);
+    if (frames > quint64(bytes.size()) / bytesPerFrame) {
+        drwav_uninit(&wav);
+        return fail(error,
+                    QStringLiteral("the WAV file is corrupt or truncated."));
+    }
     std::vector<quint8> raw(size_t(frames) * bytesPerFrame);
     const quint64 read = drwav_read_pcm_frames(&wav, frames, raw.data());
 
@@ -242,7 +251,7 @@ bool decodeWav(const QByteArray &bytes, bool leftOnly, ImportedSample *out,
         out->sampleRate = rateFromAgbPitch(
             agbp, double(out->baseKey) + out->fracSemitone);
     else
-        out->sampleRate = double(wav.sampleRate);
+        out->sampleRate = declaredRate;
     return true;
 }
 

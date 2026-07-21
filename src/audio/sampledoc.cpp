@@ -39,8 +39,10 @@ SeamMetrics seamMetrics(const QByteArray &s8, qint64 loopStart)
             aa += a * a;
             bb += b * b;
         }
-        if (aa > 0.0 && bb > 0.0)
+        if (aa > 0.0 && bb > 0.0) {
             seam.ncc = ab / std::sqrt(aa * bb);
+            seam.nccValid = true;
+        }
     }
     return seam;
 }

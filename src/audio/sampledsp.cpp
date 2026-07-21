@@ -24,12 +24,28 @@ double besselI0(double x)
     return sum;
 }
 
-inline double sinc(double v)
+// Kaiser window as a function of arg = 1 − v², linearly interpolated from a
+// table: w(v) = I₀(β·sqrt(arg))/I₀(β) = g(arg). Tabulating over arg needs no
+// per-tap sqrt or I₀ series — the render budget is interactive (the dialog
+// re-renders on every control change), and per-tap I₀ dominated it ~10:1.
+// β is a compile-time constant, so the table is built once.
+constexpr int kKaiserTableN = 8192;
+
+double kaiserFromArg(double arg)
 {
-    if (std::abs(v) < 1e-12)
-        return 1.0;
-    const double pv = kPi * v;
-    return std::sin(pv) / pv;
+    static const std::vector<double> table = [] {
+        std::vector<double> t(kKaiserTableN + 1);
+        const double i0Beta = besselI0(kBeta);
+        for (int i = 0; i <= kKaiserTableN; i++)
+            t[size_t(i)] =
+                besselI0(kBeta * std::sqrt(double(i) / kKaiserTableN))
+                / i0Beta;
+        return t;
+    }();
+    const double x = arg * kKaiserTableN;
+    const int i = int(x) >= kKaiserTableN ? kKaiserTableN - 1 : int(x);
+    const double f = x - double(i);
+    return table[size_t(i)] * (1.0 - f) + table[size_t(i) + 1] * f;
 }
 
 } // namespace
@@ -64,23 +80,35 @@ std::vector<float> resampleSinc(const float *x, qint64 n, double ratio,
 
     const double fc = 0.5 * std::min(1.0, ratio) * kRolloff;
     const double W = kLobesPerSide / (2.0 * fc);
-    const double i0Beta = besselI0(kBeta);
+    // sin(2π·fc·u) advances by a constant phase step as k walks the taps —
+    // one rotation per tap replaces a libm sin() call (double keeps the
+    // accumulated error ~1e-14 over the ~400-tap window).
+    const double stepSin = std::sin(2.0 * kPi * fc);
+    const double stepCos = std::cos(2.0 * kPi * fc);
 
     for (qint64 out = 0; out < outCount; out++) {
         const double t = double(out) / ratio;
         const qint64 k0 = qint64(std::ceil(t - W));
         const qint64 k1 = qint64(std::floor(t + W));
+        double u = double(k0) - t;
+        double s = std::sin(2.0 * kPi * fc * u);
+        double c = std::cos(2.0 * kPi * fc * u);
         double num = 0.0, den = 0.0;
-        for (qint64 k = k0; k <= k1; k++) {
-            const double u = double(k) - t;
+        for (qint64 k = k0; k <= k1; k++, u += 1.0) {
             const double v = u / W;
             const double arg = 1.0 - v * v;
-            if (arg < 0.0)
-                continue;
-            const double h = 2.0 * fc * sinc(2.0 * fc * u)
-                * (besselI0(kBeta * std::sqrt(arg)) / i0Beta);
-            num += sample(k) * h;
-            den += h;
+            if (arg >= 0.0) {
+                // h(u) = 2fc·sinc(2fc·u)·kaiser = sin(2π·fc·u)/(π·u)·kaiser.
+                const double h = (std::abs(u) < 1e-9
+                                      ? 2.0 * fc
+                                      : s / (kPi * u))
+                    * kaiserFromArg(arg);
+                num += sample(k) * h;
+                den += h;
+            }
+            const double sn = s * stepCos + c * stepSin;
+            c = c * stepCos - s * stepSin;
+            s = sn;
         }
         // Per-output tap-sum normalization: exact unity DC gain at every
         // fractional position, clean edge handling.

@@ -119,6 +119,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_fineTune->setDecimals(2);
     m_fineTune->setSuffix(tr(" cents"));
     m_fineTune->setValue(defaults.fineTuneCents);
+    m_sourceCents = m_fineTune->value(); // spin-rounded source tuning
     m_fineTune->setKeyboardTracking(false);
     connect(m_fineTune, &QDoubleSpinBox::valueChanged, this,
             &SampleEditorDialog::applyParamsFromUi);
@@ -140,7 +141,12 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     for (const int rate : kGbaMixRates)
         m_rateCombo->addItem(QString::number(rate));
     m_rateCombo->setCurrentIndex(0);
-    connect(m_rateCombo, &QComboBox::editTextChanged, this,
+    // Apply on commit (preset pick, Enter, focus-out) — not per keystroke:
+    // every apply is a full synchronous pipeline render (~120 ms/5 s of
+    // source), too heavy to run while a custom rate is being typed.
+    connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
+            &SampleEditorDialog::applyParamsFromUi);
+    connect(m_rateCombo->lineEdit(), &QLineEdit::editingFinished, this,
             &SampleEditorDialog::applyParamsFromUi);
     form->addRow(tr("Target rate (Hz):"), m_rateCombo);
 
@@ -212,8 +218,6 @@ QByteArray SampleEditorDialog::wavBytes()
 
 void SampleEditorDialog::applyParamsFromUi()
 {
-    if (m_updatingUi)
-        return;
     const ImportedSample &src = m_doc.source();
     SampleEditParams p = m_doc.params();
     p.cropStart = m_cropStart->value();
@@ -229,10 +233,12 @@ void SampleEditorDialog::applyParamsFromUi()
     p.normalizeMode =
         SampleEditParams::NormalizeMode(m_normalizeMode->currentIndex());
     // The source agbp word stays authoritative only while the pipeline
-    // leaves pitch untouched (identity rate, source key/tuning).
+    // leaves pitch untouched (identity rate, source key/tuning). Tuning
+    // compares against the spin's own rounded rendition of the source
+    // fraction — both sides are spin values, so equality is exact.
     const bool pitchUntouched = src.exactPitch != 0
         && p.targetRate == src.sampleRate && p.baseKey == src.baseKey
-        && std::abs(p.fineTuneCents - src.fracSemitone * 100.0) < 1e-9;
+        && p.fineTuneCents == m_sourceCents;
     p.exactPitchOverride = pitchUntouched ? src.exactPitch : 0;
     m_doc.setParams(p);
     refreshOutputs();
@@ -268,11 +274,13 @@ void SampleEditorDialog::refreshOutputs()
                  .arg(midiKeyName(out.unityNote));
     const quint32 romBytes = 16 + ((out.size + 3) & ~quint32(3));
     QString cost = tr("ROM cost: %1 bytes").arg(romBytes);
-    if (out.seam.valid)
-        cost += tr(" — seam amp %1 LSB, slope %2, match %3%")
+    if (out.seam.valid) {
+        cost += tr(" — seam amp %1 LSB, slope %2")
                     .arg(out.seam.ampLsb)
-                    .arg(out.seam.derivLsb)
-                    .arg(int(out.seam.ncc * 100.0));
+                    .arg(out.seam.derivLsb);
+        if (out.seam.nccValid)
+            cost += tr(", match %1%").arg(int(out.seam.ncc * 100.0));
+    }
     lines += cost;
     for (const QString &w : m_doc.source().warnings + out.warnings)
         lines += tr("Warning: %1").arg(w);

@@ -103,8 +103,14 @@ of §9 item 1 down ~0.9 dB at 6.0 kHz. L = 56 puts the −0.1 dB point above
   `min(1, r)` pins the cutoff at the source Nyquist.
 - **Per-output tap-sum normalization** (the `/Σh` above) forces exact unity
   DC gain at every fractional position and cleanly handles edges.
-- `kaiser` via the standard I₀ power series (double, ~25 terms, ~15 lines).
-  Direct `sin()` per tap is fine offline.
+- `kaiser` via the standard I₀ power series (double, ~25 terms, ~15 lines),
+  **tabulated once** over `arg = 1 − v² ∈ [0, 1]` (8192 entries, linear
+  interpolation — β is a compile-time constant) and `sin` advanced by a
+  constant-phase rotation per tap. Rationale: the render is *interactive*
+  (the dialog re-runs the whole pipeline on every control change), and
+  per-tap I₀/sin measured 785 ms for 5 s of 44.1 kHz source vs 120 ms
+  tabulated; both approximations sit ~1e-8, far under the §9 margins
+  (measured −0.0006 dB at 6 kHz, −119 dB at 8 kHz, unchanged).
 - **Edges**: zeros before sample 0 (silence-before-attack is truth). For a
   *looped source* whose loop metadata is known, pad past the end by
   **wrapping loop content** (continue reading from `loopStart`) so the filter

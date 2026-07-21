@@ -49,7 +49,11 @@ private:
 
     SampleDocument m_doc;
     NameValidator m_validator;
-    bool m_updatingUi = false;
+    // The fine-tune spin's rendition of the source tuning (the spin rounds
+    // to 2 decimals): the verbatim-agbp carry compares against this, not the
+    // full-precision source fraction, so an unrelated edit can't spuriously
+    // drop the override.
+    double m_sourceCents = 0.0;
 
     QSpinBox *m_cropStart;
     QSpinBox *m_cropEnd;
