@@ -115,6 +115,7 @@ void AudioEngine::shutdown()
         m4a_engine_destroy(m_previewEngine.get());
         m_previewEngine.reset();
     }
+    m_audition.reset();
     m_timeline = nullptr;
     m_voicegroup = nullptr;
     if (m_context) {
@@ -276,6 +277,8 @@ void AudioEngine::resetPreviewEngine()
     m_previewEngine->analogFilter = m_settings.analogFilter;
     m4a_engine_set_pcm_mix_rate(m_previewEngine.get(), m_settings.pcmMixRate);
     m_previewVoiceKey = -1;
+    // The reinit destroyed every channel, so all audition slots retire.
+    m_audition.reset();
 }
 
 void AudioEngine::previewNote(uint8_t track, uint8_t key, uint8_t velocity)
@@ -605,6 +608,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyPreviewNote();
     applyTimedPreviews(frameCount);
     applyPreviewVoice();
+    m_audition.apply(m_previewEngine.get(), kAuditionTrack);
     applyPolyDebug();
 
     // Voice edits: tracks hold a ToneData copy taken at program change, so a

@@ -34,10 +34,15 @@
 #include <algorithm>
 #include <cstring>
 
+#include "audio/sampleimport.h"
+#include "audio/sf2reader.h"
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
+#include "project/samplereg.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#include "ui/sampleeditordialog.h"
+#include "ui/sf2zonepicker.h"
 #include "ui/polyphonypanel.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
@@ -241,6 +246,12 @@ void MainWindow::buildUi()
             m_active->view->setEventListVisible(on);
     });
 
+    // Tools menu: project-level utilities that aren't song-scoped.
+    QMenu *toolsMenu = menuBar()->addMenu(tr("&Tools"));
+    m_importSampleAction = toolsMenu->addAction(tr("Import &Sample..."), this,
+                                                &MainWindow::importSample);
+    m_importSampleAction->setEnabled(false);
+
     // Transport toolbar
     QToolBar *transport = addToolBar(tr("Transport"));
     // saveState() persists dock/toolbar layout by objectName only.
@@ -329,6 +340,10 @@ void MainWindow::buildUi()
             &MainWindow::onVoiceEditRequested);
     connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
             &MainWindow::newVoicegroup);
+    connect(m_vgBrowser, &VoicegroupBrowser::newSampleRequested, this,
+            &MainWindow::importSampleForSlot);
+    connect(m_vgBrowser, &VoicegroupBrowser::editSampleRequested, this,
+            &MainWindow::editSampleForSlot);
     // The dock's voicegroup selector: same undoable cfg edit as Song
     // Settings; onDocumentChanged does the actual swap (and, on a
     // not-found arg, keeps the old voicegroup with a status message).
@@ -814,6 +829,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
 
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
+    m_importSampleAction->setEnabled(true);
     updateWindowTitle();
     populateSongList();
     m_songList->setCurrentSong(-1);
@@ -1354,6 +1370,349 @@ void MainWindow::importMidi()
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(),
                      wizard.player(), wizard.cfg(), wizard.newVoicegroupName());
+}
+
+void MainWindow::importSample()
+{
+    importSampleForSlot(-1);
+}
+
+void MainWindow::importSampleForSlot(int slot)
+{
+    if (!m_project.isOpen())
+        return;
+    // Refuse before the file dialog: a legacy-aif or unwired project can't
+    // take samples no matter which file is picked.
+    const SampleFormatProbe probe =
+        SampleRegistrar::probeSampleFormat(m_project.root());
+    if (!probe.ok()) {
+        QMessageBox::warning(this, tr("Import Sample"), probe.refusal);
+        return;
+    }
+    QSettings settings;
+    const QString startDir =
+        settings.value(QStringLiteral("lastSampleDir"), QDir::homePath())
+            .toString();
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Import Sample"), startDir,
+        tr("Audio files (*.wav *.aif *.aiff *.mp3 *.flac *.ogg *.sf2);;"
+           "All files (*)"));
+    if (path.isEmpty())
+        return;
+    settings.setValue(QStringLiteral("lastSampleDir"), QFileInfo(path).path());
+
+    QFile sourceFile(path);
+    if (!sourceFile.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("Import Sample"),
+                             tr("Cannot read %1.").arg(path));
+        return;
+    }
+    const QByteArray sourceBytes = sourceFile.readAll();
+    sourceFile.close();
+
+    ImportedSample sample;
+    QString error;
+    // Decode choices beyond the source bytes, recorded in the provenance
+    // sidecar so "Edit sample…" can re-decode identically.
+    bool leftOnly = false;
+    int sf2Zone = -1;
+    if (sf2Magic(sourceBytes)) {
+        // SoundFonts hold many samples: pick a zone first (FORMATS.md §5);
+        // the chosen zone then rides the ordinary editor pipeline.
+        Sf2File font;
+        if (!readSf2Bytes(sourceBytes, path, &font, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+        Sf2ZonePicker picker(font, this);
+        if (picker.exec() != QDialog::Accepted)
+            return;
+        if (!extractSf2Zone(font, picker.selectedZone(), &sample, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+        sf2Zone = picker.selectedZone();
+    } else {
+        if (!importAudioBytes(sourceBytes, path, &sample, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+        if (sample.phaseCancelStereo
+            && QMessageBox::question(
+                   this, tr("Import Sample"),
+                   tr("The left and right channels of %1 are "
+                      "phase-cancelling — the mono mix may sound hollow.\n\n"
+                      "Import the left channel only instead?")
+                       .arg(QFileInfo(path).fileName()))
+                == QMessageBox::Yes) {
+            if (!importAudioBytes(sourceBytes, path, &sample, &error, true)) {
+                QMessageBox::warning(
+                    this, tr("Import Sample"),
+                    tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+                return;
+            }
+            leftOnly = true;
+        }
+    }
+
+    const QString root = m_project.root();
+    const QStringList symbols = vgCatalog().directSound;
+    // Browser-initiated: audition with the destination voice's envelope
+    // when that slot already holds a DirectSound-family voice.
+    AuditionSlots::Adsr destAdsr;
+    bool hasDestAdsr = false;
+    if (slot >= 0 && m_active && m_active->vgSource) {
+        const VgVoice *dest = m_active->vgSource->voiceAt(slot);
+        if (dest && !vgMacroIsCgb(dest->macro)) {
+            destAdsr = {uint8_t(dest->attack), uint8_t(dest->decay),
+                        uint8_t(dest->sustain), uint8_t(dest->release)};
+            hasDestAdsr = true;
+        }
+    }
+    SampleEditorDialog dialog(
+        std::move(sample),
+        [root, symbols](const QString &name, QString *validationError) {
+            return SampleRegistrar::validateSampleName(root, name, symbols,
+                                                       validationError);
+        },
+        m_audioOk ? &m_audio : nullptr, hasDestAdsr ? &destAdsr : nullptr,
+        this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    // Write-through commit (not undoable, like song registration): the
+    // rendered .wav (FORMATS.md §1) plus its direct_sound_data.inc block.
+    if (!SampleRegistrar::registerSample(root, dialog.sampleName(),
+                                         dialog.wavBytes(), &error)) {
+        QMessageBox::warning(this, tr("Import Sample"), error);
+        return;
+    }
+    // Provenance sidecar (PLAN.md §3): source identity + the edit params, so
+    // "Edit sample…" reopens from the hi-res source. Auxiliary — a failed
+    // write never fails the commit that just landed.
+    SampleSidecar sidecar;
+    sidecar.sourcePath = QFileInfo(path).absoluteFilePath();
+    sidecar.sourceSha256 = SampleRegistrar::sourceHashHex(sourceBytes);
+    sidecar.leftOnly = leftOnly;
+    sidecar.sf2Zone = sf2Zone;
+    sidecar.params = dialog.document()->params();
+    QString sidecarError;
+    if (!SampleRegistrar::writeSampleSidecar(root, dialog.sampleName(), sidecar,
+                                             &sidecarError))
+        statusBar()->showMessage(
+            tr("Sample imported, but saving its edit history failed: %1")
+                .arg(sidecarError),
+            8000);
+    invalidateVgCatalog();
+    updateVoicegroupBrowser();
+
+    // Browser-initiated: point the requesting slot's voice at the new sample
+    // via the session undo stack — the file creation above is write-through,
+    // but the voice assignment stays undoable (PLAN.md §3).
+    if (slot >= 0 && m_active && m_active->vgSource) {
+        // A DirectSound-family slot keeps its voice and only swaps the
+        // sample: the dialog auditioned with that voice's envelope, so
+        // replacing its ADSR (or key/pan/macro variant) would commit
+        // something other than what was heard.
+        const VgVoice *dest = m_active->vgSource->voiceAt(slot);
+        const bool keepDest = dest
+            && (dest->macro == VgMacro::DirectSound
+                || dest->macro == VgMacro::DirectSoundNoResample
+                || dest->macro == VgMacro::DirectSoundAlt);
+        VgVoice voice;
+        if (keepDest) {
+            voice = *dest;
+        } else {
+            voice.macro = VgMacro::DirectSound;
+            voice.key = 60;
+            voice.pan = 0;
+            const VgAdsr adsr = vgDefaultAdsr(
+                vgCatalog().typicalAdsr, voice.macro,
+                QStringLiteral("DirectSoundWaveData_") + dialog.sampleName());
+            voice.attack = adsr.attack;
+            voice.decay = adsr.decay;
+            voice.sustain = adsr.sustain;
+            voice.release = adsr.release;
+        }
+        voice.symbol =
+            QStringLiteral("DirectSoundWaveData_") + dialog.sampleName();
+        onVoiceEditRequested(slot, voice, true);
+        m_vgBrowser->revealSlot(slot);
+    }
+    statusBar()->showMessage(
+        tr("Imported %1 — DirectSoundWaveData_%1 is now available to "
+           "voicegroups")
+            .arg(dialog.sampleName()),
+        8000);
+}
+
+void MainWindow::editSampleForSlot(int slot)
+{
+    if (!m_project.isOpen() || !m_active || !m_active->vgSource)
+        return;
+    const QString prefix = QStringLiteral("DirectSoundWaveData_");
+    const VgVoice *voice = m_active->vgSource->voiceAt(slot);
+    if (!voice || !voice->symbol.startsWith(prefix)) {
+        QMessageBox::warning(
+            this, tr("Edit Sample"),
+            tr("This voice does not reference a DirectSound sample."));
+        return;
+    }
+    const QString name = voice->symbol.mid(prefix.size());
+    const QString root = m_project.root();
+    const SampleFormatProbe probe = SampleRegistrar::probeSampleFormat(root);
+    if (!probe.ok()) {
+        QMessageBox::warning(this, tr("Edit Sample"), probe.refusal);
+        return;
+    }
+    const QString wavPath =
+        probe.samplesDir + QStringLiteral("/%1.wav").arg(name);
+    if (!QFile::exists(wavPath)) {
+        QMessageBox::warning(
+            this, tr("Edit Sample"),
+            tr("%1.wav does not exist in sound/direct_sound_samples — only "
+               "samples with a .wav source can be edited here.")
+                .arg(name));
+        return;
+    }
+
+    // Provenance: reopen from the sidecar's hi-res source while it still
+    // checks out; otherwise the committed 8-bit .wav (the project is
+    // canonical without the sidecar — still crop/loop-editable).
+    ImportedSample sample;
+    SampleSidecar sidecar;
+    bool fromSource = false; // decoding the original hi-res source
+    bool haveParams = false; // sidecar params apply to that source
+    QString error;
+    if (SampleRegistrar::readSampleSidecar(root, name, &sidecar)) {
+        const auto decodeSource = [&](const QByteArray &bytes,
+                                      ImportedSample *out, QString *err) {
+            if (sidecar.sf2Zone >= 0) {
+                Sf2File font;
+                return readSf2Bytes(bytes, sidecar.sourcePath, &font, err)
+                    && extractSf2Zone(font, sidecar.sf2Zone, out, err);
+            }
+            return importAudioBytes(bytes, sidecar.sourcePath, out, err,
+                                    sidecar.leftOnly);
+        };
+        QFile sourceFile(sidecar.sourcePath);
+        QByteArray sourceBytes;
+        if (sourceFile.open(QIODevice::ReadOnly))
+            sourceBytes = sourceFile.readAll();
+        if (sourceBytes.isEmpty()) {
+            QMessageBox::information(
+                this, tr("Edit Sample"),
+                tr("The original source (%1) is no longer readable; editing "
+                   "the committed 8-bit sample instead.")
+                    .arg(sidecar.sourcePath));
+        } else if (SampleRegistrar::sourceHashHex(sourceBytes)
+                   != sidecar.sourceSha256) {
+            const QMessageBox::StandardButton pick = QMessageBox::question(
+                this, tr("Edit Sample"),
+                tr("%1 has changed since this sample was created, so the "
+                   "saved edit settings no longer apply to it.\n\n"
+                   "Re-import the changed file with fresh settings? "
+                   "(\"No\" edits the committed 8-bit sample instead.)")
+                    .arg(sidecar.sourcePath),
+                QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+            if (pick == QMessageBox::Cancel)
+                return;
+            if (pick == QMessageBox::Yes) {
+                if (!decodeSource(sourceBytes, &sample, &error)) {
+                    QMessageBox::warning(
+                        this, tr("Edit Sample"),
+                        tr("%1: %2").arg(sidecar.sourcePath, error));
+                    return;
+                }
+                sidecar.sourceSha256 =
+                    SampleRegistrar::sourceHashHex(sourceBytes);
+                fromSource = true;
+            }
+        } else if (decodeSource(sourceBytes, &sample, &error)) {
+            fromSource = true;
+            haveParams = true;
+        } else {
+            QMessageBox::information(
+                this, tr("Edit Sample"),
+                tr("The original source (%1) no longer decodes (%2); editing "
+                   "the committed 8-bit sample instead.")
+                    .arg(sidecar.sourcePath, error));
+        }
+    }
+    if (!fromSource) {
+        QFile wavFile(wavPath);
+        if (!wavFile.open(QIODevice::ReadOnly)
+            || !importAudioBytes(wavFile.readAll(), wavPath, &sample,
+                                 &error)) {
+            QMessageBox::warning(this, tr("Edit Sample"),
+                                 tr("%1: %2").arg(wavPath, error));
+            return;
+        }
+    }
+
+    AuditionSlots::Adsr destAdsr;
+    bool hasDestAdsr = false;
+    if (!vgMacroIsCgb(voice->macro)) {
+        destAdsr = {uint8_t(voice->attack), uint8_t(voice->decay),
+                    uint8_t(voice->sustain), uint8_t(voice->release)};
+        hasDestAdsr = true;
+    }
+    SampleEditorDialog dialog(
+        std::move(sample),
+        [name](const QString &candidate, QString *validationError) {
+            if (candidate == name)
+                return true;
+            if (validationError)
+                *validationError =
+                    tr("the sample keeps its registered name (%1).").arg(name);
+            return false;
+        },
+        m_audioOk ? &m_audio : nullptr, hasDestAdsr ? &destAdsr : nullptr,
+        this);
+    dialog.setEditTarget(name);
+    if (haveParams)
+        dialog.applyParamsExternal(sidecar.params);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    // Write-through commit: overwrite the .wav in place; the registration
+    // block already exists and stays untouched.
+    if (!SampleRegistrar::updateSample(root, name, dialog.wavBytes(),
+                                       &error)) {
+        QMessageBox::warning(this, tr("Edit Sample"), error);
+        return;
+    }
+    if (fromSource) {
+        sidecar.params = dialog.document()->params();
+        QString sidecarError;
+        if (!SampleRegistrar::writeSampleSidecar(root, name, sidecar,
+                                                 &sidecarError))
+            statusBar()->showMessage(
+                tr("Sample saved, but saving its edit history failed: %1")
+                    .arg(sidecarError),
+                8000);
+    } else {
+        // The session came from the committed bytes, which were just
+        // replaced — a stale sidecar would misdescribe them on the next
+        // reopen (the committed .wav is its own provenance now).
+        SampleRegistrar::removeSampleSidecar(root, name);
+    }
+    invalidateVgCatalog();
+    updateVoicegroupBrowser();
+    // The loaded voicegroup decoded the old .wav at load time; reload so the
+    // edit is audible without reopening the song.
+    if (m_active && m_active->vgSource)
+        reloadVoicegroupPreview(*m_active, slot);
+    statusBar()->showMessage(
+        tr("Saved %1 — the ROM's .bin recompiles on the next build")
+            .arg(name),
+        8000);
 }
 
 void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label,

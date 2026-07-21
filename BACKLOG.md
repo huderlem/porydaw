@@ -11,6 +11,20 @@ lives in SPEC.md §8; this is the loose-ends list between milestones.
   warning counts all notes; CGB-voiced notes don't consume PCM channels, and
   with the voicegroup + program map known the estimate could be exact.
 
+## Sample Studio (shipped; design: docs/sample-studio/)
+
+The custom-DirectSound-sample feature shipped (all six phases; SPEC §6.2).
+Items explicitly deferred out of it:
+
+- **16-bit .wav output toggle** for users who post-process samples in
+  external tools (8-bit chosen for audition/build bit-parity).
+- **Offer to install wav2agb** into legacy `.aif`/aif2pcm forks (the
+  registrar only refuses actionably there; FORMATS.md appendix A has the
+  no-DSP `.aif` fallback design if ever wanted). The optional legacy `.aif`
+  *writer* (PLAN.md §6 phase-6 stretch) was likewise not built.
+- **Sample rename/delete** management UI (creation and in-place editing
+  only, for now — "Edit…" keeps the registered name).
+
 ## General things
 
 - **Info Window** an "About porydaw" file menu item should show the user

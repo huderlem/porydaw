@@ -257,6 +257,28 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   channels → tracks (warn > 16 or > polyphony budget), unmapped CCs flagged — then
   saved into the project as a new song file.
 
+**Sample Studio (custom DirectSound samples; design: `docs/sample-studio/`):**
+Tools → Import Sample (or "New…" / "Edit…" beside the sample combo in the
+voicegroup dock) opens a modal editor over any .wav/.aif/.mp3/.flac/.ogg
+source or .sf2 zone: non-destructive crop / loop / retune / resample /
+normalize on an immutable hi-res decode, with loop auto-suggestion, live
+seam-click metrics, pitch-detect prefill, and engine-true audition — the
+auditioned bytes, porydaw playback after commit, and the built ROM's `.bin`
+are bit-identical (retune rides the `smpl`/`agbp` metadata; porydaw never
+resamples for tuning). Committing writes the 8-bit `.wav` into
+`sound/direct_sound_samples/` and appends its registration block to
+`sound/direct_sound_data.inc` (write-through, not undoable;
+wav2agb-pipeline projects only, actionable refusals otherwise) —
+browser-initiated imports then point the requesting voice at the new symbol
+as an ordinary undoable voice edit. A provenance sidecar
+(`.porydaw/samples/<name>.json`: source path + content hash + edit params)
+lets "Edit…" reopen the hi-res source exactly where the user left off; a
+missing sidecar or changed source falls back to re-importing the committed
+8-bit `.wav` (still crop/loop-editable), and edits save over the `.wav` in
+place with the registration untouched. `--samplecheck` harness (registrar
+refusals, DSP acceptance, audition==build parity, offscreen editor driving,
+compressed formats, SoundFont zones, engine loop integration, provenance).
+
 ### 6.3 New Song flow (write-through registration)
 
 The "New Song" wizard collects name, voicegroup, player (BGM/SE), and `midi.cfg`
@@ -376,8 +398,14 @@ through a private engine instance with §7 semantics — loop count + fadeout
 for looping songs, ring-out tail otherwise, selectable sample rate, streamed
 16-bit stereo output with progress/cancel; `--exportcheck` harness.
 
+**Sample Studio (shipped after M4):**
+Custom DirectSound sample creation end to end — import → crop / retune /
+resample / normalize / loop → engine-true audition → write-through commit
+and registration, with provenance sidecars for reopening. Details in §6.2;
+design and formats in `docs/sample-studio/`.
+
 **Later / opt-in ideas (explicitly out of scope for v1):**
-keysplit table *editing*, sample import (wav2agb semantics), full project
+keysplit table *editing*, full project
 write-back behind a "let porydaw edit project files" setting, pokeruby profile
 validation, MIDI keyboard live input.
 

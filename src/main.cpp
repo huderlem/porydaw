@@ -48,6 +48,19 @@ int runPrimeCheck();
 // transportcheck.cpp; playback-start halts ringing auditions (self-contained,
 // no project needed; SKIPs without an audio device).
 int runTransportCheck();
+// samplecheck.cpp; Sample Studio check (phases 1-6): registrar/import
+// refusals, the headless pipeline (decode, resample, quantize, normalize,
+// write, engine-loader parity), the phase-3 editor (pitch detection,
+// loop suggestion, crossfade bake, audition slots, offscreen waveform/undo
+// driving), the phase-4 compressed decoders (embedded MP3/FLAC/Ogg
+// fixtures), the phase-5 SoundFont reader + zone picker (synthesized
+// .sf2, offscreen driving), and the phase-6 engine loop-wrap integration +
+// provenance sidecar / edit-in-place pipeline, in fully-fresh fake decomp
+// projects under the given (nonexistent) scratch dir. The optional second
+// argument points at a wav2agb decomp checkout (e.g. pokeemerald) whose
+// sound/direct_sound_samples corpus gates the corpus-conditional sections.
+int runSampleCheck(const QString &scratchDir,
+                   const QString &corpusRoot = QString());
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -115,6 +128,12 @@ int main(int argc, char *argv[])
         const QString path =
             polyCheck + 1 < args.size() ? args[polyCheck + 1] : QString();
         return runPolyCheck(path);
+    }
+    const int sampleCheck = args.indexOf(QStringLiteral("--samplecheck"));
+    if (sampleCheck >= 0 && sampleCheck + 1 < args.size()) {
+        const QString corpus =
+            sampleCheck + 2 < args.size() ? args[sampleCheck + 2] : QString();
+        return runSampleCheck(args[sampleCheck + 1], corpus);
     }
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
