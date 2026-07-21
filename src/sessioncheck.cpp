@@ -111,7 +111,10 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
             sort->setCurrentIndex(1);
             search->setText(QStringLiteral("filterme"));
         }
-        window.resize(999, 555);
+        // Must fit the offscreen platform's 800x600 virtual screen: newer Qt
+        // clamps restoreGeometry() to the available screen, so an oversized
+        // window would come back shrunk and block 5 would fail.
+        window.resize(777, 505);
         check(window.close(), "close was refused");
         QSettings settings;
         check(!settings.value(QStringLiteral("windowGeometry"))
@@ -137,7 +140,7 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
     // combo, so it's checked after restoreSession().
     {
         MainWindow window;
-        check(window.size() == QSize(999, 555),
+        check(window.size() == QSize(777, 505),
               "new window did not restore the saved geometry");
         window.restoreSession();
         check(window.windowTitle().startsWith(songLabel),
