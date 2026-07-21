@@ -173,6 +173,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_uiTimer, &QTimer::timeout, this, &MainWindow::uiTick);
     m_uiTimer->start();
     m_playheadTimer->setTimerType(Qt::PreciseTimer);
+    m_playheadTimer->setInterval(16);
     connect(m_playheadTimer, &QTimer::timeout, this, &MainWindow::synchronizePlayhead);
 
     updateTransportActions();
