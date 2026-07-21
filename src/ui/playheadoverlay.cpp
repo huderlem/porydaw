@@ -186,11 +186,17 @@ void PlayheadOverlay::synchronizeGeometry()
     Q_ASSERT(owner);
 
     const QRegion oldVisibleSurfaceRegion = m_visibleSurfaceRegion;
+    const bool eventListVisible = !m_surfaces.roll->isVisibleTo(owner);
     const QRect rollGeometry = surfaceGeometry(m_surfaces.roll);
-    const QRect playheadGeometry(0, rollGeometry.top(), owner->width(),
-                                 owner->height() - rollGeometry.top());
+    const QRect topGeometry =
+        eventListVisible ? surfaceGeometry(m_surfaces.ruler) : rollGeometry;
+    const QRect playheadGeometry(0, topGeometry.top(), owner->width(),
+                                 owner->height() - topGeometry.top());
     const QRegion visibleSurfaces =
-        visibleSurfaceRegion(m_surfaces.roll, m_surfaces.rollOrigin)
+        (eventListVisible
+             ? visibleSurfaceRegion(m_surfaces.ruler, m_surfaces.rulerOrigin)
+             : QRegion())
+        + visibleSurfaceRegion(m_surfaces.roll, m_surfaces.rollOrigin)
         + visibleSurfaceRegion(m_surfaces.lanes, m_surfaces.lanesOrigin)
         + visibleSurfaceRegion(m_surfaces.strip, m_surfaces.stripOrigin);
     const int timelineOrigin =

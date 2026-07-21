@@ -246,11 +246,11 @@ QStringList playheadOverlayCheckFailures(SongView &view,
               playheadCenter(marker->grab(), playheadColor);
           checkCenter(firstMarkerCenter, firstSample,
                       QStringLiteral("stopped"));
+          const QRect rulerArea(ruler->mapTo(&view, QPoint()), ruler->size());
           if (firstMarkerCenter >= 0.0) {
             const QPixmap composedPixmap = view.grab();
             const qreal playheadX =
                 marker->mapTo(&view, QPoint()).x() + firstMarkerCenter;
-            const QRect rulerArea(ruler->mapTo(&view, QPoint()), ruler->size());
             if (hasPlayheadRedLine(composedPixmap.toImage(),
                                    composedPixmap.devicePixelRatio(), playheadX,
                                    rulerArea, playheadColor)) {
@@ -323,6 +323,10 @@ QStringList playheadOverlayCheckFailures(SongView &view,
                                      belowEventList, playheadColor);
               if (overpaintedEventList) {
                 fail("playhead overpainted the event list");
+              }
+              if (!hasPlayheadRedLine(composedImage, composedDpr, playheadX,
+                                      rulerArea, playheadColor)) {
+                fail("playhead did not extend into the event-list time ruler");
               }
               if (!renderedOnTimeline) {
                 fail("playhead overlay did not render on visible timeline "
