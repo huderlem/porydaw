@@ -606,6 +606,13 @@ bool importAudioBytes(const QByteArray &bytes, const QString &sourcePath,
                && bytes.mid(8, 4) == "AIFC") {
         return fail(error, QStringLiteral("AIFF-C is not supported — export "
                                           "uncompressed AIFF or WAV."));
+    } else if (bytes.size() >= 12 && bytes.startsWith("RIFF")
+               && bytes.mid(8, 4) == "sfbk") {
+        // SoundFonts route through Sf2Reader + the zone picker, never this
+        // single-stream front door (FORMATS.md §5).
+        return fail(error, QStringLiteral("SoundFont files hold multiple "
+                                          "samples — pick a zone with the "
+                                          "SoundFont zone picker."));
     } else if (bytes.size() >= 4 && bytes.startsWith("fLaC")) {
         ok = decodeFlac(bytes, leftChannelOnly, out, error);
     } else if (bytes.size() >= 4 && bytes.startsWith("OggS")) {

@@ -69,6 +69,8 @@ qt_add_executable(porydaw
     src/audio/sampledoc.h
     src/audio/samplewav.cpp
     src/audio/samplewav.h
+    src/audio/sf2reader.cpp
+    src/audio/sf2reader.h
     src/core/mid2agbtables.cpp
     src/core/mid2agbtables.h
     src/core/miditimeline.cpp
@@ -97,6 +99,8 @@ qt_add_executable(porydaw
     src/ui/newsongwizard.h
     src/ui/sampleeditordialog.cpp
     src/ui/sampleeditordialog.h
+    src/ui/sf2zonepicker.cpp
+    src/ui/sf2zonepicker.h
     src/ui/waveformview.cpp
     src/ui/waveformview.h
     src/ui/voicegroupbrowser.cpp

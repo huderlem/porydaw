@@ -188,10 +188,11 @@ RIFF form `sfbk`; Sample Studio reads only:
   loopEnd (pool indices; sf2 loop end is **exclusive**), sampleRate,
   originalPitch (MIDI key), pitchCorrection (signed cents), sampleLink,
   sampleType.
-- `pdta` → `phdr`/`inst`/`ibag`/`igen` only as far as grouping sample names
-  under instrument/preset labels for the picker UI. Generator/modulator
-  semantics, velocity layers, and per-zone tuning overrides are deliberately
-  ignored.
+- `pdta` → `phdr`/`inst`/`ibag`/`igen` (plus the `pbag`/`pgen` index arrays,
+  structurally required to link presets to instruments) only as far as
+  grouping sample names under instrument/preset labels for the picker UI.
+  Generator/modulator semantics, velocity layers, and per-zone tuning
+  overrides are deliberately ignored.
 - sampleType: mono (1) imported directly; left/right-linked (4/2) import this
   channel and flag "stereo pair — imported one channel" in the UI; ROM
   samples (0x8000 bit) skipped.

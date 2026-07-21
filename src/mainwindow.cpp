@@ -35,12 +35,14 @@
 #include <cstring>
 
 #include "audio/sampleimport.h"
+#include "audio/sf2reader.h"
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
 #include "project/samplereg.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
 #include "ui/sampleeditordialog.h"
+#include "ui/sf2zonepicker.h"
 #include "ui/polyphonypanel.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
@@ -1391,31 +1393,63 @@ void MainWindow::importSampleForSlot(int slot)
             .toString();
     const QString path = QFileDialog::getOpenFileName(
         this, tr("Import Sample"), startDir,
-        tr("Audio files (*.wav *.aif *.aiff *.mp3 *.flac *.ogg);;"
+        tr("Audio files (*.wav *.aif *.aiff *.mp3 *.flac *.ogg *.sf2);;"
            "All files (*)"));
     if (path.isEmpty())
         return;
     settings.setValue(QStringLiteral("lastSampleDir"), QFileInfo(path).path());
 
-    ImportedSample sample;
-    QString error;
-    if (!importAudioFile(path, &sample, &error)) {
+    QFile sourceFile(path);
+    if (!sourceFile.open(QIODevice::ReadOnly)) {
         QMessageBox::warning(this, tr("Import Sample"),
-                             tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+                             tr("Cannot read %1.").arg(path));
         return;
     }
-    if (sample.phaseCancelStereo
-        && QMessageBox::question(
-               this, tr("Import Sample"),
-               tr("The left and right channels of %1 are phase-cancelling — "
-                  "the mono mix may sound hollow.\n\nImport the left channel "
-                  "only instead?")
-                   .arg(QFileInfo(path).fileName()))
-            == QMessageBox::Yes
-        && !importAudioFile(path, &sample, &error, true)) {
-        QMessageBox::warning(this, tr("Import Sample"),
-                             tr("%1: %2").arg(QFileInfo(path).fileName(), error));
-        return;
+    const QByteArray sourceBytes = sourceFile.readAll();
+    sourceFile.close();
+
+    ImportedSample sample;
+    QString error;
+    if (sf2Magic(sourceBytes)) {
+        // SoundFonts hold many samples: pick a zone first (FORMATS.md §5);
+        // the chosen zone then rides the ordinary editor pipeline.
+        Sf2File font;
+        if (!readSf2Bytes(sourceBytes, path, &font, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+        Sf2ZonePicker picker(font, this);
+        if (picker.exec() != QDialog::Accepted)
+            return;
+        if (!extractSf2Zone(font, picker.selectedZone(), &sample, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+    } else {
+        if (!importAudioBytes(sourceBytes, path, &sample, &error)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
+        if (sample.phaseCancelStereo
+            && QMessageBox::question(
+                   this, tr("Import Sample"),
+                   tr("The left and right channels of %1 are "
+                      "phase-cancelling — the mono mix may sound hollow.\n\n"
+                      "Import the left channel only instead?")
+                       .arg(QFileInfo(path).fileName()))
+                == QMessageBox::Yes
+            && !importAudioBytes(sourceBytes, path, &sample, &error, true)) {
+            QMessageBox::warning(
+                this, tr("Import Sample"),
+                tr("%1: %2").arg(QFileInfo(path).fileName(), error));
+            return;
+        }
     }
 
     const QString root = m_project.root();

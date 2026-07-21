@@ -49,6 +49,9 @@ QString sourceLine(const ImportedSample &s)
     case ImportedSample::Ogg:
         kind = QStringLiteral("Ogg Vorbis");
         break;
+    case ImportedSample::Sf2:
+        kind = QStringLiteral("SoundFont zone");
+        break;
     default:
         kind = QStringLiteral("audio");
         break;
