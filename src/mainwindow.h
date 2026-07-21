@@ -192,10 +192,13 @@ private:
     // out of Paused — the Space binding (Reaper-style restart), while the
     // Play button resumes from the pause point.
     void startPlayback(bool fromEditCursor = false);
+    void pausePlayback();
+    void stopPlayback();
     // The session's cfg (volume/reverb) merged with the global engine knobs
     // — everything AudioEngine::updateSettings applies.
     SongSettings songSettingsFor(const SongSession &session) const;
     void updateTransportActions();
+    void synchronizePlayhead();
     void updateWindowTitle();
     QString formatTime(uint64_t samples) const;
 
@@ -261,4 +264,5 @@ private:
     QLabel *m_songLabel = nullptr;
     QLabel *m_polyLabel = nullptr;
     QTimer *m_uiTimer = nullptr;
+    QTimer *m_playheadTimer = nullptr;
 };

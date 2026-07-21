@@ -6,6 +6,7 @@
 #include <QCursor>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -18,6 +19,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QObject>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -41,9 +43,11 @@
 #include <map>
 #include <utility>
 
+
 #include "core/mid2agbtables.h"
 #include "core/songdocument.h"
 #include "ui/eventlistview.h"
+#include "ui/playheadoverlay.h"
 
 namespace songview {
 
@@ -114,8 +118,8 @@ QColor loopFill() { return QColor(255, 200, 60, 16); }
 QColor loopEdge() { return QColor(224, 168, 0); }
 QColor playheadColor() { return QColor(226, 66, 66); }
 
-// Draw the loop-region band and the playhead line across rect. x positions
-// are computed with origin = local x of timeline tick 0's content position.
+// Draw the loop-region band across rect. x positions are
+// computed with origin = local x of timeline tick 0's content position.
 // timeSelCovered says whether this widget (or row) is inside the active time
 // selection's scope, so the selection band tints exactly the covered content.
 void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin,
@@ -158,18 +162,10 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, int origin
                 p.drawLine(x1, rect.top(), x1, rect.bottom());
         }
     }
-
-    // Edit cursor (dashed, theme foreground) under the playback cursor.
-    const int ex = origin + sv->contentX(double(sv->editCursorTick()));
-    if (ex >= rect.left() && ex <= rect.right()) {
+    const int cursorX = origin + sv->contentX(double(sv->editCursorTick()));
+    if (cursorX >= rect.left() && cursorX <= rect.right()) {
         p.setPen(QPen(sv->palette().color(QPalette::WindowText), 1, Qt::DashLine));
-        p.drawLine(ex, rect.top(), ex, rect.bottom());
-    }
-
-    const int px = origin + sv->contentX(sv->playheadTick());
-    if (px >= rect.left() && px <= rect.right()) {
-        p.setPen(QPen(playheadColor(), 1));
-        p.drawLine(px, rect.top(), px, rect.bottom());
+        p.drawLine(cursorX, rect.top(), cursorX, rect.bottom());
     }
 }
 
@@ -509,16 +505,6 @@ protected:
             p.drawLine(sx1, 0, sx1, height() / 2);
         }
 
-        // Playhead handle.
-        const int px = kGutterW + m_sv->contentX(m_sv->playheadTick());
-        if (px >= area.left() && px <= area.right()) {
-            QPainterPath tri;
-            tri.moveTo(px - 4, height() - 12);
-            tri.lineTo(px + 4, height() - 12);
-            tri.lineTo(px, height() - 4);
-            tri.closeSubpath();
-            p.fillPath(tri, playheadColor());
-        }
     }
 
     void wheelEvent(QWheelEvent *event) override
@@ -4227,6 +4213,18 @@ SongView::SongView(QWidget *parent)
 
     m_strip = new OtherStrip(this);
     vbox->addWidget(m_strip);
+    PlayheadOverlay::Surfaces playheadSurfaces;
+    playheadSurfaces.ruler = m_ruler;
+    playheadSurfaces.rulerOrigin = kGutterW;
+    playheadSurfaces.roll = m_roll;
+    playheadSurfaces.rollOrigin = kKeyboardW;
+    playheadSurfaces.lanes = m_lanes;
+    playheadSurfaces.lanesOrigin = kGutterW;
+    playheadSurfaces.strip = m_strip;
+    playheadSurfaces.stripOrigin = kGutterW;
+    m_playheadOverlay =
+        new PlayheadOverlay(this, playheadSurfaces, playheadColor());
+    syncPlayheadOverlay();
 
     m_hbar = new QScrollBar(Qt::Horizontal, this);
     auto *hbarRow = new QHBoxLayout;
@@ -5150,11 +5148,9 @@ void SongView::setPlayheadSample(uint64_t samplePos, bool playing)
         if (px < 0 || px > vw * 85 / 100)
             setHScroll(int(m_playheadTick * m_pxPerTick) - vw / 10);
     }
-    // The event list mirrors the playhead as a tinted row (and follows it
-    // while playing, mirroring the roll's scroll-follow).
     m_events->setPlayheadTick(m_playheadTick, playing);
     m_headers->syncVoices();
-    refreshTimelineViews();
+    syncPlayheadOverlay();
 }
 
 bool SongView::userGestureActive() const
@@ -5162,6 +5158,16 @@ bool SongView::userGestureActive() const
     return (m_ruler && m_ruler->gestureActive())
         || (m_roll && m_roll->gestureActive())
         || (m_lanes && m_lanes->gestureActive());
+}
+
+void SongView::syncPlayheadOverlay()
+{
+    if (m_playheadOverlay) {
+        const qreal playheadX =
+            m_playheadTick * m_pxPerTick - qreal(m_scrollPx);
+        m_playheadOverlay->setPlayhead(
+            playheadX, m_timeline != nullptr, m_playing);
+    }
 }
 
 void SongView::setEditCursorTick(uint64_t tick)
@@ -5720,6 +5726,7 @@ void SongView::refreshTimelineViews()
     m_roll->update();
     m_lanes->update();
     m_strip->update();
+    syncPlayheadOverlay();
 }
 
 void SongView::resizeEvent(QResizeEvent *event)
@@ -5733,4 +5740,5 @@ void SongView::resizeEvent(QResizeEvent *event)
             {std::max(120, m_splitter->height() - kLanesAreaH), kLanesAreaH});
     }
     updateScrollbars();
+    syncPlayheadOverlay();
 }

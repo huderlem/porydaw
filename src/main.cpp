@@ -89,6 +89,7 @@ int main(int argc, char *argv[])
     const int selfTest = args.indexOf(QStringLiteral("--selftest"));
     if (selfTest >= 0 && selfTest + 2 < args.size()) {
         MainWindow window;
+        window.show();
         return window.runSelfTest(args[selfTest + 1], args[selfTest + 2]) ? 0 : 1;
     }
     const int saveCheck = args.indexOf(QStringLiteral("--savecheck"));
