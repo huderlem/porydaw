@@ -440,7 +440,11 @@ std::vector<LoopCandidate> suggestLoop(const float *x, qint64 n, double rate,
         : 128;
 
     // The b window needs S − W ≥ 0 and the a window reads W real samples
-    // past E (the untrimmed tail).
+    // past E (the untrimmed tail). A buffer that can't fit both windows
+    // (large pitched W on a short crop) has no candidates — and would break
+    // the qBound below, whose min must not exceed its max.
+    if (W >= n - 1 - W)
+        return out;
     regionA = qBound<qint64>(W, regionA, n - 1);
     const qint64 Bmax = std::min(regionB, n - 1 - W);
     if (Bmax <= regionA)

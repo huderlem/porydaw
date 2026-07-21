@@ -1456,18 +1456,32 @@ void MainWindow::importSampleForSlot(int slot)
     // via the session undo stack — the file creation above is write-through,
     // but the voice assignment stays undoable (PLAN.md §3).
     if (slot >= 0 && m_active && m_active->vgSource) {
+        // A DirectSound-family slot keeps its voice and only swaps the
+        // sample: the dialog auditioned with that voice's envelope, so
+        // replacing its ADSR (or key/pan/macro variant) would commit
+        // something other than what was heard.
+        const VgVoice *dest = m_active->vgSource->voiceAt(slot);
+        const bool keepDest = dest
+            && (dest->macro == VgMacro::DirectSound
+                || dest->macro == VgMacro::DirectSoundNoResample
+                || dest->macro == VgMacro::DirectSoundAlt);
         VgVoice voice;
-        voice.macro = VgMacro::DirectSound;
-        voice.key = 60;
-        voice.pan = 0;
+        if (keepDest) {
+            voice = *dest;
+        } else {
+            voice.macro = VgMacro::DirectSound;
+            voice.key = 60;
+            voice.pan = 0;
+            const VgAdsr adsr = vgDefaultAdsr(
+                vgCatalog().typicalAdsr, voice.macro,
+                QStringLiteral("DirectSoundWaveData_") + dialog.sampleName());
+            voice.attack = adsr.attack;
+            voice.decay = adsr.decay;
+            voice.sustain = adsr.sustain;
+            voice.release = adsr.release;
+        }
         voice.symbol =
             QStringLiteral("DirectSoundWaveData_") + dialog.sampleName();
-        const VgAdsr adsr = vgDefaultAdsr(vgCatalog().typicalAdsr,
-                                          voice.macro, voice.symbol);
-        voice.attack = adsr.attack;
-        voice.decay = adsr.decay;
-        voice.sustain = adsr.sustain;
-        voice.release = adsr.release;
         onVoiceEditRequested(slot, voice, true);
         m_vgBrowser->revealSlot(slot);
     }

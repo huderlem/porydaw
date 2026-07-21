@@ -1698,6 +1698,16 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             expect(refined.ncc >= nccBefore - 1e-9,
                    "refine never worsens the seam correlation");
         }
+
+        // A buffer long enough to search (≥ 256) but too short for the
+        // pitched seam windows (2·period ≥ length): no candidates, and no
+        // qBound(min > max) on the region clamp.
+        const std::vector<float> stub = genSine(rate, 440.0, 300.0 / rate,
+                                                0.4);
+        expect(SampleDsp::suggestLoop(stub.data(), qint64(stub.size()), rate,
+                                      200.0, 0, qint64(stub.size()) - 1)
+                   .empty(),
+               "window-starved pitched buffer returns no candidates");
         if (failures == before)
             std::printf("samplecheck: loop suggestion OK\n");
     }
