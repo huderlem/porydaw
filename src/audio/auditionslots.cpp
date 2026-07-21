@@ -29,11 +29,16 @@ bool AuditionSlots::publishNote(const QByteArray &s8, uint32_t freq,
     sl.bytes.assign(reinterpret_cast<const int8_t *>(s8.constData()),
                     reinterpret_cast<const int8_t *>(s8.constData())
                         + s8.size());
+    // The engine's interpolating mixer reads one sample past the current
+    // position (m4a_pcm_channel_render's s1 lookahead); the voicegroup
+    // loader pads every WaveData with a repeat of the final sample for
+    // exactly this. Mirror it — size stays the real sample count.
+    sl.bytes.push_back(sl.bytes.back());
     sl.wave.type = 0;
     sl.wave.status = looped ? 0x4000 : 0;
     sl.wave.freq = freq;
     sl.wave.loopStart = looped ? loopStart : 0;
-    sl.wave.size = uint32_t(sl.bytes.size());
+    sl.wave.size = uint32_t(sl.bytes.size() - 1);
     sl.wave.data = sl.bytes.data();
     sl.tone = ToneData{};
     sl.tone.type = VOICE_DIRECTSOUND;

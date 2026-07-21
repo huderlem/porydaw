@@ -2175,7 +2175,7 @@ public:
         m_selSweep = false;
         m_hoverRow = -1;
         if (m_sv->timeline()) {
-            m_rows.push_back({Row::Tempo, nullptr});
+            m_rows.push_back({Row::Tempo});
             const SongViewModel &model = m_sv->model();
             const int selected = m_sv->selectedTrack();
             // The voice row shows whenever the track has changes; with a
@@ -2188,10 +2188,10 @@ public:
                 }
             }
             if (voiceRow)
-                m_rows.push_back({Row::Voice, nullptr});
+                m_rows.push_back({Row::Voice});
             for (const AutoLane &lane : model.lanes)
                 if (lane.track == selected)
-                    m_rows.push_back({Row::Lane, &lane});
+                    m_rows.push_back({Row::Lane, lane.track, lane.cc});
         }
         applyHeight();
         update();
@@ -2365,10 +2365,11 @@ protected:
         setFocus();
         const Row &row = m_rows[ri];
         if (event->pos().x() < kGutterW) {
-            if (row.kind == Row::Lane
+            if (const AutoLane *lane = rowLane(row);
+                lane
                 && (event->button() == Qt::LeftButton
                     || event->button() == Qt::RightButton))
-                showLaneMenu(*row.lane, event->globalPosition().toPoint());
+                showLaneMenu(*lane, event->globalPosition().toPoint());
             return;
         }
         if (event->button() == Qt::RightButton) {
@@ -2615,10 +2616,27 @@ protected:
     void leaveEvent(QEvent *) override { clearHover(); }
 
 private:
+    // Lane rows carry their identity BY VALUE, never a pointer into
+    // model.lanes: rows outlive a model rebuild (setSong resets view
+    // heights before rebuildRows repopulates them), so a cached pointer
+    // dangles the moment the model is reassigned. Anything needing the
+    // live lane (points, name) resolves it through rowLane().
     struct Row {
         enum Kind { Tempo, Voice, Lane } kind;
-        const AutoLane *lane;
+        int track = 0;
+        uint8_t cc = 0;
     };
+
+    const AutoLane *rowLane(const Row &row) const
+    {
+        if (row.kind != Row::Lane)
+            return nullptr;
+        for (const AutoLane &lane : m_sv->model().lanes) {
+            if (lane.track == row.track && lane.cc == row.cc)
+                return &lane;
+        }
+        return nullptr; // stale row: its lane left the model
+    }
 
     // The lane identity a row contributes to a lane-scoped time selection:
     // (engine track, cc), with the global tempo row as track -1 so it
@@ -2631,7 +2649,7 @@ private:
         case Row::Voice:
             return {m_sv->selectedTrack(), DOC_CC_VOICE};
         case Row::Lane:
-            return {row.lane->track, row.lane->cc};
+            return {row.track, row.cc};
         }
         return {-1, 0};
     }
@@ -2728,7 +2746,7 @@ private:
         case Row::Voice:
             return QStringLiteral("voice:%1").arg(m_sv->selectedTrack());
         case Row::Lane:
-            return laneKey(row.lane->track, row.lane->cc);
+            return laneKey(row.track, row.cc);
         }
         return QString();
     }
@@ -3006,8 +3024,8 @@ private:
             return true;
         }
         if (row.kind == Row::Lane) {
-            *cc = row.lane->cc; // LANE_CC_BEND == DOC_CC_BEND
-            *track = row.lane->track;
+            *cc = row.cc; // LANE_CC_BEND == DOC_CC_BEND
+            *track = row.track;
             return true;
         }
         return false;
@@ -3017,8 +3035,8 @@ private:
     {
         if (row.kind == Row::Tempo)
             return &m_sv->model().tempoLane;
-        if (row.kind == Row::Lane)
-            return &row.lane->points;
+        if (const AutoLane *lane = rowLane(row))
+            return &lane->points;
         return nullptr;
     }
 
@@ -3056,19 +3074,21 @@ private:
             *maxV = 200;
             for (const LanePoint &pt : m_sv->model().tempoLane)
                 *maxV = std::max(*maxV, pt.value + 20);
-        } else if (row.kind == Row::Lane && row.lane->cc == LANE_CC_BEND) {
+        } else if (row.kind == Row::Lane && row.cc == LANE_CC_BEND) {
             *minV = -8192;
             *maxV = 8191;
-        } else if (row.kind == Row::Lane && laneRangeZoomable(row.lane->cc)) {
+        } else if (row.kind == Row::Lane && laneRangeZoomable(row.cc)) {
             // Zoomed value axis: the display max shrinks so a small useful
             // range (MOD's 0..20, say) gets the row's pixels. Data outside
             // the chosen range always grows the axis back — points never
             // draw off-scale, and the gutter label shows the live range.
             int dataMax = 0;
-            for (const LanePoint &pt : row.lane->points)
-                dataMax = std::max(dataMax, pt.value);
+            if (const AutoLane *lane = rowLane(row)) {
+                for (const LanePoint &pt : lane->points)
+                    dataMax = std::max(dataMax, pt.value);
+            }
             const int mode =
-                m_rowRanges.value(rowKey(row), laneRangeDefault(row.lane->cc));
+                m_rowRanges.value(rowKey(row), laneRangeDefault(row.cc));
             *maxV = mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
         }
     }
@@ -3081,11 +3101,13 @@ private:
         case Row::Voice:
             return SongView::tr("Voice");
         case Row::Lane: {
-            if (row.lane->cc == LANE_CC_BEND)
+            if (row.cc == LANE_CC_BEND)
                 return SongView::tr("Pitch bend (BEND)");
-            const M4aCcInfo info = m4aClassifyCc(row.lane->cc);
-            return QStringLiteral("%1 (%2)").arg(row.lane->name,
-                                                 QLatin1String(info.name));
+            const M4aCcInfo info = m4aClassifyCc(row.cc);
+            const AutoLane *lane = rowLane(row);
+            return QStringLiteral("%1 (%2)").arg(
+                lane ? lane->name : QLatin1String(info.name),
+                QLatin1String(info.name));
         }
         }
         return QString();
@@ -3096,9 +3118,9 @@ private:
     QString formatRowValue(const Row &row, int v) const
     {
         if (row.kind == Row::Lane) {
-            if (row.lane->cc == LANE_CC_BEND)
+            if (row.cc == LANE_CC_BEND)
                 return m4aFormatBend(v);
-            return m4aFormatCcValue(row.lane->cc, uint8_t(v));
+            return m4aFormatCcValue(row.cc, uint8_t(v));
         }
         return QString::number(v);
     }
@@ -3109,11 +3131,11 @@ private:
     {
         if (row.kind != Row::Lane)
             return false;
-        if (row.lane->cc == 0x0A || row.lane->cc == 0x18) { // PAN/TUNE: c_v 0
+        if (row.cc == 0x0A || row.cc == 0x18) { // PAN/TUNE: c_v 0
             *value = 64;
             return true;
         }
-        if (row.lane->cc == LANE_CC_BEND) {
+        if (row.cc == LANE_CC_BEND) {
             *value = 0;
             return true;
         }
@@ -3131,11 +3153,11 @@ private:
             minShown = 1;
             maxShown = 999;
             label = SongView::tr("BPM:");
-        } else if (row.lane->cc == LANE_CC_BEND) {
+        } else if (row.cc == LANE_CC_BEND) {
             minShown = -8192;
             maxShown = 8191;
             label = SongView::tr("Bend (0 = none):");
-        } else if (row.lane->cc == 0x0A || row.lane->cc == 0x18) {
+        } else if (row.cc == 0x0A || row.cc == 0x18) {
             minShown = -64;
             maxShown = 63;
             offset = 64;
@@ -3328,8 +3350,9 @@ private:
         case Row::Voice:
             break;
         case Row::Lane:
-            points = &row.lane->points;
-            curve = SongView::trackColor(row.lane->track);
+            if (const AutoLane *lane = rowLane(row))
+                points = &lane->points;
+            curve = SongView::trackColor(row.track);
             break;
         }
 
@@ -3369,7 +3392,7 @@ private:
             paintVoiceRow(p, plot);
         else if (points)
             paintCurve(p, plot, *points, minV, maxV, curve,
-                       row.kind == Row::Lane && row.lane->cc == LANE_CC_BEND);
+                       row.kind == Row::Lane && row.cc == LANE_CC_BEND);
 
         const std::pair<int, uint8_t> id = rowIdentity(row);
         drawOverlays(p, m_sv, plot, kGutterW,

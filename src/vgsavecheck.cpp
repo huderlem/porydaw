@@ -422,16 +422,19 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             const int indexBeforeFlips = tab->doc.undoStack()->index();
             activate(waveCombo, 1);
             const QString sawSymbol = tab->vgSource->voiceAt(synthSlot)->symbol;
-            const VgSynthDesc *sawDef =
-                VoicegroupSource::synthInstruments(projectRoot).find(sawSymbol);
+            // find() points into the catalog: it must outlive the pointer.
+            const VgSynthCatalog sawCatalog =
+                VoicegroupSource::synthInstruments(projectRoot);
+            const VgSynthDesc *sawDef = sawCatalog.find(sawSymbol);
             check(sawDef && sawDef->waveform == 1,
                   "waveform flip to saw did not dedupe onto an on-disk saw");
             activate(waveCombo, 0);
             // Deduped onto an on-disk 50% pulse when the project has one,
             // minted under the param name otherwise — never the duty-0 name.
             const QString pulseSymbol = tab->vgSource->voiceAt(synthSlot)->symbol;
-            const VgSynthDesc *pulseDef =
-                VoicegroupSource::synthInstruments(projectRoot).find(pulseSymbol);
+            const VgSynthCatalog pulseCatalog =
+                VoicegroupSource::synthInstruments(projectRoot);
+            const VgSynthDesc *pulseDef = pulseCatalog.find(pulseSymbol);
             check((pulseDef && *pulseDef == VgSynthDesc{})
                       || pulseSymbol == vgSynthSymbolName(VgSynthDesc{}),
                   "waveform flip back to pulse did not adopt the 50% default");
