@@ -63,6 +63,16 @@ void WaveformView::setMarkers(qint64 cropStart, qint64 cropEnd,
     update();
 }
 
+void WaveformView::setSeamOverlay(std::vector<float> endWindow,
+                                  std::vector<float> startWindow)
+{
+    if (m_seamEnd == endWindow && m_seamStart == startWindow)
+        return;
+    m_seamEnd = std::move(endWindow);
+    m_seamStart = std::move(startWindow);
+    update();
+}
+
 void WaveformView::setPlayhead(qint64 sourceSample)
 {
     if (m_playhead == sourceSample)
@@ -344,37 +354,38 @@ void WaveformView::paintEvent(QPaintEvent *event)
         }
     }
 
-    // Seam overlay: the window leading into the loop end superimposed on the
-    // window leading into the loop start — matched shapes mean a clean seam.
-    if (m_loopOn && m_loopEnd > m_loopStart) {
-        const qint64 w = std::min<qint64>(
-            {256, m_loopEnd - m_loopStart, m_loopStart + 1, m_loopEnd + 1});
-        if (w >= 8) {
-            const QRect inset(r.width() - 236, 6, 228, 56);
-            p.fillRect(inset, palette().color(QPalette::AlternateBase));
-            p.setPen(palette().color(QPalette::Mid));
-            p.drawRect(inset);
-            const auto drawWindow = [&](qint64 endIncl, const QColor &c) {
-                QPainterPath path;
-                for (qint64 i = 0; i < w; i++) {
-                    const double v = double(x[endIncl - w + 1 + i]);
-                    const double px = inset.left() + 1
-                        + double(i) * (inset.width() - 2) / double(w - 1);
-                    const double py = inset.center().y()
-                        - v * (inset.height() * 0.45);
-                    if (i == 0)
-                        path.moveTo(px, py);
-                    else
-                        path.lineTo(px, py);
-                }
-                p.setPen(QPen(c, 1));
-                p.drawPath(path);
-            };
-            drawWindow(m_loopEnd, QColor(0xE8, 0x50, 0x50));
-            drawWindow(m_loopStart, QColor(0x40, 0xB0, 0xE0));
-            p.setPen(palette().color(QPalette::Mid));
-            p.drawText(inset.adjusted(4, 2, -4, -2), Qt::AlignBottom,
-                       tr("seam"));
-        }
+    // Seam overlay: the PROCESSED window leading into the loop end
+    // superimposed on the one leading into the loop start (owner-fed via
+    // setSeamOverlay) — matched shapes mean a clean seam, and render-stage
+    // effects like the crossfade bake visibly reshape the traces.
+    if (m_loopOn && m_seamEnd.size() >= 8
+        && m_seamEnd.size() == m_seamStart.size()) {
+        const qint64 w = qint64(m_seamEnd.size());
+        const QRect inset(r.width() - 236, 6, 228, 56);
+        p.fillRect(inset, palette().color(QPalette::AlternateBase));
+        p.setPen(palette().color(QPalette::Mid));
+        p.drawRect(inset);
+        const auto drawWindow = [&](const std::vector<float> &win,
+                                    const QColor &c) {
+            QPainterPath path;
+            for (qint64 i = 0; i < w; i++) {
+                const double v = double(win[size_t(i)]);
+                const double px = inset.left() + 1
+                    + double(i) * (inset.width() - 2) / double(w - 1);
+                const double py = inset.center().y()
+                    - v * (inset.height() * 0.45);
+                if (i == 0)
+                    path.moveTo(px, py);
+                else
+                    path.lineTo(px, py);
+            }
+            p.setPen(QPen(c, 1));
+            p.drawPath(path);
+        };
+        drawWindow(m_seamEnd, QColor(0xE8, 0x50, 0x50));
+        drawWindow(m_seamStart, QColor(0x40, 0xB0, 0xE0));
+        p.setPen(palette().color(QPalette::Mid));
+        p.drawText(inset.adjusted(4, 2, -4, -2), Qt::AlignBottom,
+                   tr("seam"));
     }
 }

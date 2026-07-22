@@ -2049,15 +2049,23 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
         const int refineCount = undo->count(); // 3 or 4 (no-op refine skips)
 
-        // 5. Crossfade toggle flows into the params.
+        // 5. Crossfade toggle flows into the params, and the seam inset
+        // renders the PROCESSED windows, so baking visibly reshapes them.
         auto *crossfade = dialog.findChild<QCheckBox *>(
             QStringLiteral("sampleCrossfade"));
         expect(crossfade != nullptr, "crossfade toggle found");
         if (crossfade) {
+            const std::vector<float> endBefore = wave->seamEndWindow();
+            const std::vector<float> startBefore = wave->seamStartWindow();
+            expect(!endBefore.empty() && endBefore.size() == startBefore.size(),
+                   "looped render feeds the seam overlay");
             crossfade->setChecked(true);
             expect(doc->params().crossfadeOn
                        && undo->count() == refineCount + 1,
                    "crossfade toggle is undoable");
+            expect(wave->seamEndWindow() != endBefore
+                       || wave->seamStartWindow() != startBefore,
+                   "crossfade bake reshapes the seam overlay");
             crossfade->setChecked(false);
         }
 

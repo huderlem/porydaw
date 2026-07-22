@@ -19,6 +19,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include <algorithm>
 #include <climits>
 #include <cmath>
 
@@ -682,6 +683,23 @@ void SampleEditorDialog::refreshOutputs()
     updatePitchHint();
     m_waveform->setMarkers(p.cropStart, p.cropEnd, p.loopStart, p.loopEnd,
                            p.loopOn);
+
+    // The seam inset renders the PROCESSED windows (final grid, final
+    // gain, crossfade baked in) — checking "Smooth seam" must visibly
+    // reshape the traces, not just the numbers.
+    std::vector<float> seamEnd, seamStart;
+    if (out.looped) {
+        const qint64 S = out.loopStart;
+        const qint64 E = qint64(out.size) - 1;
+        const qint64 w = std::min<qint64>({256, E - S, S + 1, E + 1});
+        if (w >= 8 && qint64(out.preview.size()) > E) {
+            seamEnd.assign(out.preview.begin() + (E - w + 1),
+                           out.preview.begin() + (E + 1));
+            seamStart.assign(out.preview.begin() + (S - w + 1),
+                             out.preview.begin() + (S + 1));
+        }
+    }
+    m_waveform->setSeamOverlay(std::move(seamEnd), std::move(seamStart));
 
     const double gainDb =
         out.normalizeGain > 0.0 ? 20.0 * std::log10(out.normalizeGain) : 0.0;
