@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QShortcut>
 #include <QSpinBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <climits>
@@ -221,13 +222,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
 
     // ---- loop tools ----
     auto *tools = new QHBoxLayout;
-    m_snapZero = new QCheckBox(tr("Snap to zero"), this);
-    m_snapZero->setObjectName(QStringLiteral("sampleSnapZero"));
-    m_snapZero->setToolTip(
-        tr("Snap dragged markers to the nearest zero crossing."));
-    connect(m_snapZero, &QCheckBox::toggled, m_waveform,
-            &WaveformView::setSnapToZero);
-    tools->addWidget(m_snapZero);
     m_suggestButton = new QPushButton(tr("Suggest loop"), this);
     m_suggestButton->setObjectName(QStringLiteral("sampleSuggestLoop"));
     connect(m_suggestButton, &QPushButton::clicked, this,
@@ -253,12 +247,12 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     tools->addWidget(m_seamBadge);
     layout->addLayout(tools);
 
-    // ---- the pipeline form ----
+    // ---- the pipeline form (the beginner surface; expert rows live in
+    // the Advanced section below) ----
     auto *form = new QFormLayout;
     auto *sourceLabel = new QLabel(QFileInfo(src.sourcePath).fileName(), this);
     sourceLabel->setToolTip(src.sourcePath);
     form->addRow(tr("Source:"), sourceLabel);
-    form->addRow(tr("Format:"), new QLabel(sourceLine(src), this));
 
     const auto makeSpin = [this](const char *name, int min, int max,
                                  int value, int mergeKey) {
@@ -271,16 +265,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
                 [this, mergeKey] { applyParamsFromUi(mergeKey); });
         return spin;
     };
-
-    m_cropStart = makeSpin("sampleCropStart", 0, frames - 1,
-                           int(defaults.cropStart), 1);
-    m_cropEnd = makeSpin("sampleCropEnd", 1, frames, int(defaults.cropEnd), 2);
-    auto *cropRow = new QHBoxLayout;
-    cropRow->addWidget(m_cropStart);
-    cropRow->addWidget(new QLabel(tr("to"), this));
-    cropRow->addWidget(m_cropEnd);
-    cropRow->addStretch();
-    form->addRow(tr("Crop (samples):"), cropRow);
 
     m_loopOn = new QCheckBox(tr("Loop"), this);
     m_loopOn->setObjectName(QStringLiteral("sampleLoopOn"));
@@ -300,16 +284,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     form->addRow(tr("Loop (samples):"), loopRow);
 
     m_baseKey = makeSpin("sampleBaseKey", 0, 127, defaults.baseKey, 5);
-    m_fineTune = new QDoubleSpinBox(this);
-    m_fineTune->setObjectName(QStringLiteral("sampleFineTune"));
-    m_fineTune->setRange(0.0, 99.99);
-    m_fineTune->setDecimals(2);
-    m_fineTune->setSuffix(tr(" cents"));
-    m_fineTune->setValue(defaults.fineTuneCents);
-    m_sourceCents = m_fineTune->value(); // spin-rounded source tuning
-    m_fineTune->setKeyboardTracking(false);
-    connect(m_fineTune, &QDoubleSpinBox::valueChanged, this,
-            [this] { applyParamsFromUi(6); });
     m_pitchLabel = new QLabel(this);
     m_pitchLabel->setObjectName(QStringLiteral("samplePitchLabel"));
     m_pitchApply = new QPushButton(tr("Apply"), this);
@@ -320,8 +294,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
             &SampleEditorDialog::applyDetectedPitch);
     auto *keyRow = new QHBoxLayout;
     keyRow->addWidget(m_baseKey);
-    keyRow->addWidget(new QLabel(QStringLiteral("+"), this));
-    keyRow->addWidget(m_fineTune);
     keyRow->addSpacing(12);
     keyRow->addWidget(m_pitchLabel);
     keyRow->addWidget(m_pitchApply);
@@ -336,41 +308,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         m_pitchApply->setToolTip(
             tr("Detect the sample's pitch and show it here."));
     }
-
-    m_rateCombo = new QComboBox(this);
-    m_rateCombo->setObjectName(QStringLiteral("sampleRateCombo"));
-    m_rateCombo->setEditable(true);
-    m_rateCombo->addItem(tr("Keep source (%1 Hz)")
-                             .arg(src.sampleRate, 0, 'f',
-                                  src.sampleRate == std::floor(src.sampleRate)
-                                      ? 0
-                                      : 2));
-    for (const int rate : kGbaMixRates)
-        m_rateCombo->addItem(QString::number(rate));
-    m_rateCombo->setCurrentIndex(0);
-    // Apply on commit (preset pick, Enter, focus-out) — not per keystroke:
-    // every apply is a full synchronous pipeline render (~120 ms/5 s of
-    // source), too heavy to run while a custom rate is being typed.
-    connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
-            [this] { applyParamsFromUi(-1); });
-    connect(m_rateCombo->lineEdit(), &QLineEdit::editingFinished, this,
-            [this] { applyParamsFromUi(-1); });
-    form->addRow(tr("Target rate (Hz):"), m_rateCombo);
-
-    m_normalizeMode = new QComboBox(this);
-    m_normalizeMode->setObjectName(QStringLiteral("sampleNormalizeMode"));
-    m_normalizeMode->addItems({tr("Auto"), tr("Looped (−9 dBFS loop RMS)"),
-                               tr("One-shot (peak)"), tr("Off")});
-    m_normalizeMode->setCurrentIndex(int(defaults.normalizeMode));
-    connect(m_normalizeMode, &QComboBox::currentIndexChanged, this,
-            [this] { applyParamsFromUi(-1); });
-    m_gainReadout = new QLabel(this);
-    m_gainReadout->setObjectName(QStringLiteral("sampleGainReadout"));
-    auto *normRow = new QHBoxLayout;
-    normRow->addWidget(m_normalizeMode);
-    normRow->addWidget(m_gainReadout);
-    normRow->addStretch();
-    form->addRow(tr("Normalize:"), normRow);
 
     m_crossfade = new QCheckBox(
         tr("Crossfade the seam (bakes the loop end into the pre-loop "
@@ -449,6 +386,95 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_outputSummary->setWordWrap(true);
     layout->addWidget(m_outputSummary);
 
+    // ---- Advanced disclosure: expert rows, collapsed by default ----
+    m_advancedToggle = new QToolButton(this);
+    m_advancedToggle->setObjectName(QStringLiteral("sampleAdvancedToggle"));
+    m_advancedToggle->setText(tr("Advanced"));
+    m_advancedToggle->setCheckable(true);
+    m_advancedToggle->setAutoRaise(true);
+    m_advancedToggle->setArrowType(Qt::RightArrow);
+    m_advancedToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    layout->addWidget(m_advancedToggle);
+    m_advancedBody = new QWidget(this);
+    m_advancedBody->setObjectName(QStringLiteral("sampleAdvancedBody"));
+    auto *advForm = new QFormLayout(m_advancedBody);
+    advForm->setContentsMargins(18, 0, 0, 0);
+    connect(m_advancedToggle, &QToolButton::toggled, this, [this](bool on) {
+        m_advancedBody->setVisible(on);
+        m_advancedToggle->setArrowType(on ? Qt::DownArrow : Qt::RightArrow);
+    });
+
+    advForm->addRow(tr("Format:"),
+                    new QLabel(sourceLine(src), m_advancedBody));
+
+    m_cropStart = makeSpin("sampleCropStart", 0, frames - 1,
+                           int(defaults.cropStart), 1);
+    m_cropEnd = makeSpin("sampleCropEnd", 1, frames, int(defaults.cropEnd), 2);
+    auto *cropRow = new QHBoxLayout;
+    cropRow->addWidget(m_cropStart);
+    cropRow->addWidget(new QLabel(tr("to"), m_advancedBody));
+    cropRow->addWidget(m_cropEnd);
+    cropRow->addStretch();
+    advForm->addRow(tr("Crop (samples):"), cropRow);
+
+    m_fineTune = new QDoubleSpinBox(this);
+    m_fineTune->setObjectName(QStringLiteral("sampleFineTune"));
+    m_fineTune->setRange(0.0, 99.99);
+    m_fineTune->setDecimals(2);
+    m_fineTune->setSuffix(tr(" cents"));
+    m_fineTune->setValue(defaults.fineTuneCents);
+    m_sourceCents = m_fineTune->value(); // spin-rounded source tuning
+    m_fineTune->setKeyboardTracking(false);
+    connect(m_fineTune, &QDoubleSpinBox::valueChanged, this,
+            [this] { applyParamsFromUi(6); });
+    auto *tuneRow = new QHBoxLayout;
+    tuneRow->addWidget(m_fineTune);
+    tuneRow->addStretch();
+    advForm->addRow(tr("Fine tune:"), tuneRow);
+
+    m_rateCombo = new QComboBox(this);
+    m_rateCombo->setObjectName(QStringLiteral("sampleRateCombo"));
+    m_rateCombo->setEditable(true);
+    m_rateCombo->addItem(tr("Keep source (%1 Hz)")
+                             .arg(src.sampleRate, 0, 'f',
+                                  src.sampleRate == std::floor(src.sampleRate)
+                                      ? 0
+                                      : 2));
+    for (const int rate : kGbaMixRates)
+        m_rateCombo->addItem(QString::number(rate));
+    m_rateCombo->setCurrentIndex(0);
+    // Apply on commit (preset pick, Enter, focus-out) — not per keystroke:
+    // every apply is a full synchronous pipeline render (~120 ms/5 s of
+    // source), too heavy to run while a custom rate is being typed.
+    connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
+            [this] { applyParamsFromUi(-1); });
+    connect(m_rateCombo->lineEdit(), &QLineEdit::editingFinished, this,
+            [this] { applyParamsFromUi(-1); });
+    advForm->addRow(tr("Target rate (Hz):"), m_rateCombo);
+
+    m_normalizeMode = new QComboBox(this);
+    m_normalizeMode->setObjectName(QStringLiteral("sampleNormalizeMode"));
+    m_normalizeMode->addItems({tr("Auto"), tr("Looped (−9 dBFS loop RMS)"),
+                               tr("One-shot (peak)"), tr("Off")});
+    m_normalizeMode->setCurrentIndex(int(defaults.normalizeMode));
+    connect(m_normalizeMode, &QComboBox::currentIndexChanged, this,
+            [this] { applyParamsFromUi(-1); });
+    m_gainReadout = new QLabel(this);
+    m_gainReadout->setObjectName(QStringLiteral("sampleGainReadout"));
+    auto *normRow = new QHBoxLayout;
+    normRow->addWidget(m_normalizeMode);
+    normRow->addWidget(m_gainReadout);
+    normRow->addStretch();
+    advForm->addRow(tr("Normalize:"), normRow);
+
+    m_techDetail = new QLabel(m_advancedBody);
+    m_techDetail->setObjectName(QStringLiteral("sampleTechDetail"));
+    m_techDetail->setWordWrap(true);
+    advForm->addRow(m_techDetail);
+
+    m_advancedBody->setVisible(false);
+    layout->addWidget(m_advancedBody);
+
     auto *nameForm = new QFormLayout;
     m_nameEdit = new QLineEdit(this);
     m_nameEdit->setObjectName(QStringLiteral("sampleNameEdit"));
@@ -461,18 +487,13 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_nameStatus->setWordWrap(true);
     layout->addWidget(m_nameStatus);
 
-    auto *note = new QLabel(
-        tr("wav2agb pipeline detected — the exported .wav lands in "
-           "sound/direct_sound_samples/ and the build's %.bin rule compiles "
-           "it."),
-        this);
-    note->setWordWrap(true);
-    layout->addWidget(note);
-
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     m_addButton = buttons->addButton(tr("Add to Project"),
                                      QDialogButtonBox::AcceptRole);
     m_addButton->setObjectName(QStringLiteral("sampleAddButton"));
+    m_addButton->setToolTip(
+        tr("Exports the .wav into sound/direct_sound_samples/ and registers "
+           "it; the build's %.bin rule compiles it."));
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
@@ -620,9 +641,12 @@ void SampleEditorDialog::refreshOutputs()
 
     // The seam badge (DSP.md §6): green amp ≤ 2 LSB and deriv ≤ 3
     // LSB/sample, amber up to double those, red otherwise.
-    if (out.looped && out.seam.valid) {
-        const bool green = out.seam.ampLsb <= 2 && out.seam.derivLsb <= 3;
-        const bool amber = out.seam.ampLsb <= 4 && out.seam.derivLsb <= 6;
+    const bool seamKnown = out.looped && out.seam.valid;
+    const bool green =
+        seamKnown && out.seam.ampLsb <= 2 && out.seam.derivLsb <= 3;
+    const bool amber =
+        seamKnown && out.seam.ampLsb <= 4 && out.seam.derivLsb <= 6;
+    if (seamKnown) {
         m_seamBadge->setVisible(true);
         m_seamBadge->setText(green ? tr("seam: clean")
                                    : amber ? tr("seam: fair")
@@ -636,22 +660,38 @@ void SampleEditorDialog::refreshOutputs()
         m_seamBadge->setVisible(false);
     }
 
+    // Friendly one-liner on the main surface; the technical readout lives
+    // in the Advanced section.
+    const quint32 romBytes = 16 + ((out.size + 3) & ~quint32(3));
     QStringList lines;
+    QString brief;
+    if (out.outputRate > 0)
+        brief = tr("%1 s · ").arg(double(out.size) / out.outputRate, 0, 'f',
+                                  2);
+    brief += romBytes >= 1024
+        ? tr("%1 KB ROM").arg(double(romBytes) / 1024.0, 0, 'f', 1)
+        : tr("%1 bytes ROM").arg(romBytes);
+    brief += seamKnown ? (green ? tr(" · loops cleanly")
+                                : amber ? tr(" · loop seam: fair")
+                                        : tr(" · loop seam clicks"))
+                       : out.looped ? tr(" · looped") : tr(" · one-shot");
+    lines += brief;
+    for (const QString &w : m_doc.source().warnings + out.warnings)
+        lines += tr("Warning: %1").arg(w);
+    m_outputSummary->setText(lines.join(QLatin1Char('\n')));
+
+    QStringList detail;
     QString first =
         tr("Output: %1 samples @ %2 Hz").arg(out.size).arg(out.declaredRate);
     first += out.looped
         ? tr(" — loop %1..%2").arg(out.loopStart).arg(out.size)
         : tr(" — one-shot");
-    if (out.outputRate > 0)
-        first += QStringLiteral(" (%1 s)").arg(
-            double(out.size) / out.outputRate, 0, 'f', 2);
-    lines += first;
-    lines += tr("Pitch: %1 Hz at C4 (60) — agbp %2, unity %3 (%4)")
-                 .arg(double(out.freq) / 1024.0, 0, 'f', 2)
-                 .arg(out.freq)
-                 .arg(out.unityNote)
-                 .arg(midiKeyName(out.unityNote));
-    const quint32 romBytes = 16 + ((out.size + 3) & ~quint32(3));
+    detail += first;
+    detail += tr("Pitch: %1 Hz at C4 (60) — agbp %2, unity %3 (%4)")
+                  .arg(double(out.freq) / 1024.0, 0, 'f', 2)
+                  .arg(out.freq)
+                  .arg(out.unityNote)
+                  .arg(midiKeyName(out.unityNote));
     QString cost = tr("ROM cost: %1 bytes").arg(romBytes);
     if (out.seam.valid) {
         cost += tr(" — seam amp %1 LSB, slope %2")
@@ -660,10 +700,8 @@ void SampleEditorDialog::refreshOutputs()
         if (out.seam.nccValid)
             cost += tr(", match %1%").arg(int(out.seam.ncc * 100.0));
     }
-    lines += cost;
-    for (const QString &w : m_doc.source().warnings + out.warnings)
-        lines += tr("Warning: %1").arg(w);
-    m_outputSummary->setText(lines.join(QLatin1Char('\n')));
+    detail += cost;
+    m_techDetail->setText(detail.join(QLatin1Char('\n')));
 }
 
 void SampleEditorDialog::validateName()

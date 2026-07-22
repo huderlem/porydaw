@@ -150,9 +150,6 @@ void WaveformView::dragHandleTo(qint64 sample)
     const qint64 n = m_sample ? m_sample->frameCount() : 0;
     if (n <= 0)
         return;
-    if (m_snapZero)
-        sample = SampleDsp::nearestZeroCrossing(m_sample->buffer.data(), n,
-                                                sample);
     switch (m_drag) {
     case CropStartHandle:
         m_cropStart = qBound<qint64>(0, sample, m_cropEnd - 1);

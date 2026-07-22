@@ -21,6 +21,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
+class QToolButton;
 class WaveformView;
 
 // The Sample Studio dialog (docs/sample-studio/PLAN.md §5): the dominant
@@ -133,7 +134,6 @@ private:
     QElapsedTimer m_auditionClock;
 
     WaveformView *m_waveform = nullptr;
-    QCheckBox *m_snapZero = nullptr;
     QPushButton *m_suggestButton = nullptr;
     QPushButton *m_refineButton = nullptr;
     QHBoxLayout *m_chipRow = nullptr;
@@ -160,6 +160,11 @@ private:
     QCheckBox *m_seamSolo = nullptr;
     QCheckBox *m_useDestAdsr = nullptr;
     QLabel *m_outputSummary = nullptr;
+    // The Advanced disclosure: expert rows (format, crop, rate, normalize,
+    // fine-tune) plus the technical output readout, collapsed by default.
+    QToolButton *m_advancedToggle = nullptr;
+    QWidget *m_advancedBody = nullptr;
+    QLabel *m_techDetail = nullptr;
     QLineEdit *m_nameEdit = nullptr;
     QLabel *m_nameStatus = nullptr;
     QPushButton *m_addButton = nullptr;

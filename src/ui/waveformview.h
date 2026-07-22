@@ -7,9 +7,8 @@
 
 // The Sample Studio waveform view (docs/sample-studio/PLAN.md §Modules):
 // zoomable source-domain waveform over a peak pyramid, with draggable crop
-// and loop handles, optional zero-crossing snap, a loop-seam overlay (the
-// pre-loop-end and pre-loop-start windows superimposed), and a playhead
-// during audition. Pure view: it emits marker-change signals during drags;
+// and loop handles, a loop-seam overlay (the pre-loop-end and
+// pre-loop-start windows superimposed), and a playhead during audition. Pure view: it emits marker-change signals during drags;
 // the owner applies them to the document and reflects state back through
 // setMarkers.
 class WaveformView : public QWidget
@@ -23,7 +22,6 @@ public:
     void setSample(const ImportedSample *sample);
     void setMarkers(qint64 cropStart, qint64 cropEnd, qint64 loopStart,
                     qint64 loopEnd, bool loopOn);
-    void setSnapToZero(bool on) { m_snapZero = on; }
     // Source-domain playhead; -1 hides it.
     void setPlayhead(qint64 sourceSample);
     bool gestureActive() const { return m_drag != NoHandle || m_panning; }
@@ -68,7 +66,6 @@ private:
     qint64 m_cropStart = 0, m_cropEnd = 0;
     qint64 m_loopStart = 0, m_loopEnd = 0;
     bool m_loopOn = false;
-    bool m_snapZero = false;
     qint64 m_playhead = -1;
     // Fit-to-width until the user zooms: the initial fit happens before the
     // layout settles, so resizes must re-fit or the view shows dead space.

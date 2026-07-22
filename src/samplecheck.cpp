@@ -1926,30 +1926,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         expect(std::llabs(doc->params().loopStart - 3000) <= 40,
                "redo re-applies the drag");
 
-        // 2. Zero-crossing snap: the fixture is a 220.5 Hz sine at 44100
-        // (period exactly 200), so snapped markers land on sign changes.
-        auto *snap =
-            dialog.findChild<QCheckBox *>(QStringLiteral("sampleSnapZero"));
-        expect(snap != nullptr, "snap toggle found");
-        if (snap) {
-            snap->setChecked(true);
-            const QPoint from2 =
-                wave->handlePoint(WaveformView::LoopStartHandle);
-            const QPoint to2(wave->xForSample(5000), from2.y());
-            dragMouse(wave, from2, to2);
-            const qint64 landed = doc->params().loopStart;
-            const std::vector<float> &buf = doc->source().buffer;
-            const bool onCrossing = landed > 0
-                && ((buf[size_t(landed) - 1] < 0.0f
-                     && buf[size_t(landed)] >= 0.0f)
-                    || (buf[size_t(landed) - 1] >= 0.0f
-                        && buf[size_t(landed)] < 0.0f));
-            expect(onCrossing, "snapped drag lands on a zero crossing");
-            expect(undo->count() == 2, "snapped drag is the second entry");
-            snap->setChecked(false);
-        }
-
-        // 3. Pitch detection: the fixture carries smpl metadata, so nothing
+        // 2. Pitch detection: the fixture carries smpl metadata, so nothing
         // was silently prefilled; the button detects first, applies second.
         auto *pitchApply = dialog.findChild<QPushButton *>(
             QStringLiteral("samplePitchApply"));
@@ -1966,16 +1943,16 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                    "smpl metadata wins over detection at open");
             pitchApply->click(); // detect + display only
             expect(pitchLabel->text().contains(QStringLiteral("220"))
-                       && undo->count() == 2,
+                       && undo->count() == 1,
                    "first click detects without applying");
             pitchApply->click(); // apply
             expect(baseKey->value() == 57
                        && std::abs(fineTune->value() - 3.93) < 1.5
-                       && undo->count() == 3,
+                       && undo->count() == 2,
                    "second click applies the detected pitch");
         }
 
-        // 4. Suggest: chips appear; applying the best one produces a clean
+        // 3. Suggest: chips appear; applying the best one produces a clean
         // seam on this pure tone (badge green, NCC high).
         auto *suggest = dialog.findChild<QPushButton *>(
             QStringLiteral("sampleSuggestLoop"));
@@ -1987,7 +1964,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             expect(chip0 != nullptr, "suggestion chips appear");
             if (chip0) {
                 chip0->click();
-                expect(undo->count() == 4, "chip apply is one undo entry");
+                expect(undo->count() == 3, "chip apply is one undo entry");
                 const ProcessedSample &out = doc->processed();
                 expect(out.looped && out.seam.valid && out.seam.ampLsb <= 2
                            && out.seam.derivLsb <= 3
@@ -2001,7 +1978,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             }
         }
 
-        // 5. Refine is a no-worse local re-seat and one undo entry at most.
+        // 4. Refine is a no-worse local re-seat and one undo entry at most.
         auto *refine = dialog.findChild<QPushButton *>(
             QStringLiteral("sampleRefineLoop"));
         const double nccBeforeRefine = doc->processed().seam.ncc;
@@ -2010,9 +1987,9 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             expect(doc->processed().seam.ncc >= nccBeforeRefine - 0.02,
                    "refine keeps the seam at least as clean");
         }
-        const int refineCount = undo->count(); // 4 or 5 (no-op refine skips)
+        const int refineCount = undo->count(); // 3 or 4 (no-op refine skips)
 
-        // 6. Crossfade toggle flows into the params.
+        // 5. Crossfade toggle flows into the params.
         auto *crossfade = dialog.findChild<QCheckBox *>(
             QStringLiteral("sampleCrossfade"));
         expect(crossfade != nullptr, "crossfade toggle found");
@@ -2024,13 +2001,13 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             crossfade->setChecked(false);
         }
 
-        // 7. No engine was passed: the audition strip is disabled.
+        // 6. No engine was passed: the audition strip is disabled.
         auto *playOnce = dialog.findChild<QPushButton *>(
             QStringLiteral("sampleAuditionOnce"));
         expect(playOnce && !playOnce->isEnabled(),
                "audition strip disabled without audio");
 
-        // 8. Full undo walks back to the import defaults.
+        // 7. Full undo walks back to the import defaults.
         while (undo->canUndo())
             undo->undo();
         expect(doc->params() == SampleDocument::defaultParams(hiRes),
@@ -2038,7 +2015,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         while (undo->canRedo())
             undo->redo();
 
-        // 9. Commit: register the render and re-run the §1 assertions.
+        // 8. Commit: register the render and re-run the §1 assertions.
         auto *nameEdit =
             dialog.findChild<QLineEdit *>(QStringLiteral("sampleNameEdit"));
         expect(nameEdit != nullptr, "name field found");
