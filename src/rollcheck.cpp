@@ -18,6 +18,7 @@
 
 #include "core/songdocument.h"
 #include "project/decompproject.h"
+#include "rollcheckplayhead.h"
 #include "ui/songview.h"
 
 // --rollcheck <projectRoot> <song> [shot.png]: piano-roll gesture check.
@@ -556,6 +557,11 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         view.scrollByPx(view.contentX(0.0) - home); // back where it started
     }
 
+    // A stopped playhead is a thin child overlay. Moving it must preserve the
+    // timeline parents' backing stores instead of repainting their contents.
+    for (const QString &error : playheadOverlayCheckFailures(view, *timeline))
+        fail(qUtf8Printable(error));
+
     // Inline track rename: renameTrack opens a line editor on the header
     // row; Return commits (queued past the panel rebuild), Escape discards,
     // and loop-marker names are refused. isHidden (not isVisible) because
@@ -790,6 +796,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         }
     }
 
+    const auto screenshotTick =
+        uint64_t(std::ceil(std::max(0.0, view.tickAtContentX(view.width() / 2))));
+    view.setPlayheadSample(timeline->sampleForTick(screenshotTick), false);
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");

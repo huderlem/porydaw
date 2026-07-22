@@ -47,6 +47,8 @@ qt_add_executable(porydaw
     src/tabcheck.cpp
     src/eventviewcheck.cpp
     src/rollcheck.cpp
+    src/rollcheckplayhead.cpp
+    src/rollcheckplayhead.h
     src/viewcheck.cpp
     src/roundtrip.cpp
     src/editcheck.cpp
@@ -127,6 +129,8 @@ qt_add_executable(porydaw
     src/ui/songviewmodel.h
     src/ui/songview.cpp
     src/ui/songview.h
+    src/ui/playheadoverlay.cpp
+    src/ui/playheadoverlay.h
     src/ui/eventlistview.cpp
     src/ui/eventlistview.h
     src/ui/viewsidecar.cpp

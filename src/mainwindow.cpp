@@ -32,6 +32,7 @@
 #include <QCloseEvent>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include "audio/sampleimport.h"
@@ -166,9 +167,16 @@ MainWindow::MainWindow(QWidget *parent)
                   : tr("No audio device."));
 
     m_uiTimer = new QTimer(this);
+    m_playheadTimer = new QTimer(this);
+
     m_uiTimer->setInterval(33);
     connect(m_uiTimer, &QTimer::timeout, this, &MainWindow::uiTick);
     m_uiTimer->start();
+    m_playheadTimer->setTimerType(Qt::PreciseTimer);
+    // 60hz is 16.6 ms; Qt can tick faster than this, making the playhead move
+    // faster than 60hz and wasting time.
+    m_playheadTimer->setInterval(17);
+    connect(m_playheadTimer, &QTimer::timeout, this, &MainWindow::synchronizePlayhead);
 
     updateTransportActions();
 }
@@ -279,18 +287,18 @@ void MainWindow::buildUi()
     m_playPauseAction->setShortcut(Qt::Key_Space);
     connect(m_playPauseAction, &QAction::triggered, this, [this] {
         if (m_audio.transport() == Transport::Playing)
-            m_audio.pause();
+            pausePlayback();
         else
             startPlayback(/*fromEditCursor=*/true);
     });
     addAction(m_playPauseAction);
 
     m_pauseAction = new QAction(style()->standardIcon(QStyle::SP_MediaPause), tr("Pause"), this);
-    connect(m_pauseAction, &QAction::triggered, this, [this] { m_audio.pause(); });
+    connect(m_pauseAction, &QAction::triggered, this, [this] { pausePlayback(); });
     transport->addAction(m_pauseAction);
 
     m_stopAction = new QAction(style()->standardIcon(QStyle::SP_MediaStop), tr("Stop"), this);
-    connect(m_stopAction, &QAction::triggered, this, [this] { m_audio.stop(); });
+    connect(m_stopAction, &QAction::triggered, this, [this] { stopPlayback(); });
     transport->addAction(m_stopAction);
 
     m_loopAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Loop"), this);
@@ -491,8 +499,10 @@ SongSession *MainWindow::createSession()
     // chasing controller state to the landing position.
     connect(s->view, &SongView::editCursorMoved, this, [this, s](uint64_t tick) {
         if (s == m_active && m_audioOk && m_audio.songLoaded()
-            && m_audio.transport() != Transport::Stopped)
+            && m_audio.transport() != Transport::Stopped) {
             m_audio.seek(m_audio.timeline()->sampleForTick(tick));
+            synchronizePlayhead();
+        }
     });
     connect(&s->doc, &SongDocument::documentChanged, this,
             [this, s] { onDocumentChanged(*s); });
@@ -581,6 +591,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
         updateWindowTitle();
         updateTransportActions();
         persistOpenTabs();
+        synchronizePlayhead();
         return;
     }
 
@@ -591,6 +602,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
         maybeRefreshVoicegroup(*session);
     if (m_audioOk)
         attachEngine(*session);
+    synchronizePlayhead();
     updateVoicegroupBrowser();
     updatePolyPanelContext(session);
 
@@ -1264,7 +1276,7 @@ void MainWindow::exportWav()
         return;
     appSettings.setValue(QStringLiteral("lastWavExportDir"), QFileInfo(path).path());
 
-    m_audio.stop();
+    stopPlayback();
 
     QProgressDialog progress(tr("Rendering %1...").arg(session->doc.label()),
                              tr("Cancel"), 0, 1000, this);
@@ -2252,14 +2264,11 @@ void MainWindow::uiTick()
 {
     if (!m_audioOk)
         return;
-
     if (m_active && m_audio.songLoaded()) {
         const uint64_t length = m_audio.timeline()->lengthSamples;
         m_timeLabel->setText(QStringLiteral("%1 / %2")
                                  .arg(formatTime(m_audio.playheadSamples()),
                                       formatTime(length)));
-        m_active->view->setPlayheadSample(m_audio.playheadSamples(),
-                                          m_audio.transport() == Transport::Playing);
 
         const uint64_t lost = m_audio.polyLostTotal();
         QString poly = tr("PCM %1/%2 · CGB %3/4")
@@ -2279,6 +2288,24 @@ void MainWindow::uiTick()
     updateTransportActions();
 }
 
+void MainWindow::synchronizePlayhead()
+{
+    if (!m_audioOk || !m_active || !m_audio.songLoaded()) {
+        // This also runs synchronously from activateSession(nullptr).
+        m_playheadTimer->stop();
+        return;
+    }
+
+    const bool playing = m_audio.transport() == Transport::Playing;
+    m_active->view->setPlayheadSample(m_audio.playheadSamples(), playing);
+    if (playing) {
+        if (!m_playheadTimer->isActive())
+            m_playheadTimer->start();
+    } else {
+        m_playheadTimer->stop();
+    }
+}
+
 void MainWindow::startPlayback(bool fromEditCursor)
 {
     if (!m_audioOk || !m_active || !m_audio.songLoaded())
@@ -2287,6 +2314,19 @@ void MainWindow::startPlayback(bool fromEditCursor)
         m_audio.seek(
             m_audio.timeline()->sampleForTick(m_active->view->editCursorTick()));
     m_audio.play();
+    synchronizePlayhead();
+}
+
+void MainWindow::pausePlayback()
+{
+    m_audio.pause();
+    synchronizePlayhead();
+}
+
+void MainWindow::stopPlayback()
+{
+    m_audio.stop();
+    synchronizePlayhead();
 }
 
 void MainWindow::updateTransportActions()
@@ -2336,7 +2376,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     qInfo("selftest: loaded %s (%zu events, %d tracks)", qUtf8Printable(target->label),
           m_audio.timeline()->events.size(), m_audio.timeline()->usedTrackCount);
 
-    m_audio.play();
+    startPlayback();
     QEventLoop loop;
     QTimer::singleShot(1500, &loop, &QEventLoop::quit);
     loop.exec();
@@ -2487,6 +2527,25 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
 
     bool ok = m_audio.transport() == Transport::Playing && playedSeconds > 1.0
         && m_audio.playheadSamples() >= posBeforeEdit && vgEditOk;
+    if (ok) {
+        pausePlayback();
+        QTimer::singleShot(150, &loop, &QEventLoop::quit);
+        loop.exec();
+        const uint64_t pausedSample = m_audio.playheadSamples();
+        const double pausedViewTick = tab->view->playheadTick();
+        const double pausedEngineTick =
+            m_audio.timeline()->tickForSample(pausedSample);
+        constexpr double kPausedPlayheadToleranceTicks = 0.25;
+        ok = std::abs(pausedViewTick - pausedEngineTick) <= kPausedPlayheadToleranceTicks;
+        if (!ok) {
+            qWarning("selftest: paused playhead reconciliation FAILED "
+                     "(view %.3f ticks, engine %.3f ticks at %llu samples)",
+                     pausedViewTick, pausedEngineTick,
+                     static_cast<unsigned long long>(pausedSample));
+        }
+        startPlayback();
+    }
+
 
     // M2 polish: edit-cursor seek mid-playback, then play-from-cursor out of
     // Stopped (both go through AudioEngine::seek + chase). Loop disabled so
@@ -2501,7 +2560,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         QTimer::singleShot(300, &loop, &QEventLoop::quit);
         loop.exec();
         const uint64_t afterSeek = m_audio.playheadSamples();
-        m_audio.stop();
+        stopPlayback();
         QTimer::singleShot(200, &loop, &QEventLoop::quit);
         loop.exec();
         startPlayback(); // Stopped: must seek back to the edit cursor
@@ -2525,7 +2584,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         // playhead had ~300ms past the cursor before the pause; a 150ms
         // check after the restart must land back inside that window.
         if (ok) {
-            m_audio.pause();
+            pausePlayback();
             QTimer::singleShot(200, &loop, &QEventLoop::quit);
             loop.exec();
             const uint64_t pausedAt = m_audio.playheadSamples();
@@ -2593,7 +2652,15 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         else
             qWarning("selftest: sidecar view-state round trip FAILED");
     }
-    m_audio.stop();
+    if (ok) {
+        destroySession(tab);
+        ok = !m_playheadTimer->isActive();
+        if (ok)
+            qInfo("selftest: closing final tab stopped playhead timer");
+        else
+            qWarning("selftest: closing final tab left playhead timer active");
+    }
+    stopPlayback();
     qInfo("selftest: %s", ok ? "PASS" : "FAIL");
     return ok;
 }

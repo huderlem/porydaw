@@ -30,6 +30,7 @@ class TimeRuler;
 class PianoRoll;
 class AutomationArea;
 class OtherStrip;
+class PlayheadOverlay;
 class TrackHeaderPanel;
 
 // Fixed gutter geometry shared by every timeline-aligned child: the track
@@ -456,6 +457,7 @@ private:
     // A mouse gesture is live in the ruler, roll, or lanes (pan, drag,
     // sweep); playhead follow-scroll pauses while one runs.
     bool userGestureActive() const;
+    void syncPlayheadOverlay();
     int viewportWidth() const;
     void setHScroll(int px);
     void updateScrollbars();
@@ -501,6 +503,7 @@ private:
     QSplitter *m_splitter = nullptr; // roll above, lanes area below
     bool m_splitInit = false;        // initial sizes applied on first layout
     songview::OtherStrip *m_strip = nullptr;
+    songview::PlayheadOverlay *m_playheadOverlay = nullptr;
     QScrollBar *m_hbar = nullptr;
     QScrollBar *m_vbar = nullptr;
 };
