@@ -29,8 +29,8 @@ class WaveformView;
 // waveform view with crop/loop drag handles, a checkable "Loop this
 // sample" group that hides all loop chrome for one-shots and seeds the
 // best analyzer candidate (plus a crossfade bake iff its seam isn't
-// clean) on first enable, a green/amber/red seam badge with a one-click
-// Fix, pitch-detect prefill, and an engine audition strip (play / key)
+// clean) on first enable, a green/amber/red seam badge, pitch-detect
+// prefill, and an engine audition strip (play / key)
 // driven through the audition-slot protocol (PLAN.md §4). Expert rows
 // live in a collapsed Advanced disclosure; the whole control column
 // below the waveform rides a squeeze-then-scroll area. Pure view: the
@@ -156,7 +156,6 @@ private:
     QWidget *m_loopBody = nullptr;
     QPushButton *m_tryLoop = nullptr;
     QPushButton *m_refineButton = nullptr;
-    QPushButton *m_seamFix = nullptr;
     QLabel *m_suggestStatus = nullptr;
     QLabel *m_seamBadge = nullptr;
     QSpinBox *m_cropStart = nullptr;

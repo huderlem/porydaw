@@ -133,10 +133,10 @@ Layout (revised 2026-07-21 for the beginner-first pass): WaveformView
 dominant on top. Below: a checkable "Loop this sample" group whose body
 hides entirely for one-shots — first enable on a loop-less sample seeds the
 analyzer's best candidate plus a crossfade bake iff its seam isn't clean,
-as one undo entry; inside it the green/amber/red seam badge (DSP.md §6)
-with a one-click crossfade "Fix" when non-green, "Try another loop"
-(cycles the top-5 candidates), "Refine", loop-range spins, and "Smooth
-seam (crossfade)". Then base key (pitch-detect prefill, note-name spin);
+as one undo entry; inside it the green/amber/red seam badge (DSP.md §6),
+"Try another loop" (cycles the top-5 candidates), "Refine", loop-range
+spins, and "Smooth seam (crossfade)" — the badge's remedy IS the
+crossfade checkbox, no separate Fix affordance. Then base key (pitch-detect prefill, note-name spin);
 target-rate combo (presets from `kGbaMixRates`, "keep source rate", free
 entry — doubles allowed; fresh sources DEFAULT to min(source, 13379) —
 `kGbaDefaultRate` — while prepared/gbaReady files keep their source rate

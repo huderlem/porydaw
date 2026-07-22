@@ -2028,23 +2028,14 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
             }
 
             // Misaligned loop (220.5 Hz sine, period 200 — a 137-sample
-            // loop cannot seat cleanly): the badge goes non-green and
-            // carries the one-click crossfade Fix.
+            // loop cannot seat cleanly): the badge goes non-green. Also
+            // the bad-seam state the refine/crossfade sections below run
+            // from.
             loopStartSpin->setValue(2000);
             loopEndSpin->setValue(2137);
-            auto *fix = dialog.findChild<QPushButton *>(
-                QStringLiteral("sampleSeamFix"));
             expect(doc->processed().seam.valid && badge->isVisible()
                        && badge->text() != QStringLiteral("seam: clean"),
                    "misaligned loop is not clean");
-            expect(fix && fix->isVisible(), "Fix appears for a bad seam");
-            if (fix) {
-                fix->click();
-                expect(doc->params().crossfadeOn, "Fix bakes a crossfade");
-                expect(!fix->isVisible(), "Fix disappears once applied");
-                undo->undo(); // crossfade back off for the sections below
-                expect(!doc->params().crossfadeOn, "crossfade Fix undoes");
-            }
         }
 
         // 4. Refine is a no-worse local re-seat and one undo entry at most.

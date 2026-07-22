@@ -284,13 +284,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_seamBadge->setObjectName(QStringLiteral("sampleSeamBadge"));
     m_seamBadge->setMargin(3);
     seamRow->addWidget(m_seamBadge);
-    m_seamFix = new QPushButton(tr("Fix"), this);
-    m_seamFix->setObjectName(QStringLiteral("sampleSeamFix"));
-    m_seamFix->setToolTip(
-        tr("Smooth the clicking seam with a crossfade bake."));
-    connect(m_seamFix, &QPushButton::clicked, this,
-            [this] { m_crossfade->setChecked(true); });
-    seamRow->addWidget(m_seamFix);
     m_tryLoop = new QPushButton(tr("Try another loop"), this);
     m_tryLoop->setObjectName(QStringLiteral("sampleTryLoop"));
     m_tryLoop->setToolTip(
@@ -717,8 +710,6 @@ void SampleEditorDialog::refreshOutputs()
     } else {
         m_seamBadge->setVisible(false);
     }
-    // A clicking seam carries its own one-click remedy.
-    m_seamFix->setVisible(seamKnown && !green && !p.crossfadeOn);
 
     // Friendly one-liner on the main surface; the technical readout lives
     // in the Advanced section.
