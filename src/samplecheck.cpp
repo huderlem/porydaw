@@ -1927,8 +1927,10 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         expect(std::llabs(doc->params().loopStart - 3000) <= 40,
                "redo re-applies the drag");
 
-        // 2. Pitch detection: the fixture carries smpl metadata, so nothing
-        // was silently prefilled; the button detects first, applies second.
+        // 2. Pitch mismatch hint: the fixture's smpl claims unity 60 but
+        // the tone sounds at 220 Hz (A3 + a few cents), so the detect
+        // chrome shows at open; one Apply click adopts the detection and
+        // the chrome hides again (agreement is the quiet state).
         auto *pitchApply = dialog.findChild<QPushButton *>(
             QStringLiteral("samplePitchApply"));
         auto *pitchLabel =
@@ -1942,15 +1944,16 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         if (pitchApply && pitchLabel && baseKey && fineTune) {
             expect(baseKey->value() == 60,
                    "smpl metadata wins over detection at open");
-            pitchApply->click(); // detect + display only
-            expect(pitchLabel->text().contains(QStringLiteral("220"))
-                       && undo->count() == 1,
-                   "first click detects without applying");
-            pitchApply->click(); // apply
+            expect(pitchApply->isVisible() && pitchLabel->isVisible()
+                       && pitchLabel->text().contains(QStringLiteral("220")),
+                   "metadata/detection mismatch surfaces the hint");
+            pitchApply->click();
             expect(baseKey->value() == 57
                        && std::abs(fineTune->value() - 3.93) < 1.5
                        && undo->count() == 2,
-                   "second click applies the detected pitch");
+                   "Apply adopts the detected pitch as one undo entry");
+            expect(!pitchApply->isVisible() && !pitchLabel->isVisible(),
+                   "agreement hides the detect chrome");
         }
 
         // 3. Auto-populate: disabling the loop hides the group's body;

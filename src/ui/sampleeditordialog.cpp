@@ -11,8 +11,10 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QShortcut>
 #include <QSpinBox>
+#include <QValidator>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -102,6 +104,50 @@ QByteArray seamSoloBytes(const ProcessedSample &out)
     return bytes;
 }
 
+// "57", "A3", "a#3", "C-1", or the display form "A3 (57)".
+int parseMidiKey(const QString &text, int fallback)
+{
+    const QString t = text.trimmed();
+    bool ok = false;
+    const int direct = t.toInt(&ok);
+    if (ok)
+        return qBound(0, direct, 127);
+    static const QRegularExpression re(
+        QStringLiteral("^([A-Ga-g])([#b]?)(-?\\d+)"));
+    const QRegularExpressionMatch m = re.match(t);
+    if (!m.hasMatch())
+        return fallback;
+    static const int base[] = {9, 11, 0, 2, 4, 5, 7}; // A..G
+    int semis = base[m.captured(1).toUpper().at(0).toLatin1() - 'A'];
+    if (m.captured(2) == QLatin1String("#"))
+        semis++;
+    else if (m.captured(2) == QLatin1String("b"))
+        semis--;
+    return qBound(0, (m.captured(3).toInt() + 1) * 12 + semis, 127);
+}
+
+// A spin box that shows MIDI keys as note names ("A3 (57)") — beginners
+// read pitches, not key numbers — and parses either form back.
+class MidiKeySpinBox : public QSpinBox
+{
+public:
+    using QSpinBox::QSpinBox;
+
+protected:
+    QString textFromValue(int value) const override
+    {
+        return QStringLiteral("%1 (%2)").arg(midiKeyName(value)).arg(value);
+    }
+    int valueFromText(const QString &text) const override
+    {
+        return parseMidiKey(text, value());
+    }
+    QValidator::State validate(QString &, int &) const override
+    {
+        return QValidator::Acceptable;
+    }
+};
+
 } // namespace
 
 // A parameter edit on the dialog-local stack. Value-based before/after;
@@ -166,21 +212,19 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         m_destAdsr = *destAdsr;
     }
 
-    // Pitch-detect prefill (DSP.md §4): only when the container carried no
-    // pitch metadata — a real smpl/INST unity note always wins, and the
-    // detection is otherwise display-only until the user applies it.
-    if (!m_doc.source().hasPitchMetadata) {
-        ensurePitchDetected();
-        if (m_pitch.pitched) {
-            SampleEditParams p = m_doc.params();
-            const double exact =
-                69.0 + 12.0 * std::log2(m_pitch.f0 / 440.0);
-            p.baseKey = qBound(0, int(std::floor(exact)), 127);
-            p.fineTuneCents = qBound(
-                0.0, std::round((exact - std::floor(exact)) * 10000.0) / 100.0,
-                99.99);
-            m_doc.setParams(p);
-        }
+    // Pitch detection (DSP.md §4) runs once at open for every source. It
+    // prefills the key/cents only when the container carried no pitch
+    // metadata — a real smpl/INST unity note always wins — and otherwise
+    // just powers the mismatch hint beside the base key (updatePitchHint).
+    ensurePitchDetected();
+    if (!m_doc.source().hasPitchMetadata && m_pitch.pitched) {
+        SampleEditParams p = m_doc.params();
+        const double exact = 69.0 + 12.0 * std::log2(m_pitch.f0 / 440.0);
+        p.baseKey = qBound(0, int(std::floor(exact)), 127);
+        p.fineTuneCents = qBound(
+            0.0, std::round((exact - std::floor(exact)) * 10000.0) / 100.0,
+            99.99);
+        m_doc.setParams(p);
     }
 
     const ImportedSample &src = m_doc.source();
@@ -333,7 +377,18 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     sourceLabel->setToolTip(src.sourcePath);
     form->addRow(tr("Source:"), sourceLabel);
 
-    m_baseKey = makeSpin("sampleBaseKey", 0, 127, defaults.baseKey, 5);
+    m_baseKey = new MidiKeySpinBox(this);
+    m_baseKey->setObjectName(QStringLiteral("sampleBaseKey"));
+    m_baseKey->setRange(0, 127);
+    m_baseKey->setValue(defaults.baseKey);
+    m_baseKey->setKeyboardTracking(false);
+    m_baseKey->setToolTip(
+        tr("The key this sample sounds at, as a note name or MIDI number."));
+    connect(m_baseKey, &QSpinBox::valueChanged, this,
+            [this] { applyParamsFromUi(5); });
+    // The detect chrome is quiet-agreement UI: hidden while the current
+    // key matches the detection, visible (with one-click Apply) only on a
+    // real mismatch — updatePitchHint decides via refreshOutputs.
     m_pitchLabel = new QLabel(this);
     m_pitchLabel->setObjectName(QStringLiteral("samplePitchLabel"));
     m_pitchApply = new QPushButton(tr("Apply"), this);
@@ -349,15 +404,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     keyRow->addWidget(m_pitchApply);
     keyRow->addStretch();
     form->addRow(tr("Base key:"), keyRow);
-    if (m_pitchTried) {
-        // Prefill already ran (no container metadata); show the result.
-        ensurePitchDetected();
-    } else {
-        m_pitchLabel->setText(tr("Detect pitch:"));
-        m_pitchApply->setText(tr("Detect"));
-        m_pitchApply->setToolTip(
-            tr("Detect the sample's pitch and show it here."));
-    }
 
     layout->addLayout(form);
 
@@ -373,11 +419,11 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         else
             startAudition(m_doc.processed().looped);
     });
-    m_auditionKey = new QSpinBox(this);
+    m_auditionKey = new MidiKeySpinBox(this);
     m_auditionKey->setObjectName(QStringLiteral("sampleAuditionKey"));
     m_auditionKey->setRange(0, 127);
     m_auditionKey->setValue(60);
-    m_auditionKey->setToolTip(tr("Audition MIDI key."));
+    m_auditionKey->setToolTip(tr("Audition key."));
     connect(m_auditionKey, &QSpinBox::valueChanged, this, [this] {
         if (m_auditionMode != AuditionMode::None)
             startAudition(m_auditionMode == AuditionMode::Loop);
@@ -648,6 +694,7 @@ void SampleEditorDialog::refreshOutputs()
     const ProcessedSample &out = m_doc.processed();
     const SampleEditParams &p = m_doc.params();
     m_loopBody->setVisible(p.loopOn);
+    updatePitchHint();
     if (m_engine)
         m_seamSolo->setEnabled(out.looped);
     m_waveform->setMarkers(p.cropStart, p.cropEnd, p.loopStart, p.loopEnd,
@@ -742,32 +789,44 @@ void SampleEditorDialog::validateName()
 
 void SampleEditorDialog::ensurePitchDetected()
 {
-    if (!m_pitchTried) {
-        m_pitchTried = true;
-        // Run on pre-resample audio over the sustained region: the loop
-        // region if set, else the middle 50% of the crop (DSP.md §4).
-        const ImportedSample &src = m_doc.source();
-        const SampleEditParams &p = m_doc.params();
-        const float *x = src.buffer.data();
-        qint64 from, len;
-        if (p.loopOn && p.loopEnd > p.loopStart) {
-            from = qBound<qint64>(0, p.loopStart, src.frameCount());
-            len = qMin(p.loopEnd + 1, src.frameCount()) - from;
-        } else {
-            const qint64 cropLen = p.cropEnd - p.cropStart;
-            from = p.cropStart + cropLen / 4;
-            len = cropLen / 2;
-        }
-        if (len < 8192) { // too short for 3 frames — widen to everything
-            from = 0;
-            len = src.frameCount();
-        }
-        m_pitch = SampleDsp::detectPitchYin(x + from, len, src.sampleRate);
+    if (m_pitchTried)
+        return;
+    m_pitchTried = true;
+    // Run on pre-resample audio over the sustained region: the loop
+    // region if set, else the middle 50% of the crop (DSP.md §4).
+    const ImportedSample &src = m_doc.source();
+    const SampleEditParams &p = m_doc.params();
+    const float *x = src.buffer.data();
+    qint64 from, len;
+    if (p.loopOn && p.loopEnd > p.loopStart) {
+        from = qBound<qint64>(0, p.loopStart, src.frameCount());
+        len = qMin(p.loopEnd + 1, src.frameCount()) - from;
+    } else {
+        const qint64 cropLen = p.cropEnd - p.cropStart;
+        from = p.cropStart + cropLen / 4;
+        len = cropLen / 2;
     }
-    if (m_pitchLabel) {
-        if (m_pitch.pitched) {
-            const double exact =
-                69.0 + 12.0 * std::log2(m_pitch.f0 / 440.0);
+    if (len < 8192) { // too short for 3 frames — widen to everything
+        from = 0;
+        len = src.frameCount();
+    }
+    m_pitch = SampleDsp::detectPitchYin(x + from, len, src.sampleRate);
+}
+
+// The detect chrome shows only when the detection disagrees with the
+// current key+cents by more than ~40 cents — beyond detection noise,
+// worth a deliberate one-click Apply. Agreement (the usual case: the
+// prefill already adopted the detection, or the metadata was right)
+// keeps the row clean.
+void SampleEditorDialog::updatePitchHint()
+{
+    bool show = false;
+    if (m_pitch.pitched) {
+        const double exact = 69.0 + 12.0 * std::log2(m_pitch.f0 / 440.0);
+        const double current = double(m_doc.params().baseKey)
+            + m_doc.params().fineTuneCents / 100.0;
+        show = std::abs(exact - current) > 0.40;
+        if (show) {
             const int nearest = qBound(0, int(std::lround(exact)), 127);
             const double cents = (exact - double(nearest)) * 100.0;
             m_pitchLabel->setText(
@@ -776,24 +835,15 @@ void SampleEditorDialog::ensurePitchDetected()
                     .arg(cents >= 0 ? QStringLiteral("+") : QString())
                     .arg(cents, 0, 'f', 0)
                     .arg(m_pitch.f0, 0, 'f', 1));
-            m_pitchApply->setText(tr("Apply"));
-            m_pitchApply->setEnabled(true);
-        } else {
-            m_pitchLabel->setText(tr("Detected: unpitched"));
-            m_pitchApply->setText(tr("Apply"));
-            m_pitchApply->setEnabled(false);
         }
     }
+    m_pitchLabel->setVisible(show);
+    m_pitchApply->setVisible(show);
 }
 
 void SampleEditorDialog::applyDetectedPitch()
 {
-    // First click on a metadata-carrying source is "Detect": run the
-    // detection and display it; applying takes a second, deliberate click
-    // (DSP.md §4 — never silently applied).
-    const bool firstDetection = !m_pitchTried;
-    ensurePitchDetected();
-    if (firstDetection || !m_pitch.pitched)
+    if (!m_pitch.pitched)
         return;
     const double exact = 69.0 + 12.0 * std::log2(m_pitch.f0 / 440.0);
     SampleEditParams p = m_doc.params();

@@ -83,6 +83,7 @@ private:
     void refreshOutputs();
     void validateName();
     void ensurePitchDetected();
+    void updatePitchHint();
     void applyDetectedPitch();
     void computeChips();
     bool ensureChips();
@@ -111,7 +112,9 @@ private:
     // Waveform drag gestures collapse into one undo entry.
     SampleEditParams m_gestureBase;
 
-    // Pitch detection (DSP.md §4) — computed once, prefill only.
+    // Pitch detection (DSP.md §4) — computed once at open. Prefills the
+    // key/cents only when the container carried no pitch metadata;
+    // otherwise it powers the quiet mismatch hint beside the base key.
     bool m_pitchTried = false;
     SampleDsp::PitchResult m_pitch;
 
