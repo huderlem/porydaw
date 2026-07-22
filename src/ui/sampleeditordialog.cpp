@@ -15,6 +15,7 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QValidator>
 #include <QToolButton>
 #include <QVBoxLayout>
@@ -207,10 +208,16 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
 
     auto *layout = new QVBoxLayout(this);
 
-    // ---- the waveform, dominant on top ----
+    // ---- the waveform, dominant on top; it shares the vertical space
+    // with the control column through a splitter so its height is
+    // user-resizable ----
+    auto *split = new QSplitter(Qt::Vertical, this);
+    split->setObjectName(QStringLiteral("sampleSplit"));
+    split->setChildrenCollapsible(false);
+    layout->addWidget(split, 1);
     m_waveform = new WaveformView(this);
     m_waveform->setSample(&m_doc.source());
-    layout->addWidget(m_waveform, 1);
+    split->addWidget(m_waveform);
     connect(m_waveform, &WaveformView::gestureStarted, this, [this] {
         m_gestureBase = m_doc.params();
     });
@@ -249,11 +256,25 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
     scroll->viewport()->setAutoFillBackground(false); // keep the dialog look
-    layout->addWidget(scroll);
+    split->addWidget(scroll);
+    split->setStretchFactor(0, 1);
+    split->setStretchFactor(1, 0);
     auto *content = new QWidget;
     auto *column = new QVBoxLayout(content);
     column->setContentsMargins(0, 0, 0, 0);
     scroll->setWidget(content);
+
+    // ---- the name, first — the one field every commit needs ----
+    auto *nameForm = new QFormLayout;
+    m_nameEdit = new QLineEdit(this);
+    m_nameEdit->setObjectName(QStringLiteral("sampleNameEdit"));
+    m_nameEdit->setText(src.suggestedName);
+    nameForm->addRow(tr("Name:"), m_nameEdit);
+    column->addLayout(nameForm);
+    m_nameStatus = new QLabel(this);
+    m_nameStatus->setObjectName(QStringLiteral("sampleNameStatus"));
+    m_nameStatus->setWordWrap(true);
+    column->addWidget(m_nameStatus);
 
     const auto makeSpin = [this](const char *name, int min, int max,
                                  int value, int mergeKey) {
@@ -267,18 +288,15 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         return spin;
     };
 
-    // ---- the loop group: every loop-related control lives here, and the
-    // body hides entirely while the sample is a one-shot ----
-    m_loopGroup = new QGroupBox(tr("Loop this sample"), this);
-    m_loopGroup->setObjectName(QStringLiteral("sampleLoopOn"));
-    m_loopGroup->setCheckable(true);
-    m_loopGroup->setChecked(defaults.loopOn);
-    auto *groupLayout = new QVBoxLayout(m_loopGroup);
-    m_loopBody = new QWidget(m_loopGroup);
-    m_loopBody->setObjectName(QStringLiteral("sampleLoopBody"));
-    groupLayout->addWidget(m_loopBody);
-    auto *loopLayout = new QVBoxLayout(m_loopBody);
-    loopLayout->setContentsMargins(0, 0, 0, 0);
+    // ---- loop controls: a plain checkbox on the column; the frame with
+    // every loop-related control exists only while the sample loops ----
+    m_loopCheck = new QCheckBox(tr("Loop this sample"), this);
+    m_loopCheck->setObjectName(QStringLiteral("sampleLoopOn"));
+    m_loopCheck->setChecked(defaults.loopOn);
+    column->addWidget(m_loopCheck);
+    m_loopGroup = new QGroupBox(this);
+    m_loopGroup->setObjectName(QStringLiteral("sampleLoopBody"));
+    auto *loopLayout = new QVBoxLayout(m_loopGroup);
 
     auto *seamRow = new QHBoxLayout;
     m_seamBadge = new QLabel(this);
@@ -332,8 +350,8 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
 
     // First enable on a sample with no loop yet seeds the analyzer's best
     // candidate (autoPopulateLoop); any other toggle is a plain parameter
-    // edit. Body visibility tracks the params via refreshOutputs.
-    connect(m_loopGroup, &QGroupBox::toggled, this, [this](bool on) {
+    // edit. Frame visibility tracks the params via refreshOutputs.
+    connect(m_loopCheck, &QCheckBox::toggled, this, [this](bool on) {
         if (m_syncing)
             return;
         if (on && m_doc.params().loopStart == m_doc.params().loopEnd)
@@ -341,7 +359,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         else
             applyParamsFromUi(-1);
     });
-    m_loopBody->setVisible(defaults.loopOn);
+    m_loopGroup->setVisible(defaults.loopOn);
     column->addWidget(m_loopGroup);
 
     // ---- the pipeline form (the beginner surface; expert rows live in
@@ -417,7 +435,8 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_playButton = new QPushButton(tr("Play"), this);
     m_playButton->setObjectName(QStringLiteral("sampleAuditionPlay"));
     m_playButton->setToolTip(
-        tr("Audition the render (looped when the loop is enabled)."));
+        tr("Audition the render — looped when the loop is enabled; "
+           "one-shots repeat with a short gap until stopped."));
     connect(m_playButton, &QPushButton::clicked, this, [this] {
         if (m_auditionMode != AuditionMode::None)
             stopAudition();
@@ -531,18 +550,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
 
     m_advancedBody->setVisible(false);
     column->addWidget(m_advancedBody);
-
-    auto *nameForm = new QFormLayout;
-    m_nameEdit = new QLineEdit(this);
-    m_nameEdit->setObjectName(QStringLiteral("sampleNameEdit"));
-    m_nameEdit->setText(src.suggestedName);
-    nameForm->addRow(tr("Name:"), m_nameEdit);
-    column->addLayout(nameForm);
-
-    m_nameStatus = new QLabel(this);
-    m_nameStatus->setObjectName(QStringLiteral("sampleNameStatus"));
-    m_nameStatus->setWordWrap(true);
-    column->addWidget(m_nameStatus);
     column->addStretch();
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
@@ -605,7 +612,7 @@ void SampleEditorDialog::applyParamsFromUi(int mergeKey)
     SampleEditParams p = m_doc.params();
     p.cropStart = m_cropStart->value();
     p.cropEnd = m_cropEnd->value();
-    p.loopOn = m_loopGroup->isChecked();
+    p.loopOn = m_loopCheck->isChecked();
     p.loopStart = m_loopStart->value();
     p.loopEnd = m_loopEnd->value();
     p.baseKey = m_baseKey->value();
@@ -658,7 +665,7 @@ void SampleEditorDialog::syncUiFromParams()
     const ImportedSample &src = m_doc.source();
     m_cropStart->setValue(int(p.cropStart));
     m_cropEnd->setValue(int(p.cropEnd));
-    m_loopGroup->setChecked(p.loopOn);
+    m_loopCheck->setChecked(p.loopOn);
     m_loopStart->setValue(int(p.loopStart));
     m_loopEnd->setValue(int(p.loopEnd));
     m_baseKey->setValue(p.baseKey);
@@ -679,10 +686,13 @@ void SampleEditorDialog::refreshOutputs()
 {
     const ProcessedSample &out = m_doc.processed();
     const SampleEditParams &p = m_doc.params();
-    m_loopBody->setVisible(p.loopOn);
+    m_loopGroup->setVisible(p.loopOn);
     updatePitchHint();
     m_waveform->setMarkers(p.cropStart, p.cropEnd, p.loopStart, p.loopEnd,
                            p.loopOn);
+    // The waveform trace shows the normalized amplitude (1.0 when the
+    // normalize stage is off or a no-op).
+    m_waveform->setGain(out.normalizeGain);
 
     // The seam inset renders the PROCESSED windows (final grid, final
     // gain, crossfade baked in) — checking "Smooth seam" must visibly
@@ -740,10 +750,6 @@ void SampleEditorDialog::refreshOutputs()
     brief += romBytes >= 1024
         ? tr("%1 KB ROM").arg(double(romBytes) / 1024.0, 0, 'f', 1)
         : tr("%1 bytes ROM").arg(romBytes);
-    brief += seamKnown ? (green ? tr(" · loops cleanly")
-                                : amber ? tr(" · loop seam: fair")
-                                        : tr(" · loop seam clicks"))
-                       : out.looped ? tr(" · looped") : tr(" · one-shot");
     lines += brief;
     for (const QString &w : m_doc.source().warnings + out.warnings)
         lines += tr("Warning: %1").arg(w);
@@ -1041,6 +1047,7 @@ void SampleEditorDialog::startAudition(bool looped)
         : 1.0;
     m_auditionCrop = m_doc.params().cropStart;
     m_auditionPos = 0.0;
+    m_auditionGapLeft = 0.0;
     m_auditionClock.restart();
     m_auditionTimer.start();
     m_playButton->setText(tr("Stop"));
@@ -1080,6 +1087,14 @@ void SampleEditorDialog::auditionTick()
     // Display-only playhead approximation: advance at the channel's playback
     // rate and wrap in the loop, mapped back to source coordinates.
     const double dt = double(m_auditionClock.restart()) / 1000.0;
+    // A finished one-shot repeats from the start after a half-second gap
+    // (the channel ended itself at the data end).
+    if (m_auditionGapLeft > 0.0) {
+        m_auditionGapLeft -= dt;
+        if (m_auditionGapLeft <= 0.0)
+            startAudition(false);
+        return;
+    }
     m_auditionPos += dt * m_auditionRate;
     if (m_auditionLooped) {
         const double S = double(m_auditionLoopStart);
@@ -1087,7 +1102,8 @@ void SampleEditorDialog::auditionTick()
         if (len > 0.0 && m_auditionPos >= double(m_auditionSize))
             m_auditionPos = S + std::fmod(m_auditionPos - S, len);
     } else if (m_auditionPos >= double(m_auditionSize)) {
-        stopAudition(); // the channel ended itself at the data end
+        m_auditionGapLeft = 0.5;
+        m_waveform->setPlayhead(-1);
         return;
     }
     m_waveform->setPlayhead(

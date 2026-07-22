@@ -32,6 +32,10 @@ public:
     // the crossfade bake / normalize / resample all show up in the inset.
     void setSeamOverlay(std::vector<float> endWindow,
                         std::vector<float> startWindow);
+    // Display gain for the trace (the normalize stage's applied gain), so
+    // the waveform shows the amplitude the render actually has. Clamped
+    // to full scale when the gain would clip past the widget.
+    void setGain(double gain);
     const std::vector<float> &seamEndWindow() const { return m_seamEnd; }
     const std::vector<float> &seamStartWindow() const { return m_seamStart; }
     // Source-domain playhead; -1 hides it.
@@ -78,6 +82,7 @@ private:
     qint64 m_cropStart = 0, m_cropEnd = 0;
     qint64 m_loopStart = 0, m_loopEnd = 0;
     bool m_loopOn = false;
+    double m_gain = 1.0;
     std::vector<float> m_seamEnd;
     std::vector<float> m_seamStart;
     qint64 m_playhead = -1;

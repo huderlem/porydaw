@@ -73,6 +73,14 @@ void WaveformView::setSeamOverlay(std::vector<float> endWindow,
     update();
 }
 
+void WaveformView::setGain(double gain)
+{
+    if (m_gain == gain)
+        return;
+    m_gain = gain;
+    update();
+}
+
 void WaveformView::setPlayhead(qint64 sourceSample)
 {
     if (m_playhead == sourceSample)
@@ -311,8 +319,12 @@ void WaveformView::paintEvent(QPaintEvent *event)
             continue;
         const SampleDsp::PeakPyramid::MinMax mm =
             m_pyramid.query(x, from, to);
-        const int y0 = mid - int(std::lround(double(mm.hi) * yScale));
-        const int y1 = mid - int(std::lround(double(mm.lo) * yScale));
+        const int y0 = mid
+            - int(std::lround(qBound(-1.0, double(mm.hi) * m_gain, 1.0)
+                              * yScale));
+        const int y1 = mid
+            - int(std::lround(qBound(-1.0, double(mm.lo) * m_gain, 1.0)
+                              * yScale));
         p.drawLine(px, y0, px, std::max(y1, y0 + 1));
     }
     p.setPen(QColor(128, 128, 128, 120));

@@ -59,8 +59,11 @@ int runTransportCheck();
 // projects under the given (nonexistent) scratch dir. The optional second
 // argument points at a wav2agb decomp checkout (e.g. pokeemerald) whose
 // sound/direct_sound_samples corpus gates the corpus-conditional sections.
+// The optional third argument saves editor-dialog screenshots there (plus
+// a -oneshot variant with the loop frame hidden).
 int runSampleCheck(const QString &scratchDir,
-                   const QString &corpusRoot = QString());
+                   const QString &corpusRoot = QString(),
+                   const QString &screenshotPath = QString());
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -133,7 +136,9 @@ int main(int argc, char *argv[])
     if (sampleCheck >= 0 && sampleCheck + 1 < args.size()) {
         const QString corpus =
             sampleCheck + 2 < args.size() ? args[sampleCheck + 2] : QString();
-        return runSampleCheck(args[sampleCheck + 1], corpus);
+        const QString shot =
+            sampleCheck + 3 < args.size() ? args[sampleCheck + 3] : QString();
+        return runSampleCheck(args[sampleCheck + 1], corpus, shot);
     }
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();

@@ -5,13 +5,14 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileInfo>
-#include <QGroupBox>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSpinBox>
+#include <QSplitter>
 #include <QString>
 #include <QTreeWidget>
 #include <algorithm>
@@ -424,7 +425,8 @@ void pumpEngine(M4AEngine *engine, int blocks)
 
 } // namespace
 
-int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
+int runSampleCheck(const QString &scratchDir, const QString &corpusRoot,
+                   const QString &screenshotPath)
 {
     if (QDir(scratchDir).exists()) {
         std::fprintf(stderr,
@@ -1479,7 +1481,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         auto *baseKey =
             dialog.findChild<QSpinBox *>(QStringLiteral("sampleBaseKey"));
         auto *loopOn =
-            dialog.findChild<QGroupBox *>(QStringLiteral("sampleLoopOn"));
+            dialog.findChild<QCheckBox *>(QStringLiteral("sampleLoopOn"));
         auto *rateCombo =
             dialog.findChild<QComboBox *>(QStringLiteral("sampleRateCombo"));
         auto *fineTune = dialog.findChild<QDoubleSpinBox *>(
@@ -1971,13 +1973,14 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                    "agreement hides the detect chrome");
         }
 
-        // 3. Auto-populate: disabling the loop hides the group's body;
-        // zeroing the loop points and re-enabling seeds the analyzer's
-        // best candidate as ONE undo entry (clean seam on this pure tone,
-        // so no crossfade bake). "Try another loop" cycles candidates,
-        // and a deliberately misaligned loop surfaces the crossfade Fix.
+        // 3. Auto-populate: disabling the loop hides the loop frame
+        // entirely; zeroing the loop points and re-enabling seeds the
+        // analyzer's best candidate as ONE undo entry (clean seam on this
+        // pure tone, so no crossfade bake). "Try another loop" cycles
+        // candidates, and a deliberately misaligned loop surfaces the
+        // crossfade Fix.
         auto *group =
-            dialog.findChild<QGroupBox *>(QStringLiteral("sampleLoopOn"));
+            dialog.findChild<QCheckBox *>(QStringLiteral("sampleLoopOn"));
         auto *loopBody =
             dialog.findChild<QWidget *>(QStringLiteral("sampleLoopBody"));
         auto *loopStartSpin =
@@ -2095,6 +2098,47 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                    "short window scrolls the controls");
             dialog.resize(900, 640);
             QApplication::processEvents();
+        }
+
+        // 8b. The waveform/controls splitter makes the waveform height
+        // user-resizable.
+        auto *split = dialog.findChild<QSplitter *>(
+            QStringLiteral("sampleSplit"));
+        expect(split != nullptr, "waveform splitter found");
+        if (split && wave) {
+            const int tall = wave->height();
+            split->setSizes({wave->minimumSizeHint().height(), 10000});
+            QApplication::processEvents();
+            expect(wave->height() < tall,
+                   "splitter drag shrinks the waveform");
+            split->setSizes({10000, split->sizes().value(1)});
+            QApplication::processEvents();
+        }
+
+        // Layout evidence: the looped dialog, plus a -oneshot variant
+        // (loop unchecked — the loop frame is gone entirely, not an empty
+        // box). The toggle round-trips through plain param edits, so the
+        // commit below still renders the redone state.
+        if (!screenshotPath.isEmpty()) {
+            QApplication::processEvents();
+            QImage image(dialog.size(), QImage::Format_ARGB32_Premultiplied);
+            image.fill(Qt::white);
+            dialog.render(&image);
+            image.save(screenshotPath);
+            if (group) {
+                group->setChecked(false);
+                QApplication::processEvents();
+                QImage oneShot(dialog.size(),
+                               QImage::Format_ARGB32_Premultiplied);
+                oneShot.fill(Qt::white);
+                dialog.render(&oneShot);
+                const QFileInfo info(screenshotPath);
+                oneShot.save(info.path() + QLatin1Char('/')
+                             + info.completeBaseName()
+                             + QStringLiteral("-oneshot.") + info.suffix());
+                group->setChecked(true);
+                QApplication::processEvents();
+            }
         }
 
         // 9. Commit: register the render and re-run the §1 assertions.

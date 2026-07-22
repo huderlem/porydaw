@@ -26,13 +26,15 @@ class QToolButton;
 class WaveformView;
 
 // The Sample Studio dialog (docs/sample-studio/PLAN.md §5): the dominant
-// waveform view with crop/loop drag handles, a checkable "Loop this
-// sample" group that hides all loop chrome for one-shots and seeds the
-// best analyzer candidate (plus a crossfade bake iff its seam isn't
-// clean) on first enable, a green/amber/red seam badge, pitch-detect
-// prefill, and an engine audition strip (play / key)
-// driven through the audition-slot protocol (PLAN.md §4). Expert rows
-// live in a collapsed Advanced disclosure; the whole control column
+// waveform view with crop/loop drag handles (height user-resizable via a
+// splitter), a "Loop this sample" checkbox whose loop-chrome frame
+// disappears entirely for one-shots and seeds the best analyzer
+// candidate (plus a crossfade bake iff its seam isn't clean) on first
+// enable, a green/amber/red seam badge, pitch-detect prefill, and an
+// engine audition strip (play / key) driven through the audition-slot
+// protocol (PLAN.md §4); one-shot auditions repeat with a half-second
+// gap until stopped. Expert rows live in a collapsed Advanced
+// disclosure; the whole control column
 // below the waveform rides a squeeze-then-scroll area. Pure view: the
 // dialog renders and hands out the export bytes; MainWindow does the
 // writes on accept. Parameter edits ride a dialog-local QUndoStack —
@@ -140,6 +142,7 @@ private:
     AuditionMode m_auditionMode = AuditionMode::None;
     bool m_republishPending = false;
     double m_auditionPos = 0.0;   // output-domain samples
+    double m_auditionGapLeft = 0.0; // seconds until a one-shot repeats
     double m_auditionRate = 0.0;  // output samples/sec at the audition key
     double m_auditionRatio = 1.0; // output rate / source rate
     qint64 m_auditionCrop = 0;    // source crop start for playhead mapping
@@ -150,10 +153,10 @@ private:
     QElapsedTimer m_auditionClock;
 
     WaveformView *m_waveform = nullptr;
-    // The loop group: checkable, and its body hides entirely while the
-    // sample is a one-shot.
+    // The loop controls: a plain checkbox, and a frame that exists only
+    // while the sample loops.
+    QCheckBox *m_loopCheck = nullptr;
     QGroupBox *m_loopGroup = nullptr;
-    QWidget *m_loopBody = nullptr;
     QPushButton *m_tryLoop = nullptr;
     QPushButton *m_refineButton = nullptr;
     QLabel *m_suggestStatus = nullptr;
