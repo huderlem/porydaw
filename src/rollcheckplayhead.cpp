@@ -226,7 +226,7 @@ void checkEventListRendering(SongView &view,
     if (!hasLine(triangleArea)) {
         failures.append("playhead triangle did not render below the time ruler");
     }
-    if (redWidth(triangleArea.bottom()) <= redWidth(triangleArea.top())) {
+    if (redWidth(triangleArea.bottom() - 1) <= redWidth(triangleArea.top())) {
         failures.append("playhead triangle did not point up in the event list");
     }
     if (hasLine(QRect(eventListArea.left(),
