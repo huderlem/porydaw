@@ -30,9 +30,10 @@ class WaveformView;
 // sample" group that hides all loop chrome for one-shots and seeds the
 // best analyzer candidate (plus a crossfade bake iff its seam isn't
 // clean) on first enable, a green/amber/red seam badge with a one-click
-// Fix, pitch-detect prefill, and an engine audition strip (play / key /
-// seam solo) driven through the audition-slot protocol (PLAN.md §4).
-// Expert rows live in a collapsed Advanced disclosure. Pure view: the
+// Fix, pitch-detect prefill, and an engine audition strip (play / key)
+// driven through the audition-slot protocol (PLAN.md §4). Expert rows
+// live in a collapsed Advanced disclosure; the whole control column
+// below the waveform rides a squeeze-then-scroll area. Pure view: the
 // dialog renders and hands out the export bytes; MainWindow does the
 // writes on accept. Parameter edits ride a dialog-local QUndoStack —
 // nothing project-visible exists until commit.
@@ -145,7 +146,6 @@ private:
     quint32 m_auditionSize = 0;
     quint32 m_auditionLoopStart = 0;
     bool m_auditionLooped = false;
-    bool m_auditionSeamSolo = false;
     QTimer m_auditionTimer;
     QElapsedTimer m_auditionClock;
 
@@ -173,7 +173,6 @@ private:
     QCheckBox *m_crossfade = nullptr;
     QPushButton *m_playButton = nullptr;
     QSpinBox *m_auditionKey = nullptr;
-    QCheckBox *m_seamSolo = nullptr;
     QCheckBox *m_useDestAdsr = nullptr;
     QLabel *m_outputSummary = nullptr;
     // The Advanced disclosure: expert rows (format, crop, rate, normalize,

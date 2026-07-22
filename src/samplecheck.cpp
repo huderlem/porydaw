@@ -9,6 +9,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QString>
 #include <QTreeWidget>
@@ -1177,6 +1179,18 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
     // ---- pipeline determinism: two fresh documents → identical bytes ----
     {
         const int before = failures;
+        // Fresh (non-prepared) sources default to the GBA mix rate; sources
+        // at or below it keep their own. Prepared files are covered by the
+        // byte-faithful dialog assertions.
+        expect(SampleDocument::defaultParams(hiRes).targetRate == 13379.0,
+               "fresh hi-res source defaults to 13379 Hz");
+        {
+            ImportedSample low = hiRes;
+            low.sampleRate = 8000.0;
+            low.gbaReady = false;
+            expect(SampleDocument::defaultParams(low).targetRate == 8000.0,
+                   "sources below the GBA rate keep their own");
+        }
         SampleEditParams p = SampleDocument::defaultParams(hiRes);
         p.cropStart = 100;
         p.cropEnd = 11500;
@@ -1300,6 +1314,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
         {
             SampleEditParams p = d; // identity rate, explicit looped gain
+            p.targetRate = hiRes.sampleRate;
             p.normalizeMode = SampleEditParams::NormalizeLooped;
             cases.push_back({"pm_d", p});
         }
@@ -2069,7 +2084,21 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         while (undo->canRedo())
             undo->redo();
 
-        // 8. Commit: register the render and re-run the §1 assertions.
+        // 8. Squeeze-then-scroll: a too-short window scrolls the control
+        // column instead of squashing the loop/Advanced frames.
+        auto *scroll = dialog.findChild<QScrollArea *>(
+            QStringLiteral("sampleScroll"));
+        expect(scroll != nullptr, "control-column scroll area found");
+        if (scroll) {
+            dialog.resize(900, 280);
+            QApplication::processEvents();
+            expect(scroll->verticalScrollBar()->maximum() > 0,
+                   "short window scrolls the controls");
+            dialog.resize(900, 640);
+            QApplication::processEvents();
+        }
+
+        // 9. Commit: register the render and re-run the §1 assertions.
         auto *nameEdit =
             dialog.findChild<QLineEdit *>(QStringLiteral("sampleNameEdit"));
         expect(nameEdit != nullptr, "name field found");

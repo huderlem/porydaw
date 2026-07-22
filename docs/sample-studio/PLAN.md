@@ -135,18 +135,22 @@ hides entirely for one-shots — first enable on a loop-less sample seeds the
 analyzer's best candidate plus a crossfade bake iff its seam isn't clean,
 as one undo entry; inside it the green/amber/red seam badge (DSP.md §6)
 with a one-click crossfade "Fix" when non-green, "Try another loop"
-(cycles the top-5 candidates), "Refine", loop-range spins, "Smooth seam
-(crossfade)", and "Audition seam". Then base key (pitch-detect prefill);
-audition strip (single play/stop toggle — looped iff the loop is on —
-audition key selector, "use destination voice ADSR" when
-browser-initiated); a one-line friendly summary (duration · ROM cost
+(cycles the top-5 candidates), "Refine", loop-range spins, and "Smooth
+seam (crossfade)". Then base key (pitch-detect prefill, note-name spin);
+target-rate combo (presets from `kGbaMixRates`, "keep source rate", free
+entry — doubles allowed; fresh sources DEFAULT to min(source, 13379) —
+`kGbaDefaultRate` — while prepared/gbaReady files keep their source rate
+for byte-faithfulness); audition strip (single play/stop toggle — looped
+iff the loop is on — audition key selector, "use destination voice ADSR"
+when browser-initiated); a one-line friendly summary (duration · ROM cost
 `16 + align4(n)` · seam verdict); a collapsed "Advanced" disclosure
-(format line, crop spins, fine-tune cents, target-rate combo with presets
-from `kGbaMixRates` / "keep source rate" / free entry — doubles allowed,
-normalize mode + resulting gain readout, technical output readout); commit
-strip (name field with live validation, "Add to project"). No
-snap-to-zero toggle: markers land where dragged, seam quality is the
-suggest/refine/crossfade machinery's job.
+(format line, crop spins, fine-tune cents, normalize mode + resulting
+gain readout, technical output readout); commit strip (name field with
+live validation, "Add to project"). Everything below the waveform except
+the dialog buttons rides a frameless squeeze-then-scroll QScrollArea so
+short windows scroll rather than squish the frames. No snap-to-zero
+toggle (markers land where dragged) and no seam-solo audition — seam
+quality is the suggest/refine/crossfade machinery's job.
 
 Never add program-remap UI. Cries/DPCM are out of scope (never emit DPCM).
 
@@ -201,8 +205,9 @@ unit section — generation retirement invariants, no use-after-reuse, rapid
 publish storm doesn't starve; commit into fixture project re-runs §1
 assertions; undo count for the dialog-local stack. *Manual checklist*:
 looped audition while dragging loop handles (no glitches, no device stop);
-retune scrub across keys; audition during song playback doesn't disturb it;
-"loop seam solo".
+retune scrub across keys; audition during song playback doesn't disturb it.
+(The "loop seam solo" audition shipped here was removed in the 2026-07-21
+beginner-UX pass — it served no real purpose.)
 
 ### Phase 4 — Compressed formats
 - Vendor dr_mp3/dr_flac/stb_vorbis behind `SampleImport`; extend file

@@ -344,8 +344,10 @@ simulation.
 
 - Keyboard audition at arbitrary MIDI keys (exercises base-key/tuning
   metadata end-to-end, not just the waveform).
-- Sustained audition holds ≥ 3 loop passes; a "loop seam solo" control
-  auditions ±150 ms around the seam on repeat.
+- Sustained audition holds ≥ 3 loop passes. (A "loop seam solo" control —
+  ±150 ms around the seam on repeat — shipped and was removed in the
+  2026-07-21 beginner-UX pass: a plain looped audition surfaces clicks
+  just as well, and the extra control served no real purpose.)
 - **A/B toggle** to the hi-res float intermediate (pre-quantize,
   pre-resample) so the user can hear what the pipeline costs. Default stays
   GBA-true: seam clicks and the 8-bit noise floor only exist post-quantize;

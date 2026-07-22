@@ -55,6 +55,10 @@ struct ImportedSample {
     qint64 frameCount() const { return qint64(buffer.size()); }
 };
 
+// The default export rate for fresh (non-prepared) sources: the common GBA
+// music mix rate. Sources already at or below it keep their own rate.
+constexpr double kGbaDefaultRate = 13379.0;
+
 // The user-editable parameter set. All positions are source-domain frame
 // indices (crop end exclusive, loop end inclusive); the render maps them to
 // the final grid stage by stage (DSP.md §1 marker bookkeeping).

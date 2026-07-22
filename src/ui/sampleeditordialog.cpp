@@ -12,6 +12,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QShortcut>
 #include <QSpinBox>
 #include <QValidator>
@@ -31,7 +32,6 @@
 namespace {
 
 constexpr int kSampleParamsCommandId = 0x5350; // 'SP'
-constexpr double kPi = 3.14159265358979323846;
 
 QString sourceLine(const ImportedSample &s)
 {
@@ -75,33 +75,6 @@ QString sourceLine(const ImportedSample &s)
         text += QStringLiteral(" (%1 s)").arg(
             double(s.frameCount()) / s.sampleRate, 0, 'f', 2);
     return text;
-}
-
-// "Loop seam solo" (DSP.md §8): audition ±150 ms around the seam on repeat.
-// The window — the material leading into the loop end followed by the
-// material leaving the loop start — loops whole, with short raised-cosine
-// edge fades so the artificial window wrap can't be mistaken for the seam
-// under test (the seam itself sits mid-window, untouched).
-QByteArray seamSoloBytes(const ProcessedSample &out)
-{
-    const qint64 S = out.loopStart;
-    const qint64 E = qint64(out.size) - 1;
-    const qint64 loopLen = E + 1 - S;
-    const qint64 w = qBound<qint64>(
-        1, qint64(std::llround(0.150 * out.outputRate)), loopLen);
-    QByteArray bytes = out.s8.mid(int(E + 1 - w), int(w));
-    bytes += out.s8.mid(int(S), int(qMin(w, loopLen)));
-    const int f =
-        int(qMin<qint64>(qint64(std::llround(0.005 * out.outputRate)),
-                         bytes.size() / 4));
-    for (int i = 0; i < f; i++) {
-        const double g =
-            0.5 * (1.0 - std::cos(kPi * double(i) / double(f)));
-        bytes[i] = char(qint8(std::lround(double(qint8(bytes[i])) * g)));
-        const int j = bytes.size() - 1 - i;
-        bytes[j] = char(qint8(std::lround(double(qint8(bytes[j])) * g)));
-    }
-    return bytes;
 }
 
 // "57", "A3", "a#3", "C-1", or the display form "A3 (57)".
@@ -265,6 +238,22 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
                                                 m_doc.params(), -1));
     });
 
+    // Everything below the waveform (except the dialog buttons) lives on a
+    // scrollable column: a short window squeezes sections to their layout
+    // minimums first, then scrolls instead of squashing the loop/Advanced
+    // frames (the polyphony dock's squeeze-then-scroll pattern).
+    auto *scroll = new QScrollArea(this);
+    scroll->setObjectName(QStringLiteral("sampleScroll"));
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+    scroll->viewport()->setAutoFillBackground(false); // keep the dialog look
+    layout->addWidget(scroll);
+    auto *content = new QWidget;
+    auto *column = new QVBoxLayout(content);
+    column->setContentsMargins(0, 0, 0, 0);
+    scroll->setWidget(content);
+
     const auto makeSpin = [this](const char *name, int min, int max,
                                  int value, int mergeKey) {
         auto *spin = new QSpinBox(this);
@@ -344,15 +333,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     connect(m_crossfade, &QCheckBox::toggled, this,
             [this] { applyParamsFromUi(-1); });
     seamOptsRow->addWidget(m_crossfade);
-    m_seamSolo = new QCheckBox(tr("Audition seam"), this);
-    m_seamSolo->setObjectName(QStringLiteral("sampleSeamSolo"));
-    m_seamSolo->setToolTip(
-        tr("Audition ±150 ms around the loop seam on repeat."));
-    connect(m_seamSolo, &QCheckBox::toggled, this, [this] {
-        if (m_auditionMode == AuditionMode::Loop)
-            startAudition(true);
-    });
-    seamOptsRow->addWidget(m_seamSolo);
     seamOptsRow->addStretch();
     loopLayout->addLayout(seamOptsRow);
 
@@ -368,7 +348,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
             applyParamsFromUi(-1);
     });
     m_loopBody->setVisible(defaults.loopOn);
-    layout->addWidget(m_loopGroup);
+    column->addWidget(m_loopGroup);
 
     // ---- the pipeline form (the beginner surface; expert rows live in
     // the Advanced section below) ----
@@ -405,7 +385,38 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     keyRow->addStretch();
     form->addRow(tr("Base key:"), keyRow);
 
-    layout->addLayout(form);
+    m_rateCombo = new QComboBox(this);
+    m_rateCombo->setObjectName(QStringLiteral("sampleRateCombo"));
+    m_rateCombo->setEditable(true);
+    m_rateCombo->setToolTip(
+        tr("Output sample rate — 13379 Hz is the common GBA music rate."));
+    m_rateCombo->addItem(tr("Keep source (%1 Hz)")
+                             .arg(src.sampleRate, 0, 'f',
+                                  src.sampleRate == std::floor(src.sampleRate)
+                                      ? 0
+                                      : 2));
+    for (const int rate : kGbaMixRates)
+        m_rateCombo->addItem(QString::number(rate));
+    // Reflect the document defaults (fresh sources default to the GBA mix
+    // rate, not the source rate) before the connects so no spurious apply
+    // fires mid-construction.
+    if (defaults.targetRate == src.sampleRate)
+        m_rateCombo->setCurrentIndex(0);
+    else
+        m_rateCombo->setEditText(QString::number(defaults.targetRate));
+    // Apply on commit (preset pick, Enter, focus-out) — not per keystroke:
+    // every apply is a full synchronous pipeline render (~120 ms/5 s of
+    // source), too heavy to run while a custom rate is being typed.
+    connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
+            [this] { applyParamsFromUi(-1); });
+    connect(m_rateCombo->lineEdit(), &QLineEdit::editingFinished, this,
+            [this] { applyParamsFromUi(-1); });
+    auto *rateRow = new QHBoxLayout;
+    rateRow->addWidget(m_rateCombo);
+    rateRow->addStretch();
+    form->addRow(tr("Target rate (Hz):"), rateRow);
+
+    column->addLayout(form);
 
     // ---- audition strip (engine slots, PLAN.md §4) ----
     auto *audition = new QHBoxLayout;
@@ -441,10 +452,10 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     });
     audition->addWidget(m_useDestAdsr);
     audition->addStretch();
-    layout->addLayout(audition);
+    column->addLayout(audition);
     if (!m_engine) {
         for (QWidget *w : std::initializer_list<QWidget *>{
-                 m_playButton, m_auditionKey, m_seamSolo}) {
+                 m_playButton, m_auditionKey}) {
             w->setEnabled(false);
             w->setToolTip(tr("Audio is unavailable."));
         }
@@ -456,7 +467,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_outputSummary = new QLabel(this);
     m_outputSummary->setObjectName(QStringLiteral("sampleOutputSummary"));
     m_outputSummary->setWordWrap(true);
-    layout->addWidget(m_outputSummary);
+    column->addWidget(m_outputSummary);
 
     // ---- Advanced disclosure: expert rows, collapsed by default ----
     m_advancedToggle = new QToolButton(this);
@@ -466,7 +477,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     m_advancedToggle->setAutoRaise(true);
     m_advancedToggle->setArrowType(Qt::RightArrow);
     m_advancedToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    layout->addWidget(m_advancedToggle);
+    column->addWidget(m_advancedToggle);
     m_advancedBody = new QWidget(this);
     m_advancedBody->setObjectName(QStringLiteral("sampleAdvancedBody"));
     auto *advForm = new QFormLayout(m_advancedBody);
@@ -504,26 +515,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     tuneRow->addStretch();
     advForm->addRow(tr("Fine tune:"), tuneRow);
 
-    m_rateCombo = new QComboBox(this);
-    m_rateCombo->setObjectName(QStringLiteral("sampleRateCombo"));
-    m_rateCombo->setEditable(true);
-    m_rateCombo->addItem(tr("Keep source (%1 Hz)")
-                             .arg(src.sampleRate, 0, 'f',
-                                  src.sampleRate == std::floor(src.sampleRate)
-                                      ? 0
-                                      : 2));
-    for (const int rate : kGbaMixRates)
-        m_rateCombo->addItem(QString::number(rate));
-    m_rateCombo->setCurrentIndex(0);
-    // Apply on commit (preset pick, Enter, focus-out) — not per keystroke:
-    // every apply is a full synchronous pipeline render (~120 ms/5 s of
-    // source), too heavy to run while a custom rate is being typed.
-    connect(m_rateCombo, &QComboBox::currentIndexChanged, this,
-            [this] { applyParamsFromUi(-1); });
-    connect(m_rateCombo->lineEdit(), &QLineEdit::editingFinished, this,
-            [this] { applyParamsFromUi(-1); });
-    advForm->addRow(tr("Target rate (Hz):"), m_rateCombo);
-
     m_normalizeMode = new QComboBox(this);
     m_normalizeMode->setObjectName(QStringLiteral("sampleNormalizeMode"));
     m_normalizeMode->addItems({tr("Auto"), tr("Looped (−9 dBFS loop RMS)"),
@@ -545,19 +536,20 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     advForm->addRow(m_techDetail);
 
     m_advancedBody->setVisible(false);
-    layout->addWidget(m_advancedBody);
+    column->addWidget(m_advancedBody);
 
     auto *nameForm = new QFormLayout;
     m_nameEdit = new QLineEdit(this);
     m_nameEdit->setObjectName(QStringLiteral("sampleNameEdit"));
     m_nameEdit->setText(src.suggestedName);
     nameForm->addRow(tr("Name:"), m_nameEdit);
-    layout->addLayout(nameForm);
+    column->addLayout(nameForm);
 
     m_nameStatus = new QLabel(this);
     m_nameStatus->setObjectName(QStringLiteral("sampleNameStatus"));
     m_nameStatus->setWordWrap(true);
-    layout->addWidget(m_nameStatus);
+    column->addWidget(m_nameStatus);
+    column->addStretch();
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, this);
     m_addButton = buttons->addButton(tr("Add to Project"),
@@ -695,8 +687,6 @@ void SampleEditorDialog::refreshOutputs()
     const SampleEditParams &p = m_doc.params();
     m_loopBody->setVisible(p.loopOn);
     updatePitchHint();
-    if (m_engine)
-        m_seamSolo->setEnabled(out.looped);
     m_waveform->setMarkers(p.cropStart, p.cropEnd, p.loopStart, p.loopEnd,
                            p.loopOn);
 
@@ -1020,20 +1010,9 @@ void SampleEditorDialog::startAudition(bool looped)
     if (looped && !out.looped)
         looped = false;
 
-    QByteArray bytes;
-    quint32 loopStart = 0;
-    bool loopFlag = looped;
-    m_auditionSeamSolo = false;
-    if (looped && m_seamSolo->isChecked()) {
-        bytes = seamSoloBytes(out);
-        loopFlag = true;
-        m_auditionSeamSolo = true;
-    } else {
-        bytes = out.s8;
-        loopStart = out.loopStart;
-        // "Play once" on a looped render: drop the loop flag so the note
-        // plays through the data once and the channel ends itself.
-    }
+    const QByteArray &bytes = out.s8;
+    const quint32 loopStart = out.loopStart;
+    const bool loopFlag = looped;
 
     AuditionSlots::Adsr adsr;
     if (m_hasDestAdsr && m_useDestAdsr->isChecked())
@@ -1100,10 +1079,6 @@ void SampleEditorDialog::auditionTick()
             m_auditionPos = S + std::fmod(m_auditionPos - S, len);
     } else if (m_auditionPos >= double(m_auditionSize)) {
         stopAudition(); // the channel ended itself at the data end
-        return;
-    }
-    if (m_auditionSeamSolo) {
-        m_waveform->setPlayhead(-1);
         return;
     }
     m_waveform->setPlayhead(

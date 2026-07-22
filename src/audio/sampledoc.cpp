@@ -34,7 +34,12 @@ SampleEditParams SampleDocument::defaultParams(const ImportedSample &source)
     p.baseKey = source.baseKey;
     p.fineTuneCents =
         qBound(0.0, source.fracSemitone * 100.0, 99.9999999999);
-    p.targetRate = source.sampleRate;
+    // Fresh sources default to the common GBA music rate — a beginner's
+    // 44.1 kHz import should not land a 44.1 kHz ROM sample. Sources at or
+    // below it keep theirs; prepared files stay byte-faithful (below).
+    p.targetRate = source.gbaReady
+        ? source.sampleRate
+        : qMin(source.sampleRate, kGbaDefaultRate);
     if (source.gbaReady) {
         // Prepared file: byte-faithful no-op pipeline.
         p.normalizeMode = SampleEditParams::NormalizeOff;
