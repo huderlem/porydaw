@@ -19,6 +19,11 @@ class QLabel;
 class QPushButton;
 class QSpinBox;
 
+// What a picker row stands for, so the owner resolves its audition
+// correctly: samples publish PCM, waves publish CGB wave bytes, keysplits
+// resolve to whichever sub-voice the audition key lands on.
+enum class VgAuditionKind { Sample, Wave, Keysplit };
+
 // The voicegroup dock (SPEC §6.1): the current song's 128 voicegroup entries
 // with press-and-hold audition, plus an editor panel for the selected voice.
 // Basic voice types (sample/square/wave/noise) plus keysplit, drumkit, and
@@ -84,9 +89,10 @@ public:
 signals:
     // velocity 0 releases. Routed to AudioEngine::previewVoice.
     void auditionVoice(int voice, int key, int velocity);
-    // The sample picker's browse audition: play the symbol's committed sample
-    // through the selected voice's envelope (AudioEngine::auditionSample).
-    void sampleAuditionRequested(const QString &symbol,
+    // The sample picker's browse audition: play the symbol's committed data
+    // through the selected voice's envelope (samples/waves; a keysplit row's
+    // envelope comes from its resolved sub-voice, so adsr is unused there).
+    void sampleAuditionRequested(const QString &symbol, VgAuditionKind kind,
                                  const AuditionSlots::Adsr &adsr);
     void sampleAuditionStopRequested();
     // The user edited the selected voice. The browser does not touch the

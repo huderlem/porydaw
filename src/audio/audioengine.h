@@ -107,9 +107,16 @@ public:
     // coalesces — retry on the next re-render).
     bool auditionSample(const QByteArray &s8, uint32_t freq,
                         uint32_t loopStart, bool looped, uint8_t key,
-                        const AuditionSlots::Adsr &adsr)
+                        const AuditionSlots::Adsr &adsr, uint8_t toneKey = 60)
     {
-        return m_audition.publishNote(s8, freq, loopStart, looped, key, adsr);
+        return m_audition.publishNote(s8, freq, loopStart, looped, key, adsr,
+                                      toneKey);
+    }
+    // CGB programmable-wave audition (16 packed bytes; CGB-range adsr).
+    bool auditionWave(const QByteArray &wave16, uint8_t key,
+                      const AuditionSlots::Adsr &adsr)
+    {
+        return m_audition.publishWave(wave16, key, adsr);
     }
     void auditionSampleOff() { m_audition.publishOff(); }
 

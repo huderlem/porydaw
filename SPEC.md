@@ -217,11 +217,13 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 
 - **Left dock — Project panel:** song browser (grouped BGM / SE / fanfares, searchable),
   voicegroup browser for the current song's voicegroup (each entry with type icon,
-  name, ADSR summary; click to audition). A sample voice's Sample field is a
-  picker button (not a combo — the project sample list is huge and
+  name, ADSR summary; click to audition). A sample or wave voice's symbol
+  field is a picker button (not a combo — the project sample list is huge and
   prefix-heavy): its popup has a search filter, keysplit/sample/phoneme
-  sections, loop badges with a rate/length detail line, and
-  audition-on-highlight through the voice's own envelope; typed symbols the
+  sections (the wave list for programmable-wave voices), loop badges with a
+  rate/length detail line, and audition-on-highlight — samples and waves play
+  through the voice's own envelope, keysplit rows play whichever sub-voice
+  middle C resolves to with that sub-voice's envelope; typed symbols the
   project scan didn't list still commit via an explicit fallback row.
 - **Center — Arrangement + Piano roll:** track headers (≤ 16 tracks; name, instrument,
   mute/solo, volume/pan mini-controls) beside a shared-timeline piano roll. Selected

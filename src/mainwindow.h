@@ -220,12 +220,17 @@ private:
     };
     const VgCatalog &vgCatalog();
     void invalidateVgCatalog();
-    // The committed sample data behind a DirectSound symbol (the picker's
-    // loop badges and browse audition): one voicegroup_load_samples batch
-    // over the whole catalog, loaded on first use and freed with it.
+    // The committed data behind the picker's rows (loop badges and browse
+    // audition): one voicegroup_load_samples batch over the whole catalog —
+    // DirectSound samples, programmable waves, and keysplit instruments —
+    // loaded on first use and freed with the catalog.
+    void ensureSampleSet();
     const WaveData *sampleWaveFor(const QString &symbol);
+    void auditionKeysplit(const QString &symbol);
     LoadedSampleSet *m_sampleSet = nullptr;
     QHash<QString, const WaveData *> m_sampleWaves;
+    QHash<QString, const uint32_t *> m_progWaves;
+    QHash<QString, LoadedKeysplit> m_keysplits;
     // Minted-but-unsaved Golden Sun synth definitions (symbol -> descriptor),
     // project-wide. Param edits point voice lines at these; they reach disk
     // (and the browser's dropdown) only when a voicegroup referencing them

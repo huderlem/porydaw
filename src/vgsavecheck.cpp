@@ -619,11 +619,15 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                   "picker does not show the voice's symbol");
 
             QStringList auditioned;
+            QList<VgAuditionKind> auditionKinds;
             int stops = 0;
             QMetaObject::Connection c1 = connect(
                 m_vgBrowser, &VoicegroupBrowser::sampleAuditionRequested, this,
-                [&auditioned](const QString &s, const AuditionSlots::Adsr &) {
+                [&auditioned, &auditionKinds](const QString &s,
+                                              VgAuditionKind kind,
+                                              const AuditionSlots::Adsr &) {
                     auditioned.append(s);
+                    auditionKinds.append(kind);
                 });
             QMetaObject::Connection c2 = connect(
                 m_vgBrowser, &VoicegroupBrowser::sampleAuditionStopRequested,
@@ -648,6 +652,26 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 }
                 check(rows >= 2, "picker lists fewer than two symbols");
                 check(badges > 0, "no loop badges on any sample row");
+
+                // Keysplit rows audition too — the resolved sub-voice plays
+                // (MainWindow::auditionKeysplit), so browsing them is
+                // audible like everything else.
+                QTreeWidgetItem *ksRow = nullptr;
+                for (QTreeWidgetItemIterator it(list); *it && !ksRow; ++it) {
+                    if ((*it)->data(0, Qt::UserRole + 1).toBool())
+                        ksRow = *it;
+                }
+                if (ksRow) {
+                    const int seen = auditioned.size();
+                    list->setCurrentItem(ksRow);
+                    check(auditioned.size() == seen + 1
+                              && auditionKinds.last()
+                                  == VgAuditionKind::Keysplit,
+                          "keysplit row did not audition as a keysplit");
+                } else {
+                    std::printf("vgsavecheck: note: no keysplit instruments, "
+                                "keysplit audition skipped\n");
+                }
 
                 if (!screenshotPath.isEmpty()) {
                     QWidget *popup = picker->findChild<QWidget *>(
@@ -706,6 +730,90 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                           && tab->vgSource->voiceAt(dsSlot)->symbol
                               == before.symbol,
                       "undo did not restore the unlisted symbol");
+
+                // Wave voices share the picker: switching the Type swaps the
+                // list to the project's programmable waves, and highlighting
+                // one auditions it as a CGB wave.
+                if (vgCatalog().progWave.isEmpty()) {
+                    std::printf("vgsavecheck: note: no programmable waves, "
+                                "wave picker section skipped\n");
+                } else {
+                    QComboBox *typeCombo = nullptr;
+                    for (QComboBox *combo :
+                         m_vgBrowser->findChildren<QComboBox *>()) {
+                        if (combo->findData(int(VgMacro::ProgWave)) >= 0)
+                            typeCombo = combo;
+                    }
+                    int undos = 0;
+                    if (check(typeCombo != nullptr, "no Type combo")) {
+                        const int waveIndex =
+                            typeCombo->findData(int(VgMacro::ProgWave));
+                        typeCombo->setCurrentIndex(waveIndex);
+                        QMetaObject::invokeMethod(typeCombo, "activated",
+                                                  Qt::DirectConnection,
+                                                  Q_ARG(int, waveIndex));
+                        undos++;
+                        const VgVoice *waveVoice =
+                            tab->vgSource->voiceAt(dsSlot);
+                        check(waveVoice
+                                  && waveVoice->macro == VgMacro::ProgWave,
+                              "type switch to Prog Wave did not take");
+                        check(picker->isVisible()
+                                  && picker->currentSymbol()
+                                      == waveVoice->symbol,
+                              "wave voice does not show the picker");
+
+                        picker->openPopup();
+                        QString otherWave;
+                        for (QTreeWidgetItemIterator it(list);
+                             *it && otherWave.isEmpty(); ++it) {
+                            const QString s =
+                                (*it)->data(0, Qt::UserRole).toString();
+                            if (!s.isEmpty() && s != waveVoice->symbol)
+                                otherWave = s;
+                        }
+                        for (QTreeWidgetItemIterator it(list); *it; ++it) {
+                            const QString s =
+                                (*it)->data(0, Qt::UserRole).toString();
+                            check(s.isEmpty()
+                                      || vgCatalog().progWave.contains(s),
+                                  "wave picker lists a non-wave symbol");
+                        }
+                        if (otherWave.isEmpty()) {
+                            std::printf("vgsavecheck: note: single wave, "
+                                        "wave audition/pick skipped\n");
+                            QWidget *popup = picker->findChild<QWidget *>(
+                                QStringLiteral("vgSamplePickerPopup"));
+                            if (popup)
+                                popup->hide();
+                        } else {
+                            const int seen = auditioned.size();
+                            search->setText(otherWave);
+                            check(auditioned.size() > seen
+                                      && auditioned.last() == otherWave
+                                      && auditionKinds.last()
+                                          == VgAuditionKind::Wave,
+                                  "filtering onto a wave did not audition "
+                                  "it as a wave");
+                            QKeyEvent waveRet(QEvent::KeyPress, Qt::Key_Return,
+                                              Qt::NoModifier);
+                            QCoreApplication::sendEvent(search, &waveRet);
+                            undos++;
+                            check(tab->vgSource->voiceAt(dsSlot)
+                                      && tab->vgSource->voiceAt(dsSlot)->symbol
+                                          == otherWave,
+                              "the picked wave did not commit");
+                        }
+                        while (undos-- > 0)
+                            tab->doc.undoStack()->undo();
+                        const VgVoice *restored =
+                            tab->vgSource->voiceAt(dsSlot);
+                        check(restored && restored->macro == before.macro
+                                  && restored->symbol == before.symbol,
+                              "undo did not restore the sample voice after "
+                              "the wave round trip");
+                    }
+                }
             }
             disconnect(c1);
             disconnect(c2);

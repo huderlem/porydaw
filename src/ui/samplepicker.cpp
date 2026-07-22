@@ -143,8 +143,7 @@ void SamplePickerButton::openPopup()
                     if (m_positioning || !item)
                         return;
                     const QString symbol = item->data(0, kSymbolRole).toString();
-                    if (symbol.isEmpty() || item->data(0, kKeysplitRole).toBool()
-                        || item == m_typedRow)
+                    if (symbol.isEmpty() || item == m_typedRow)
                         return;
                     emit auditionRequested(symbol);
                     m_auditionOffTimer->start();

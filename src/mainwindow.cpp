@@ -368,9 +368,24 @@ void MainWindow::buildUi()
         return info;
     });
     connect(m_vgBrowser, &VoicegroupBrowser::sampleAuditionRequested, this,
-            [this](const QString &symbol, const AuditionSlots::Adsr &adsr) {
+            [this](const QString &symbol, VgAuditionKind kind,
+                   const AuditionSlots::Adsr &adsr) {
                 if (!m_audioOk)
                     return;
+                if (kind == VgAuditionKind::Keysplit) {
+                    auditionKeysplit(symbol);
+                    return;
+                }
+                if (kind == VgAuditionKind::Wave) {
+                    ensureSampleSet();
+                    const uint32_t *pw = m_progWaves.value(symbol, nullptr);
+                    if (pw)
+                        m_audio.auditionWave(
+                            QByteArray::fromRawData(
+                                reinterpret_cast<const char *>(pw), 16),
+                            60, adsr);
+                    return;
+                }
                 const WaveData *wd = sampleWaveFor(symbol);
                 if (!wd || !wd->data || wd->size == 0)
                     return;
@@ -1935,39 +1950,100 @@ const MainWindow::VgCatalog &MainWindow::vgCatalog()
 void MainWindow::invalidateVgCatalog()
 {
     m_vgCatalog.valid = false;
-    // The loaded sample batch is derived from the catalog's symbol list;
-    // audition is safe across the free because AuditionSlots copies the
-    // bytes into its own slot at publish time.
+    // The loaded instrument batch is derived from the catalog's symbol
+    // lists; audition is safe across the free because AuditionSlots copies
+    // the bytes into its own slot at publish time.
     m_sampleWaves.clear();
+    m_progWaves.clear();
+    m_keysplits.clear();
     voicegroup_free_samples(m_sampleSet);
     m_sampleSet = nullptr;
 }
 
+void MainWindow::ensureSampleSet()
+{
+    if (m_sampleSet || !m_project.isOpen())
+        return;
+    const VgCatalog &catalog = vgCatalog();
+    QList<QByteArray> storage;
+    const auto utf8 = [&storage](const QString &s) {
+        storage.append(s.toUtf8());
+        return storage.last().constData();
+    };
+    std::vector<const char *> samples, waves, keysplits, tables;
+    for (const QString &s : catalog.directSound)
+        samples.push_back(utf8(s));
+    for (const QString &s : catalog.progWave)
+        waves.push_back(utf8(s));
+    for (const auto &pair : catalog.keysplits) {
+        keysplits.push_back(utf8(pair.first));
+        tables.push_back(utf8(pair.second));
+    }
+    m_sampleSet = voicegroup_load_samples(
+        m_project.root().toLocal8Bit().constData(), samples.data(),
+        int(samples.size()), waves.data(), int(waves.size()),
+        keysplits.data(), tables.data(), int(keysplits.size()), nullptr);
+    if (!m_sampleSet)
+        return;
+    for (int i = 0; i < catalog.directSound.size() && i < m_sampleSet->count;
+         i++) {
+        if (m_sampleSet->waves[i])
+            m_sampleWaves.insert(catalog.directSound.at(i),
+                                 m_sampleSet->waves[i]);
+    }
+    for (int i = 0;
+         i < catalog.progWave.size() && i < m_sampleSet->progWaveCount; i++) {
+        if (m_sampleSet->progWaves[i])
+            m_progWaves.insert(catalog.progWave.at(i),
+                               m_sampleSet->progWaves[i]);
+    }
+    for (int i = 0;
+         i < catalog.keysplits.size() && i < m_sampleSet->keysplitCount; i++) {
+        const LoadedKeysplit &ks = m_sampleSet->keysplits[i];
+        if (ks.subGroup && ks.table)
+            m_keysplits.insert(catalog.keysplits.at(i).first, ks);
+    }
+}
+
 const WaveData *MainWindow::sampleWaveFor(const QString &symbol)
 {
-    if (!m_project.isOpen())
-        return nullptr;
-    if (!m_sampleSet) {
-        const QStringList symbols = vgCatalog().directSound;
-        QList<QByteArray> storage;
-        std::vector<const char *> ptrs;
-        storage.reserve(symbols.size());
-        ptrs.reserve(symbols.size());
-        for (const QString &s : symbols) {
-            storage.append(s.toUtf8());
-            ptrs.push_back(storage.last().constData());
-        }
-        m_sampleSet = voicegroup_load_samples(
-            m_project.root().toLocal8Bit().constData(), ptrs.data(),
-            int(ptrs.size()), nullptr);
-        if (!m_sampleSet)
-            return nullptr;
-        for (int i = 0; i < symbols.size() && i < m_sampleSet->count; i++) {
-            if (m_sampleSet->waves[i])
-                m_sampleWaves.insert(symbols.at(i), m_sampleSet->waves[i]);
-        }
-    }
+    ensureSampleSet();
     return m_sampleWaves.value(symbol, nullptr);
+}
+
+// Browse-audition a keysplit instrument: play whatever sub-voice the
+// audition key (middle C) resolves to, with that sub-voice's own envelope —
+// the same resolution the engine does per note (resolve_voice).
+void MainWindow::auditionKeysplit(const QString &symbol)
+{
+    ensureSampleSet();
+    const auto it = m_keysplits.constFind(symbol);
+    if (it == m_keysplits.constEnd())
+        return;
+    const uint8_t idx = it->table[60];
+    if (idx >= VOICEGROUP_SIZE)
+        return; // old-style overflow index: nothing loaded to play
+    const ToneData &sub = it->subGroup[idx];
+    if (sub.type & (VOICE_KEYSPLIT | VOICE_KEYSPLIT_ALL))
+        return; // nested split: the engine refuses these too
+    const AuditionSlots::Adsr adsr{sub.attack, sub.decay, sub.sustain,
+                                   sub.release};
+    const int cgbType = sub.type & 0x07;
+    if (cgbType == 0 && sub.wav && sub.wav->data && sub.wav->size > 0) {
+        m_audio.auditionSample(
+            QByteArray::fromRawData(
+                reinterpret_cast<const char *>(sub.wav->data),
+                int(sub.wav->size)),
+            sub.wav->freq, sub.wav->loopStart,
+            (sub.wav->status & 0x4000) != 0, 60, adsr, sub.key);
+    } else if (cgbType == VOICE_PROGRAMMABLE_WAVE && sub.wavePointer) {
+        m_audio.auditionWave(
+            QByteArray::fromRawData(
+                reinterpret_cast<const char *>(sub.wavePointer), 16),
+            60, adsr);
+    }
+    // Square/noise sub-voices: rare, and their audition would need CGB
+    // square plumbing — silently skipped.
 }
 
 void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)

@@ -40,8 +40,19 @@ public:
     // UI thread: copy the rendered sample into a retired slot and publish a
     // note-on at midiKey. Returns false when no slot is retired
     // (pathological — the caller coalesces; the next drag tick retries).
+    // toneKey is the voice's base key (ToneData.key): a keysplit sub-voice
+    // can pitch its sample around a key other than middle C.
     bool publishNote(const QByteArray &s8, uint32_t freq, uint32_t loopStart,
-                     bool looped, uint8_t midiKey, const Adsr &adsr);
+                     bool looped, uint8_t midiKey, const Adsr &adsr,
+                     uint8_t toneKey = 60);
+
+    // UI thread: audition a CGB programmable wave (16 packed bytes = 32
+    // nibbles). adsr carries CGB-range envelope values (attack/decay/release
+    // 0-7, sustain 0-15). The wave bytes are copied into the slot — the CGB
+    // wave channel reads them for the note's whole life, so the slot retires
+    // only once no CGB channel references them anymore.
+    bool publishWave(const QByteArray &wave16, uint8_t midiKey,
+                     const Adsr &adsr);
 
     // UI thread: release the sounding audition (the slot stays busy until
     // its release envelope completes).
@@ -60,10 +71,12 @@ private:
     struct Slot {
         ToneData tone = {};
         WaveData wave = {};
-        std::vector<int8_t> bytes;
+        std::vector<int8_t> bytes; // PCM (+interp pad) or 16 wave bytes
         uint64_t gen = 0; // UI thread: generation last published into it
     };
     Slot m_slots[kSlots];
+    // Shared publish plumbing: pick a retired slot (-1 when none).
+    int retiredSlot() const;
     // Publish command: generation << 16 | slot << 8 | key/flags (bit 7 of
     // the low byte = note-off; low 7 bits = MIDI key).
     std::atomic<uint64_t> m_publish{0};
