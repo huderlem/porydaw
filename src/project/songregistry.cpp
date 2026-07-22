@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include "core/smf.h"
+#include "project/sidecar.h"
 #include "project/songsmk.h"
 
 namespace {
@@ -551,7 +552,7 @@ bool saveRegistrationMeta(const QString &projectRoot, const QString &label,
     reg.insert(QStringLiteral("player"), player);
     root.insert(QStringLiteral("registration"), reg);
 
-    QDir().mkpath(QFileInfo(path).path());
+    Sidecar::ensureDir(projectRoot);
     QFile out(path);
     if (!out.open(QIODevice::WriteOnly))
         return false;

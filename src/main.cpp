@@ -65,6 +65,9 @@ int runTransportCheck();
 int runSampleCheck(const QString &scratchDir,
                    const QString &corpusRoot = QString(),
                    const QString &screenshotPath = QString());
+// ignorecheck.cpp; sidecar-dir .gitignore check (self-contained, builds its
+// own scratch projects; the scratch dir must not exist).
+int runIgnoreCheck(const QString &scratchDir);
 // eventviewcheck.cpp; raw MIDI event list check (model API + offscreen UI);
 // the optional song label + path save that song's rendered event list.
 int runEventViewCheck(const QString &projectRoot,
@@ -147,6 +150,9 @@ int main(int argc, char *argv[])
     }
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
+    const int ignoreCheck = args.indexOf(QStringLiteral("--ignorecheck"));
+    if (ignoreCheck >= 0 && ignoreCheck + 1 < args.size())
+        return runIgnoreCheck(args[ignoreCheck + 1]);
     if (args.contains(QStringLiteral("--transportcheck")))
         return runTransportCheck();
     const int editCheck = args.indexOf(QStringLiteral("--editcheck"));

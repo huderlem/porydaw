@@ -7,8 +7,8 @@
 // Per-song sidecar view state (SPEC §4.4), stored as JSON in
 // <projectroot>/.porydaw/<song>.json. Sidecars are cosmetic only: a missing
 // or unreadable file just means default view state, and a failed save is
-// silent — never worth interrupting the user over. `.porydaw/` is meant for
-// the project's .gitignore.
+// silent — never worth interrupting the user over. Creating `.porydaw/`
+// also adds it to the project's .gitignore (project/sidecar.h).
 namespace ViewSidecar {
 
 QString pathFor(const QString &projectRoot, const QString &songLabel);

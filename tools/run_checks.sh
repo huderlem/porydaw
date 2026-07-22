@@ -99,6 +99,7 @@ run tabcheck         base --tabcheck SCRATCH mus_abandoned_ship mus_petalburg
 run eventviewcheck   base --eventviewcheck SCRATCH
 run rollcheck        base --rollcheck SCRATCH mus_abandoned_ship
 run loopcheck        -    --loopcheck
+run ignorecheck      -    --ignorecheck SCRATCH
 run primecheck       -    --primecheck
 run transportcheck   -    --transportcheck
 run polycheck        -    --polycheck

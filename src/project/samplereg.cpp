@@ -1,5 +1,6 @@
 #include "samplereg.h"
 
+#include "sidecar.h"
 #include "voicegroupsource.h"
 
 #include <QCryptographicHash>
@@ -416,7 +417,7 @@ bool SampleRegistrar::writeSampleSidecar(const QString &projectRoot,
                                          QString *error)
 {
     const QString path = sampleSidecarPath(projectRoot, name);
-    QDir().mkpath(QFileInfo(path).path());
+    Sidecar::ensureDir(projectRoot, QStringLiteral("samples"));
     QJsonObject source;
     source.insert(QStringLiteral("path"), sidecar.sourcePath);
     source.insert(QStringLiteral("sha256"), sidecar.sourceSha256);

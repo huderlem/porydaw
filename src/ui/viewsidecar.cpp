@@ -1,12 +1,13 @@
 #include "viewsidecar.h"
 
-#include <QDir>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
 #include <algorithm>
+
+#include "project/sidecar.h"
 
 namespace ViewSidecar {
 
@@ -114,7 +115,7 @@ bool save(const QString &projectRoot, const QString &songLabel,
     }
     root.insert(QLatin1String("view"), obj);
 
-    if (!QDir(projectRoot).mkpath(QStringLiteral(".porydaw")))
+    if (!Sidecar::ensureDir(projectRoot))
         return false;
     QSaveFile file(path);
     if (!file.open(QIODevice::WriteOnly))

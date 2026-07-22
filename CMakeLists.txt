@@ -62,6 +62,7 @@ qt_add_executable(porydaw
     src/primecheck.cpp
     src/transportcheck.cpp
     src/mkcheck.cpp
+    src/ignorecheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp
     src/audio/audioengine.cpp
@@ -103,6 +104,8 @@ qt_add_executable(porydaw
     src/project/songsmk.h
     src/project/samplereg.cpp
     src/project/samplereg.h
+    src/project/sidecar.cpp
+    src/project/sidecar.h
     src/project/voicegroupsource.cpp
     src/project/voicegroupsource.h
     src/ui/m4asemantics.cpp
