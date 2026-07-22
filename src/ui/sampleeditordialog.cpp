@@ -379,20 +379,16 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     connect(m_baseKey, &QSpinBox::valueChanged, this,
             [this] { applyParamsFromUi(5); });
     // The detect chrome is quiet-agreement UI: hidden while the current
-    // key matches the detection, visible (with one-click Apply) only on a
-    // real mismatch — updatePitchHint decides via refreshOutputs.
-    m_pitchLabel = new QLabel(this);
-    m_pitchLabel->setObjectName(QStringLiteral("samplePitchLabel"));
-    m_pitchApply = new QPushButton(tr("Apply"), this);
+    // key matches the detection, visible (one button naming the detected
+    // key) only on a real mismatch — updatePitchHint decides via
+    // refreshOutputs and fills in the button text.
+    m_pitchApply = new QPushButton(this);
     m_pitchApply->setObjectName(QStringLiteral("samplePitchApply"));
-    m_pitchApply->setToolTip(
-        tr("Set the base key and cents from the detected pitch."));
     connect(m_pitchApply, &QPushButton::clicked, this,
             &SampleEditorDialog::applyDetectedPitch);
     auto *keyRow = new QHBoxLayout;
     keyRow->addWidget(m_baseKey);
     keyRow->addSpacing(12);
-    keyRow->addWidget(m_pitchLabel);
     keyRow->addWidget(m_pitchApply);
     keyRow->addStretch();
     form->addRow(tr("Base key:"), keyRow);
@@ -820,7 +816,7 @@ void SampleEditorDialog::ensurePitchDetected()
 
 // The detect chrome shows only when the detection disagrees with the
 // current key+cents by more than ~40 cents — beyond detection noise,
-// worth a deliberate one-click Apply. Agreement (the usual case: the
+// worth a deliberate one-click adopt. Agreement (the usual case: the
 // prefill already adopted the detection, or the metadata was right)
 // keeps the row clean.
 void SampleEditorDialog::updatePitchHint()
@@ -834,15 +830,17 @@ void SampleEditorDialog::updatePitchHint()
         if (show) {
             const int nearest = qBound(0, int(std::lround(exact)), 127);
             const double cents = (exact - double(nearest)) * 100.0;
-            m_pitchLabel->setText(
-                tr("Detected: %1 %2%3¢ (%4 Hz)")
+            m_pitchApply->setText(tr("Use detected pitch (%1)")
+                                      .arg(midiKeyName(nearest)));
+            m_pitchApply->setToolTip(
+                tr("Set the base key and cents from the detected pitch: "
+                   "%1 %2%3¢ (%4 Hz).")
                     .arg(midiKeyName(nearest))
                     .arg(cents >= 0 ? QStringLiteral("+") : QString())
                     .arg(cents, 0, 'f', 0)
                     .arg(m_pitch.f0, 0, 'f', 1));
         }
     }
-    m_pitchLabel->setVisible(show);
     m_pitchApply->setVisible(show);
 }
 

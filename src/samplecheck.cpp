@@ -1950,26 +1950,40 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot,
         // the chrome hides again (agreement is the quiet state).
         auto *pitchApply = dialog.findChild<QPushButton *>(
             QStringLiteral("samplePitchApply"));
-        auto *pitchLabel =
-            dialog.findChild<QLabel *>(QStringLiteral("samplePitchLabel"));
         auto *baseKey =
             dialog.findChild<QSpinBox *>(QStringLiteral("sampleBaseKey"));
         auto *fineTune = dialog.findChild<QDoubleSpinBox *>(
             QStringLiteral("sampleFineTune"));
-        expect(pitchApply && pitchLabel && baseKey && fineTune,
-               "pitch widgets found");
-        if (pitchApply && pitchLabel && baseKey && fineTune) {
+        expect(pitchApply && baseKey && fineTune, "pitch widgets found");
+        if (pitchApply && baseKey && fineTune) {
             expect(baseKey->value() == 60,
                    "smpl metadata wins over detection at open");
-            expect(pitchApply->isVisible() && pitchLabel->isVisible()
-                       && pitchLabel->text().contains(QStringLiteral("220")),
+            // The 220 Hz tone detects as A3; the button names the key and
+            // the tooltip carries the cents/Hz detail.
+            expect(pitchApply->isVisible()
+                       && pitchApply->text().contains(QStringLiteral("A3"))
+                       && pitchApply->toolTip().contains(
+                           QStringLiteral("220")),
                    "metadata/detection mismatch surfaces the hint");
+            // Evidence while the mismatch chrome is showing (every later
+            // screenshot has it hidden by agreement).
+            if (!screenshotPath.isEmpty()) {
+                QApplication::processEvents();
+                QImage pitchShot(dialog.size(),
+                                 QImage::Format_ARGB32_Premultiplied);
+                pitchShot.fill(Qt::white);
+                dialog.render(&pitchShot);
+                const QFileInfo info(screenshotPath);
+                pitchShot.save(info.path() + QLatin1Char('/')
+                               + info.completeBaseName()
+                               + QStringLiteral("-pitch.") + info.suffix());
+            }
             pitchApply->click();
             expect(baseKey->value() == 57
                        && std::abs(fineTune->value() - 3.93) < 1.5
                        && undo->count() == 2,
-                   "Apply adopts the detected pitch as one undo entry");
-            expect(!pitchApply->isVisible() && !pitchLabel->isVisible(),
+                   "the button adopts the detected pitch as one undo entry");
+            expect(!pitchApply->isVisible(),
                    "agreement hides the detect chrome");
         }
 

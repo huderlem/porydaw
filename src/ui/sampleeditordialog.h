@@ -167,7 +167,6 @@ private:
     QSpinBox *m_loopEnd = nullptr;
     QSpinBox *m_baseKey = nullptr;
     QDoubleSpinBox *m_fineTune = nullptr;
-    QLabel *m_pitchLabel = nullptr;
     QPushButton *m_pitchApply = nullptr;
     QComboBox *m_rateCombo = nullptr;
     QComboBox *m_normalizeMode = nullptr;
