@@ -1351,9 +1351,6 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent *event) override
     {
-        // The keyboard column hides the hover mark while a gesture runs;
-        // repaint it so the mark reappears even if the cursor holds still.
-        update(0, 0, kKeyboardW, height());
         if (event->button() == Qt::MiddleButton && m_panning) {
             m_panning = false;
             setCursor(Qt::ArrowCursor);
@@ -1986,10 +1983,7 @@ private:
         QFont f = p.font();
         f.setPixelSize(std::min(10, keyH));
         p.setFont(f);
-        // The hover mark hides while a gesture runs: the sounding-key
-        // highlight owns the column then, and a stale hover row under a
-        // pan or band sweep would just mislead.
-        const int hovered = gestureActive() ? -1 : m_hoverKey;
+        const int hovered = m_hoverKey;
         for (int key = 0; key < 128; key++) {
             const int y = keyToY(key);
             if (y + keyH < 0 || y > height())

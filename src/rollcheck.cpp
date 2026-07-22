@@ -40,8 +40,9 @@
 // header row reorders the tracks, the mute flag following the moved
 // track through undo and redo; a right-button release cancels the drag,
 // and a drop with a rename editor open commits the typed name first.
-// An idle cursor over the roll marks its key row on the keyboard column
-// (with a note-name chip), cleared when the cursor leaves the widget.
+// The cursor over the roll marks its key row on the keyboard column
+// (with a note-name chip) — held through gestures so a drag's target row
+// stays readable — cleared when the cursor leaves the widget.
 // Undoing every gesture must restore the original bytes.
 
 namespace {
@@ -147,7 +148,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     }
     const int keyH = view.keyHeight();
 
-    // Hover readout: an idle cursor anywhere over the roll marks its key row
+    // Hover readout: the cursor anywhere over the roll marks its key row
     // on the keyboard column (mirrored in the hoverKey property); leaving
     // the widget clears the mark.
     {
