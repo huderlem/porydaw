@@ -10,6 +10,7 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -230,19 +231,25 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     connect(m_samplePicker, &SamplePickerButton::auditionStopRequested, this,
             &VoicegroupBrowser::sampleAuditionStopRequested);
     // Sample Studio entry (SPEC §6.2): visible on DirectSound sample voices.
-    m_newSampleButton = new QPushButton(tr("New…"), m_symbolRow);
+    // Glyph-only tool buttons — the picker needs the row's width, and the
+    // tooltips carry the words the labels used to.
+    m_newSampleButton = new QToolButton(m_symbolRow);
     m_newSampleButton->setObjectName(QStringLiteral("vgNewSampleButton"));
+    m_newSampleButton->setText(QStringLiteral("+"));
+    m_newSampleButton->setAutoRaise(true);
     m_newSampleButton->setToolTip(
-        tr("Import a new sample and assign it to this voice."));
+        tr("New sample: import a sample and assign it to this voice."));
     symbolLayout->addWidget(m_newSampleButton);
-    connect(m_newSampleButton, &QPushButton::clicked, this,
+    connect(m_newSampleButton, &QToolButton::clicked, this,
             [this] { emit newSampleRequested(currentSlot()); });
-    m_editSampleButton = new QPushButton(tr("Edit…"), m_symbolRow);
+    m_editSampleButton = new QToolButton(m_symbolRow);
     m_editSampleButton->setObjectName(QStringLiteral("vgEditSampleButton"));
+    m_editSampleButton->setText(QStringLiteral("✎"));
+    m_editSampleButton->setAutoRaise(true);
     m_editSampleButton->setToolTip(
-        tr("Reopen this voice's sample in Sample Studio."));
+        tr("Edit sample: reopen this voice's sample in Sample Studio."));
     symbolLayout->addWidget(m_editSampleButton);
-    connect(m_editSampleButton, &QPushButton::clicked, this,
+    connect(m_editSampleButton, &QToolButton::clicked, this,
             [this] { emit editSampleRequested(currentSlot()); });
     addRow(tr("Sample"), m_symbolRow, &m_symbolLabel);
 

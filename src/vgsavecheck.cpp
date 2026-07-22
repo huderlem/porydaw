@@ -4,6 +4,7 @@
 #include <QDirIterator>
 #include <QDockWidget>
 #include <QFile>
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -678,6 +679,14 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                         QStringLiteral("vgSamplePickerPopup"));
                     check(popup && popup->grab().save(screenshotPath),
                           "could not save the picker screenshot");
+                    // A -dock variant of the browser itself: the editor
+                    // panel's Sample row (picker + glyph tool buttons).
+                    const QFileInfo info(screenshotPath);
+                    check(m_vgBrowser->grab().save(
+                              info.path() + QLatin1Char('/')
+                              + info.completeBaseName()
+                              + QStringLiteral("-dock.") + info.suffix()),
+                          "could not save the dock screenshot");
                 }
 
                 // Pick a different plain sample by typing its full symbol:

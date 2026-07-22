@@ -18,6 +18,7 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QSpinBox;
+class QToolButton;
 
 // What a picker row stands for, so the owner resolves its audition
 // correctly: samples publish PCM, waves publish CGB wave bytes, keysplits
@@ -165,8 +166,8 @@ private:
     QWidget *m_symbolRow = nullptr;
     QComboBox *m_symbolCombo = nullptr; // wave/drumkit/synth symbol lists
     SamplePickerButton *m_samplePicker = nullptr; // sample-list voices
-    QPushButton *m_newSampleButton = nullptr;
-    QPushButton *m_editSampleButton = nullptr;
+    QToolButton *m_newSampleButton = nullptr;
+    QToolButton *m_editSampleButton = nullptr;
     QWidget *m_sweepRow = nullptr;
     QSpinBox *m_sweepTimeSpin = nullptr;
     QComboBox *m_sweepDirCombo = nullptr;
