@@ -778,6 +778,10 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                             check(s.isEmpty()
                                       || vgCatalog().progWave.contains(s),
                                   "wave picker lists a non-wave symbol");
+                            // Waves show the verbatim symbol (samples strip
+                            // their shared prefix; waves don't).
+                            check(s.isEmpty() || (*it)->text(0) == s,
+                                  "wave row does not show its full symbol");
                         }
                         if (otherWave.isEmpty()) {
                             std::printf("vgsavecheck: note: single wave, "

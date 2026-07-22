@@ -61,6 +61,14 @@ void SamplePickerButton::setCurrentSymbol(const QString &symbol)
     updateButtonText();
 }
 
+void SamplePickerButton::setDisplayFullSymbols(bool on)
+{
+    if (m_fullNames == on)
+        return;
+    m_fullNames = on;
+    updateButtonText();
+}
+
 void SamplePickerButton::setInfoProvider(
     std::function<SamplePickInfo(const QString &)> provider)
 {
@@ -74,7 +82,8 @@ bool SamplePickerButton::popupVisible() const
 
 void SamplePickerButton::updateButtonText()
 {
-    const QString name = vgSampleDisplayName(m_currentSymbol);
+    const QString name =
+        m_fullNames ? m_currentSymbol : vgSampleDisplayName(m_currentSymbol);
     const int avail = width() - 24; // frame + a hint of breathing room
     setText(name.isEmpty()
                 ? tr("(none)")
@@ -211,7 +220,8 @@ void SamplePickerButton::rebuildList()
             nonEmpty > 1 ? addSection(s.title) : m_list->invisibleRootItem();
         for (const QString &symbol : *s.symbols) {
             auto *row = new QTreeWidgetItem(parent);
-            row->setText(0, vgSampleDisplayName(symbol));
+            row->setText(0, m_fullNames ? symbol
+                                        : vgSampleDisplayName(symbol));
             row->setData(0, kSymbolRole, symbol);
             row->setData(0, kKeysplitRole, s.keysplit);
             row->setToolTip(0, symbol);

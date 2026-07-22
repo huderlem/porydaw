@@ -694,6 +694,9 @@ void VoicegroupBrowser::populateEditor()
         m_symbolCombo->setVisible(!pickerList);
         m_samplePicker->setVisible(pickerList);
         if (pickerList) {
+            // Wave symbols read best verbatim; sample symbols drown in their
+            // shared DirectSoundWaveData_ prefix.
+            m_samplePicker->setDisplayFullSymbols(wave);
             if (wave)
                 m_samplePicker->setChoices(QStringList(), m_waveSymbols,
                                            QStringList());

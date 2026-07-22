@@ -39,6 +39,10 @@ public:
     // as nothing (no single sample to play) but commit like any symbol.
     void setChoices(const QStringList &keysplits, const QStringList &samples,
                     const QStringList &phonemes);
+    // Show symbols verbatim instead of prefix-stripped (rows and button).
+    // Wave lists want this: unlike the samples' uniform DirectSoundWaveData_
+    // wall, the full ProgrammableWaveData_* symbol is the recognizable name.
+    void setDisplayFullSymbols(bool on);
     void setCurrentSymbol(const QString &symbol);
     QString currentSymbol() const { return m_currentSymbol; }
 
@@ -72,6 +76,7 @@ private:
 
     QStringList m_keysplits, m_samples, m_phonemes;
     QString m_currentSymbol;
+    bool m_fullNames = false;
     std::function<SamplePickInfo(const QString &)> m_info;
 
     QWidget *m_popup = nullptr; // created on first open
