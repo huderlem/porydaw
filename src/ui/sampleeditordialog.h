@@ -16,6 +16,7 @@ class AudioEngine;
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
+class QGroupBox;
 class QHBoxLayout;
 class QLabel;
 class QLineEdit;
@@ -25,14 +26,16 @@ class QToolButton;
 class WaveformView;
 
 // The Sample Studio dialog (docs/sample-studio/PLAN.md §5): the dominant
-// waveform view with crop/loop drag handles, numeric pipeline controls,
-// loop auto-suggestion chips with live click metrics and a green/amber/red
-// seam badge, pitch-detect prefill, crossfade bake, and an engine audition
-// strip (play once / play looped / stop / key / loop seam solo) driven
-// through the audition-slot protocol (PLAN.md §4). Pure view: the dialog
-// renders and hands out the export bytes; MainWindow does the writes on
-// accept. Parameter edits ride a dialog-local QUndoStack — nothing
-// project-visible exists until commit.
+// waveform view with crop/loop drag handles, a checkable "Loop this
+// sample" group that hides all loop chrome for one-shots and seeds the
+// best analyzer candidate (plus a crossfade bake iff its seam isn't
+// clean) on first enable, a green/amber/red seam badge with a one-click
+// Fix, pitch-detect prefill, and an engine audition strip (play / key /
+// seam solo) driven through the audition-slot protocol (PLAN.md §4).
+// Expert rows live in a collapsed Advanced disclosure. Pure view: the
+// dialog renders and hands out the export bytes; MainWindow does the
+// writes on accept. Parameter edits ride a dialog-local QUndoStack —
+// nothing project-visible exists until commit.
 class SampleEditorDialog : public QDialog
 {
     Q_OBJECT
@@ -81,7 +84,10 @@ private:
     void validateName();
     void ensurePitchDetected();
     void applyDetectedPitch();
-    void suggestLoops();
+    void computeChips();
+    bool ensureChips();
+    void autoPopulateLoop();
+    void tryAnotherLoop();
     void refineCurrentLoop();
     void applyChip(int index);
     SampleEditParams analysisParams() const;
@@ -110,6 +116,8 @@ private:
     SampleDsp::PitchResult m_pitch;
 
     // Suggested loop candidates, mapped back to source coordinates.
+    // Computed lazily (one analysis render + seam search) and cached
+    // against the inputs that shape the analysis grid.
     struct Chip {
         qint64 srcStart = 0;
         qint64 srcEnd = 0;
@@ -117,6 +125,11 @@ private:
         SeamMetrics metrics;
     };
     std::vector<Chip> m_chips;
+    bool m_chipsValid = false;
+    int m_chipIndex = -1; // last-applied candidate ("Try another" cycles)
+    qint64 m_chipsCropStart = -1;
+    qint64 m_chipsCropEnd = -1;
+    double m_chipsRate = -1.0;
 
     // Audition state (engine slots; display playhead is a UI approximation).
     enum class AuditionMode { None, Once, Loop };
@@ -134,15 +147,17 @@ private:
     QElapsedTimer m_auditionClock;
 
     WaveformView *m_waveform = nullptr;
-    QPushButton *m_suggestButton = nullptr;
+    // The loop group: checkable, and its body hides entirely while the
+    // sample is a one-shot.
+    QGroupBox *m_loopGroup = nullptr;
+    QWidget *m_loopBody = nullptr;
+    QPushButton *m_tryLoop = nullptr;
     QPushButton *m_refineButton = nullptr;
-    QHBoxLayout *m_chipRow = nullptr;
-    std::vector<QPushButton *> m_chipButtons;
+    QPushButton *m_seamFix = nullptr;
     QLabel *m_suggestStatus = nullptr;
     QLabel *m_seamBadge = nullptr;
     QSpinBox *m_cropStart = nullptr;
     QSpinBox *m_cropEnd = nullptr;
-    QCheckBox *m_loopOn = nullptr;
     QSpinBox *m_loopStart = nullptr;
     QSpinBox *m_loopEnd = nullptr;
     QSpinBox *m_baseKey = nullptr;
@@ -153,9 +168,7 @@ private:
     QComboBox *m_normalizeMode = nullptr;
     QLabel *m_gainReadout = nullptr;
     QCheckBox *m_crossfade = nullptr;
-    QPushButton *m_playOnce = nullptr;
-    QPushButton *m_playLoop = nullptr;
-    QPushButton *m_stopButton = nullptr;
+    QPushButton *m_playButton = nullptr;
     QSpinBox *m_auditionKey = nullptr;
     QCheckBox *m_seamSolo = nullptr;
     QCheckBox *m_useDestAdsr = nullptr;

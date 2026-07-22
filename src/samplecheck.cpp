@@ -5,6 +5,7 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QFileInfo>
+#include <QGroupBox>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
@@ -1463,7 +1464,7 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         auto *baseKey =
             dialog.findChild<QSpinBox *>(QStringLiteral("sampleBaseKey"));
         auto *loopOn =
-            dialog.findChild<QCheckBox *>(QStringLiteral("sampleLoopOn"));
+            dialog.findChild<QGroupBox *>(QStringLiteral("sampleLoopOn"));
         auto *rateCombo =
             dialog.findChild<QComboBox *>(QStringLiteral("sampleRateCombo"));
         auto *fineTune = dialog.findChild<QDoubleSpinBox *>(
@@ -1952,29 +1953,79 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
                    "second click applies the detected pitch");
         }
 
-        // 3. Suggest: chips appear; applying the best one produces a clean
-        // seam on this pure tone (badge green, NCC high).
-        auto *suggest = dialog.findChild<QPushButton *>(
-            QStringLiteral("sampleSuggestLoop"));
-        expect(suggest != nullptr, "suggest button found");
-        if (suggest) {
-            suggest->click();
-            auto *chip0 = dialog.findChild<QPushButton *>(
-                QStringLiteral("sampleLoopChip0"));
-            expect(chip0 != nullptr, "suggestion chips appear");
-            if (chip0) {
-                chip0->click();
-                expect(undo->count() == 3, "chip apply is one undo entry");
-                const ProcessedSample &out = doc->processed();
-                expect(out.looped && out.seam.valid && out.seam.ampLsb <= 2
-                           && out.seam.derivLsb <= 3
-                           && (!out.seam.nccValid || out.seam.ncc >= 0.95),
-                       "applied suggestion loops cleanly");
-                auto *badge = dialog.findChild<QLabel *>(
-                    QStringLiteral("sampleSeamBadge"));
-                expect(badge && badge->isVisible()
-                           && badge->text() == QStringLiteral("seam: clean"),
-                       "seam badge reads clean");
+        // 3. Auto-populate: disabling the loop hides the group's body;
+        // zeroing the loop points and re-enabling seeds the analyzer's
+        // best candidate as ONE undo entry (clean seam on this pure tone,
+        // so no crossfade bake). "Try another loop" cycles candidates,
+        // and a deliberately misaligned loop surfaces the crossfade Fix.
+        auto *group =
+            dialog.findChild<QGroupBox *>(QStringLiteral("sampleLoopOn"));
+        auto *loopBody =
+            dialog.findChild<QWidget *>(QStringLiteral("sampleLoopBody"));
+        auto *loopStartSpin =
+            dialog.findChild<QSpinBox *>(QStringLiteral("sampleLoopStart"));
+        auto *loopEndSpin =
+            dialog.findChild<QSpinBox *>(QStringLiteral("sampleLoopEnd"));
+        auto *badge =
+            dialog.findChild<QLabel *>(QStringLiteral("sampleSeamBadge"));
+        expect(group && loopBody && loopStartSpin && loopEndSpin && badge,
+               "loop group widgets found");
+        if (group && loopBody && loopStartSpin && loopEndSpin && badge) {
+            expect(loopBody->isVisible(), "loop body shows while looped");
+            group->setChecked(false); // undo 3
+            expect(!doc->params().loopOn && !loopBody->isVisible(),
+                   "unchecking the group hides the loop chrome");
+            loopEndSpin->setValue(0);   // undo 4
+            loopStartSpin->setValue(0); // undo 5
+            expect(undo->count() == 5, "loop reset landed");
+            group->setChecked(true); // auto-populate, undo 6
+            expect(doc->params().loopOn
+                       && doc->params().loopStart != doc->params().loopEnd,
+                   "re-enabling seeds a loop");
+            expect(undo->count() == 6, "auto-populate is one undo entry");
+            expect(!doc->params().crossfadeOn,
+                   "clean tone needs no crossfade bake");
+            const ProcessedSample &out = doc->processed();
+            expect(out.looped && out.seam.valid && out.seam.ampLsb <= 2
+                       && out.seam.derivLsb <= 3
+                       && (!out.seam.nccValid || out.seam.ncc >= 0.95),
+                   "auto-populated loop is clean");
+            expect(badge->isVisible()
+                       && badge->text() == QStringLiteral("seam: clean"),
+                   "seam badge reads clean");
+            expect(loopBody->isVisible(), "loop chrome is back");
+            undo->undo();
+            expect(!doc->params().loopOn,
+                   "undo re-disables the auto-populated loop");
+            undo->redo();
+            expect(doc->params().loopOn, "redo re-enables it");
+
+            auto *tryLoop = dialog.findChild<QPushButton *>(
+                QStringLiteral("sampleTryLoop"));
+            expect(tryLoop != nullptr, "try-another button found");
+            if (tryLoop) {
+                tryLoop->click();
+                expect(doc->params().loopOn && doc->processed().looped,
+                       "try-another keeps a valid loop");
+            }
+
+            // Misaligned loop (220.5 Hz sine, period 200 — a 137-sample
+            // loop cannot seat cleanly): the badge goes non-green and
+            // carries the one-click crossfade Fix.
+            loopStartSpin->setValue(2000);
+            loopEndSpin->setValue(2137);
+            auto *fix = dialog.findChild<QPushButton *>(
+                QStringLiteral("sampleSeamFix"));
+            expect(doc->processed().seam.valid && badge->isVisible()
+                       && badge->text() != QStringLiteral("seam: clean"),
+                   "misaligned loop is not clean");
+            expect(fix && fix->isVisible(), "Fix appears for a bad seam");
+            if (fix) {
+                fix->click();
+                expect(doc->params().crossfadeOn, "Fix bakes a crossfade");
+                expect(!fix->isVisible(), "Fix disappears once applied");
+                undo->undo(); // crossfade back off for the sections below
+                expect(!doc->params().crossfadeOn, "crossfade Fix undoes");
             }
         }
 
@@ -2002,9 +2053,9 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot)
         }
 
         // 6. No engine was passed: the audition strip is disabled.
-        auto *playOnce = dialog.findChild<QPushButton *>(
-            QStringLiteral("sampleAuditionOnce"));
-        expect(playOnce && !playOnce->isEnabled(),
+        auto *playBtn = dialog.findChild<QPushButton *>(
+            QStringLiteral("sampleAuditionPlay"));
+        expect(playBtn && !playBtn->isEnabled(),
                "audition strip disabled without audio");
 
         // 7. Full undo walks back to the import defaults.

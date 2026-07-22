@@ -129,16 +129,24 @@ wrong: docks are persistent project-state views; wizard is wrong: one screen
 + commit). Flow: file dialog → (if .sf2) Sf2ZonePicker → editor. Internally
 separate widgets so the harness can drive them offscreen.
 
-Layout: WaveformView dominant on top. Below: crop/loop readouts with the
-live click metrics + green/amber/red badge (DSP.md §6); "Suggest loop" (top-5
-candidate chips); base key + cents (pitch-detect prefill, piano-key picker or
-spinbox); target-rate combo (presets from `kGbaMixRates`, "keep source
-rate", free entry — doubles allowed); normalize mode + resulting gain
-readout; crossfade-bake toggle; audition strip (play once / play looped /
-stop, audition key selector, "use destination voice ADSR" when
-browser-initiated, "loop seam solo"); commit strip (name field with live
-validation, ROM cost `16 + align4(n)` bytes, detected-pipeline note, "Add to
-project").
+Layout (revised 2026-07-21 for the beginner-first pass): WaveformView
+dominant on top. Below: a checkable "Loop this sample" group whose body
+hides entirely for one-shots — first enable on a loop-less sample seeds the
+analyzer's best candidate plus a crossfade bake iff its seam isn't clean,
+as one undo entry; inside it the green/amber/red seam badge (DSP.md §6)
+with a one-click crossfade "Fix" when non-green, "Try another loop"
+(cycles the top-5 candidates), "Refine", loop-range spins, "Smooth seam
+(crossfade)", and "Audition seam". Then base key (pitch-detect prefill);
+audition strip (single play/stop toggle — looped iff the loop is on —
+audition key selector, "use destination voice ADSR" when
+browser-initiated); a one-line friendly summary (duration · ROM cost
+`16 + align4(n)` · seam verdict); a collapsed "Advanced" disclosure
+(format line, crop spins, fine-tune cents, target-rate combo with presets
+from `kGbaMixRates` / "keep source rate" / free entry — doubles allowed,
+normalize mode + resulting gain readout, technical output readout); commit
+strip (name field with live validation, "Add to project"). No
+snap-to-zero toggle: markers land where dragged, seam quality is the
+suggest/refine/crossfade machinery's job.
 
 Never add program-remap UI. Cries/DPCM are out of scope (never emit DPCM).
 

@@ -6,6 +6,7 @@
 #include <QDoubleSpinBox>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -220,40 +221,6 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
                                                 m_doc.params(), -1));
     });
 
-    // ---- loop tools ----
-    auto *tools = new QHBoxLayout;
-    m_suggestButton = new QPushButton(tr("Suggest loop"), this);
-    m_suggestButton->setObjectName(QStringLiteral("sampleSuggestLoop"));
-    connect(m_suggestButton, &QPushButton::clicked, this,
-            &SampleEditorDialog::suggestLoops);
-    tools->addWidget(m_suggestButton);
-    m_refineButton = new QPushButton(tr("Refine"), this);
-    m_refineButton->setObjectName(QStringLiteral("sampleRefineLoop"));
-    m_refineButton->setToolTip(
-        tr("Re-seat the current loop markers with a local seam search."));
-    connect(m_refineButton, &QPushButton::clicked, this,
-            &SampleEditorDialog::refineCurrentLoop);
-    tools->addWidget(m_refineButton);
-    m_chipRow = new QHBoxLayout;
-    m_chipRow->setSpacing(2);
-    tools->addLayout(m_chipRow);
-    m_suggestStatus = new QLabel(this);
-    m_suggestStatus->setObjectName(QStringLiteral("sampleSuggestStatus"));
-    tools->addWidget(m_suggestStatus);
-    tools->addStretch();
-    m_seamBadge = new QLabel(this);
-    m_seamBadge->setObjectName(QStringLiteral("sampleSeamBadge"));
-    m_seamBadge->setMargin(3);
-    tools->addWidget(m_seamBadge);
-    layout->addLayout(tools);
-
-    // ---- the pipeline form (the beginner surface; expert rows live in
-    // the Advanced section below) ----
-    auto *form = new QFormLayout;
-    auto *sourceLabel = new QLabel(QFileInfo(src.sourcePath).fileName(), this);
-    sourceLabel->setToolTip(src.sourcePath);
-    form->addRow(tr("Source:"), sourceLabel);
-
     const auto makeSpin = [this](const char *name, int min, int max,
                                  int value, int mergeKey) {
         auto *spin = new QSpinBox(this);
@@ -266,22 +233,105 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         return spin;
     };
 
-    m_loopOn = new QCheckBox(tr("Loop"), this);
-    m_loopOn->setObjectName(QStringLiteral("sampleLoopOn"));
-    m_loopOn->setChecked(defaults.loopOn);
-    connect(m_loopOn, &QCheckBox::toggled, this,
-            [this] { applyParamsFromUi(-1); });
+    // ---- the loop group: every loop-related control lives here, and the
+    // body hides entirely while the sample is a one-shot ----
+    m_loopGroup = new QGroupBox(tr("Loop this sample"), this);
+    m_loopGroup->setObjectName(QStringLiteral("sampleLoopOn"));
+    m_loopGroup->setCheckable(true);
+    m_loopGroup->setChecked(defaults.loopOn);
+    auto *groupLayout = new QVBoxLayout(m_loopGroup);
+    m_loopBody = new QWidget(m_loopGroup);
+    m_loopBody->setObjectName(QStringLiteral("sampleLoopBody"));
+    groupLayout->addWidget(m_loopBody);
+    auto *loopLayout = new QVBoxLayout(m_loopBody);
+    loopLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *seamRow = new QHBoxLayout;
+    m_seamBadge = new QLabel(this);
+    m_seamBadge->setObjectName(QStringLiteral("sampleSeamBadge"));
+    m_seamBadge->setMargin(3);
+    seamRow->addWidget(m_seamBadge);
+    m_seamFix = new QPushButton(tr("Fix"), this);
+    m_seamFix->setObjectName(QStringLiteral("sampleSeamFix"));
+    m_seamFix->setToolTip(
+        tr("Smooth the clicking seam with a crossfade bake."));
+    connect(m_seamFix, &QPushButton::clicked, this,
+            [this] { m_crossfade->setChecked(true); });
+    seamRow->addWidget(m_seamFix);
+    m_tryLoop = new QPushButton(tr("Try another loop"), this);
+    m_tryLoop->setObjectName(QStringLiteral("sampleTryLoop"));
+    m_tryLoop->setToolTip(
+        tr("Cycle through the loop points the analyzer found."));
+    connect(m_tryLoop, &QPushButton::clicked, this,
+            &SampleEditorDialog::tryAnotherLoop);
+    seamRow->addWidget(m_tryLoop);
+    m_refineButton = new QPushButton(tr("Refine"), this);
+    m_refineButton->setObjectName(QStringLiteral("sampleRefineLoop"));
+    m_refineButton->setToolTip(
+        tr("Re-seat the current loop markers with a local seam search."));
+    connect(m_refineButton, &QPushButton::clicked, this,
+            &SampleEditorDialog::refineCurrentLoop);
+    seamRow->addWidget(m_refineButton);
+    m_suggestStatus = new QLabel(this);
+    m_suggestStatus->setObjectName(QStringLiteral("sampleSuggestStatus"));
+    seamRow->addWidget(m_suggestStatus);
+    seamRow->addStretch();
+    loopLayout->addLayout(seamRow);
+
     m_loopStart = makeSpin("sampleLoopStart", 0, frames - 1,
                            int(defaults.loopStart), 3);
     m_loopEnd = makeSpin("sampleLoopEnd", 0, frames - 1,
                          int(defaults.loopEnd), 4);
-    auto *loopRow = new QHBoxLayout;
-    loopRow->addWidget(m_loopOn);
-    loopRow->addWidget(m_loopStart);
-    loopRow->addWidget(new QLabel(tr("to"), this));
-    loopRow->addWidget(m_loopEnd);
-    loopRow->addStretch();
-    form->addRow(tr("Loop (samples):"), loopRow);
+    auto *rangeRow = new QHBoxLayout;
+    rangeRow->addWidget(new QLabel(tr("Loop range (samples):"), this));
+    rangeRow->addWidget(m_loopStart);
+    rangeRow->addWidget(new QLabel(tr("to"), this));
+    rangeRow->addWidget(m_loopEnd);
+    rangeRow->addStretch();
+    loopLayout->addLayout(rangeRow);
+
+    auto *seamOptsRow = new QHBoxLayout;
+    m_crossfade = new QCheckBox(tr("Smooth seam (crossfade)"), this);
+    m_crossfade->setObjectName(QStringLiteral("sampleCrossfade"));
+    m_crossfade->setToolTip(
+        tr("Bakes the loop end into the pre-loop material to smooth the "
+           "seam."));
+    m_crossfade->setChecked(defaults.crossfadeOn);
+    connect(m_crossfade, &QCheckBox::toggled, this,
+            [this] { applyParamsFromUi(-1); });
+    seamOptsRow->addWidget(m_crossfade);
+    m_seamSolo = new QCheckBox(tr("Audition seam"), this);
+    m_seamSolo->setObjectName(QStringLiteral("sampleSeamSolo"));
+    m_seamSolo->setToolTip(
+        tr("Audition ±150 ms around the loop seam on repeat."));
+    connect(m_seamSolo, &QCheckBox::toggled, this, [this] {
+        if (m_auditionMode == AuditionMode::Loop)
+            startAudition(true);
+    });
+    seamOptsRow->addWidget(m_seamSolo);
+    seamOptsRow->addStretch();
+    loopLayout->addLayout(seamOptsRow);
+
+    // First enable on a sample with no loop yet seeds the analyzer's best
+    // candidate (autoPopulateLoop); any other toggle is a plain parameter
+    // edit. Body visibility tracks the params via refreshOutputs.
+    connect(m_loopGroup, &QGroupBox::toggled, this, [this](bool on) {
+        if (m_syncing)
+            return;
+        if (on && m_doc.params().loopStart == m_doc.params().loopEnd)
+            autoPopulateLoop();
+        else
+            applyParamsFromUi(-1);
+    });
+    m_loopBody->setVisible(defaults.loopOn);
+    layout->addWidget(m_loopGroup);
+
+    // ---- the pipeline form (the beginner surface; expert rows live in
+    // the Advanced section below) ----
+    auto *form = new QFormLayout;
+    auto *sourceLabel = new QLabel(QFileInfo(src.sourcePath).fileName(), this);
+    sourceLabel->setToolTip(src.sourcePath);
+    form->addRow(tr("Source:"), sourceLabel);
 
     m_baseKey = makeSpin("sampleBaseKey", 0, 127, defaults.baseKey, 5);
     m_pitchLabel = new QLabel(this);
@@ -309,32 +359,20 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
             tr("Detect the sample's pitch and show it here."));
     }
 
-    m_crossfade = new QCheckBox(
-        tr("Crossfade the seam (bakes the loop end into the pre-loop "
-           "material)"),
-        this);
-    m_crossfade->setObjectName(QStringLiteral("sampleCrossfade"));
-    m_crossfade->setChecked(defaults.crossfadeOn);
-    connect(m_crossfade, &QCheckBox::toggled, this,
-            [this] { applyParamsFromUi(-1); });
-    form->addRow(tr("Loop seam:"), m_crossfade);
-
     layout->addLayout(form);
 
     // ---- audition strip (engine slots, PLAN.md §4) ----
     auto *audition = new QHBoxLayout;
-    m_playOnce = new QPushButton(tr("Play once"), this);
-    m_playOnce->setObjectName(QStringLiteral("sampleAuditionOnce"));
-    connect(m_playOnce, &QPushButton::clicked, this,
-            [this] { startAudition(false); });
-    m_playLoop = new QPushButton(tr("Play looped"), this);
-    m_playLoop->setObjectName(QStringLiteral("sampleAuditionLoop"));
-    connect(m_playLoop, &QPushButton::clicked, this,
-            [this] { startAudition(true); });
-    m_stopButton = new QPushButton(tr("Stop"), this);
-    m_stopButton->setObjectName(QStringLiteral("sampleAuditionStop"));
-    connect(m_stopButton, &QPushButton::clicked, this,
-            &SampleEditorDialog::stopAudition);
+    m_playButton = new QPushButton(tr("Play"), this);
+    m_playButton->setObjectName(QStringLiteral("sampleAuditionPlay"));
+    m_playButton->setToolTip(
+        tr("Audition the render (looped when the loop is enabled)."));
+    connect(m_playButton, &QPushButton::clicked, this, [this] {
+        if (m_auditionMode != AuditionMode::None)
+            stopAudition();
+        else
+            startAudition(m_doc.processed().looped);
+    });
     m_auditionKey = new QSpinBox(this);
     m_auditionKey->setObjectName(QStringLiteral("sampleAuditionKey"));
     m_auditionKey->setRange(0, 127);
@@ -344,20 +382,9 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
         if (m_auditionMode != AuditionMode::None)
             startAudition(m_auditionMode == AuditionMode::Loop);
     });
-    m_seamSolo = new QCheckBox(tr("Loop seam solo"), this);
-    m_seamSolo->setObjectName(QStringLiteral("sampleSeamSolo"));
-    m_seamSolo->setToolTip(
-        tr("Audition ±150 ms around the loop seam on repeat."));
-    connect(m_seamSolo, &QCheckBox::toggled, this, [this] {
-        if (m_auditionMode == AuditionMode::Loop)
-            startAudition(true);
-    });
-    audition->addWidget(m_playOnce);
-    audition->addWidget(m_playLoop);
-    audition->addWidget(m_stopButton);
+    audition->addWidget(m_playButton);
     audition->addWidget(new QLabel(tr("Key:"), this));
     audition->addWidget(m_auditionKey);
-    audition->addWidget(m_seamSolo);
     m_useDestAdsr = new QCheckBox(tr("Use destination voice ADSR"), this);
     m_useDestAdsr->setObjectName(QStringLiteral("sampleDestAdsr"));
     m_useDestAdsr->setChecked(m_hasDestAdsr);
@@ -371,8 +398,7 @@ SampleEditorDialog::SampleEditorDialog(ImportedSample sample,
     layout->addLayout(audition);
     if (!m_engine) {
         for (QWidget *w : std::initializer_list<QWidget *>{
-                 m_playOnce, m_playLoop, m_stopButton, m_auditionKey,
-                 m_seamSolo}) {
+                 m_playButton, m_auditionKey, m_seamSolo}) {
             w->setEnabled(false);
             w->setToolTip(tr("Audio is unavailable."));
         }
@@ -547,7 +573,7 @@ void SampleEditorDialog::applyParamsFromUi(int mergeKey)
     SampleEditParams p = m_doc.params();
     p.cropStart = m_cropStart->value();
     p.cropEnd = m_cropEnd->value();
-    p.loopOn = m_loopOn->isChecked();
+    p.loopOn = m_loopGroup->isChecked();
     p.loopStart = m_loopStart->value();
     p.loopEnd = m_loopEnd->value();
     p.baseKey = m_baseKey->value();
@@ -600,7 +626,7 @@ void SampleEditorDialog::syncUiFromParams()
     const ImportedSample &src = m_doc.source();
     m_cropStart->setValue(int(p.cropStart));
     m_cropEnd->setValue(int(p.cropEnd));
-    m_loopOn->setChecked(p.loopOn);
+    m_loopGroup->setChecked(p.loopOn);
     m_loopStart->setValue(int(p.loopStart));
     m_loopEnd->setValue(int(p.loopEnd));
     m_baseKey->setValue(p.baseKey);
@@ -621,14 +647,9 @@ void SampleEditorDialog::refreshOutputs()
 {
     const ProcessedSample &out = m_doc.processed();
     const SampleEditParams &p = m_doc.params();
-    m_loopStart->setEnabled(m_loopOn->isChecked());
-    m_loopEnd->setEnabled(m_loopOn->isChecked());
-    m_refineButton->setEnabled(p.loopOn);
-    m_crossfade->setEnabled(p.loopOn);
-    if (m_engine) {
-        m_playLoop->setEnabled(out.looped);
+    m_loopBody->setVisible(p.loopOn);
+    if (m_engine)
         m_seamSolo->setEnabled(out.looped);
-    }
     m_waveform->setMarkers(p.cropStart, p.cropEnd, p.loopStart, p.loopEnd,
                            p.loopOn);
 
@@ -659,6 +680,8 @@ void SampleEditorDialog::refreshOutputs()
     } else {
         m_seamBadge->setVisible(false);
     }
+    // A clicking seam carries its own one-click remedy.
+    m_seamFix->setVisible(seamKnown && !green && !p.crossfadeOn);
 
     // Friendly one-liner on the main surface; the technical readout lives
     // in the Advanced section.
@@ -798,13 +821,20 @@ SampleEditParams SampleEditorDialog::analysisParams() const
     return p;
 }
 
-void SampleEditorDialog::suggestLoops()
+// Fill m_chips with loop candidates for the current crop/rate. Heavy (one
+// analysis render + the seam search), so results are cached and keyed on
+// the inputs that shape the analysis grid (ensureChips).
+void SampleEditorDialog::computeChips()
 {
     ensurePitchDetected();
-    for (QPushButton *chip : m_chipButtons)
-        chip->deleteLater();
-    m_chipButtons.clear();
     m_chips.clear();
+    m_chipIndex = -1;
+    const SampleEditParams &cur = m_doc.params();
+    m_chipsValid = true;
+    m_chipsCropStart = cur.cropStart;
+    m_chipsCropEnd = cur.cropEnd;
+    m_chipsRate = cur.targetRate;
+    m_suggestStatus->clear();
 
     SampleDocument analysis(m_doc.source());
     analysis.setParams(analysisParams());
@@ -814,7 +844,7 @@ void SampleEditorDialog::suggestLoops()
     const double ratio = srcRate > 0.0 ? ana.outputRate / srcRate : 1.0;
     if (n < 256) {
         m_suggestStatus->setText(
-            tr("sample too short for a loop search — set markers manually."));
+            tr("sample too short for a loop search — drag the markers."));
         return;
     }
     const double period =
@@ -823,52 +853,67 @@ void SampleEditorDialog::suggestLoops()
         SampleDsp::suggestLoop(ana.preview.data(), n, ana.outputRate, period,
                                qint64(std::llround(0.40 * double(n))), n - 1);
     if (cands.empty()) {
-        m_suggestStatus->setText(tr("no loop candidates found."));
+        m_suggestStatus->setText(
+            tr("no loop candidates found — drag the markers."));
         return;
     }
 
     const qint8 *s8 = reinterpret_cast<const qint8 *>(ana.s8.constData());
-    const qint64 cropStart = m_doc.params().cropStart;
-    bool anyClean = false;
     for (const SampleDsp::LoopCandidate &cand : cands) {
         Chip chip;
         chip.cand = cand;
         chip.metrics =
             SampleDsp::seamMetricsAt(s8, n, cand.loopStart, cand.loopEnd);
-        chip.srcStart =
-            cropStart + qint64(std::llround(double(cand.loopStart) / ratio));
-        chip.srcEnd =
-            cropStart + qint64(std::llround(double(cand.loopEnd) / ratio));
-        anyClean = anyClean || cand.passedGates;
+        chip.srcStart = cur.cropStart
+            + qint64(std::llround(double(cand.loopStart) / ratio));
+        chip.srcEnd = cur.cropStart
+            + qint64(std::llround(double(cand.loopEnd) / ratio));
         m_chips.push_back(chip);
     }
-    for (size_t i = 0; i < m_chips.size(); i++) {
-        const Chip &chip = m_chips[i];
-        auto *button = new QPushButton(
-            tr("%1% · %2 s")
-                .arg(int(chip.cand.ncc * 100.0))
-                .arg(double(chip.cand.loopEnd + 1 - chip.cand.loopStart)
-                         / ana.outputRate,
-                     0, 'f', 2),
-            this);
-        button->setObjectName(QStringLiteral("sampleLoopChip%1").arg(i));
-        button->setToolTip(
-            tr("Loop %1..%2 — seam amp %3 LSB, slope %4%5")
-                .arg(chip.srcStart)
-                .arg(chip.srcEnd)
-                .arg(chip.metrics.ampLsb)
-                .arg(chip.metrics.derivLsb)
-                .arg(chip.cand.passedGates ? QString()
-                                           : tr(" (fails level gates)")));
-        const int index = int(i);
-        connect(button, &QPushButton::clicked, this,
-                [this, index] { applyChip(index); });
-        m_chipRow->addWidget(button);
-        m_chipButtons.push_back(button);
+}
+
+// The cached candidates, recomputed when the analysis inputs moved.
+bool SampleEditorDialog::ensureChips()
+{
+    const SampleEditParams &p = m_doc.params();
+    if (!m_chipsValid || m_chipsCropStart != p.cropStart
+        || m_chipsCropEnd != p.cropEnd || m_chipsRate != p.targetRate)
+        computeChips();
+    return !m_chips.empty();
+}
+
+// First-time enable on a sample with no loop yet: seed the analyzer's best
+// candidate, plus the crossfade bake iff that seam isn't clean — one
+// params delta, so one undo entry.
+void SampleEditorDialog::autoPopulateLoop()
+{
+    SampleEditParams p = m_doc.params();
+    p.loopOn = true;
+    if (ensureChips()) {
+        const Chip &best = m_chips.front();
+        m_chipIndex = 0;
+        m_suggestStatus->setText(tr("loop 1 of %1").arg(m_chips.size()));
+        p.loopStart = best.srcStart;
+        p.loopEnd = best.srcEnd;
+        p.crossfadeOn =
+            !(best.metrics.ampLsb <= 2 && best.metrics.derivLsb <= 3);
+    } else {
+        // No candidate: loop the whole crop so the handles land somewhere
+        // sane; the status line explains.
+        p.loopStart = p.cropStart;
+        p.loopEnd = qMax(p.cropStart, p.cropEnd - 1);
     }
-    m_suggestStatus->setText(
-        anyClean ? QString()
-                 : tr("no clean loop found — consider a crossfade bake."));
+    commitParams(p, -1);
+}
+
+void SampleEditorDialog::tryAnotherLoop()
+{
+    if (!ensureChips())
+        return;
+    // Freshly recomputed candidates restart at the best one; otherwise
+    // advance past the one currently applied.
+    applyChip(m_chipIndex < 0 ? 0
+                              : (m_chipIndex + 1) % int(m_chips.size()));
 }
 
 void SampleEditorDialog::applyChip(int index)
@@ -876,6 +921,9 @@ void SampleEditorDialog::applyChip(int index)
     if (index < 0 || size_t(index) >= m_chips.size())
         return;
     const Chip &chip = m_chips[size_t(index)];
+    m_chipIndex = index;
+    m_suggestStatus->setText(
+        tr("loop %1 of %2").arg(index + 1).arg(m_chips.size()));
     SampleEditParams p = m_doc.params();
     p.loopOn = true;
     p.loopStart = chip.srcStart;
@@ -957,6 +1005,7 @@ void SampleEditorDialog::startAudition(bool looped)
     m_auditionPos = 0.0;
     m_auditionClock.restart();
     m_auditionTimer.start();
+    m_playButton->setText(tr("Stop"));
 }
 
 void SampleEditorDialog::stopAudition()
@@ -966,6 +1015,7 @@ void SampleEditorDialog::stopAudition()
     m_auditionMode = AuditionMode::None;
     m_republishPending = false;
     m_auditionTimer.stop();
+    m_playButton->setText(tr("Play"));
     if (m_waveform)
         m_waveform->setPlayhead(-1);
 }
