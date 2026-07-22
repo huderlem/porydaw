@@ -1186,7 +1186,11 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
-        setHoverKey(yToKey(event->pos().y()));
+        // A velocity drag moves the cursor vertically while the note's
+        // pitch stays put; the mark pins to the note so the readout
+        // doesn't wander off its row.
+        setHoverKey(m_drag == Drag::Velocity ? m_velAnchor.key
+                                             : yToKey(event->pos().y()));
         if (m_panning) {
             const QPoint pos = event->globalPosition().toPoint();
             const QPoint d = pos - m_panPos;

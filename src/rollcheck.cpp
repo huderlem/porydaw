@@ -312,6 +312,10 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
               Qt::LeftButton);
     sendMouse(roll, QEvent::MouseMove, b.handle - QPoint(0, 20), Qt::NoButton,
               Qt::LeftButton);
+    // The cursor sits rows above the note now, but the hover mark pins to
+    // the note's own pitch for the whole velocity drag.
+    if (roll->property("hoverKey").toInt() != b.key)
+        fail("velocity drag did not pin the hover mark to the note's key");
     sendMouse(roll, QEvent::MouseButtonRelease, b.handle - QPoint(0, 20),
               Qt::LeftButton, Qt::NoButton);
     DocNote dragged;
