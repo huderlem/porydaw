@@ -1186,6 +1186,7 @@ protected:
 
     void mouseMoveEvent(QMouseEvent *event) override
     {
+        setHoverKey(yToKey(event->pos().y()));
         if (m_panning) {
             const QPoint pos = event->globalPosition().toPoint();
             const QPoint d = pos - m_panPos;
@@ -1346,8 +1347,13 @@ protected:
         }
     }
 
+    void leaveEvent(QEvent *) override { setHoverKey(-1); }
+
     void mouseReleaseEvent(QMouseEvent *event) override
     {
+        // The keyboard column hides the hover mark while a gesture runs;
+        // repaint it so the mark reappears even if the cursor holds still.
+        update(0, 0, kKeyboardW, height());
         if (event->button() == Qt::MiddleButton && m_panning) {
             m_panning = false;
             setCursor(Qt::ArrowCursor);
@@ -1551,6 +1557,18 @@ private:
     int yToKey(int y) const
     {
         return std::clamp(127 - (y + m_sv->scrollY()) / m_sv->keyHeight(), 0, 127);
+    }
+
+    // Key row under the cursor: the keyboard column mirrors it with a tint
+    // and a note-name chip so the row reads at any zoom (-1 = cursor left
+    // the roll). Exposed as a dynamic property for the check harness.
+    void setHoverKey(int key)
+    {
+        if (key == m_hoverKey)
+            return;
+        m_hoverKey = key;
+        setProperty("hoverKey", m_hoverKey);
+        update(0, 0, kKeyboardW, height());
     }
 
     // All roll auditions go through here so the keyboard column can mark the
@@ -1968,6 +1986,10 @@ private:
         QFont f = p.font();
         f.setPixelSize(std::min(10, keyH));
         p.setFont(f);
+        // The hover mark hides while a gesture runs: the sounding-key
+        // highlight owns the column then, and a stale hover row under a
+        // pan or band sweep would just mislead.
+        const int hovered = gestureActive() ? -1 : m_hoverKey;
         for (int key = 0; key < 128; key++) {
             const int y = keyToY(key);
             if (y + keyH < 0 || y > height())
@@ -1990,6 +2012,34 @@ private:
                                    Qt::AlignRight | Qt::AlignVCenter, midiKeyName(key));
                 }
             }
+            if (key == hovered && !sounding) {
+                QColor h = m_sv->palette().color(QPalette::Highlight);
+                h.setAlpha(80);
+                p.fillRect(QRect(0, y, kKeyboardW, keyH), h);
+            }
+        }
+        // Note-name chip on the hovered row: keys can be as short as 4px,
+        // so the name gets its own fixed-size readout instead of in-row
+        // text, vertically clamped so edge rows stay readable.
+        if (hovered >= 0) {
+            const QString name = midiKeyName(hovered);
+            QFont cf = p.font();
+            cf.setPixelSize(10);
+            p.setFont(cf);
+            const QFontMetrics fm(cf);
+            const int cw = fm.horizontalAdvance(name) + 8;
+            const int ch = fm.height() + 2;
+            const int cy = std::clamp(keyToY(hovered) + (keyH - ch) / 2, 0,
+                                      std::max(0, height() - ch));
+            const QRect chip(kKeyboardW - 2 - cw, cy, cw, ch);
+            p.save();
+            p.setRenderHint(QPainter::Antialiasing);
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0x30, 0x30, 0x30, 230));
+            p.drawRoundedRect(chip, 3, 3);
+            p.setPen(Qt::white);
+            p.drawText(chip, Qt::AlignCenter, name);
+            p.restore();
         }
         p.setPen(m_sv->palette().color(QPalette::Mid));
         p.drawLine(kKeyboardW - 1, 0, kKeyboardW - 1, height());
@@ -2083,6 +2133,7 @@ private:
     int m_velAudEff = -1;      // last effective velocity auditioned mid-drag
     int m_kbdKey = -1;         // key sounding from a keyboard-column press
     int m_soundingKey = -1;    // auditioned key highlighted on the keyboard
+    int m_hoverKey = -1;       // key row under the cursor; -1 = no mark
     bool m_auditioned = false; // a drag/draw preview note is sounding
     uint8_t m_lastVelocity = 100; // new-note default; latches to the last
                                   // clicked/velocity-edited note

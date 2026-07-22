@@ -40,6 +40,8 @@
 // header row reorders the tracks, the mute flag following the moved
 // track through undo and redo; a right-button release cancels the drag,
 // and a drop with a rename editor open commits the typed name first.
+// An idle cursor over the roll marks its key row on the keyboard column
+// (with a note-name chip), cleared when the cursor leaves the widget.
 // Undoing every gesture must restore the original bytes.
 
 namespace {
@@ -144,6 +146,28 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         return 1;
     }
     const int keyH = view.keyHeight();
+
+    // Hover readout: an idle cursor anywhere over the roll marks its key row
+    // on the keyboard column (mirrored in the hoverKey property); leaving
+    // the widget clears the mark.
+    {
+        const int y = roll->height() / 2;
+        const int expected =
+            std::clamp(127 - (y + view.scrollY()) / keyH, 0, 127);
+        sendMouse(roll, QEvent::MouseMove,
+                  QPoint(songview::kKeyboardW + 40, y), Qt::NoButton,
+                  Qt::NoButton);
+        if (roll->property("hoverKey").toInt() != expected)
+            fail("hovering the notes area did not mark its key row");
+        sendMouse(roll, QEvent::MouseMove, QPoint(4, y + keyH), Qt::NoButton,
+                  Qt::NoButton);
+        if (roll->property("hoverKey").toInt() != expected - 1)
+            fail("hovering the keyboard column did not follow the key row");
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(roll, &leave);
+        if (roll->property("hoverKey").toInt() != -1)
+            fail("leaving the roll did not clear the hover mark");
+    }
 
     // A row/cell is taken if a note of the selected track sits within one
     // cell of it (the roll's hit test pads note rects by 2px; a full cell of
@@ -799,6 +823,10 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     const auto screenshotTick =
         uint64_t(std::ceil(std::max(0.0, view.tickAtContentX(view.width() / 2))));
     view.setPlayheadSample(timeline->sampleForTick(screenshotTick), false);
+    // Park the cursor mid-roll so the shot shows the hover mark + name chip.
+    sendMouse(roll, QEvent::MouseMove,
+              QPoint(songview::kKeyboardW + 60, roll->height() / 3), Qt::NoButton,
+              Qt::NoButton);
     const QImage image = view.grab().toImage();
     if (image.isNull())
         fail("offscreen render produced no image");
