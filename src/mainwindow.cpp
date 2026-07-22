@@ -191,6 +191,7 @@ MainWindow::~MainWindow()
     // Stop the audio thread before the sessions free the timeline and
     // voicegroup it borrows.
     m_audio.shutdown();
+    voicegroup_free_samples(m_sampleSet);
 }
 
 void MainWindow::buildUi()
@@ -352,6 +353,39 @@ void MainWindow::buildUi()
             &MainWindow::importSampleForSlot);
     connect(m_vgBrowser, &VoicegroupBrowser::editSampleRequested, this,
             &MainWindow::editSampleForSlot);
+    // The sample picker: loop badges and browse audition both read the
+    // committed sample data the engine would play, loaded lazily in one
+    // batch per catalog generation.
+    m_vgBrowser->setSampleInfoProvider([this](const QString &symbol) {
+        SamplePickInfo info;
+        const WaveData *wd = sampleWaveFor(symbol);
+        if (!wd || !wd->data || wd->size == 0)
+            return info;
+        info.known = true;
+        info.looped = (wd->status & 0x4000) != 0;
+        info.rateHz = int(wd->freq / 1024);
+        info.seconds = info.rateHz > 0 ? double(wd->size) / info.rateHz : 0.0;
+        return info;
+    });
+    connect(m_vgBrowser, &VoicegroupBrowser::sampleAuditionRequested, this,
+            [this](const QString &symbol, const AuditionSlots::Adsr &adsr) {
+                if (!m_audioOk)
+                    return;
+                const WaveData *wd = sampleWaveFor(symbol);
+                if (!wd || !wd->data || wd->size == 0)
+                    return;
+                m_audio.auditionSample(
+                    QByteArray::fromRawData(
+                        reinterpret_cast<const char *>(wd->data),
+                        int(wd->size)),
+                    wd->freq, wd->loopStart, (wd->status & 0x4000) != 0, 60,
+                    adsr);
+            });
+    connect(m_vgBrowser, &VoicegroupBrowser::sampleAuditionStopRequested, this,
+            [this] {
+                if (m_audioOk)
+                    m_audio.auditionSampleOff();
+            });
     // The dock's voicegroup selector: same undoable cfg edit as Song
     // Settings; onDocumentChanged does the actual swap (and, on a
     // not-found arg, keeps the old voicegroup with a status message).
@@ -1896,6 +1930,44 @@ const MainWindow::VgCatalog &MainWindow::vgCatalog()
         m_vgCatalog.valid = true;
     }
     return m_vgCatalog;
+}
+
+void MainWindow::invalidateVgCatalog()
+{
+    m_vgCatalog.valid = false;
+    // The loaded sample batch is derived from the catalog's symbol list;
+    // audition is safe across the free because AuditionSlots copies the
+    // bytes into its own slot at publish time.
+    m_sampleWaves.clear();
+    voicegroup_free_samples(m_sampleSet);
+    m_sampleSet = nullptr;
+}
+
+const WaveData *MainWindow::sampleWaveFor(const QString &symbol)
+{
+    if (!m_project.isOpen())
+        return nullptr;
+    if (!m_sampleSet) {
+        const QStringList symbols = vgCatalog().directSound;
+        QList<QByteArray> storage;
+        std::vector<const char *> ptrs;
+        storage.reserve(symbols.size());
+        ptrs.reserve(symbols.size());
+        for (const QString &s : symbols) {
+            storage.append(s.toUtf8());
+            ptrs.push_back(storage.last().constData());
+        }
+        m_sampleSet = voicegroup_load_samples(
+            m_project.root().toLocal8Bit().constData(), ptrs.data(),
+            int(ptrs.size()), nullptr);
+        if (!m_sampleSet)
+            return nullptr;
+        for (int i = 0; i < symbols.size() && i < m_sampleSet->count; i++) {
+            if (m_sampleSet->waves[i])
+                m_sampleWaves.insert(symbols.at(i), m_sampleSet->waves[i]);
+        }
+    }
+    return m_sampleWaves.value(symbol, nullptr);
 }
 
 void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)

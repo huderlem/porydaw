@@ -10,7 +10,9 @@ extern "C" {
 #include "voicegroup_loader.h"
 }
 
+#include "audio/auditionslots.h"
 #include "project/voicegroupsource.h"
+#include "ui/samplepicker.h"
 
 class QComboBox;
 class QLabel;
@@ -60,6 +62,10 @@ public:
                    const QHash<QString, VgSynthDesc> &pendingSynths = {},
                    std::function<QString(const VgSynthDesc &)> mintSynth = {});
 
+    // Loop badge / detail metadata for the sample picker's rows, resolved by
+    // the owner from the project's committed sample files.
+    void setSampleInfoProvider(std::function<SamplePickInfo(const QString &)> fn);
+
     int currentSlot() const;
     void selectSlot(int slot);
     // Jump-from-context navigation (track header / event list): select the
@@ -78,6 +84,11 @@ public:
 signals:
     // velocity 0 releases. Routed to AudioEngine::previewVoice.
     void auditionVoice(int voice, int key, int velocity);
+    // The sample picker's browse audition: play the symbol's committed sample
+    // through the selected voice's envelope (AudioEngine::auditionSample).
+    void sampleAuditionRequested(const QString &symbol,
+                                 const AuditionSlots::Adsr &adsr);
+    void sampleAuditionStopRequested();
     // The user edited the selected voice. The browser does not touch the
     // source itself: the owner applies the edit (as a song undo command) and
     // reflects it back via voiceChanged / a full setVoicegroup. structural
@@ -125,6 +136,8 @@ private:
     const LoadedVoiceGroup *m_vg = nullptr;
     VoicegroupSource *m_source = nullptr;
     QStringList m_sampleChoices; // keysplits, then samples, then phonemes
+    // The same choices partitioned for the picker's sections.
+    QStringList m_keysplitChoices, m_plainSamples, m_phonemes;
     QStringList m_waveSymbols;
     QStringList m_drumkitChoices; // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
@@ -144,7 +157,8 @@ private:
     QLabel *m_notice = nullptr;
     QComboBox *m_typeCombo = nullptr;
     QWidget *m_symbolRow = nullptr;
-    QComboBox *m_symbolCombo = nullptr;
+    QComboBox *m_symbolCombo = nullptr; // wave/drumkit/synth symbol lists
+    SamplePickerButton *m_samplePicker = nullptr; // sample-list voices
     QPushButton *m_newSampleButton = nullptr;
     QPushButton *m_editSampleButton = nullptr;
     QWidget *m_sweepRow = nullptr;

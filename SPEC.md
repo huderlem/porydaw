@@ -217,7 +217,12 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 
 - **Left dock — Project panel:** song browser (grouped BGM / SE / fanfares, searchable),
   voicegroup browser for the current song's voicegroup (each entry with type icon,
-  name, ADSR summary; click to audition).
+  name, ADSR summary; click to audition). A sample voice's Sample field is a
+  picker button (not a combo — the project sample list is huge and
+  prefix-heavy): its popup has a search filter, keysplit/sample/phoneme
+  sections, loop badges with a rate/length detail line, and
+  audition-on-highlight through the voice's own envelope; typed symbols the
+  project scan didn't list still commit via an explicit fallback row.
 - **Center — Arrangement + Piano roll:** track headers (≤ 16 tracks; name, instrument,
   mute/solo, volume/pan mini-controls) beside a shared-timeline piano roll. Selected
   track is editable; other tracks ghosted. Loop region rendered from `[`/`]` markers.
@@ -258,7 +263,7 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   saved into the project as a new song file.
 
 **Sample Studio (custom DirectSound samples; design: `docs/sample-studio/`):**
-Tools → Import Sample (or "New…" / "Edit…" beside the sample combo in the
+Tools → Import Sample (or "New…" / "Edit…" beside the sample picker in the
 voicegroup dock) opens a modal editor over any .wav/.aif/.mp3/.flac/.ogg
 source or .sf2 zone: non-destructive crop / loop / retune / resample /
 normalize on an immutable hi-res decode, with loop auto-suggestion, live

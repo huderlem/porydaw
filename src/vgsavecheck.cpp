@@ -4,9 +4,11 @@
 #include <QDirIterator>
 #include <QDockWidget>
 #include <QFile>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QTreeWidgetItemIterator>
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
@@ -44,7 +46,8 @@ QByteArray readFileBytes(const QString &path)
 
 } // namespace
 
-bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songLabel)
+bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songLabel,
+                                const QString &screenshotPath)
 {
     m_persistSession = false;
     if (!m_audioOk) {
@@ -507,38 +510,38 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
     }
 
     // 9. A structural commit fired from inside a track header's own mouse
-    // press must not free that header row mid-event: clicking a header
-    // focuses the roll (selectTrack), which fires the symbol box's
-    // editingFinished, and a changed symbol reloads the voicegroup — which
-    // rebuilds the header panel while the clicked row's mousePressEvent is
-    // still on the stack. The row has to survive its own press (deferred
-    // deletion), or this is a use-after-free crash.
-    {
+    // press must not free that header row mid-event: with a changed arg
+    // typed into the voicegroup selector's line edit, clicking a header
+    // focuses the roll (selectTrack), which fires editingFinished — an
+    // undoable -G switch whose voicegroup swap rebuilds the header panel
+    // while the clicked row's mousePressEvent is still on the stack. The
+    // row has to survive its own press (deferred deletion), or this is a
+    // use-after-free crash. (The sample symbol box that originally hit this
+    // is now the picker, which commits from its popup instead of on focus
+    // loss — the selector keeps the scenario alive.)
+    if (otherArg.isEmpty()) {
+        std::printf("vgsavecheck: note: no second voicegroup found, "
+                    "mid-press structural rebuild skipped\n");
+    } else {
         show();
         activateWindow();
         QCoreApplication::processEvents();
-        m_vgBrowser->revealSlot(dsSlot);
-        const VgVoice preTypo = *tab->vgSource->voiceAt(dsSlot);
-        QComboBox *symbolCombo = nullptr;
-        for (QComboBox *combo : m_vgBrowser->findChildren<QComboBox *>()) {
-            if (combo->isEditable()
-                && combo->objectName() != QLatin1String("vgArgCombo"))
-                symbolCombo = combo;
-        }
+        const QString argBefore = tab->doc.cfg().voicegroupArg;
+        QComboBox *vgCombo =
+            m_vgBrowser->findChild<QComboBox *>(QStringLiteral("vgArgCombo"));
         int otherTrack = -1;
         const MidiTimeline *tl = tab->view->timeline();
         for (int t = 0; t < 16 && otherTrack < 0 && tl; t++) {
             if (t != tab->view->selectedTrack() && tl->tracks[t].used)
                 otherTrack = t;
         }
-        if (check(symbolCombo && otherTrack >= 0,
-                  "no symbol box or second track for the mid-press commit")) {
-            QLineEdit *edit = symbolCombo->lineEdit();
+        if (check(vgCombo && otherTrack >= 0,
+                  "no vg selector or second track for the mid-press commit")) {
+            QLineEdit *edit = vgCombo->lineEdit();
             edit->setFocus();
             QCoreApplication::processEvents();
-            if (check(edit->hasFocus(), "symbol box did not take focus")) {
-                const QString typo = preTypo.symbol + QStringLiteral("x");
-                edit->setText(typo);
+            if (check(edit->hasFocus(), "vg selector did not take focus")) {
+                edit->setText(otherArg);
                 QPointer<QWidget> row = tab->view->findChild<QWidget *>(
                     QStringLiteral("trackHeaderRow%1").arg(otherTrack));
                 if (check(row != nullptr, "no header row for the other track")) {
@@ -552,9 +555,8 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                           "header rebuild freed the row inside its own press");
                     check(tab->view->selectedTrack() == otherTrack,
                           "the header click did not select its track");
-                    check(tab->vgSource->voiceAt(dsSlot)
-                              && tab->vgSource->voiceAt(dsSlot)->symbol == typo,
-                          "the mid-press symbol edit did not commit");
+                    check(tab->doc.cfg().voicegroupArg == otherArg,
+                          "the mid-press -G edit did not commit");
                     if (!row.isNull()) {
                         QMouseEvent release(QEvent::MouseButtonRelease,
                                             QPointF(pos),
@@ -585,12 +587,128 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                     check(tab->view->selectedTrack() == track,
                           "a rebuilt header row did not select its track");
                 }
-                tab->doc.undoStack()->undo(); // the typo'd symbol
+                tab->doc.undoStack()->undo(); // the mid-press -G switch
+                check(tab->doc.cfg().voicegroupArg == argBefore
+                          && tab->vgSource
+                          && tab->vgSource->loadName() == vgLoadName,
+                      "undo did not restore the mid-press -G switch");
+            }
+        }
+    }
+
+    // 10. The sample picker (the Sample field for DirectSound voices):
+    // replaces the giant combo, filters by typed text, auditions the
+    // highlighted sample, marks looped samples, commits an undoable symbol
+    // change, and still accepts an unlisted typed symbol.
+    {
+        m_vgBrowser->revealSlot(dsSlot);
+        QCoreApplication::processEvents();
+        auto *picker = m_vgBrowser->findChild<SamplePickerButton *>(
+            QStringLiteral("vgSamplePickerButton"));
+        QComboBox *symbolCombo = nullptr;
+        for (QComboBox *combo : m_vgBrowser->findChildren<QComboBox *>()) {
+            if (combo->isEditable()
+                && combo->objectName() != QLatin1String("vgArgCombo"))
+                symbolCombo = combo;
+        }
+        if (check(picker && symbolCombo, "no sample picker in the editor")) {
+            check(picker->isVisible() && !symbolCombo->isVisible(),
+                  "sample voice does not show the picker instead of the combo");
+            const VgVoice before = *tab->vgSource->voiceAt(dsSlot);
+            check(picker->currentSymbol() == before.symbol,
+                  "picker does not show the voice's symbol");
+
+            QStringList auditioned;
+            int stops = 0;
+            QMetaObject::Connection c1 = connect(
+                m_vgBrowser, &VoicegroupBrowser::sampleAuditionRequested, this,
+                [&auditioned](const QString &s, const AuditionSlots::Adsr &) {
+                    auditioned.append(s);
+                });
+            QMetaObject::Connection c2 = connect(
+                m_vgBrowser, &VoicegroupBrowser::sampleAuditionStopRequested,
+                this, [&stops] { stops++; });
+
+            picker->openPopup();
+            auto *search = picker->findChild<QLineEdit *>(
+                QStringLiteral("vgSamplePickerSearch"));
+            auto *list = picker->findChild<QTreeWidget *>(
+                QStringLiteral("vgSamplePickerList"));
+            if (check(search && list && picker->popupVisible(),
+                      "picker popup did not open")) {
+                // Every catalog sample is listed, and the committed sample
+                // data drives at least one loop badge (vanilla projects have
+                // plenty of looped instruments).
+                int rows = 0, badges = 0;
+                for (QTreeWidgetItemIterator it(list); *it; ++it) {
+                    if ((*it)->data(0, Qt::UserRole).toString().isEmpty())
+                        continue; // section label
+                    rows++;
+                    badges += (*it)->text(1).isEmpty() ? 0 : 1;
+                }
+                check(rows >= 2, "picker lists fewer than two symbols");
+                check(badges > 0, "no loop badges on any sample row");
+
+                if (!screenshotPath.isEmpty()) {
+                    QWidget *popup = picker->findChild<QWidget *>(
+                        QStringLiteral("vgSamplePickerPopup"));
+                    check(popup && popup->grab().save(screenshotPath),
+                          "could not save the picker screenshot");
+                }
+
+                // Pick a different plain sample by typing its full symbol:
+                // the filter narrows onto it, highlighting auditions it, and
+                // Return commits it as an undoable voice edit.
+                QString target;
+                for (QTreeWidgetItemIterator it(list); *it && target.isEmpty();
+                     ++it) {
+                    const QString s = (*it)->data(0, Qt::UserRole).toString();
+                    if (!s.isEmpty() && s != before.symbol
+                        && !(*it)->data(0, Qt::UserRole + 1).toBool())
+                        target = s;
+                }
+                if (check(!target.isEmpty(), "no alternate sample to pick")) {
+                    search->setText(target);
+                    check(auditioned.contains(target),
+                          "filtering onto a sample did not audition it");
+                    QKeyEvent ret(QEvent::KeyPress, Qt::Key_Return,
+                                  Qt::NoModifier);
+                    QCoreApplication::sendEvent(search, &ret);
+                    check(!picker->popupVisible(),
+                          "committing a pick did not close the popup");
+                    check(stops > 0, "closing the popup did not stop audition");
+                    check(tab->vgSource->voiceAt(dsSlot)
+                              && tab->vgSource->voiceAt(dsSlot)->symbol == target,
+                          "the picked symbol did not commit");
+                    check(tab->doc.isDirty(),
+                          "the picked symbol did not push an undo command");
+                    tab->doc.undoStack()->undo();
+                    check(tab->vgSource->voiceAt(dsSlot)
+                              && tab->vgSource->voiceAt(dsSlot)->symbol
+                                  == before.symbol,
+                          "undo did not restore the picked symbol");
+                    check(picker->currentSymbol() == before.symbol,
+                          "undo did not refresh the picker's label");
+                }
+
+                // An unlisted symbol still commits via the typed-text row
+                // (the editable combo's old superpower).
+                picker->openPopup();
+                const QString unlisted = QStringLiteral("VgSaveCheckUnlisted");
+                search->setText(unlisted);
+                QKeyEvent ret(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(search, &ret);
+                check(tab->vgSource->voiceAt(dsSlot)
+                          && tab->vgSource->voiceAt(dsSlot)->symbol == unlisted,
+                      "an unlisted typed symbol did not commit");
+                tab->doc.undoStack()->undo();
                 check(tab->vgSource->voiceAt(dsSlot)
                           && tab->vgSource->voiceAt(dsSlot)->symbol
-                              == preTypo.symbol,
-                      "undo did not restore the typo'd symbol");
+                              == before.symbol,
+                      "undo did not restore the unlisted symbol");
             }
+            disconnect(c1);
+            disconnect(c2);
         }
     }
 
@@ -599,7 +717,8 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
     return failures == 0;
 }
 
-int runVgSaveCheck(const QString &projectRoot, const QString &songLabel)
+int runVgSaveCheck(const QString &projectRoot, const QString &songLabel,
+                   const QString &screenshotPath)
 {
     // Redirected settings: the user's real session is never touched.
     QTemporaryDir settingsDir;
@@ -613,5 +732,5 @@ int runVgSaveCheck(const QString &projectRoot, const QString &songLabel)
                        settingsDir.path());
 
     MainWindow window;
-    return window.runVgSaveCheck(projectRoot, songLabel) ? 0 : 1;
+    return window.runVgSaveCheck(projectRoot, songLabel, screenshotPath) ? 0 : 1;
 }

@@ -115,6 +115,8 @@ qt_add_executable(porydaw
     src/ui/sf2zonepicker.h
     src/ui/waveformview.cpp
     src/ui/waveformview.h
+    src/ui/samplepicker.cpp
+    src/ui/samplepicker.h
     src/ui/voicegroupbrowser.cpp
     src/ui/voicegroupbrowser.h
     src/ui/enginesettingsdialog.cpp

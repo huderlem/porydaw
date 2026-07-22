@@ -40,8 +40,10 @@ public:
 
     // Unified song+voicegroup undo/save check (--vgsavecheck; vgsavecheck.cpp).
     // Writes into the project: run against a scratch copy, with QSettings
-    // already redirected by the caller.
-    bool runVgSaveCheck(const QString &projectRoot, const QString &songLabel);
+    // already redirected by the caller. A non-empty screenshotPath saves the
+    // sample picker's open popup for visual review.
+    bool runVgSaveCheck(const QString &projectRoot, const QString &songLabel,
+                        const QString &screenshotPath = QString());
 
     // Multi-tab check (--tabcheck; tabcheck.cpp): per-tab documents and undo
     // stacks, playback stopping on tab switches, tab close/replace, and
@@ -217,7 +219,13 @@ private:
         VgAdsrDefaults typicalAdsr;
     };
     const VgCatalog &vgCatalog();
-    void invalidateVgCatalog() { m_vgCatalog.valid = false; }
+    void invalidateVgCatalog();
+    // The committed sample data behind a DirectSound symbol (the picker's
+    // loop badges and browse audition): one voicegroup_load_samples batch
+    // over the whole catalog, loaded on first use and freed with it.
+    const WaveData *sampleWaveFor(const QString &symbol);
+    LoadedSampleSet *m_sampleSet = nullptr;
+    QHash<QString, const WaveData *> m_sampleWaves;
     // Minted-but-unsaved Golden Sun synth definitions (symbol -> descriptor),
     // project-wide. Param edits point voice lines at these; they reach disk
     // (and the browser's dropdown) only when a voicegroup referencing them

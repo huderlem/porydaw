@@ -195,6 +195,29 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_symbolCombo->setEditable(true);
     m_symbolCombo->setInsertPolicy(QComboBox::NoInsert);
     symbolLayout->addWidget(m_symbolCombo, 1);
+    // Sample-list voices swap the combo for the searchable picker: the
+    // project's sample list is huge and prefix-heavy, so it gets search,
+    // loop badges, and audition-on-highlight instead of a mile-long menu.
+    m_samplePicker = new SamplePickerButton(m_symbolRow);
+    symbolLayout->addWidget(m_samplePicker, 1);
+    connect(m_samplePicker, &SamplePickerButton::symbolPicked, this,
+            [this] { commitEdit(); });
+    connect(m_samplePicker, &SamplePickerButton::auditionRequested, this,
+            [this](const QString &symbol) {
+                const VgVoice *voice =
+                    m_source ? m_source->voiceAt(currentSlot()) : nullptr;
+                // The destination voice's envelope, so the browse audition
+                // sounds like the commit would. A keysplit destination has
+                // no envelope of its own (all-zero: silence) — keep the
+                // default full-sustain audition envelope there.
+                AuditionSlots::Adsr adsr;
+                if (voice && macroIsDsFamily(voice->macro))
+                    adsr = {uint8_t(voice->attack), uint8_t(voice->decay),
+                            uint8_t(voice->sustain), uint8_t(voice->release)};
+                emit sampleAuditionRequested(symbol, adsr);
+            });
+    connect(m_samplePicker, &SamplePickerButton::auditionStopRequested, this,
+            &VoicegroupBrowser::sampleAuditionStopRequested);
     // Sample Studio entry (SPEC §6.2): visible on DirectSound sample voices.
     m_newSampleButton = new QPushButton(tr("New…"), m_symbolRow);
     m_newSampleButton->setObjectName(QStringLiteral("vgNewSampleButton"));
@@ -316,6 +339,10 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_newButton->setFocusPolicy(Qt::NoFocus);
     m_newSampleButton->setFocusPolicy(Qt::NoFocus);
     m_editSampleButton->setFocusPolicy(Qt::NoFocus);
+    // The picker button too — its popup's search box takes focus in its own
+    // popup window instead, where plain Space types rather than toggling
+    // playback.
+    m_samplePicker->setFocusPolicy(Qt::NoFocus);
     for (QWidget *w : std::initializer_list<QWidget *>{
              m_tree, m_vgCombo, m_typeCombo, m_symbolCombo, m_dutyCombo, m_periodCombo,
              m_synthWaveCombo, m_synthDutySpin, m_synthStepSpin, m_synthDepthSpin,
@@ -451,12 +478,28 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source,
         m_synthBySymbol.insert(it.key(), it.value());
     m_keysplitTables.clear();
     m_sampleChoices.clear();
+    m_keysplitChoices.clear();
+    m_plainSamples.clear();
+    m_phonemes.clear();
     for (const auto &pair : keysplits) {
         m_keysplitTables.insert(pair.first, pair.second);
         m_sampleChoices.append(pair.first);
+        m_keysplitChoices.append(pair.first);
     }
     m_sampleChoices += sampleSymbols; // already sorted, phonemes last
+    for (const QString &symbol : sampleSymbols) {
+        (symbol.contains(QStringLiteral("Phoneme")) ? m_phonemes
+                                                    : m_plainSamples)
+            .append(symbol);
+    }
+    m_samplePicker->setChoices(m_keysplitChoices, m_plainSamples, m_phonemes);
     populateEditor();
+}
+
+void VoicegroupBrowser::setSampleInfoProvider(
+    std::function<SamplePickInfo(const QString &)> fn)
+{
+    m_samplePicker->setInfoProvider(std::move(fn));
 }
 
 int VoicegroupBrowser::currentSlot() const
@@ -632,18 +675,27 @@ void VoicegroupBrowser::populateEditor()
         m_symbolLabel->setText(synth ? tr("Synth")
                                      : wave ? tr("Wave")
                                             : drumkit ? tr("Drumkit") : tr("Sample"));
-        m_symbolCombo->clear();
-        if (synth) {
-            // The current symbol may be a zero-size .bin descriptor with no
-            // set_synth entry; setCurrentText still shows it (editable combo).
-            for (const auto &def : m_synths.defs)
-                m_symbolCombo->addItem(def.first);
+        // Sample-list voices (plain samples and keysplits) use the picker;
+        // the short wave/drumkit/synth lists keep the combo.
+        const bool sampleList = !synth && !wave && !drumkit;
+        m_symbolCombo->setVisible(!sampleList);
+        m_samplePicker->setVisible(sampleList);
+        if (sampleList) {
+            m_samplePicker->setCurrentSymbol(voice->symbol);
         } else {
-            m_symbolCombo->addItems(wave ? m_waveSymbols
-                                         : drumkit ? m_drumkitChoices
-                                                   : m_sampleChoices);
+            m_symbolCombo->clear();
+            if (synth) {
+                // The current symbol may be a zero-size .bin descriptor with
+                // no set_synth entry; setCurrentText still shows it (editable
+                // combo).
+                for (const auto &def : m_synths.defs)
+                    m_symbolCombo->addItem(def.first);
+            } else {
+                m_symbolCombo->addItems(wave ? m_waveSymbols
+                                             : m_drumkitChoices);
+            }
+            m_symbolCombo->setCurrentText(voice->symbol);
         }
-        m_symbolCombo->setCurrentText(voice->symbol);
         const bool sampleVoice = !synth && !wave && !drumkit
             && macroIsDsFamily(voice->macro);
         m_newSampleButton->setVisible(sampleVoice);
@@ -756,15 +808,19 @@ void VoicegroupBrowser::commitEdit()
         v.macro = VgMacro(selData);
         const bool wave = macroIsWave(v.macro);
         const bool drumkit = macroIsDrumkit(v.macro);
-        // The combo only holds this family's list when the current voice
-        // shares it (samples and keysplits share one list; waves, drumkits,
-        // and synths each have their own).
+        // The symbol widget only holds this family's list when the current
+        // voice shares it (samples and keysplits share the picker; waves,
+        // drumkits, and synths each have their own combo list).
         const bool comboShowsThisList = wave
             ? macroIsWave(cur->macro)
             : drumkit ? macroIsDrumkit(cur->macro)
                       : macroUsesSampleList(cur->macro) && !curSynth;
-        QString symbol =
-            comboShowsThisList ? m_symbolCombo->currentText().trimmed() : QString();
+        QString symbol;
+        if (comboShowsThisList) {
+            symbol = (wave || drumkit)
+                ? m_symbolCombo->currentText().trimmed()
+                : m_samplePicker->currentSymbol().trimmed();
+        }
         // A deliberate Type change away from a keysplit or synth voice
         // overrides the stale symbol shown in the combo.
         if (!wave && !drumkit && typeChanged

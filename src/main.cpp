@@ -19,7 +19,8 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath = QSt
 int runVgCheck(const QString &projectRoot, const QString &songLabel);
 // vgsavecheck.cpp; unified song+voicegroup undo/save check through MainWindow,
 // against redirected QSettings (writes into the project: use a copy).
-int runVgSaveCheck(const QString &projectRoot, const QString &songLabel);
+int runVgSaveCheck(const QString &projectRoot, const QString &songLabel,
+                   const QString &screenshotPath = QString());
 // exportcheck.cpp; WAV export check (writes a .wav into the project: use a copy).
 int runExportCheck(const QString &projectRoot, const QString &songLabel);
 // mkcheck.cpp; songs.mk-fallback parse/write check for projects with no
@@ -109,8 +110,12 @@ int main(int argc, char *argv[])
     if (vgCheck >= 0 && vgCheck + 2 < args.size())
         return runVgCheck(args[vgCheck + 1], args[vgCheck + 2]);
     const int vgSaveCheck = args.indexOf(QStringLiteral("--vgsavecheck"));
-    if (vgSaveCheck >= 0 && vgSaveCheck + 2 < args.size())
-        return runVgSaveCheck(args[vgSaveCheck + 1], args[vgSaveCheck + 2]);
+    if (vgSaveCheck >= 0 && vgSaveCheck + 2 < args.size()) {
+        const QString shot =
+            vgSaveCheck + 3 < args.size() ? args[vgSaveCheck + 3] : QString();
+        return runVgSaveCheck(args[vgSaveCheck + 1], args[vgSaveCheck + 2],
+                              shot);
+    }
     const int exportCheck = args.indexOf(QStringLiteral("--exportcheck"));
     if (exportCheck >= 0 && exportCheck + 2 < args.size())
         return runExportCheck(args[exportCheck + 1], args[exportCheck + 2]);
