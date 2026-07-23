@@ -312,6 +312,18 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application) {
   reporter.check(cellColor(0) == flash,
                  "a model background brush is painted over by the item "
                  "stylesheet (playhead tint, polyphony flash)");
+  const auto ink = QColor(255, 0, 255);
+  table.item(1, 0)->setText(QStringLiteral("XXXX"));
+  table.item(1, 0)->setForeground(ink);
+  const auto inkImage = table.viewport()->grab().toImage();
+  auto foundInk = false;
+  for (auto y = 0; y < inkImage.height() && !foundInk; ++y) {
+    for (auto x = 0; x < inkImage.width() && !foundInk; ++x)
+      foundInk = inkImage.pixelColor(x, y) == ink;
+  }
+  reporter.check(foundInk,
+                 "a model foreground brush is overridden by the item "
+                 "stylesheet (polyphony event log severity colors)");
   themes::ThemeDialog dialog(controller);
   auto *custom =
       dialog.findChild<QRadioButton *>(QStringLiteral("customModeButton"));

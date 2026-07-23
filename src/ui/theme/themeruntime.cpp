@@ -462,15 +462,14 @@ QString itemViewStyleSheet(const Theme &theme) {
              "QAbstractItemView{background-color:%1;color:%2;"
              "border-color:%3;alternate-background-color:%4;"
              "selection-background-color:%5;selection-color:%6;}"
-             // The plain ::item rules carry palette properties only (no
-             // background, border, or box): anything drawable here makes
+             // No plain ::item or ::item:alternate rules: any drawable
+             // property there (background, even a bare border-color) makes
              // QStyleSheetStyle paint the rule instead of the model's
-             // BackgroundRole brush (event-list playhead tint, polyphony
-             // flash). Base and alternate fills come from the view-level
-             // rule above.
-             "QAbstractItemView::item{color:%2;}"
-             "QAbstractItemView::item:alternate{color:%7;}"
-             "QAbstractItemView::item:hover{background-color:%8;color:%9;}"
+             // BackgroundRole brush, and a color property overrides the
+             // model's ForegroundRole (event-list playhead tint, polyphony
+             // flash and log severity colors). Themed item defaults come
+             // from the view-level rule above.
+             "QAbstractItemView::item:hover{background-color:%7;color:%8;}"
              "QAbstractItemView::item:selected{background-color:%5;"
              "color:%6;}")
       .arg(colorName(theme, Role::item_background))
@@ -479,7 +478,6 @@ QString itemViewStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::item_alternate_background))
       .arg(colorName(theme, Role::item_selected_background))
       .arg(colorName(theme, Role::item_selected_text))
-      .arg(colorName(theme, Role::item_text))
       .arg(colorName(theme, Role::item_hover_background))
       .arg(colorName(theme, Role::item_hover_text));
 }
