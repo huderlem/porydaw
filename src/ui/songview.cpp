@@ -1170,19 +1170,24 @@ protected:
         const QRect grid(kKeyboardW, 0, width() - kKeyboardW, height());
         p.setClipRect(grid);
 
-        // Pitch row shading + octave boundaries.
+        // Pitch row shading + separators where two natural rows touch
+        // (B/C and E/F) — everywhere else an accidental row already
+        // breaks up the naturals.
     const
         QColor accidentalRow = pianoRollAccidentalLaneColor();
         const QColor octaveLine =
         themes::color(themes::Role::song_view_piano_keyboard_separator);
+        // E/F stays lighter than the C octave delineator.
+        QColor naturalLine = octaveLine;
+        naturalLine.setAlpha(90);
         for (int key = 0; key < 128; key++) {
             const int y = keyToY(key);
             if (y + keyH < 0 || y > height())
                 continue;
             if (isBlackKey(key))
                 p.fillRect(QRect(grid.left(), y, grid.width(), keyH), accidentalRow);
-            if (key % 12 == 0) { // octave line under every C
-                p.setPen(octaveLine);
+            if (key % 12 == 0 || key % 12 == 5) { // under every C and F
+                p.setPen(key % 12 == 0 ? octaveLine : naturalLine);
                 p.drawLine(grid.left(), y + keyH, grid.right(), y + keyH);
             }
         }
@@ -2198,10 +2203,14 @@ private:
                         themes::color(
                             themes::Role::song_view_piano_keyboard_active_key));
                 }
-                if (key % 12 == 0) {
+                // B/C and E/F are the only spots where two natural
+                // keys touch, so those bottom edges get a separator.
+                if (key % 12 == 0 || key % 12 == 5) {
                     p.setPen(themes::color(
                         themes::Role::song_view_piano_keyboard_separator));
                     p.drawLine(0, y + keyH, kKeyboardW, y + keyH);
+                }
+                if (key % 12 == 0) {
                     p.setPen(themes::color(
                         themes::Role::song_view_piano_keyboard_label));
                     if (labelFont) {
