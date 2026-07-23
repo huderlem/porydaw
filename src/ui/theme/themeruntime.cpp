@@ -2,8 +2,13 @@
 #include "ui/layout.h"
 
 #include <QApplication>
+#include <QDir>
+#include <QFile>
 #include <QFont>
+#include <QImage>
+#include <QPainter>
 #include <QPalette>
+#include <QPolygonF>
 
 #include <QSet>
 #include <QWidget>
@@ -176,8 +181,62 @@ QString inputStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::disabled_text));
 }
 
+// The stylesheet renderer draws no fallback arrow once the spin buttons are
+// styled, and its border-triangle emulation fills the whole border box, so
+// real arrow glyphs are rendered to per-color image files the stylesheet can
+// reference. The color-keyed name makes regeneration a cheap existence check
+// and keeps a live preview from ever reading a half-written previous file.
+QString spinArrowImagePath(const QColor &color, bool pointsUp,
+                           int devicePixelRatio) {
+  const auto directory = QDir::temp().filePath(QStringLiteral("porydaw-theme"));
+  if (!QDir().mkpath(directory))
+    return {};
+  const auto path =
+      QStringLiteral("%1/spin-%2-%3%4.png")
+          .arg(directory, pointsUp ? QStringLiteral("up") : QStringLiteral("down"),
+               color.name(QColor::HexRgb).mid(1),
+               devicePixelRatio > 1
+                   ? QStringLiteral("@%1x").arg(devicePixelRatio)
+                   : QString());
+  if (QFile::exists(path))
+    return path;
+  // An odd width keeps the triangle's peak on a whole pixel column.
+  const auto width = (layout::fontPx(0.45) | 1) * devicePixelRatio;
+  const auto height = qMax(2, layout::fontPx(0.28)) * devicePixelRatio;
+  QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+  image.fill(Qt::transparent);
+  QPainter painter(&image);
+  painter.setRenderHint(QPainter::Antialiasing);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(color);
+  const auto peakX = width / 2.0;
+  painter.drawPolygon(pointsUp
+                          ? QPolygonF{{0.0, qreal(height)},
+                                      {qreal(width), qreal(height)},
+                                      {peakX, 0.0}}
+                          : QPolygonF{{0.0, 0.0},
+                                      {qreal(width), 0.0},
+                                      {peakX, qreal(height)}});
+  painter.end();
+  return image.save(path) ? path : QString();
+}
+
+QString spinArrowStyleSheet(const Theme &theme) {
+  const auto color = theme.color(Role::spin_button_text);
+  const auto up = spinArrowImagePath(color, true, 1);
+  const auto down = spinArrowImagePath(color, false, 1);
+  spinArrowImagePath(color, true, 2); // @2x variants for high-DPI lookups
+  spinArrowImagePath(color, false, 2);
+  if (up.isEmpty() || down.isEmpty())
+    return {};
+  return QStringLiteral("QAbstractSpinBox::up-arrow{image:url(%1);}"
+                        "QAbstractSpinBox::down-arrow{image:url(%2);}")
+      .arg(up, down);
+}
+
 QString spinBoxStyleSheet(const Theme &theme) {
-  return QStringLiteral(
+  return spinArrowStyleSheet(theme) +
+         QStringLiteral(
              "QAbstractSpinBox{background-color:%1;color:%2;"
              "border-top-color:%3;border-left-color:%3;"
              "border-right-color:%4;border-bottom-color:%4;}"

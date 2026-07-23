@@ -35,6 +35,8 @@ struct FontScaledGeometry {
   int comboDropDownLane;
   int comboDropDownWidth;
   int listPositionIndicatorMinimumLength;
+  int indicatorExtent;
+  int groupBoxTitleBand;
 };
 
 // Space tokens use their enum ordinal as the lookup key:
@@ -113,6 +115,8 @@ FontScaledGeometry resolveGeometry(int baseFontPx,
       comboDropDownLane,
       qMax(singlePixel(), comboDropDownLane - 2 * singlePixel()),
       resolvedSpace(spaces, Space::Eight),
+      resolve(baseFontPx, 0.9),
+      resolve(baseFontPx, 1.2),
   };
 }
 
@@ -155,8 +159,52 @@ QString comboBoxGeometryStyleSheet(const FontScaledGeometry &geometry) {
 }
 
 QString tabGeometryStyleSheet(const FontScaledGeometry &geometry) {
+  // Vertical tab metrics must stay in step with chromeRowHeight(); only the
+  // horizontal padding is free to breathe.
   return QStringLiteral("QTabBar::tab{margin-top:%1;padding:%1 %2;}")
-      .arg(pixels(geometry.half), pixels(geometry.one));
+      .arg(pixels(geometry.half), pixels(geometry.two));
+}
+
+// The stylesheet renderer drops the native style's built-in breathing room
+// and subcontrol art the moment a widget family is themed. These rules give
+// every styled family back font-derived padding, correctly shaped check and
+// radio indicators, a reserved group-box title band, and a full spin-button
+// lane (whose arrow glyphs the theme sheet supplies as generated images).
+QString comfortGeometryStyleSheet(const FontScaledGeometry &geometry) {
+  auto sheet =
+      QStringLiteral(
+          "QMenuBar::item{padding:%1 %2;}"
+          "QMenu{padding:%3 0px;}"
+          "QMenu::separator{height:%4;margin:%3 %2;}"
+          "QToolTip{padding:%3 %1;}"
+          "QLineEdit,QTextEdit,QPlainTextEdit,QAbstractSpinBox{padding:%3 %1;}"
+          "QHeaderView::section{padding:%3 %1;}")
+          .arg(pixels(geometry.one), pixels(geometry.two),
+               pixels(geometry.half), pixels(geometry.border));
+  sheet +=
+      QStringLiteral(
+          "QCheckBox,QRadioButton{spacing:%1;}"
+          "QCheckBox::indicator,QRadioButton::indicator{width:%2;height:%2;}"
+          "QRadioButton::indicator{border-radius:%3;}")
+          .arg(pixels(geometry.one), pixels(geometry.indicatorExtent),
+               pixels((geometry.indicatorExtent + 2 * geometry.border) / 2));
+  sheet += QStringLiteral(
+               "QGroupBox{margin-top:%1;padding-top:%2;}"
+               "QGroupBox::title{subcontrol-origin:margin;"
+               "subcontrol-position:top left;left:%3;padding:0 %2;}")
+               .arg(pixels(geometry.groupBoxTitleBand), pixels(geometry.half),
+                    pixels(geometry.one));
+  // No ::up-arrow/::down-arrow rules on purpose: with none present the
+  // stylesheet renderer draws the base style's arrow primitive in the
+  // theme's foreground, exactly like the combo drop-down arrow.
+  sheet += QStringLiteral(
+               "QAbstractSpinBox{padding-right:%1;}"
+               "QAbstractSpinBox::up-button{subcontrol-origin:border;"
+               "subcontrol-position:top right;width:%1;}"
+               "QAbstractSpinBox::down-button{subcontrol-origin:border;"
+               "subcontrol-position:bottom right;width:%1;}")
+               .arg(pixels(geometry.comboDropDownLane));
+  return sheet;
 }
 
 QString
@@ -188,6 +236,7 @@ QString buildGeometryStyleSheet(int baseFontPx,
   return commonGeometryStyleSheet(geometry) +
          comboBoxGeometryStyleSheet(geometry) +
          tabGeometryStyleSheet(geometry) +
+         comfortGeometryStyleSheet(geometry) +
          listPositionIndicatorGeometryStyleSheet(geometry) +
          toolbarGeometryStyleSheet(geometry);
 }
