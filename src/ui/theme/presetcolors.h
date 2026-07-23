@@ -56,11 +56,12 @@ enum class PresetColor {
   /// Scrollbar thumbs and SongView grid lines.
   scrollbar_handle,
   /// SongView piano-roll note area background; its lightness selects the
-  /// authored playhead and accidental-lane colors.
+  /// authored accidental-lane color.
   piano_roll_background,
   /// SongView piano-roll accidental-note lane background.
   piano_roll_accidental_lane,
-  /// SongView piano-roll playhead.
+  /// SongView playhead: a fixed identity red shared by every theme, like
+  /// the Mute and Solo domain colors (rollcheck pixel-scans for it).
   playhead,
   /// Natural (white) keys on the SongView piano keyboard.
   piano_natural_key,
@@ -275,7 +276,7 @@ constexpr PresetColors makeVanilla() {
   colors.color(PresetColor::scrollbar_handle) = "#A49D97";
   colors.color(PresetColor::piano_roll_background) = "#D9D3CF";
   colors.color(PresetColor::piano_roll_accidental_lane) = "#C9C3BF";
-  colors.color(PresetColor::playhead) = "#202224";
+  colors.color(PresetColor::playhead) = "#E24242";
   colors.color(PresetColor::piano_natural_key) = "#F4F4F4";
   colors.color(PresetColor::piano_black_key) = "#434040";
   colors.color(PresetColor::piano_keyboard_separator) = "#9A9A9A";
@@ -305,7 +306,7 @@ constexpr PresetColors makeDarkNeutralHigh() {
   colors.color(PresetColor::scrollbar_handle) = "#262626";
   colors.color(PresetColor::piano_roll_background) = "#454545";
   colors.color(PresetColor::piano_roll_accidental_lane) = "#383838";
-  colors.color(PresetColor::playhead) = "#FFFFFF";
+  colors.color(PresetColor::playhead) = "#E24242";
   colors.color(PresetColor::piano_natural_key) = "#AAAAAA";
   colors.color(PresetColor::piano_black_key) = "#4C4C4C";
   colors.color(PresetColor::piano_keyboard_separator) = "#404040";
@@ -334,7 +335,7 @@ constexpr PresetColors makeImmaterial() {
   colors.color(PresetColor::scrollbar_handle) = "#212225"; // also grid color
   colors.color(PresetColor::piano_roll_background) = "#3C3F46";
   colors.color(PresetColor::piano_roll_accidental_lane) = "#2F3239";
-  colors.color(PresetColor::playhead) = "#FFFFFF";
+  colors.color(PresetColor::playhead) = "#E24242";
   colors.color(PresetColor::piano_natural_key) = "#898B92";
   colors.color(PresetColor::piano_black_key) = "#21232B";
   colors.color(PresetColor::piano_keyboard_separator) = "#34373F";

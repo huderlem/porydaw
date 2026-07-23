@@ -29,10 +29,6 @@ constexpr auto kMaximumExtendAttempts = 100;
 constexpr auto kLightnessMatchAttempts = 8;
 constexpr auto kLightnessBoundAttempts = 32;
 constexpr auto kLightnessBoundStep = 0.001;
-// Dark piano-roll backgrounds use a white playhead; light backgrounds use
-// black.
-constexpr auto kPlayheadLightnessThreshold = 0.50;
-
 // One control family receives one ramp so default, hover, and active states
 // move together instead of accumulating independent color tweaks.
 struct TouchableRamp {
@@ -90,13 +86,6 @@ QColor lightenToContrast(const QColor &foreground, const QColor &background,
       return candidate;
   }
   return QColor::fromRgb(255, 255, 255);
-}
-
-// Keep the playhead legible against the piano-roll surface.
-QColor playheadColor(const QColor &pianoRollBackground) {
-  if (oklabLightness(pianoRollBackground) < kPlayheadLightnessThreshold)
-    return QColor::fromRgb(255, 255, 255);
-  return QColor::fromRgb(0, 0, 0);
 }
 
 // Keep Accent as selected text when readable; otherwise use the safer neutral.
@@ -543,8 +532,9 @@ Theme derive(const QColor &primary, const QColor &accent) {
   theme.color(Role::song_view_piano_roll_background) = windowBackground;
   theme.color(Role::song_view_piano_roll_accidental_lane) =
       shiftOklabLightness(windowBackground, -0.05);
-  theme.color(Role::song_view_playhead) =
-      playheadColor(theme.color(Role::song_view_piano_roll_background));
+  // The playhead keeps its identity red in every theme, like the Mute and
+  // Solo domain colors; its glow keeps it visible on any surface.
+  theme.color(Role::song_view_playhead) = QColor::fromRgb(226, 66, 66);
   theme.color(Role::song_view_piano_keyboard_natural_key) =
       QColor::fromRgb(0xE8, 0xE8, 0xE8);
   theme.color(Role::song_view_piano_keyboard_black_key) =
