@@ -65,9 +65,11 @@ signals:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
     void appendEvent(const M4APolyEvent &ev);
+    void applyLogItemInk(QListWidgetItem *item);
     void refreshTable(const AudioEngine::PolySnapshot &snap);
     void clearRuntimeState();
     // Stacked sections when narrow, overflow table beside the channel grid

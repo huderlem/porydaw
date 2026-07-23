@@ -63,21 +63,41 @@ enum class PresetColor {
   /// SongView playhead: a fixed identity red shared by every theme, like
   /// the Mute and Solo domain colors (rollcheck pixel-scans for it).
   playhead,
-  /// Natural (white) keys on the SongView piano keyboard.
+  /// Natural (white) keys on the SongView piano keyboard: a fixed white
+  /// shared by every theme so the keyboard always reads black-and-white.
   piano_natural_key,
-  /// Black (accidental) keys on the SongView piano keyboard.
+  /// Black (accidental) keys on the SongView piano keyboard: a fixed
+  /// near-black shared by every theme.
   piano_black_key,
   /// Octave separator lines on the SongView piano keyboard.
   piano_keyboard_separator,
   /// Note labels on the SongView piano keyboard.
   piano_keyboard_label,
+  /// Text on active/releasing/shadow polyphony cells: a fixed near-white
+  /// shared by every theme because the fills below it are fixed too.
+  polyphony_cell_text,
+  /// Polyphony cell holding a sounding note: a fixed identity green shared
+  /// by every theme, matching the CLAP plugin's channel display.
+  polyphony_active_cell,
+  /// Polyphony cell fading a released note: a fixed identity amber.
+  polyphony_releasing_cell,
+  /// Polyphony cell playing a lost sound in solo-overflow mode: a fixed
+  /// identity blue.
+  polyphony_shadow_cell,
+  /// Dropped-note rows in the polyphony event log.
+  polyphony_dropped_text,
+  /// Cut-off-note rows in the polyphony event log.
+  polyphony_stolen_text,
+  /// Overflow-table row flash on a fresh drop: a fixed identity red faded
+  /// by the panel.
+  polyphony_flash,
   /// Sentinel for the number of authored preset colors; not rendered.
   count,
 };
 
 inline constexpr auto presetColorCount =
     static_cast<std::size_t>(PresetColor::count);
-static_assert(presetColorCount == 24);
+static_assert(presetColorCount == 31);
 
 constexpr PresetColor presetColorFor(Role role);
 
@@ -221,6 +241,16 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::item_background,
     PresetColor::window_text,
 
+    PresetColor::control_background,
+    PresetColor::disabled_text,
+    PresetColor::polyphony_cell_text,
+    PresetColor::polyphony_active_cell,
+    PresetColor::polyphony_releasing_cell,
+    PresetColor::polyphony_shadow_cell,
+    PresetColor::polyphony_dropped_text,
+    PresetColor::polyphony_stolen_text,
+    PresetColor::polyphony_flash,
+
     PresetColor::chrome_background,
     PresetColor::separator,
     PresetColor::window_text,
@@ -229,7 +259,7 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::accent,
     PresetColor::window_text,
     PresetColor::selection_background,
-    PresetColor::accent,
+    PresetColor::window_text,
     PresetColor::window_text,
     PresetColor::playhead,
     PresetColor::control_pressed_background,
@@ -278,9 +308,18 @@ constexpr PresetColors makeVanilla() {
   colors.color(PresetColor::piano_roll_accidental_lane) = "#C9C3BF";
   colors.color(PresetColor::playhead) = "#E24242";
   colors.color(PresetColor::piano_natural_key) = "#F4F4F4";
-  colors.color(PresetColor::piano_black_key) = "#434040";
+  colors.color(PresetColor::piano_black_key) = "#202224";
   colors.color(PresetColor::piano_keyboard_separator) = "#9A9A9A";
   colors.color(PresetColor::piano_keyboard_label) = "#1A1A1A";
+  colors.color(PresetColor::polyphony_cell_text) = "#F0F0F4";
+  colors.color(PresetColor::polyphony_active_cell) = "#268C38";
+  colors.color(PresetColor::polyphony_releasing_cell) = "#B8871A";
+  colors.color(PresetColor::polyphony_shadow_cell) = "#2961BF";
+  // Severity inks keep their red and amber hues but darken to 4.5:1 on the
+  // light item surface that hosts the event log.
+  colors.color(PresetColor::polyphony_dropped_text) = "#9C2B2B";
+  colors.color(PresetColor::polyphony_stolen_text) = "#6E4A06";
+  colors.color(PresetColor::polyphony_flash) = "#D92626";
   return colors;
 }
 
@@ -309,10 +348,18 @@ constexpr PresetColors makeDarkNeutralHigh() {
   colors.color(PresetColor::piano_roll_background) = "#454545";
   colors.color(PresetColor::piano_roll_accidental_lane) = "#383838";
   colors.color(PresetColor::playhead) = "#E24242";
-  colors.color(PresetColor::piano_natural_key) = "#AAAAAA";
-  colors.color(PresetColor::piano_black_key) = "#4C4C4C";
-  colors.color(PresetColor::piano_keyboard_separator) = "#404040";
-  colors.color(PresetColor::piano_keyboard_label) = "#FFFFFF";
+  colors.color(PresetColor::piano_natural_key) = "#F4F4F4";
+  colors.color(PresetColor::piano_black_key) = "#202224";
+  colors.color(PresetColor::piano_keyboard_separator) = "#9A9A9A";
+  colors.color(PresetColor::piano_keyboard_label) = "#1A1A1A";
+  colors.color(PresetColor::polyphony_cell_text) = "#F0F0F4";
+  colors.color(PresetColor::polyphony_active_cell) = "#268C38";
+  colors.color(PresetColor::polyphony_releasing_cell) = "#B8871A";
+  colors.color(PresetColor::polyphony_shadow_cell) = "#2961BF";
+  // Severity inks lighten instead: 4.5:1 on the dark item surface.
+  colors.color(PresetColor::polyphony_dropped_text) = "#F09999";
+  colors.color(PresetColor::polyphony_stolen_text) = "#E2A854";
+  colors.color(PresetColor::polyphony_flash) = "#D92626";
   return colors;
 }
 
@@ -339,10 +386,17 @@ constexpr PresetColors makeImmaterial() {
   colors.color(PresetColor::piano_roll_background) = "#3C3F46";
   colors.color(PresetColor::piano_roll_accidental_lane) = "#2F3239";
   colors.color(PresetColor::playhead) = "#E24242";
-  colors.color(PresetColor::piano_natural_key) = "#898B92";
-  colors.color(PresetColor::piano_black_key) = "#21232B";
-  colors.color(PresetColor::piano_keyboard_separator) = "#34373F";
-  colors.color(PresetColor::piano_keyboard_label) = "#F3F3F5";
+  colors.color(PresetColor::piano_natural_key) = "#F4F4F4";
+  colors.color(PresetColor::piano_black_key) = "#202224";
+  colors.color(PresetColor::piano_keyboard_separator) = "#9A9A9A";
+  colors.color(PresetColor::piano_keyboard_label) = "#1A1A1A";
+  colors.color(PresetColor::polyphony_cell_text) = "#F0F0F4";
+  colors.color(PresetColor::polyphony_active_cell) = "#268C38";
+  colors.color(PresetColor::polyphony_releasing_cell) = "#B8871A";
+  colors.color(PresetColor::polyphony_shadow_cell) = "#2961BF";
+  colors.color(PresetColor::polyphony_dropped_text) = "#F09999";
+  colors.color(PresetColor::polyphony_stolen_text) = "#E2A854";
+  colors.color(PresetColor::polyphony_flash) = "#D92626";
   return colors;
 }
 

@@ -140,6 +140,17 @@ enum class Role {
   polyphony_value_background,
   polyphony_value_text,
 
+  // Polyphony debugger channel cells, event-log severities, and drop flash.
+  polyphony_cell_free_background,
+  polyphony_cell_free_text,
+  polyphony_cell_text,
+  polyphony_cell_active_background,
+  polyphony_cell_releasing_background,
+  polyphony_cell_shadow_background,
+  polyphony_log_dropped_text,
+  polyphony_log_stolen_text,
+  polyphony_flash_background,
+
   // Canvas colors consumed directly by SongView paint paths.
   song_view_timeline_chrome_background,
   song_view_separator,

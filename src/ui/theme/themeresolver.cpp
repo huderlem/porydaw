@@ -236,6 +236,18 @@ QColor deriveDisabledText(const QColor &globalText,
   return blackOrWhiteByWorstContrast(fills);
 }
 
+// Severity inks keep their hue but must stay readable on the surface hosting
+// them; blend toward that surface's contrast endpoint until they are.
+QColor severityText(const QColor &tint, const QColor &background) {
+  const auto endpoint = blackOrWhiteByWorstContrast({background});
+  for (auto step = 0; step <= 20; ++step) {
+    const auto candidate = mixColors(endpoint, tint, step * 0.05);
+    if (contrastRatio(candidate, background) >= kTextContrastThreshold)
+      return candidate;
+  }
+  return endpoint;
+}
+
 // Prefer theme colors before black or white. sharedFills keeps reused text
 // roles readable on every component that shares them, not just their primary
 // fill.
@@ -517,6 +529,25 @@ Theme derive(const QColor &primary, const QColor &accent) {
   theme.color(Role::disabled_text) = disabledText;
   theme.color(Role::secondary_text) = disabledText;
 
+  // Polyphony status fills are fixed identities like the playhead red; the
+  // resting cell follows the control surface, and the log's severity inks
+  // bend toward readable contrast on the item surface that hosts them.
+  theme.color(Role::polyphony_cell_free_background) = buttonBackground;
+  theme.color(Role::polyphony_cell_free_text) = disabledText;
+  theme.color(Role::polyphony_cell_text) = QColor::fromRgb(0xF0, 0xF0, 0xF4);
+  theme.color(Role::polyphony_cell_active_background) =
+      QColor::fromRgb(0x26, 0x8C, 0x38);
+  theme.color(Role::polyphony_cell_releasing_background) =
+      QColor::fromRgb(0xB8, 0x87, 0x1A);
+  theme.color(Role::polyphony_cell_shadow_background) =
+      QColor::fromRgb(0x29, 0x61, 0xBF);
+  theme.color(Role::polyphony_log_dropped_text) =
+      severityText(QColor::fromRgb(0xDB, 0x58, 0x58), itemBackground);
+  theme.color(Role::polyphony_log_stolen_text) =
+      severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
+  theme.color(Role::polyphony_flash_background) =
+      QColor::fromRgb(0xD9, 0x26, 0x26);
+
   // SongView roles are direct assignments rather than an override bundle. Each
   // paint element is visible here beside the color policy that supplies it.
   theme.color(Role::song_view_timeline_chrome_background) = chromeBackground;
@@ -535,10 +566,11 @@ Theme derive(const QColor &primary, const QColor &accent) {
   theme.color(Role::song_view_piano_roll_accidental_lane) =
       shiftOklabLightness(windowBackground, -0.05);
   // The playhead keeps its identity red in every theme, like the Mute and
-  // Solo domain colors; its glow keeps it visible on any surface.
+  // Solo domain colors; its glow keeps it visible on any surface. The piano
+  // keyboard likewise always reads black-and-white.
   theme.color(Role::song_view_playhead) = QColor::fromRgb(226, 66, 66);
   theme.color(Role::song_view_piano_keyboard_natural_key) =
-      QColor::fromRgb(0xE8, 0xE8, 0xE8);
+      QColor::fromRgb(0xF4, 0xF4, 0xF4);
   theme.color(Role::song_view_piano_keyboard_black_key) =
       QColor::fromRgb(0x20, 0x22, 0x24);
   theme.color(Role::song_view_piano_keyboard_active_key) = selectionBackground;

@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include <QCheckBox>
+#include <QEvent>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -18,6 +19,7 @@
 
 #include "core/miditimeline.h"
 #include "ui/m4asemantics.h"
+#include "ui/theme/themeruntime.h"
 
 namespace {
 
@@ -30,14 +32,21 @@ constexpr qint64 kFlashMs = 1000; // row flash fade time
 constexpr int kWideLayoutMinWidth = 600;
 constexpr int kOverflowColumnWidth = 320; // table column width in wide mode
 
-// Cell colors matching the CLAP plugin's channel_cell(): free (dark), active
+// Cell states matching the CLAP plugin's channel_cell(): free, active
 // (green), releasing (amber), lost sound playing on a shadow channel (blue).
-const QColor kCellColors[4] = {
-    QColor(51, 51, 59),
-    QColor(38, 140, 56),
-    QColor(184, 135, 26),
-    QColor(41, 97, 191),
-};
+QColor cellColor(int state)
+{
+    switch (state) {
+    case 1:
+        return themes::color(themes::Role::polyphony_cell_active_background);
+    case 2:
+        return themes::color(themes::Role::polyphony_cell_releasing_background);
+    case 3:
+        return themes::color(themes::Role::polyphony_cell_shadow_background);
+    default:
+        return themes::color(themes::Role::polyphony_cell_free_background);
+    }
+}
 
 // Bar:beat.tick position for an event, honoring time-signature changes the
 // way the ruler grid does (SongView::gridSegAt): a signature change restarts
@@ -202,9 +211,11 @@ private:
             }
             const QRect rect(x, cy, kCellW, kCellH);
             p->setPen(Qt::NoPen);
-            p->setBrush(kCellColors[state]);
+            p->setBrush(cellColor(state));
             p->drawRoundedRect(rect, 3, 3);
-            p->setPen(state == 0 ? QColor(140, 140, 148) : QColor(240, 240, 244));
+            p->setPen(themes::color(
+                state == 0 ? themes::Role::polyphony_cell_free_text
+                           : themes::Role::polyphony_cell_text));
             QFont f = font();
             f.setPixelSize(10);
             p->setFont(f);
@@ -482,33 +493,58 @@ void PolyphonyPanel::appendEvent(const M4APolyEvent &ev)
                             .arg(ev.trackIndex + 1)
                             .arg(midiKeyName(ev.midiKey), voice);
     QString text;
-    QColor color;
     switch (ev.type) {
     case M4A_POLY_DROPPED:
         text = tr("%1 | %2: dropped (no channel available)").arg(pos, who);
-        color = QColor(219, 88, 88);
         break;
     case M4A_POLY_STOLEN:
         text = tr("%1 | %2: cut off by Trk %3")
                    .arg(pos, who)
                    .arg(ev.byTrack + 1);
-        color = QColor(219, 155, 66);
         break;
     default:
         text = tr("%1 | %2: release tail cut by Trk %3")
                    .arg(pos, who)
                    .arg(ev.byTrack + 1);
-        color = palette().color(QPalette::Disabled, QPalette::Text);
         break;
     }
     auto *item = new QListWidgetItem(text);
-    item->setForeground(color);
     if (ev.tick != M4A_POLY_TICK_NONE) {
         item->setData(Qt::UserRole, qulonglong(ev.tick));
         item->setData(Qt::UserRole + 1, int(ev.trackIndex));
         item->setData(Qt::UserRole + 2, int(ev.midiKey));
     }
+    item->setData(Qt::UserRole + 3, int(ev.type));
+    applyLogItemInk(item);
     m_log->insertItem(0, item);
+}
+
+void PolyphonyPanel::applyLogItemInk(QListWidgetItem *item)
+{
+    switch (item->data(Qt::UserRole + 3).toInt()) {
+    case M4A_POLY_DROPPED:
+        item->setForeground(
+            themes::color(themes::Role::polyphony_log_dropped_text));
+        break;
+    case M4A_POLY_STOLEN:
+        item->setForeground(
+            themes::color(themes::Role::polyphony_log_stolen_text));
+        break;
+    default:
+        item->setForeground(palette().color(QPalette::Disabled, QPalette::Text));
+        break;
+    }
+}
+
+// Log rows are inked once when they are appended; a theme change would
+// otherwise leave them in the old theme's severity colors.
+void PolyphonyPanel::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange) {
+        for (int i = 0; i < m_log->count(); i++)
+            applyLogItemInk(m_log->item(i));
+    }
 }
 
 void PolyphonyPanel::refreshTable(const AudioEngine::PolySnapshot &snap)
@@ -555,7 +591,7 @@ void PolyphonyPanel::refreshTable(const AudioEngine::PolySnapshot &snap)
                                   QString::number(snap.tailCut[t])};
         QColor bg = Qt::transparent;
         if (m_flashMs[t] > 0 && now - m_flashMs[t] < kFlashMs) {
-            bg = QColor(217, 38, 38);
+            bg = themes::color(themes::Role::polyphony_flash_background);
             bg.setAlphaF(0.55f * (1.0f - float(now - m_flashMs[t]) / kFlashMs));
         }
         for (int c = 0; c < 4; c++) {
