@@ -273,6 +273,70 @@ int runUiPass(const SongInfo &song, const QString &screenshotPath)
                 fail("end-of-track focus did not move the edit cursor");
         }
         {
+            // Focusing one row of a same-tick run tints exactly that row —
+            // not the run's last sibling — and survives the engine pushing
+            // the tick back a hair low (the committed tick round-trips
+            // tick→sample→tick). A current row at a different tick gets no
+            // such preference.
+            int runFirst = -1;
+            bool madeRun = false;
+            {
+                const auto &evs = doc.smf().tracks[chunk].events;
+                for (size_t i = 0; i + 1 < evs.size(); i++) {
+                    if (evs[i].tick == evs[i + 1].tick) {
+                        runFirst = int(i);
+                        break;
+                    }
+                }
+            }
+            if (runFirst < 0) { // no natural run: twin row 0 to make one
+                events->insertCopyOfRow(0);
+                runFirst = 0;
+                madeRun = true;
+            }
+            const auto &evs = doc.smf().tracks[chunk].events;
+            const double runTick = double(evs[runFirst].tick);
+            int runLast = runFirst;
+            while (runLast + 1 < int(evs.size())
+                   && evs[runLast + 1].tick == evs[runFirst].tick)
+                runLast++;
+            table->setCurrentIndex(model->index(runFirst, 0));
+            events->setPlayheadTick(runTick, false);
+            if (!tinted(runFirst))
+                fail("focused row of a same-tick run not tinted");
+            if (tinted(runLast))
+                fail("same-tick sibling tinted instead of the focused row");
+            if (runTick > 0) {
+                events->setPlayheadTick(runTick - 0.001, false);
+                if (!tinted(runFirst))
+                    fail("sample-rounded playhead tick lost the focused row");
+            }
+            // Focusing a sibling moves the tint without a new playhead push
+            // (the cursor tick doesn't change, so nothing re-seeks).
+            table->setCurrentIndex(model->index(runLast, 0));
+            if (!tinted(runLast) || tinted(runFirst))
+                fail("re-focus inside the run did not move the tint");
+            // A current row at another tick gets no preference: the run's
+            // last row keeps the "most recently fired" tint.
+            int other = -1;
+            for (int i = 0; i < int(evs.size()); i++) {
+                if (evs[i].tick != evs[runFirst].tick) {
+                    other = i;
+                    break;
+                }
+            }
+            if (other >= 0) {
+                table->setCurrentIndex(model->index(other, 0));
+                events->setPlayheadTick(runTick, false);
+                if (!tinted(runLast))
+                    fail("off-tick current row stole the playhead tint");
+                if (tinted(other))
+                    fail("playhead tint followed an off-tick current row");
+            }
+            if (madeRun)
+                doc.undoStack()->undo();
+        }
+        {
             // A document edit reloads the table and restores the current row
             // programmatically; that must not commit the edit cursor.
             const uint64_t cursorBefore = view.editCursorTick();
@@ -480,11 +544,14 @@ int runEventViewCheck(const QString &projectRoot, const QString &screenshotSong,
         }
 
         // The UI pass runs once — on the named screenshot song, else the
-        // first playable one.
+        // first playable song whose chunk has events (mus_dummy sorts
+        // first and its empty chunk would silently skip every
+        // event-dependent check).
         if (song.label == screenshotSong) {
             uiChecked = true;
             failures += runUiPass(song, screenshotPath);
-        } else if (!uiChecked && screenshotSong.isEmpty()) {
+        } else if (!uiChecked && screenshotSong.isEmpty()
+                   && !doc.smf().tracks[chunk].events.empty()) {
             uiChecked = true;
             failures += runUiPass(song, QString());
         }

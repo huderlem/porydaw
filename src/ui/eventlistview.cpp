@@ -20,6 +20,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 
 #include "core/smf.h"
 #include "core/songdocument.h"
@@ -372,6 +373,21 @@ public:
         if (it == m_rows.end() || *it != index)
             return -1;
         return int(it - m_rows.begin());
+    }
+
+    // Tick of a display row: the event's, or the chunk end for the
+    // end-of-track row; -1 for anything invalid (incl. stale rows while
+    // hidden).
+    double tickForRow(int row) const
+    {
+        const SmfTrack *tr = track();
+        if (!tr || row < 0)
+            return -1;
+        if (row == int(m_rows.size()))
+            return double(tr->endTick);
+        if (row < int(m_rows.size()) && m_rows[row] < tr->events.size())
+            return double(tr->events[m_rows[row]].tick);
+        return -1;
     }
 
     // The row the playhead has reached: the last shown event at or before
@@ -1042,7 +1058,19 @@ void EventListView::updatePlayRow()
     // there is nothing to tint; the show-time refresh recomputes.
     if (isHidden())
         return;
-    const int row = m_model->rowForTick(m_playTick);
+    int row = m_model->rowForTick(m_playTick);
+    // Clicking a row must tint that row — never a same-tick sibling
+    // (rowForTick lands on the last of a tied run) and never the
+    // previous-tick row (the committed tick round-trips tick→sample→tick
+    // through the engine and can come back a hair under the integer tick).
+    // A current row within half a tick of the playhead is the row the
+    // playhead means.
+    const QModelIndex current = m_table->currentIndex();
+    if (m_playTick >= 0 && current.isValid() && current.row() != row) {
+        const double currentTick = m_model->tickForRow(current.row());
+        if (currentTick >= 0 && std::abs(currentTick - m_playTick) < 0.5)
+            row = current.row();
+    }
     if (row == m_model->playRow())
         return;
     m_model->setPlayRow(row);
@@ -1077,10 +1105,13 @@ void EventListView::jumpCursorToRow(int row)
         tick = track.endTick;
     else
         return;
-    if (tick == m_sv->editCursorTick())
-        return;
-    m_sv->commitEditCursor(tick);
-    m_sv->ensureTickVisible(tick);
+    if (tick != m_sv->editCursorTick()) {
+        m_sv->commitEditCursor(tick);
+        m_sv->ensureTickVisible(tick);
+    }
+    // Even when the cursor didn't move (a same-tick sibling of the tinted
+    // row was clicked), the playhead tint must follow the new current row.
+    updatePlayRow();
 }
 
 bool EventListView::eventFilter(QObject *watched, QEvent *event)
