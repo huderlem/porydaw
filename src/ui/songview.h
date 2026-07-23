@@ -33,8 +33,12 @@ class OtherStrip;
 class PlayheadOverlay;
 class TrackHeaderPanel;
 
-// Fixed piano-key column width; exposed for roll interaction checks.
+// Fixed gutter geometry shared by every timeline-aligned child: the track
+// header column plus the piano-roll keyboard column. All children put
+// timeline tick 0 at the same global x. Exposed for roll interaction checks.
+constexpr int kHeaderW = 210;
 constexpr int kKeyboardW = 52;
+constexpr int kGutterW = kHeaderW + kKeyboardW;
 // Full-width velocity handle (Reaper-style): with at least this much
 // vertical zoom, the top strip of a note drags velocity across its whole
 // width, and a thin horizontal bar inside the note shows the level

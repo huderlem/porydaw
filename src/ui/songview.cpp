@@ -64,12 +64,6 @@ namespace songview {
 
 namespace {
 
-// Fixed gutter geometry shared by every timeline-aligned child: the track
-// header column plus the piano-roll keyboard column. All children put
-// timeline tick 0 at the same global x.
-constexpr int kHeaderW = 210;
-constexpr int kGutterW = kHeaderW + kKeyboardW;
-
 // The ruler stacks a marker row (time-signature chips, loop brackets,
 // selection handles) above the bar-number/tick row, so marker text never
 // collides with the bar numbers.
