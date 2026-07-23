@@ -13,8 +13,7 @@ using TrackIdentityPalette =
     std::array<TrackIdentityColorPair, trackIdentityColorCount>;
 
 QColor colorFromHex(std::string_view hex) {
-  return QColor::fromString(
-      QLatin1StringView(hex.data(), static_cast<qsizetype>(hex.size())));
+  return QColor(QLatin1String(hex.data(), static_cast<int>(hex.size())));
 }
 
 const TrackIdentityPalette &resolvedTrackIdentityPalette() {

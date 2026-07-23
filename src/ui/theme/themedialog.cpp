@@ -237,7 +237,7 @@ QString ThemeDialog::canonicalHex(const QColor &color) {
 
 QColor ThemeDialog::parseField(const QLineEdit *field) const {
   const auto text = field->text().trimmed();
-  const auto parsed = QColor::fromString(text);
+  const auto parsed = QColor(text);
   if (!parsed.isValid() ||
       parsed.name(QColor::HexRgb).compare(text, Qt::CaseInsensitive) != 0)
     return {};

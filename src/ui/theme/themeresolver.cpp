@@ -60,8 +60,7 @@ QColor mixColors(const QColor &first, const QColor &second,
 }
 
 QColor colorFromHex(preset_colors::HexColor hex) {
-  return QColor::fromString(
-      QLatin1StringView(hex.data(), static_cast<qsizetype>(hex.size())));
+  return QColor(QLatin1String(hex.data(), static_cast<int>(hex.size())));
 }
 
 QColor blackOrWhiteByWorstContrast(const std::initializer_list<QColor> &fills) {

@@ -94,8 +94,8 @@ ThemeSelection ThemeController::readStoredSelection() const {
   auto customColors = std::optional<ColorPair>{};
   if (hasPrimary) {
     const auto colors =
-        ColorPair{QColor::fromString(m_settings.value(primaryKey).toString()),
-                  QColor::fromString(m_settings.value(accentKey).toString())};
+        ColorPair{QColor(m_settings.value(primaryKey).toString()),
+                  QColor(m_settings.value(accentKey).toString())};
     if (!isValidColorPair(colors.primary, colors.accent))
       return {};
     customColors = colors;
