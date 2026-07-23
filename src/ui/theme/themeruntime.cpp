@@ -92,19 +92,17 @@ QString toolbarStyleSheet(const Theme &theme) {
              "QToolButton{background-color:transparent;"
              "border-color:transparent;color:%4;}"
              "QToolBar#transportToolbar QToolButton:hover{"
-             "background-color:%6;border-color:transparent;color:%7;}"
+             "background-color:%5;border-color:transparent;color:%6;}"
              "QToolBar#transportToolbar QToolButton:pressed{"
-             "background-color:%6;border-color:%8;color:%7;}"
+             "background-color:%5;border-color:%7;color:%6;}"
              "QToolBar#transportToolbar QToolButton:checked{"
-             "background-color:%9;border-color:transparent;color:%10;}"
+             "background-color:%8;border-color:transparent;color:%9;}"
              "QToolBar#transportToolbar QLabel{background-color:transparent;"
-             "color:%4;}"
-             "QToolBar::separator{background-color:%5;}")
+             "color:%4;}")
       .arg(colorName(theme, Role::toolbar_background))
       .arg(colorName(theme, Role::toolbar_text))
       .arg(colorName(theme, Role::toolbar_outline))
       .arg(colorName(theme, Role::transport_text))
-      .arg(colorName(theme, Role::toolbar_separator))
       .arg(colorName(theme, Role::button_hover_background))
       .arg(colorName(theme, Role::button_hover_text))
       .arg(colorName(theme, Role::focus_outline))

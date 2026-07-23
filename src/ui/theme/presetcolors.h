@@ -116,7 +116,6 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::window_text,
     PresetColor::outline,
     PresetColor::window_text,
-    PresetColor::separator,
 
     PresetColor::chrome_background,
     PresetColor::control_background,

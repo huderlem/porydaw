@@ -426,7 +426,6 @@ Theme derive(const QColor &primary, const QColor &accent) {
   theme.color(Role::header_outline) = outline;
   theme.color(Role::scrollbar_outline) = outline;
   theme.color(Role::splitter_outline) = outline;
-  theme.color(Role::toolbar_separator) = outline;
   theme.color(Role::menu_separator) = outline;
   theme.color(Role::splitter_handle) = outline;
   theme.color(Role::splitter_handle_hover_background) = accent;

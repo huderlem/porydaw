@@ -21,7 +21,6 @@ enum class Role {
   toolbar_text,
   toolbar_outline,
   transport_text,
-  toolbar_separator,
 
   // QTabWidget pane and open-song tabs.
   tab_pane_background,

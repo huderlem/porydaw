@@ -360,7 +360,6 @@ void MainWindow::buildUi()
     transport->addAction(m_loopAction);
     refreshTransportIcons();
 
-    transport->addSeparator();
     m_timeLabel = new QLabel(QStringLiteral("--:--.- / --:--.-"), this);
     m_timeLabel->setFont(typography::bodyMono(font()));
     m_timeLabel->setContentsMargins(::layout::space(::layout::Space::Three), 0,
