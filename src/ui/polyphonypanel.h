@@ -46,6 +46,7 @@ public:
     bool invertChecked() const;
 
     // Harness hooks (--polycheck).
+    void setInvertChecked(bool on); // same path as clicking the checkbox
     int logRowCount() const;
     QString logRowText(int row) const;
     void activateLogRow(int row); // same path as a double-click

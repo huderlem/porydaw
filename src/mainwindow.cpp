@@ -504,10 +504,17 @@ void MainWindow::buildUi()
     m_polyDock->setFeatures(QDockWidget::DockWidgetMovable
                             | QDockWidget::DockWidgetClosable);
     m_polyPanel = new PolyphonyPanel(m_polyDock);
-    connect(m_polyPanel, &PolyphonyPanel::invertToggled, this, [this](bool on) {
+    // Solo-overflow only inverts the audio while the dock is on screen: with
+    // the checkbox out of sight there is nothing to explain the weird
+    // playback, so hiding the dock suspends the mode and re-showing it
+    // (checkbox still checked) resumes it.
+    const auto applyPolyInvert = [this] {
         if (m_audioOk)
-            m_audio.setPolyDebugInvert(on);
-    });
+            m_audio.setPolyDebugInvert(m_polyPanel->invertChecked()
+                                       && m_polyDock->isVisible());
+    };
+    connect(m_polyPanel, &PolyphonyPanel::invertToggled, this, applyPolyInvert);
+    connect(m_polyDock, &QDockWidget::visibilityChanged, this, applyPolyInvert);
     connect(m_polyPanel, &PolyphonyPanel::resetRequested, this, [this] {
         if (m_audioOk)
             m_audio.resetPolyStats();

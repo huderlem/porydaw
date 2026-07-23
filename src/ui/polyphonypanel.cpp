@@ -392,6 +392,11 @@ bool PolyphonyPanel::invertChecked() const
     return m_invert->isChecked();
 }
 
+void PolyphonyPanel::setInvertChecked(bool on)
+{
+    m_invert->setChecked(on);
+}
+
 bool PolyphonyPanel::wideLayoutActive() const
 {
     return m_wideLayout;

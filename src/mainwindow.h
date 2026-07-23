@@ -60,6 +60,12 @@ public:
     bool runTabCheck(const QString &projectRoot, const QString &songA,
                      const QString &songB);
 
+    // Solo-overflow visibility gate (--polycheck stage C; polycheck.cpp):
+    // the engine inverts only while the invert checkbox is checked AND the
+    // Polyphony dock is visible. No project needed; QSettings must be
+    // redirected.
+    bool runPolyGateCheck();
+
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
     // harnesses never inherit (or overwrite) the user's session.

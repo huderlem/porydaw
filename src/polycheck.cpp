@@ -1,8 +1,11 @@
 #include <QCoreApplication>
+#include <QDockWidget>
 #include <QFileInfo>
 #include <QImage>
+#include <QSettings>
 #include <QString>
 #include <QStringList>
+#include <QTemporaryDir>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -11,6 +14,7 @@
 #include "core/miditimeline.h"
 #include "core/smf.h"
 #include "core/timelineplayer.h"
+#include "mainwindow.h"
 #include "ui/polyphonypanel.h"
 
 extern "C" {
@@ -25,6 +29,10 @@ extern "C" {
 // after it. Stage B drives the PolyphonyPanel offscreen: bar:beat formatting
 // across a time-signature change, track/voice names, double-click jump ticks
 // (with the live-note sentinel suppressed), reset rebase, and the log cap.
+// Stage C constructs a real MainWindow (redirected QSettings, no project)
+// and asserts the solo-overflow gate: the engine only inverts while the
+// checkbox is checked AND the Polyphony dock is visible, so closing the
+// dock never leaves playback silently inverted.
 
 namespace {
 
@@ -499,10 +507,73 @@ int runWidgetStage(const QString &screenshotPath)
 
 } // namespace
 
+bool MainWindow::runPolyGateCheck()
+{
+    if (!m_audioOk) {
+        std::fprintf(stderr, "polycheck: no audio device available\n");
+        return false;
+    }
+    int failures = 0;
+    const auto check = [&failures](bool ok, const char *what) {
+        if (!ok) {
+            std::fprintf(stderr, "polycheck: FAIL: %s\n", what);
+            failures++;
+        }
+        return ok;
+    };
+
+    show();
+    QCoreApplication::processEvents();
+    check(!m_polyDock->isVisible(), "poly dock starts hidden");
+    check(!m_audio.polyDebugInvert(), "engine invert starts off");
+
+    // The checkbox alone must not invert anything while the dock is hidden.
+    m_polyPanel->setInvertChecked(true);
+    check(!m_audio.polyDebugInvert(), "hidden dock: checkbox alone is inert");
+
+    m_polyDock->show();
+    QCoreApplication::processEvents();
+    check(m_audio.polyDebugInvert(), "visible dock + checked box inverts");
+
+    // Closing the dock (its title-bar close button hides it) suspends the
+    // mode without losing the checkbox state...
+    m_polyDock->close();
+    QCoreApplication::processEvents();
+    check(!m_audio.polyDebugInvert(), "closing the dock suspends the invert");
+    check(m_polyPanel->invertChecked(), "closing the dock keeps the checkbox");
+
+    // ...and re-opening it resumes the mode.
+    m_polyDock->show();
+    QCoreApplication::processEvents();
+    check(m_audio.polyDebugInvert(), "re-opening the dock resumes the invert");
+
+    m_polyPanel->setInvertChecked(false);
+    check(!m_audio.polyDebugInvert(), "unchecking turns the invert off");
+
+    return failures == 0;
+}
+
 int runPolyCheck(const QString &screenshotPath)
 {
     int failures = runEngineStage();
     failures += runWidgetStage(screenshotPath);
+
+    // Stage C: redirected settings so the MainWindow neither reads nor
+    // overwrites the user's real window state.
+    QTemporaryDir settingsDir;
+    if (!settingsDir.isValid()) {
+        std::fprintf(stderr, "polycheck: no temp dir for settings\n");
+        failures++;
+    } else {
+        QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope,
+                           settingsDir.path());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                           settingsDir.path());
+        MainWindow window;
+        if (!window.runPolyGateCheck())
+            failures++;
+    }
+
     std::printf("polycheck: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }
