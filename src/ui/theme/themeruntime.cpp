@@ -360,7 +360,12 @@ QString comboStyleSheet(const Theme &theme) {
              "QComboBox::drop-down:focus{border-color:%4;}"
              "QComboBox::drop-down:hover{background-color:%7;}"
              "QComboBox::drop-down:pressed,QComboBox::drop-down:on{"
-             "background-color:%8;}")
+             "background-color:%8;}"
+             // The open popup list floats over arbitrary content, so it
+             // takes menu chrome, not the in-flow item-view outline: the
+             // descendant selector outranks the plain QAbstractItemView
+             // rule regardless of sheet order.
+             "QComboBox QAbstractItemView{border-color:%9;}")
       .arg(colorName(theme, Role::combo_background))
       .arg(colorName(theme, Role::combo_text))
       .arg(colorName(theme, Role::combo_outline))
@@ -368,7 +373,18 @@ QString comboStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::disabled_text))
       .arg(colorName(theme, Role::combo_drop_down_background))
       .arg(colorName(theme, Role::combo_drop_down_hover_background))
-      .arg(colorName(theme, Role::combo_drop_down_pressed_background));
+      .arg(colorName(theme, Role::combo_drop_down_pressed_background))
+      .arg(colorName(theme, Role::menu_outline));
+}
+
+// The sample picker floats its own QFrame popup; it borrows menu chrome so
+// every dropdown surface separates from whatever it happens to cover.
+QString pickerPopupStyleSheet(const Theme &theme) {
+  return QStringLiteral(
+             "QFrame#vgSamplePickerPopup{background-color:%1;"
+             "border-color:%2;}")
+      .arg(colorName(theme, Role::window_background))
+      .arg(colorName(theme, Role::menu_outline));
 }
 
 QString indicatorStyleSheet(const Theme &theme) {
@@ -542,7 +558,8 @@ QString colorStyleSheet(const Theme &theme) {
          toolbarStyleSheet(theme) + tabStyleSheet(theme) +
          buttonStyleSheet(theme) + trackControlStyleSheet(theme) +
          inputStyleSheet(theme) + spinBoxStyleSheet(theme) +
-         comboStyleSheet(theme) + indicatorStyleSheet(theme) +
+         comboStyleSheet(theme) + pickerPopupStyleSheet(theme) +
+         indicatorStyleSheet(theme) +
          menuBarStyleSheet(theme) + menuStyleSheet(theme) +
          tooltipStyleSheet(theme) + groupBoxStyleSheet(theme) +
          itemViewStyleSheet(theme) + headerStyleSheet(theme) +

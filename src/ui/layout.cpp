@@ -125,7 +125,8 @@ QString commonGeometryStyleSheet(const FontScaledGeometry &geometry) {
              "QPushButton,QToolButton,QTabBar::tab,QAbstractSpinBox,"
              "QLineEdit,QTextEdit,QPlainTextEdit,QCheckBox,QRadioButton,"
              "QGroupBox,QMenu,QToolTip,QAbstractItemView,QScrollBar,"
-             "QScrollBar::handle,QSplitter::handle{"
+             "QScrollBar::handle,QSplitter::handle,"
+             "QFrame#vgSamplePickerPopup{"
              "border:%1 solid transparent;border-radius:%2;}"
              "QHeaderView::section{border:0;}"
              "QPushButton{padding:%5 %6;}"
@@ -150,8 +151,8 @@ QString comboBoxGeometryStyleSheet(const FontScaledGeometry &geometry) {
              "QComboBox::drop-down{subcontrol-origin:border;"
              "subcontrol-position:top right;width:%6;"
              "border:%1 solid transparent;border-radius:%2;}"
-             "QComboBox QAbstractItemView{border:%2;border-radius:%2;"
-             "padding:%2;}"
+             "QComboBox QAbstractItemView{border:%1 solid transparent;"
+             "border-radius:%2;padding:%2;}"
              "QComboBox QAbstractItemView::item{padding:%3 %5;}")
       .arg(pixels(geometry.border), pixels(geometry.zero),
            pixels(geometry.half), pixels(geometry.comboDropDownLane),

@@ -16,6 +16,7 @@
 #include <cstdio>
 
 #include "ui/songview.h"
+#include "ui/theme/themeruntime.h"
 
 #include "mainwindow.h"
 #include "project/songregistry.h"
@@ -641,6 +642,14 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 QStringLiteral("vgSamplePickerList"));
             if (check(search && list && picker->popupVisible(),
                       "picker popup did not open")) {
+                // The popup floats over the browser, so it carries the menu
+                // outline; its corner pixel is that border.
+                QWidget *popupFrame = picker->findChild<QWidget *>(
+                    QStringLiteral("vgSamplePickerPopup"));
+                check(popupFrame
+                          && popupFrame->grab().toImage().pixelColor(0, 0)
+                              == themes::color(themes::Role::menu_outline),
+                      "the picker popup is missing the menu outline");
                 // Every catalog sample is listed, and the committed sample
                 // data drives at least one loop badge (vanilla projects have
                 // plenty of looped instruments).

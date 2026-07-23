@@ -283,6 +283,22 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application) {
   }
   reporter.check(foundHoverColor,
                  "the painted ComboBox arrow lane lost its hover color");
+  // The open popup floats over arbitrary content, so its list carries the
+  // menu outline. The view fills its popup container, making the
+  // container's corner pixel the list's border.
+  combo.showPopup();
+  application.processEvents();
+  auto *popup = combo.view()->window();
+  const auto popupOpen = popup != combo.window() && popup->isVisible();
+  reporter.check(popupOpen, "the ComboBox popup did not open");
+  if (popupOpen) {
+    const auto popupImage = popup->grab().toImage();
+    reporter.check(popupImage.pixelColor(0, 0) ==
+                       themes::color(themes::Role::menu_outline),
+                   "the open ComboBox popup list is missing the menu outline");
+  }
+  combo.hidePopup();
+  application.processEvents();
   // The event list's playhead tint and the polyphony debugger's drop
   // flash arrive as model background brushes; a stylesheet ::item
   // background once painted over both. Alternate-row fills must still
