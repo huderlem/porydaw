@@ -1,3 +1,4 @@
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QElapsedTimer>
@@ -31,7 +32,10 @@
 // note's own edge sits off-grid. A right-drag band auditions each note
 // as it first covers it (Ableton-style; the note's length is the ceiling),
 // releases it when the band leaves it or the drag ends, and selects the
-// covered notes on release. Ctrl+arrows transpose (Shift: octave)
+// covered notes on release. A plain left press on empty space auditions
+// its row at the latched velocity (glissing across rows while held,
+// released on mouse-up) and still parks the edit cursor on release; a
+// press that grows into a draw does not re-attack the sounding key. Ctrl+arrows transpose (Shift: octave)
 // and nudge the selection along the same absolute grid — both the roll's
 // note selection and a multi-track time selection — and the view follows
 // notes moved out of sight with a minimal scroll (flush at the edge, not
@@ -408,6 +412,60 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         if (doc.undoStack()->count() != preBandCount)
             fail("band sweep pushed an undo command");
         view.clearSelection(); // the sections below manage their own
+    }
+
+    // Empty-space press audition: a plain left press sounds its row at the
+    // latched velocity right away, glisses when the held cursor crosses
+    // rows, and releases on mouse-up — while the release in place still
+    // parks the edit cursor without touching the document. A press that
+    // grows into a draw keeps the already-sounding key ringing instead of
+    // re-attacking it.
+    {
+        const Cell e = findFreeCell();
+        if (e.key < 0) {
+            fail("no free grid cell for the press audition");
+            return failures;
+        }
+        std::vector<std::pair<int, int>> aud; // key, velocity
+        auto conn = QObject::connect(
+            &view, &SongView::auditionNote, &view,
+            [&](int, int key, int velocity) { aud.push_back({key, velocity}); });
+        const int preCount = doc.undoStack()->count();
+        sendMouse(roll, QEvent::MouseButtonPress, e.center, Qt::LeftButton,
+                  Qt::LeftButton);
+        if (aud != std::vector<std::pair<int, int>>{{e.key, 93}})
+            fail("empty-space press did not audition its row at the latched velocity");
+        sendMouse(roll, QEvent::MouseMove, e.center + QPoint(0, keyH),
+                  Qt::NoButton, Qt::LeftButton);
+        if (aud.empty() || aud.back() != std::make_pair(e.key - 1, 93))
+            fail("holding the press across a row did not gliss the preview");
+        sendMouse(roll, QEvent::MouseButtonRelease, e.center + QPoint(0, keyH),
+                  Qt::LeftButton, Qt::NoButton);
+        if (aud.empty() || aud.back().second != 0)
+            fail("releasing the press did not release the preview");
+        if (doc.undoStack()->count() != preCount)
+            fail("a plain empty-space click edited the document");
+        if (view.editCursorTick()
+            != view.snapTick(
+                view.tickAtContentX(e.center.x() - songview::kKeyboardW)))
+            fail("the press audition broke the click's edit-cursor park");
+        // Draw growth: press the still-free cell again and drag right past
+        // the drag threshold; the press's preview must carry into the draw
+        // with no second attack on the same key.
+        aud.clear();
+        const QPoint pull =
+            e.center + QPoint(QApplication::startDragDistance() + 8, 0);
+        sendMouse(roll, QEvent::MouseButtonPress, e.center, Qt::LeftButton,
+                  Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseMove, pull, Qt::NoButton, Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseButtonRelease, pull, Qt::LeftButton,
+                  Qt::NoButton);
+        QObject::disconnect(conn);
+        if (std::count(aud.begin(), aud.end(), std::make_pair(e.key, 93)) != 1)
+            fail("growing the press into a draw re-attacked the sounding key");
+        DocNote drawn;
+        if (!doc.findNote(track, e.tick, uint8_t(e.key), &drawn))
+            fail("the press-grown draw did not commit its note");
     }
 
     // Edge resize snaps to the ruler's absolute grid, not to grid-sized
@@ -880,20 +938,21 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         }
     }
 
-    // Sixteen commands: draw, set, draw, nudge, draw, the double-click
-    // delete, add, two resizes, the three note-selection presses MERGED
-    // into one, the off-grid behind-the-back move, Ctrl+Left (all the
-    // scroll-follow presses merge into it), two time-selection moves
-    // (kept separate by the clean-index save point), the inline rename,
-    // and the mid-song voice change — plus, when the song has a second
-    // track, the header-drag track move and the editor commit the drop
-    // flushes. Undoing them all must restore the original bytes.
+    // Seventeen commands: draw, set, draw, nudge, draw, the double-click
+    // delete, the press-grown draw, add, two resizes, the three
+    // note-selection presses MERGED into one, the off-grid behind-the-back
+    // move, Ctrl+Left (all the scroll-follow presses merge into it), two
+    // time-selection moves (kept separate by the clean-index save point),
+    // the inline rename, and the mid-song voice change — plus, when the
+    // song has a second track, the header-drag track move and the editor
+    // commit the drop flushes. Undoing them all must restore the original
+    // bytes.
     int undos = 0;
     while (doc.undoStack()->canUndo() && undos < 100) {
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 16 + (reordered ? (dragRenamed ? 2 : 1) : 0))
+    if (undos != 17 + (reordered ? (dragRenamed ? 2 : 1) : 0))
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");

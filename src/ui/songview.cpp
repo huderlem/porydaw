@@ -1322,6 +1322,10 @@ protected:
             // double-click draws immediately (mouseDoubleClickEvent).
             m_leftPress = true;
             m_sv->clearSelection();
+            // Sound the clicked row at the latched velocity so a plain
+            // press gives the same pitch feedback a draw already does.
+            auditionKey(m_pressKey, m_lastVelocity);
+            m_auditioned = true;
         } else {
             // Read-only (no document): park the edit cursor at the click,
             // like the ruler; playback follows when running.
@@ -1389,6 +1393,16 @@ protected:
                    >= QApplication::startDragDistance()) {
             m_drag = m_rightShift ? Drag::TimeSel : Drag::Band;
             m_bandAud.clear();
+        }
+        if (m_leftPress && m_drag == Drag::None) {
+            // The pressed row's preview glisses with the cursor, like the
+            // keyboard column; a draw started below anchors on the new row.
+            const int key = yToKey(event->pos().y());
+            if (key != m_pressKey) {
+                m_pressKey = key;
+                auditionKey(key, m_lastVelocity);
+                m_auditioned = true;
+            }
         }
         if (m_leftPress && m_drag == Drag::None
             && std::abs(event->pos().x() - m_pressPos.x())
@@ -1768,7 +1782,9 @@ private:
         pending.velocity = m_lastVelocity;
         pending.track = uint8_t(m_sv->selectedTrack());
         m_sv->announceNote(pending);
-        auditionKey(m_drawKey, m_lastVelocity);
+        // The empty-space press already sounds this row; don't re-attack it.
+        if (m_soundingKey != m_drawKey)
+            auditionKey(m_drawKey, m_lastVelocity);
         m_auditioned = true;
         update();
     }
