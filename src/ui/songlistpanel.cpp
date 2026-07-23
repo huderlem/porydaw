@@ -10,6 +10,8 @@
 #include <QMenu>
 #include <QVBoxLayout>
 
+#include "ui/layout.h"
+
 #include <algorithm>
 
 namespace {
@@ -54,8 +56,11 @@ bool isSubsequence(const QString &needle, const QString &hay)
 SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
+    layout->setContentsMargins(::layout::space(::layout::Space::One),
+                               ::layout::space(::layout::Space::One),
+                               ::layout::space(::layout::Space::One),
+                               ::layout::space(::layout::Space::One));
+    layout->setSpacing(::layout::space(::layout::Space::One));
 
     m_search = new QLineEdit(this);
     m_search->setObjectName(QStringLiteral("songListSearch")); // findChild for tests
@@ -69,7 +74,7 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     layout->addWidget(m_search);
 
     auto *filters = new QHBoxLayout;
-    filters->setSpacing(4);
+    filters->setSpacing(::layout::space(::layout::Space::One));
     m_category = new QComboBox(this);
     m_category->setObjectName(QStringLiteral("songListCategory"));
     m_category->addItem(tr("All"), kAllCategory);
@@ -87,6 +92,7 @@ SongListPanel::SongListPanel(QWidget *parent) : QWidget(parent)
     layout->addLayout(filters);
 
     m_list = new QListWidget(this);
+    ::layout::configureListPositionIndicator(*m_list->verticalScrollBar());
     connect(m_list, &QListWidget::itemActivated, this, &SongListPanel::activateItem);
     m_list->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_list, &QListWidget::customContextMenuRequested, this,

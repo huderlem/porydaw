@@ -25,6 +25,7 @@
 #include "core/songdocument.h"
 #include "ui/m4asemantics.h"
 #include "ui/songview.h"
+#include "ui/typography.h"
 
 namespace eventlist {
 
@@ -307,6 +308,21 @@ public:
         FilterAll     = (1 << 7) - 1
     };
 
+    static bool usesNumericFont(int column)
+    {
+        return column == ColTick || column == ColChannel || column == ColData1
+            || column == ColData2;
+    }
+
+    static QFont numericFont(const QFont &source)
+    {
+        const auto style = source.style();
+        auto font = typography::bodyMono(source);
+        font.setStyle(style);
+        font.setLetterSpacing(QFont::AbsoluteSpacing, -0.5);
+        return font;
+    }
+
     explicit EventTableModel(SongView *sv, QObject *parent)
         : QAbstractTableModel(parent), m_sv(sv)
     {
@@ -456,6 +472,17 @@ public:
         const SmfTrack *tr = track();
         if (!tr || !index.isValid())
             return {};
+        if (role == Qt::FontRole) {
+            auto font = usesNumericFont(index.column())
+                ? numericFont(QApplication::font())
+                : QApplication::font();
+            if (index.row() == int(m_rows.size())) {
+                font.setItalic(true);
+                return font;
+            }
+            if (usesNumericFont(index.column()))
+                return font;
+        }
         if (role == Qt::TextAlignmentRole) {
             if (index.column() == ColTick || index.column() == ColChannel
                 || index.column() == ColData1 || index.column() == ColData2)
@@ -471,11 +498,6 @@ public:
             return {};
         }
         if (index.row() == int(m_rows.size())) { // end-of-track row
-            if (role == Qt::FontRole) {
-                QFont font;
-                font.setItalic(true);
-                return font;
-            }
             if (role == Qt::DisplayRole || role == Qt::EditRole) {
                 if (index.column() == ColTick)
                     return qulonglong(tr->endTick);
@@ -690,6 +712,7 @@ public:
             auto *box = new QSpinBox(parent);
             box->setRange(min, max);
             box->setFrame(false);
+            box->setFont(EventTableModel::numericFont(box->font()));
             return box;
         };
         switch (index.column()) {
@@ -698,6 +721,7 @@ public:
             // a large tick just by opening and committing the editor.
             auto *edit = new QLineEdit(parent);
             edit->setFrame(false);
+            edit->setFont(EventTableModel::numericFont(edit->font()));
             static const QRegularExpression digits(QStringLiteral("[0-9]{1,19}"));
             edit->setValidator(new QRegularExpressionValidator(digits, edit));
             return edit;
@@ -831,6 +855,9 @@ EventListView::EventListView(SongView *sv, QWidget *parent)
     m_table->setAlternatingRowColors(true);
     m_table->setFrameShape(QFrame::NoFrame);
     m_table->verticalHeader()->setDefaultSectionSize(m_table->fontMetrics().height() + 6);
+    auto rowIndexFont = typography::bodyMono(m_table->font());
+    rowIndexFont.setPixelSize(qMax(1, rowIndexFont.pixelSize() - 1));
+    m_table->verticalHeader()->setFont(rowIndexFont);
     m_table->horizontalHeader()->setHighlightSections(false);
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setColumnWidth(EventTableModel::ColTick, 70);

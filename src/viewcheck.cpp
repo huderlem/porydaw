@@ -118,7 +118,14 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
                     failures++;
                 }
             };
-            expectGrid("straight auto", std::max<uint64_t>(1, tpb / 8));
+            expectGrid("straight auto below 9 px",
+                       std::max<uint64_t>(1, tpb / 4));
+            zoom.pxPerBeat = 72.0;
+            view.applyViewState(zoom);
+            expectGrid("straight auto at 9 px",
+                       std::max<uint64_t>(1, tpb / 8));
+            zoom.pxPerBeat = 64.0;
+            view.applyViewState(zoom);
             view.setGridFeel(SongView::GridFeel::Triplet);
             expectGrid("triplet auto", std::max<uint64_t>(1, tpb / 6));
             view.setGridMinDenom(8);
@@ -141,7 +148,7 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
         view.setGridMinDenom(4);
         int badSnaps = 0;
         uint64_t badTick = 0;
-        view.forEachGridLine(0, tl->lengthTicks, [&](uint64_t t, bool, int) {
+        view.forEachGridLine(0, tl->lengthTicks, [&](uint64_t t, bool, int, int) {
             if (view.snapTick(double(t)) != t && badSnaps++ == 0)
                 badTick = t;
         });

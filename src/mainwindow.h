@@ -12,16 +12,25 @@
 #include "ui/enginesettingsdialog.h"
 
 class QAction;
+class QChildEvent;
 class QDockWidget;
 class QLabel;
 class QTabWidget;
+class QSettings;
+class QToolBar;
 class QTimer;
+class QWidget;
 class QUndoGroup;
 class PolyphonyPanel;
 class SmfFile;
 class SongListPanel;
 class SongView;
 class VoicegroupBrowser;
+
+namespace themes {
+class ThemeController;
+class ThemeDialog;
+}
 
 class MainWindow : public QMainWindow
 {
@@ -58,6 +67,8 @@ public:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
+    void childEvent(QChildEvent *event) override;
 
 private slots:
     void openProject();
@@ -85,6 +96,7 @@ private slots:
 
 private:
     void buildUi();
+    void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
     // On failure warns via dialog (interactive) or status bar (restore).
     bool openProjectDir(const QString &dir, bool interactive = true);
@@ -199,6 +211,7 @@ private:
     // The session's cfg (volume/reverb) merged with the global engine knobs
     // — everything AudioEngine::updateSettings applies.
     SongSettings songSettingsFor(const SongSession &session) const;
+    void refreshTransportIcons();
     void updateTransportActions();
     void synchronizePlayhead();
     void updateWindowTitle();
@@ -258,6 +271,10 @@ private:
     QDockWidget *m_vgDock = nullptr;
     PolyphonyPanel *m_polyPanel = nullptr;
     QDockWidget *m_polyDock = nullptr;
+    QToolBar *m_transportToolbar = nullptr;
+    std::unique_ptr<QSettings> m_themeSettings;
+    std::unique_ptr<themes::ThemeController> m_themeController;
+    std::unique_ptr<themes::ThemeDialog> m_themeDialog;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_importSampleAction = nullptr;
@@ -275,7 +292,12 @@ private:
     QAction *m_eventListAction = nullptr;
     QLabel *m_timeLabel = nullptr;
     QLabel *m_songLabel = nullptr;
-    QLabel *m_polyLabel = nullptr;
+    QWidget *m_polyMeter = nullptr;
+    QLabel *m_pcmValueLabel = nullptr;
+    QLabel *m_cgbValueLabel = nullptr;
+    QLabel *m_polyLostSeparator = nullptr;
+    QLabel *m_polyLostCaption = nullptr;
+    QLabel *m_polyLostLabel = nullptr;
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
 };

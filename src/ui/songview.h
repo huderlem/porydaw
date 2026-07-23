@@ -33,13 +33,8 @@ class OtherStrip;
 class PlayheadOverlay;
 class TrackHeaderPanel;
 
-// Fixed gutter geometry shared by every timeline-aligned child: the track
-// header column plus the piano-roll keyboard column. All children put
-// timeline tick 0 at the same global x.
-constexpr int kHeaderW = 210;
+// Fixed piano-key column width; exposed for roll interaction checks.
 constexpr int kKeyboardW = 52;
-constexpr int kGutterW = kHeaderW + kKeyboardW;
-
 // Full-width velocity handle (Reaper-style): with at least this much
 // vertical zoom, the top strip of a note drags velocity across its whole
 // width, and a thin horizontal bar inside the note shows the level
@@ -225,9 +220,11 @@ public:
     void focusContent();
 
     // Bar/beat grid over [tickBegin, tickEnd): calls fn(tick, isBarStart,
-    // barNumber) for every beat, honoring the song's time signature changes.
-    void forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
-                         const std::function<void(uint64_t, bool, int)> &fn) const;
+    // barNumber, beatNumber) for every beat, honoring the song's time
+    // signature changes.
+    void forEachGridLine(
+        uint64_t tickBegin, uint64_t tickEnd,
+        const std::function<void(uint64_t, bool, int, int)> &fn) const;
 
     // --- editing support for the child widgets ---
     // Snap-grid feel and floor (the ruler's grid controls): the zoom-adaptive

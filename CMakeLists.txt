@@ -39,32 +39,34 @@ if(UNIX)
 endif()
 
 # ---- porydaw application ----
-qt_add_executable(porydaw
-    src/main.cpp
+qt_add_library(porydaw_app STATIC
     src/mainwindow.cpp
     src/mainwindow.h
     src/songsession.h
-    src/tabcheck.cpp
-    src/eventviewcheck.cpp
-    src/rollcheck.cpp
-    src/rollcheckplayhead.cpp
-    src/rollcheckplayhead.h
-    src/viewcheck.cpp
-    src/roundtrip.cpp
-    src/editcheck.cpp
-    src/savecheck.cpp
-    src/onboardcheck.cpp
-    src/vgcheck.cpp
-    src/vgsavecheck.cpp
-    src/exportcheck.cpp
-    src/loopcheck.cpp
-    src/polycheck.cpp
-    src/primecheck.cpp
-    src/transportcheck.cpp
-    src/mkcheck.cpp
-    src/ignorecheck.cpp
-    src/samplecheck.cpp
-    src/sessioncheck.cpp
+    src/ui/layout.cpp
+    src/ui/layout.h
+    src/ui/typography.cpp
+    src/ui/typography.h
+    # Editable swatches and color policy stay separate from Qt runtime mapping;
+    # paint code consumes only fully resolved roles.
+    src/ui/theme/theme.h
+    src/ui/theme/themeruntime.cpp
+    src/ui/theme/themeruntime.h
+    src/ui/theme/theme_roles.h
+    src/ui/theme/color_math.cpp
+    src/ui/theme/color_math.h
+    src/ui/theme/presetcolors.h
+    src/ui/theme/trackidentitycolors.h
+    src/ui/theme/trackidentitycolors.cpp
+    src/ui/theme/themeresolver.cpp
+    src/ui/theme/themeresolver.h
+    src/ui/theme/themecontroller.cpp
+    src/ui/theme/themecontroller.h
+    src/ui/theme/oklchpicker.cpp
+    src/ui/theme/oklchpicker.h
+    src/ui/theme/themedialog.cpp
+    src/ui/theme/themedialog.h
+
     src/audio/audioengine.cpp
     src/audio/audioengine.h
     src/audio/auditionslots.cpp
@@ -110,6 +112,8 @@ qt_add_executable(porydaw
     src/project/voicegroupsource.h
     src/ui/m4asemantics.cpp
     src/ui/m4asemantics.h
+    src/ui/applicationstartup.cpp
+    src/ui/applicationstartup.h
     src/ui/newsongwizard.cpp
     src/ui/newsongwizard.h
     src/ui/sampleeditordialog.cpp
@@ -141,7 +145,43 @@ qt_add_executable(porydaw
     src/ui/viewsidecar.cpp
     src/ui/viewsidecar.h
 )
+target_include_directories(porydaw_app PUBLIC
+    src
+    ${PORYAAAA_DIR}/third_party
+    external/dr_libs
+    external/stb
+)
+target_link_libraries(porydaw_app PUBLIC Qt6::Widgets poryaaaa_engine)
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+    target_link_libraries(porydaw_app PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+endif()
 
+qt_add_executable(porydaw
+    src/main.cpp
+    src/tabcheck.cpp
+    src/eventviewcheck.cpp
+    src/rollcheck.cpp
+    src/rollcheckplayhead.cpp
+    src/rollcheckplayhead.h
+    src/viewcheck.cpp
+    src/roundtrip.cpp
+    src/editcheck.cpp
+    src/savecheck.cpp
+    src/onboardcheck.cpp
+    src/vgcheck.cpp
+    src/vgsavecheck.cpp
+    src/exportcheck.cpp
+    src/loopcheck.cpp
+    src/polycheck.cpp
+    src/primecheck.cpp
+    src/transportcheck.cpp
+    src/mkcheck.cpp
+    src/ignorecheck.cpp
+    src/samplecheck.cpp
+    src/sessioncheck.cpp
+    resources/fonts.qrc
+)
 qt_add_resources(porydaw "cursor_images"
     PREFIX "/cursors"
     BASE "${CMAKE_CURRENT_SOURCE_DIR}/resources"
@@ -151,16 +191,27 @@ qt_add_resources(porydaw "cursor_images"
         resources/right-drag.png
         resources/right-drag@2x.png
 )
-target_include_directories(porydaw PRIVATE
-    src
-    ${PORYAAAA_DIR}/third_party
-    external/dr_libs
-    external/stb
-)
-target_link_libraries(porydaw PRIVATE Qt6::Widgets poryaaaa_engine)
-if(UNIX AND NOT APPLE)
-    find_package(Threads REQUIRED)
-    target_link_libraries(porydaw PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(porydaw PRIVATE porydaw_app)
+
+include(CTest)
+if(BUILD_TESTING)
+    # Font and theme checks link the real application library but stay out of
+    # the shipping executable and its command-line surface.
+    qt_add_executable(porydaw_themechecks
+        src/ui/theme/themechecks_main.cpp
+        src/fontcheck.cpp
+        src/ui/theme/themecheck.cpp
+        src/ui/theme/themecheck.h
+        resources/fonts.qrc
+    )
+    target_link_libraries(porydaw_themechecks PRIVATE porydaw_app)
+
+    add_test(NAME porydaw_theme_checks
+             COMMAND porydaw_themechecks --themecheck)
+    add_test(NAME porydaw_fontcheck
+             COMMAND porydaw_themechecks --fontcheck)
+    set_tests_properties(porydaw_theme_checks porydaw_fontcheck
+        PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 if(WIN32)

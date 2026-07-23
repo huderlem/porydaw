@@ -5,9 +5,12 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDebug>
 #include <QDir>
 #include <QDockWidget>
 #include <QFormLayout>
+#include <QFontMetrics>
+#include <QHBoxLayout>
 #include <QLineEdit>
 #include <QRegularExpressionValidator>
 #include <QElapsedTimer>
@@ -16,7 +19,9 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
+#include <QPainter>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QSettings>
@@ -29,6 +34,7 @@
 #include <QToolBar>
 #include <QUndoGroup>
 
+#include <QChildEvent>
 #include <QCloseEvent>
 
 #include <algorithm>
@@ -45,9 +51,14 @@
 #include "ui/sampleeditordialog.h"
 #include "ui/sf2zonepicker.h"
 #include "ui/polyphonypanel.h"
+#include "ui/layout.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
+#include "ui/theme/themecontroller.h"
+#include "ui/theme/themedialog.h"
+#include "ui/theme/themeruntime.h"
+#include "ui/typography.h"
 #include "ui/viewsidecar.h"
 #include "ui/voicegroupbrowser.h"
 
@@ -58,6 +69,20 @@ constexpr int kVoiceEditCommandId = 0x7661; // 'va': voice-edit merge id
 
 const QString kLastOpenSongsKey = QStringLiteral("lastOpenSongs");
 const QString kLastSongLabelKey = QStringLiteral("lastSongLabel");
+
+QIcon tintedStandardIcon(QWidget &widget, QStyle::StandardPixmap icon,
+                         const QSize &size)
+{
+    auto pixmap = widget.style()->standardIcon(icon).pixmap(
+        size, widget.devicePixelRatioF());
+    QPainter painter(&pixmap);
+    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    // Transport glyphs use their own role so toolbar-label changes cannot
+    // silently retint playback controls.
+    painter.fillRect(pixmap.rect(), themes::color(themes::Role::transport_text));
+    painter.end();
+    return QIcon(pixmap);
+}
 } // namespace
 
 // A voicegroup voice edit, on its tab's undo stack: song and voicegroup
@@ -143,13 +168,20 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("porydaw"));
-    resize(1100, 680);
+    resize(::layout::fontPx(92), ::layout::fontPx(57));
     m_engineSettings = EngineSettings::load();
+    m_themeSettings = std::make_unique<QSettings>();
+    m_themeController =
+        std::make_unique<themes::ThemeController>(*qApp, *m_themeSettings);
+    m_themeController->restore();
+    m_themeDialog =
+        std::make_unique<themes::ThemeDialog>(*m_themeController, this);
     buildUi();
 
     QSettings settings;
     restoreGeometry(settings.value(QStringLiteral("windowGeometry")).toByteArray());
     restoreState(settings.value(QStringLiteral("windowState")).toByteArray());
+    updateDockTabFonts();
     m_songList->restoreFilters(
         settings.value(QStringLiteral("songFilterText")).toString(),
         settings.value(QStringLiteral("songFilterSort")).toInt(),
@@ -243,9 +275,14 @@ void MainWindow::buildUi()
     // Global GBA-accuracy knobs (SPEC §7); not song-scoped, so always enabled.
     editMenu->addAction(tr("&Engine Settings..."), this,
                         &MainWindow::openEngineSettings);
+    auto *viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(tr("&Theme..."), this, [this] {
+        m_themeDialog->show();
+        m_themeDialog->raise();
+        m_themeDialog->activateWindow();
+    });
 
     // View menu: piano roll vs raw MIDI event list, per tab.
-    QMenu *viewMenu = menuBar()->addMenu(tr("&View"));
     m_eventListAction = viewMenu->addAction(tr("MIDI &Event List"));
     m_eventListAction->setCheckable(true);
     m_eventListAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+E")));
@@ -262,13 +299,14 @@ void MainWindow::buildUi()
     m_importSampleAction->setEnabled(false);
 
     // Transport toolbar
-    QToolBar *transport = addToolBar(tr("Transport"));
+    QToolBar *transport = m_transportToolbar = addToolBar(tr("Transport"));
     // saveState() persists dock/toolbar layout by objectName only.
     transport->setObjectName(QStringLiteral("transportToolbar"));
     transport->setMovable(false);
+    transport->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    transport->setIconSize(transport->iconSize());
 
-    m_goToStartAction = new QAction(style()->standardIcon(QStyle::SP_MediaSkipBackward),
-                                    tr("Go to Start"), this);
+    m_goToStartAction = new QAction(tr("Go to Start"), this);
     m_goToStartAction->setShortcut(Qt::Key_Home);
     connect(m_goToStartAction, &QAction::triggered, this, [this] {
         if (m_active)
@@ -276,7 +314,7 @@ void MainWindow::buildUi()
     });
     transport->addAction(m_goToStartAction);
 
-    m_playAction = new QAction(style()->standardIcon(QStyle::SP_MediaPlay), tr("Play"), this);
+    m_playAction = new QAction(tr("Play"), this);
     connect(m_playAction, &QAction::triggered, this, [this] { startPlayback(); });
     transport->addAction(m_playAction);
 
@@ -294,32 +332,52 @@ void MainWindow::buildUi()
     });
     addAction(m_playPauseAction);
 
-    m_pauseAction = new QAction(style()->standardIcon(QStyle::SP_MediaPause), tr("Pause"), this);
+    m_pauseAction = new QAction(tr("Pause"), this);
     connect(m_pauseAction, &QAction::triggered, this, [this] { pausePlayback(); });
     transport->addAction(m_pauseAction);
 
-    m_stopAction = new QAction(style()->standardIcon(QStyle::SP_MediaStop), tr("Stop"), this);
+    m_stopAction = new QAction(tr("Stop"), this);
     connect(m_stopAction, &QAction::triggered, this, [this] { stopPlayback(); });
     transport->addAction(m_stopAction);
 
-    m_loopAction = new QAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Loop"), this);
+    m_loopAction = new QAction(tr("Loop"), this);
     m_loopAction->setCheckable(true);
     m_loopAction->setChecked(true);
     connect(m_loopAction, &QAction::toggled, this,
             [this](bool on) { m_audio.setLoopEnabled(on); });
     transport->addAction(m_loopAction);
+    refreshTransportIcons();
 
     transport->addSeparator();
     m_timeLabel = new QLabel(QStringLiteral("--:--.- / --:--.-"), this);
-    m_timeLabel->setContentsMargins(8, 0, 8, 0);
+    m_timeLabel->setFont(typography::bodyMono(font()));
+    m_timeLabel->setContentsMargins(::layout::space(::layout::Space::Three), 0,
+                                    ::layout::space(::layout::Space::Three), 0);
     transport->addWidget(m_timeLabel);
     m_songLabel = new QLabel(this);
     transport->addWidget(m_songLabel);
+
+    // Dock titles and the tab strip share this metric-derived outer height so
+    // neither clips when the platform font or small-icon metric changes.
+    const auto chromeHeight = layout::chromeRowHeight(
+        font(), style()->pixelMetric(QStyle::PM_SmallIconSize));
+    const auto installDockTitle = [chromeHeight](QDockWidget *target) {
+        auto *title = new QLabel(target->windowTitle(), target);
+        title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+        title->setContentsMargins(::layout::space(::layout::Space::Two), 0,
+                                  ::layout::space(::layout::Space::Two), 0);
+        title->setFixedHeight(chromeHeight);
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
+        QObject::connect(target, &QDockWidget::windowTitleChanged, title,
+                         &QLabel::setText);
+        target->setTitleBarWidget(title);
+    };
 
     // Song browser dock
     auto *dock = new QDockWidget(tr("Songs"), this);
     dock->setObjectName(QStringLiteral("songsDock"));
     dock->setFeatures(QDockWidget::DockWidgetMovable);
+    installDockTitle(dock);
     m_songList = new SongListPanel(dock);
     connect(m_songList, &SongListPanel::songActivated, this, &MainWindow::songActivated);
     connect(m_songList, &SongListPanel::songOpenInNewTabRequested, this,
@@ -339,6 +397,7 @@ void MainWindow::buildUi()
     m_vgDock = new QDockWidget(tr("Voicegroup"), this);
     m_vgDock->setObjectName(QStringLiteral("voicegroupDock"));
     m_vgDock->setFeatures(QDockWidget::DockWidgetMovable);
+    installDockTitle(m_vgDock);
     m_vgBrowser = new VoicegroupBrowser(m_vgDock);
     connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
             [this](int voice, int key, int velocity) {
@@ -462,6 +521,7 @@ void MainWindow::buildUi()
     m_tabs->setTabsClosable(true);
     m_tabs->setMovable(true);
     m_tabs->setDocumentMode(true);
+    m_tabs->tabBar()->setFixedHeight(chromeHeight);
     connect(m_tabs, &QTabWidget::currentChanged, this, &MainWindow::tabChanged);
     connect(m_tabs, &QTabWidget::tabCloseRequested, this, &MainWindow::closeTab);
     connect(m_tabs->tabBar(), &QTabBar::tabMoved, this,
@@ -469,14 +529,101 @@ void MainWindow::buildUi()
     setCentralWidget(m_tabs);
 
     // Status bar: polyphony meter
-    m_polyLabel = new QLabel(this);
-    statusBar()->addPermanentWidget(m_polyLabel);
+    m_polyMeter = new QWidget(this);
+    auto *polyLayout = new QHBoxLayout(m_polyMeter);
+    polyLayout->setContentsMargins(0, 0, 0, 0);
+    polyLayout->setSpacing(::layout::space(::layout::Space::Half));
+    const auto fieldInset = ::layout::space(::layout::Space::Half);
+    const auto valueFont = typography::bodyMono(font());
+    auto *pcmCaption = new QLabel(tr("PCM"), m_polyMeter);
+    m_pcmValueLabel = new QLabel(m_polyMeter);
+    m_pcmValueLabel->setObjectName(QStringLiteral("polyphonyPcmValue"));
+    m_pcmValueLabel->setFont(valueFont);
+    m_pcmValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_pcmValueLabel->setAttribute(Qt::WA_StyledBackground);
+    m_pcmValueLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_pcmValueLabel->setFixedWidth(
+        QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("15/15")) +
+        2 * fieldInset);
+    auto *separator = new QLabel(QStringLiteral("·"), m_polyMeter);
+    auto *cgbCaption = new QLabel(tr("CGB"), m_polyMeter);
+    m_cgbValueLabel = new QLabel(m_polyMeter);
+    m_cgbValueLabel->setObjectName(QStringLiteral("polyphonyCgbValue"));
+    m_cgbValueLabel->setFont(valueFont);
+    m_cgbValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_cgbValueLabel->setAttribute(Qt::WA_StyledBackground);
+    m_cgbValueLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_cgbValueLabel->setFixedWidth(
+        QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("4/4")) +
+        2 * fieldInset);
+    m_polyLostSeparator = new QLabel(QStringLiteral("·"), m_polyMeter);
+    m_polyLostLabel = new QLabel(m_polyMeter);
+    m_polyLostLabel->setObjectName(QStringLiteral("polyphonyLostValue"));
+    m_polyLostLabel->setFont(valueFont);
+    m_polyLostLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_polyLostLabel->setAttribute(Qt::WA_StyledBackground);
+    m_polyLostLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
+    m_polyLostCaption = new QLabel(tr("notes lost"), m_polyMeter);
+    m_polyLostCaption->setObjectName(QStringLiteral("polyphonyLostCaption"));
+    m_polyLostSeparator->hide();
+    m_polyLostLabel->hide();
+    m_polyLostCaption->hide();
+    polyLayout->addWidget(pcmCaption);
+    polyLayout->addWidget(m_pcmValueLabel);
+    polyLayout->addWidget(separator);
+    polyLayout->addWidget(cgbCaption);
+    polyLayout->addWidget(m_cgbValueLabel);
+    polyLayout->addWidget(m_polyLostSeparator);
+    polyLayout->addWidget(m_polyLostLabel);
+    polyLayout->addWidget(m_polyLostCaption);
+    statusBar()->addPermanentWidget(m_polyMeter);
+    m_polyMeter->hide();
 
     // Initial focus goes to the song list (via the panel's focus proxy), not
     // its filter box — first in tab order, which otherwise wins on show and
     // swallowed the first keystrokes into the search field.
     m_songList->setFocus();
 }
+
+void MainWindow::refreshTransportIcons()
+{
+    const auto size = m_transportToolbar->iconSize();
+    m_goToStartAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaSkipBackward, size));
+    m_playAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaPlay, size));
+    m_pauseAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaPause, size));
+    m_stopAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_MediaStop, size));
+    m_loopAction->setIcon(
+        tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
+}
+
+void MainWindow::updateDockTabFonts()
+{
+    const auto dockTabFont = typography::bold(font());
+    for (auto *tabBar :
+         findChildren<QTabBar *>(QString(), Qt::FindDirectChildrenOnly))
+        tabBar->setFont(dockTabFont);
+}
+
+void MainWindow::childEvent(QChildEvent *event)
+{
+    QMainWindow::childEvent(event);
+    if (event->added())
+        QTimer::singleShot(0, this, &MainWindow::updateDockTabFonts);
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if ((event->type() == QEvent::ApplicationPaletteChange ||
+         event->type() == QEvent::StyleChange) &&
+        m_goToStartAction)
+        refreshTransportIcons();
+}
+
 
 SongSession *MainWindow::sessionForWidget(QWidget *widget) const
 {
@@ -635,7 +782,13 @@ void MainWindow::activateSession(SongSession *session, bool force)
         m_registerAction->setEnabled(false);
         m_songLabel->clear();
         m_timeLabel->setText(QStringLiteral("--:--.- / --:--.-"));
-        m_polyLabel->clear();
+        m_polyMeter->hide();
+        m_pcmValueLabel->clear();
+        m_cgbValueLabel->clear();
+        m_polyLostLabel->clear();
+        m_polyLostSeparator->hide();
+        m_polyLostLabel->hide();
+        m_polyLostCaption->hide();
         m_songList->setCurrentSong(-1);
         updateWindowTitle();
         updateTransportActions();
@@ -2419,13 +2572,18 @@ void MainWindow::uiTick()
                                       formatTime(length)));
 
         const uint64_t lost = m_audio.polyLostTotal();
-        QString poly = tr("PCM %1/%2 · CGB %3/4")
-                           .arg(m_audio.activePcmChannels())
-                           .arg(m_audio.maxPcmChannels())
-                           .arg(m_audio.activeCgbChannels());
-        if (lost > 0)
-            poly += tr(" · %1 notes lost").arg(lost);
-        m_polyLabel->setText(poly);
+        m_pcmValueLabel->setText(
+            QStringLiteral("%1/%2")
+                .arg(m_audio.activePcmChannels())
+                .arg(m_audio.maxPcmChannels()));
+        m_cgbValueLabel->setText(
+            QStringLiteral("%1/4").arg(m_audio.activeCgbChannels()));
+        const bool hasLost = lost > 0;
+        m_polyLostLabel->setText(hasLost ? QString::number(lost) : QString());
+        m_polyLostSeparator->setVisible(hasLost);
+        m_polyLostLabel->setVisible(hasLost);
+        m_polyLostCaption->setVisible(hasLost);
+        m_polyMeter->show();
 
         if (m_polyDock->isVisible()) {
             AudioEngine::PolySnapshot snap;
