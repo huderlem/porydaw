@@ -73,15 +73,27 @@ const QString kLastSongLabelKey = QStringLiteral("lastSongLabel");
 QIcon tintedStandardIcon(QWidget &widget, QStyle::StandardPixmap icon,
                          const QSize &size)
 {
-    auto pixmap = widget.style()->standardIcon(icon).pixmap(
-        size, widget.devicePixelRatioF());
-    QPainter painter(&pixmap);
-    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    const auto tinted = [&](themes::Role role) {
+        auto pixmap = widget.style()->standardIcon(icon).pixmap(
+            size, widget.devicePixelRatioF());
+        QPainter painter(&pixmap);
+        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        painter.fillRect(pixmap.rect(), themes::color(role));
+        painter.end();
+        return pixmap;
+    };
     // Transport glyphs use their own role so toolbar-label changes cannot
-    // silently retint playback controls.
-    painter.fillRect(pixmap.rect(), themes::color(themes::Role::transport_text));
-    painter.end();
-    return QIcon(pixmap);
+    // silently retint playback controls. The hover (Active) and checked (On)
+    // variants follow the button ramp's paired text colors, so the glyph
+    // stays readable on the hover and checked fills the theme sheet paints.
+    QIcon result(tinted(themes::Role::transport_text));
+    result.addPixmap(tinted(themes::Role::button_hover_text), QIcon::Active,
+                     QIcon::Off);
+    result.addPixmap(tinted(themes::Role::button_pressed_text), QIcon::Normal,
+                     QIcon::On);
+    result.addPixmap(tinted(themes::Role::button_pressed_text), QIcon::Active,
+                     QIcon::On);
+    return result;
 }
 } // namespace
 

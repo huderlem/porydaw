@@ -81,15 +81,22 @@ QString trackHeaderStyleSheet(const Theme &theme) {
 }
 
 QString toolbarStyleSheet(const Theme &theme) {
+  // Transport buttons rest flat on the toolbar chrome but answer the mouse
+  // with the shared button interaction ramp; a press adds the focus outline
+  // so the click lands visibly without changing the icon's surface (the
+  // hovered icon tint stays readable). Checked state, ordered last, wins
+  // over hover and press so an engaged Loop never loses its fill.
   return QStringLiteral(
              "QToolBar{background-color:%1;color:%2;border-color:%3;}"
              "QToolBar#transportToolbar "
              "QToolButton{background-color:transparent;"
              "border-color:transparent;color:%4;}"
-             "QToolBar#transportToolbar QToolButton:hover,"
-             "QToolBar#transportToolbar QToolButton:pressed,"
+             "QToolBar#transportToolbar QToolButton:hover{"
+             "background-color:%6;border-color:transparent;color:%7;}"
+             "QToolBar#transportToolbar QToolButton:pressed{"
+             "background-color:%6;border-color:%8;color:%7;}"
              "QToolBar#transportToolbar QToolButton:checked{"
-             "background-color:transparent;border-color:transparent;color:%4;}"
+             "background-color:%9;border-color:transparent;color:%10;}"
              "QToolBar#transportToolbar QLabel{background-color:transparent;"
              "color:%4;}"
              "QToolBar::separator{background-color:%5;}")
@@ -97,7 +104,12 @@ QString toolbarStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::toolbar_text))
       .arg(colorName(theme, Role::toolbar_outline))
       .arg(colorName(theme, Role::transport_text))
-      .arg(colorName(theme, Role::toolbar_separator));
+      .arg(colorName(theme, Role::toolbar_separator))
+      .arg(colorName(theme, Role::button_hover_background))
+      .arg(colorName(theme, Role::button_hover_text))
+      .arg(colorName(theme, Role::focus_outline))
+      .arg(colorName(theme, Role::button_pressed_background))
+      .arg(colorName(theme, Role::button_pressed_text));
 }
 
 QString tabStyleSheet(const Theme &theme) {

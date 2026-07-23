@@ -236,9 +236,13 @@ listPositionIndicatorGeometryStyleSheet(const FontScaledGeometry &geometry) {
 }
 
 QString toolbarGeometryStyleSheet(const FontScaledGeometry &geometry) {
-  return QStringLiteral("QToolBar#transportToolbar QToolButton{border:%1;"
-                        "border-radius:%2;}")
-      .arg(pixels(geometry.zero), pixels(geometry.zero));
+  // A real (transparent at rest) border lets the theme sheet surface the
+  // pressed-state outline; the zero radius keeps the buttons flat.
+  return QStringLiteral("QToolBar#transportToolbar QToolButton{"
+                        "border:%1 solid transparent;border-radius:%2;"
+                        "padding:%3;}")
+      .arg(pixels(geometry.border), pixels(geometry.zero),
+           pixels(geometry.half));
 }
 
 QString buildGeometryStyleSheet(int baseFontPx,
