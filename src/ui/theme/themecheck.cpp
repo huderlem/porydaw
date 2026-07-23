@@ -116,6 +116,18 @@ void checkDerivedThemes(Reporter &reporter) {
     const auto theme = themes::derive(primary, accent);
     reporter.check(isComplete(theme),
                    "a derived theme has an unset or translucent role");
+    // Disabled text must be legible on the window surface yet clearly
+    // dimmer than enabled text; a derived theme once returned the most
+    // text-like readable candidate, making disabled items look enabled.
+    const auto disabledText = theme.color(themes::Role::disabled_text);
+    const auto windowText = theme.color(themes::Role::window_text);
+    reporter.check(
+        themes::contrastRatio(disabledText,
+                              theme.color(themes::Role::window_background)) >=
+            4.5,
+        "derived disabled text is not readable on the window surface");
+    reporter.check(themes::contrastRatio(disabledText, windowText) >= 1.3,
+                   "derived disabled text is indistinguishable from enabled");
     const auto softened = themes::withGridLineContrast(theme, 0);
     const auto unchanged = themes::withGridLineContrast(theme, 50);
     const auto strengthened = themes::withGridLineContrast(theme, 100);

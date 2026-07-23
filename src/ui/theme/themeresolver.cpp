@@ -216,11 +216,13 @@ QColor keepChromeReadable(const QColor &candidate, const QColor &neutralBase,
 }
 
 // Disabled text is shared by many Qt controls, so validate it against every
-// surface where the platform style may place it.
+// surface where the platform style may place it. The walk starts at the most
+// faded candidate and stops at the first readable one: disabled must stay
+// legible, but its point is looking clearly dimmer than enabled text.
 QColor deriveDisabledText(const QColor &globalText,
                           const QColor &windowBackground,
                           const std::initializer_list<QColor> &fills) {
-  for (auto step = 19; step >= 0; --step) {
+  for (auto step = 0; step <= 19; ++step) {
     const auto textWeight = step * 0.05;
     const auto candidate = mixColors(globalText, windowBackground, textWeight);
     auto readable = true;
