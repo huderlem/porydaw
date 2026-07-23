@@ -565,6 +565,12 @@ protected:
                  tickBottom);
         });
 
+        // Bar numbers are the primary labels; the in-between beats only earn
+        // a "bar.beat" label once a beat spans several label-widths, so the
+        // ruler stays sparse until the zoom genuinely has room for detail.
+        const QColor barTextColor =
+            themes::color(themes::Role::song_view_primary_text);
+        const double beatLabelZoomFactor = 3.0;
         int lastLabelRight = area.left() - labelGap;
         m_sv->forEachGridLine(uint64_t(t0), uint64_t(t1),
                               [&](uint64_t tick, bool isBar, int barNumber, int beatNumber) {
@@ -573,8 +579,9 @@ protected:
               QStringLiteral("%1.%2").arg(barNumber).arg(beatNumber);
           const bool showBeatLabels =
               m_sv->pxPerBeat() >=
-              barCapWidth + 2 * labelGap + beatDetailReserve +
-                  tickMetrics.horizontalAdvance(detailedLabel);
+              beatLabelZoomFactor *
+                  (barCapWidth + 2 * labelGap + beatDetailReserve +
+                   tickMetrics.horizontalAdvance(detailedLabel));
           if (!isBar && !showBeatLabels) {
             if (drawBeatTicks) {
                                   p.setPen(indicatorColor);
@@ -584,8 +591,7 @@ protected:
             return;
           }
           const auto label =
-              showBeatLabels ? detailedLabel :
-                                                 QString::number(barNumber);
+              isBar ? QString::number(barNumber) : detailedLabel;
           const int labelWidth = tickMetrics.horizontalAdvance(label);
           const int labelX = x + barCapWidth;
           if (labelX < lastLabelRight + labelGap) {
@@ -597,10 +603,14 @@ protected:
             return;
           }
           p.setPen(indicatorColor);
-          const int indicatorTop = ticks.top() - indicatorRise;
-          p.drawLine(x, indicatorTop, x, tickBottom);
-          p.drawLine(x, indicatorTop, x + barCapWidth, indicatorTop);
-          p.setPen(textColor);
+          if (isBar) {
+            const int indicatorTop = ticks.top() - indicatorRise;
+            p.drawLine(x, indicatorTop, x, tickBottom);
+            p.drawLine(x, indicatorTop, x + barCapWidth, indicatorTop);
+          } else {
+            p.drawLine(x, ticks.center().y() - indicatorRise, x, tickBottom);
+          }
+          p.setPen(isBar ? barTextColor : textColor);
           p.drawText(labelX, tickBaseline, label);
           lastLabelRight = labelX + labelWidth;
                               });
