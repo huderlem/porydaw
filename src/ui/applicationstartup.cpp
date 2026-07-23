@@ -1,6 +1,7 @@
 #include "applicationstartup.h"
 
 #include "layout.h"
+#include "theme/themeresolver.h"
 #include "theme/themeruntime.h"
 #include "typography.h"
 
@@ -22,6 +23,11 @@ bool initializeApplication(QApplication &application)
     if (!baseFontPx || !layout::initialize(application, *baseFontPx))
         return false;
     themes::initialize(application);
+    // Every code path that paints — including the --*check harnesses, which
+    // never construct MainWindow or its ThemeController — needs a complete
+    // theme behind themes::color(). Vanilla here is the baseline; the main
+    // window's ThemeController::restore() replaces it with the stored choice.
+    themes::apply(application, themes::vanilla());
     return true;
 }
 
