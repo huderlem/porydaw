@@ -173,6 +173,25 @@ void checkDerivedThemes(Reporter &reporter) {
                    "the fixed theme open-song tab gutter does not use theme "
                    "chrome");
   }
+  // Roles that render text or affordances directly on the automation lane
+  // surface must clear the WCAG UI-component contrast bar in every theme;
+  // the fixed themes shipped with accent-on-surface readouts once already.
+  auto laneLegible = [&](const themes::Theme &theme, const char *what) {
+    const auto surface =
+        theme.color(themes::Role::song_view_piano_roll_background);
+    for (const auto role : {themes::Role::song_view_edit_preview_outline,
+                            themes::Role::song_view_add_automation_lane_action})
+      reporter.check(themes::contrastRatio(theme.color(role), surface) >= 3.0,
+                     what);
+  };
+  laneLegible(themes::vanilla(), "a Vanilla lane readout is unreadable");
+  laneLegible(themes::darkNeutralHigh(),
+              "a Dark Neutral High lane readout is unreadable");
+  laneLegible(themes::immaterial(), "an Immaterial lane readout is unreadable");
+  laneLegible(themes::derive(QColor("#2B2D31"), QColor("#66CCFF")),
+              "a dark derived lane readout is unreadable");
+  laneLegible(themes::derive(QColor("#F2F2F2"), QColor("#0055AA")),
+              "a light derived lane readout is unreadable");
 }
 
 

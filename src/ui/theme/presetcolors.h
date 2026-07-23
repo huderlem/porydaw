@@ -231,7 +231,7 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::window_text,
     PresetColor::selection_background,
     PresetColor::accent,
-    PresetColor::accent,
+    PresetColor::window_text,
     PresetColor::playhead,
     PresetColor::control_pressed_background,
     PresetColor::scrollbar_handle,
@@ -247,7 +247,7 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::selection_background,
     PresetColor::accent,
     PresetColor::outline,
-    PresetColor::accent,
+    PresetColor::secondary_text,
 };
 
 static_assert(rolePresetColors.size() == roleCount);

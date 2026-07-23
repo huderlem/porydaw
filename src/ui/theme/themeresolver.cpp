@@ -550,7 +550,7 @@ Theme derive(const QColor &primary, const QColor &accent) {
   theme.color(Role::song_view_automation_default_curve) = selectionBackground;
   theme.color(Role::song_view_automation_tempo_curve) = accent;
   theme.color(Role::song_view_file_event_marker) = outline;
-  theme.color(Role::song_view_add_automation_lane_action) = accent;
+  theme.color(Role::song_view_add_automation_lane_action) = disabledText;
 
   return theme;
 }
