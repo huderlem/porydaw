@@ -137,8 +137,34 @@ int runTransportCheck()
         return 1;
     }
     engine.loadSong(timeline.get(), &tvg.vg, SongSettings{});
+    // Hot seek must only publish a request; restarting the Core Audio device
+    // here used to block the UI thread for tens of milliseconds.
+    qint64 slowestSeekNs = 0;
+    const uint64_t midSong = timeline->lengthSamples / 2;
+    for (int i = 0; i < 5; i++) {
+        QElapsedTimer seekTimer;
+        seekTimer.start();
+        engine.seek(i & 1 ? 0 : midSong);
+        slowestSeekNs = std::max(slowestSeekNs, seekTimer.nsecsElapsed());
+    }
+    if (slowestSeekNs > 20'000'000)
+        fail("seek blocked instead of publishing to the audio thread");
+    if (!waitFor([&] { return engine.playheadSamples() == midSong; }, 2000))
+        fail("audio thread did not apply the latest seek");
+    engine.seek(0);
+    if (!waitFor([&] { return engine.playheadSamples() == 0; }, 2000))
+        fail("audio thread did not apply the reset seek");
 
     const auto active = [&] { return engine.activePcmChannels(); };
+    engine.play();
+    if (!waitFor([&] { return engine.playheadSamples() > 0; }, 2000)) {
+        fail("playback did not start for pending-seek cancellation check");
+    } else {
+        engine.seek(midSong);
+        engine.stop();
+        if (!waitFor([&] { return engine.playheadSamples() == 0; }, 2000))
+            fail("Stop did not cancel a pending seek");
+    }
 
     // A short audition whose note-off has already gone out, leaving a
     // ringing slow-release tail — the reported symptom. Fails the whole

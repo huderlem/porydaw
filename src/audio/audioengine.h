@@ -70,10 +70,8 @@ public:
     // Borrowed like loadSong's; the old timeline may be freed once this
     // returns.
     void updateTimeline(const MidiTimeline *timeline);
-    // Cold: jumps the playhead. Releases sounding notes and chases controller
-    // state so CC/program/bend/tempo are exact at the landing position. Works
-    // in any transport state; playing from Stopped starts wherever the last
-    // seek (or the stop-time reset to 0) left the playhead.
+    // Hot: requests a jump at the next audio callback. Releases sounding
+    // notes and chases controller state at the landing position.
     void seek(uint64_t samplePos);
     // Cold: re-applies song settings (master volume, reverb) to the engine.
     void updateSettings(const SongSettings &settings);
@@ -198,6 +196,7 @@ private:
     static void dataCallback(ma_device *device, void *output, const void *input,
                              uint32_t frameCount);
     void process(float *interleavedOut, uint32_t frameCount);
+    void applyPendingSeek();
     void applyTransportTransition();
     void cutAllSound();
     void applyMuteTransition();
@@ -233,6 +232,9 @@ private:
     std::atomic<bool> m_loopEnabled{true};
     std::atomic<uint32_t> m_muteMask{0};
     std::atomic<uint32_t> m_soloMask{0};
+    // Avoid stop/start stalls: publish the latest seek for the audio callback.
+    static constexpr uint64_t kNoPendingSeek = UINT64_MAX;
+    std::atomic<uint64_t> m_pendingSeek{kNoPendingSeek};
     // Preview-note command: generation<<24 | track<<16 | key<<8 | velocity.
     // The generation counter makes every request distinct so repeated notes
     // are seen by the audio thread.
