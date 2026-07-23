@@ -12,6 +12,7 @@
 #include <QComboBox>
 #include <QCursor>
 #include <QEvent>
+#include <QHeaderView>
 #include <QLineEdit>
 #include <QPaintEvent>
 #include <QPixmap>
@@ -21,6 +22,7 @@
 #include <QSlider>
 #include <QStyleOptionComboBox>
 #include <QTabBar>
+#include <QTableWidget>
 #include <QTemporaryDir>
 
 #include <array>
@@ -281,6 +283,35 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application) {
   }
   reporter.check(foundHoverColor,
                  "the painted ComboBox arrow lane lost its hover color");
+  // The event list's playhead tint and the polyphony debugger's drop
+  // flash arrive as model background brushes; a stylesheet ::item
+  // background once painted over both. Alternate-row fills must still
+  // come from the theme.
+  QTableWidget table(2, 1);
+  table.horizontalHeader()->hide();
+  table.verticalHeader()->hide();
+  table.setShowGrid(false);
+  table.setAlternatingRowColors(true);
+  table.setItem(0, 0, new QTableWidgetItem);
+  table.setItem(1, 0, new QTableWidgetItem);
+  table.resize(80, 80);
+  table.show();
+  application.processEvents();
+  const auto cellColor = [&](int row) {
+    const auto rect = table.visualItemRect(table.item(row, 0));
+    return table.viewport()->grab().toImage().pixelColor(rect.center());
+  };
+  reporter.check(cellColor(0) == themes::color(themes::Role::item_background),
+                 "an item view row is not filled with the theme item "
+                 "background");
+  reporter.check(
+      cellColor(1) == themes::color(themes::Role::item_alternate_background),
+      "an alternate item view row lost the theme alternate fill");
+  const auto flash = QColor(255, 0, 0);
+  table.item(0, 0)->setBackground(flash);
+  reporter.check(cellColor(0) == flash,
+                 "a model background brush is painted over by the item "
+                 "stylesheet (playhead tint, polyphony flash)");
   themes::ThemeDialog dialog(controller);
   auto *custom =
       dialog.findChild<QRadioButton *>(QStringLiteral("customModeButton"));

@@ -462,10 +462,14 @@ QString itemViewStyleSheet(const Theme &theme) {
              "QAbstractItemView{background-color:%1;color:%2;"
              "border-color:%3;alternate-background-color:%4;"
              "selection-background-color:%5;selection-color:%6;}"
-             "QAbstractItemView::item{background-color:%1;color:%2;"
-             "border-color:transparent;}"
-             "QAbstractItemView::item:alternate{background-color:%4;"
-             "color:%7;}"
+             // The plain ::item rules carry palette properties only (no
+             // background, border, or box): anything drawable here makes
+             // QStyleSheetStyle paint the rule instead of the model's
+             // BackgroundRole brush (event-list playhead tint, polyphony
+             // flash). Base and alternate fills come from the view-level
+             // rule above.
+             "QAbstractItemView::item{color:%2;}"
+             "QAbstractItemView::item:alternate{color:%7;}"
              "QAbstractItemView::item:hover{background-color:%8;color:%9;}"
              "QAbstractItemView::item:selected{background-color:%5;"
              "color:%6;}")
