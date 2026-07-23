@@ -449,6 +449,7 @@ Theme derive(const QColor &primary, const QColor &accent) {
 
   theme.color(Role::indicator_checked_background) = accent;
   theme.color(Role::indicator_checked_outline) = accent;
+  theme.color(Role::indicator_check_mark) = blackOrWhiteByWorstContrast({accent});
 
   // Track selection follows the item surface, while Mute and Solo retain their
   // domain colors; each state gets text chosen against its own fill.

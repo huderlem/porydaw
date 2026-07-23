@@ -181,57 +181,121 @@ QString inputStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::disabled_text));
 }
 
-// The stylesheet renderer draws no fallback arrow once the spin buttons are
-// styled, and its border-triangle emulation fills the whole border box, so
-// real arrow glyphs are rendered to per-color image files the stylesheet can
-// reference. The color-keyed name makes regeneration a cheap existence check
-// and keeps a live preview from ever reading a half-written previous file.
-QString spinArrowImagePath(const QColor &color, bool pointsUp,
-                           int devicePixelRatio) {
+// The stylesheet renderer draws none of the base style's glyph art once a
+// subcontrol is styled (and its border-triangle emulation fills the whole
+// border box), so spin arrows and check marks are rendered to per-color
+// image files the stylesheet can reference. The color-keyed name makes
+// regeneration a cheap existence check and keeps a live preview from ever
+// reading a half-written previous file.
+enum class Glyph { SpinUp, SpinDown, CheckMark };
+
+void paintGlyph(QPainter &painter, Glyph glyph, const QColor &color, int width,
+                int height) {
+  painter.setRenderHint(QPainter::Antialiasing);
+  switch (glyph) {
+  case Glyph::SpinUp:
+  case Glyph::SpinDown: {
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color);
+    const auto peakX = width / 2.0;
+    painter.drawPolygon(glyph == Glyph::SpinUp
+                            ? QPolygonF{{0.0, qreal(height)},
+                                        {qreal(width), qreal(height)},
+                                        {peakX, 0.0}}
+                            : QPolygonF{{0.0, 0.0},
+                                        {qreal(width), 0.0},
+                                        {peakX, qreal(height)}});
+    return;
+  }
+  case Glyph::CheckMark: {
+    auto pen = QPen(color, qMax(2.0, height * 0.18));
+    pen.setCapStyle(Qt::RoundCap);
+    pen.setJoinStyle(Qt::RoundJoin);
+    painter.setPen(pen);
+    painter.setBrush(Qt::NoBrush);
+    const QPointF points[] = {{width * 0.16, height * 0.52},
+                              {width * 0.42, height * 0.76},
+                              {width * 0.84, height * 0.24}};
+    painter.drawPolyline(points, 3);
+    return;
+  }
+  }
+}
+
+QSize glyphSize(Glyph glyph) {
+  switch (glyph) {
+  case Glyph::SpinUp:
+  case Glyph::SpinDown:
+    // An odd width keeps the triangle's peak on a whole pixel column.
+    return {layout::fontPx(0.45) | 1, qMax(2, layout::fontPx(0.28))};
+  case Glyph::CheckMark: {
+    const auto side = qMax(6, layout::fontPx(0.62));
+    return {side, side};
+  }
+  }
+  Q_UNREACHABLE();
+}
+
+QString glyphName(Glyph glyph) {
+  switch (glyph) {
+  case Glyph::SpinUp:
+    return QStringLiteral("spin-up");
+  case Glyph::SpinDown:
+    return QStringLiteral("spin-down");
+  case Glyph::CheckMark:
+    return QStringLiteral("check");
+  }
+  Q_UNREACHABLE();
+}
+
+QString glyphImagePath(Glyph glyph, const QColor &color,
+                       int devicePixelRatio) {
   const auto directory = QDir::temp().filePath(QStringLiteral("porydaw-theme"));
   if (!QDir().mkpath(directory))
     return {};
   const auto path =
-      QStringLiteral("%1/spin-%2-%3%4.png")
-          .arg(directory, pointsUp ? QStringLiteral("up") : QStringLiteral("down"),
-               color.name(QColor::HexRgb).mid(1),
+      QStringLiteral("%1/%2-%3%4.png")
+          .arg(directory, glyphName(glyph), color.name(QColor::HexRgb).mid(1),
                devicePixelRatio > 1
                    ? QStringLiteral("@%1x").arg(devicePixelRatio)
                    : QString());
   if (QFile::exists(path))
     return path;
-  // An odd width keeps the triangle's peak on a whole pixel column.
-  const auto width = (layout::fontPx(0.45) | 1) * devicePixelRatio;
-  const auto height = qMax(2, layout::fontPx(0.28)) * devicePixelRatio;
-  QImage image(width, height, QImage::Format_ARGB32_Premultiplied);
+  const auto size = glyphSize(glyph);
+  QImage image(size * devicePixelRatio, QImage::Format_ARGB32_Premultiplied);
   image.fill(Qt::transparent);
   QPainter painter(&image);
-  painter.setRenderHint(QPainter::Antialiasing);
-  painter.setPen(Qt::NoPen);
-  painter.setBrush(color);
-  const auto peakX = width / 2.0;
-  painter.drawPolygon(pointsUp
-                          ? QPolygonF{{0.0, qreal(height)},
-                                      {qreal(width), qreal(height)},
-                                      {peakX, 0.0}}
-                          : QPolygonF{{0.0, 0.0},
-                                      {qreal(width), 0.0},
-                                      {peakX, qreal(height)}});
+  paintGlyph(painter, glyph, color, size.width() * devicePixelRatio,
+             size.height() * devicePixelRatio);
   painter.end();
   return image.save(path) ? path : QString();
 }
 
+// Returns the 1x path after also materializing the @2x high-DPI variant.
+QString glyphImage(Glyph glyph, const QColor &color) {
+  glyphImagePath(glyph, color, 2);
+  return glyphImagePath(glyph, color, 1);
+}
+
 QString spinArrowStyleSheet(const Theme &theme) {
   const auto color = theme.color(Role::spin_button_text);
-  const auto up = spinArrowImagePath(color, true, 1);
-  const auto down = spinArrowImagePath(color, false, 1);
-  spinArrowImagePath(color, true, 2); // @2x variants for high-DPI lookups
-  spinArrowImagePath(color, false, 2);
+  const auto up = glyphImage(Glyph::SpinUp, color);
+  const auto down = glyphImage(Glyph::SpinDown, color);
   if (up.isEmpty() || down.isEmpty())
     return {};
   return QStringLiteral("QAbstractSpinBox::up-arrow{image:url(%1);}"
                         "QAbstractSpinBox::down-arrow{image:url(%2);}")
       .arg(up, down);
+}
+
+QString checkMarkStyleSheet(const Theme &theme) {
+  const auto check =
+      glyphImage(Glyph::CheckMark, theme.color(Role::indicator_check_mark));
+  if (check.isEmpty())
+    return {};
+  return QStringLiteral("QCheckBox::indicator:checked,"
+                        "QMenu::indicator:checked{image:url(%1);}")
+      .arg(check);
 }
 
 QString spinBoxStyleSheet(const Theme &theme) {
@@ -287,23 +351,25 @@ QString indicatorStyleSheet(const Theme &theme) {
              "QCheckBox,QRadioButton{background-color:transparent;color:%1;"
              "border-color:transparent;}"
              "QCheckBox:disabled,QRadioButton:disabled{color:%2;}"
-             "QCheckBox::indicator,QRadioButton::indicator{"
+             "QCheckBox::indicator,QRadioButton::indicator,QMenu::indicator{"
              "background-color:%3;border-color:%4;}"
              "QCheckBox::indicator:hover,QRadioButton::indicator:hover{"
              "background-color:%5;border-color:%4;}"
              "QCheckBox::indicator:checked,QRadioButton::indicator:checked,"
+             "QMenu::indicator:checked,"
              "QCheckBox::indicator:indeterminate{background-color:%6;"
              "border-color:%7;}"
              "QCheckBox::indicator:disabled,QRadioButton::indicator:disabled{"
              "background-color:%8;border-color:%4;}")
-      .arg(colorName(theme, Role::indicator_text))
-      .arg(colorName(theme, Role::disabled_text))
-      .arg(colorName(theme, Role::indicator_background))
-      .arg(colorName(theme, Role::indicator_outline))
-      .arg(colorName(theme, Role::indicator_hover_background))
-      .arg(colorName(theme, Role::indicator_checked_background))
-      .arg(colorName(theme, Role::indicator_checked_outline))
-      .arg(colorName(theme, Role::indicator_disabled_background));
+             .arg(colorName(theme, Role::indicator_text))
+             .arg(colorName(theme, Role::disabled_text))
+             .arg(colorName(theme, Role::indicator_background))
+             .arg(colorName(theme, Role::indicator_outline))
+             .arg(colorName(theme, Role::indicator_hover_background))
+             .arg(colorName(theme, Role::indicator_checked_background))
+             .arg(colorName(theme, Role::indicator_checked_outline))
+             .arg(colorName(theme, Role::indicator_disabled_background)) +
+         checkMarkStyleSheet(theme);
 }
 
 QString menuBarStyleSheet(const Theme &theme) {
@@ -327,7 +393,9 @@ QString menuStyleSheet(const Theme &theme) {
              "QMenu{background-color:%1;color:%2;border-color:%3;}"
              "QMenu::item{background-color:%1;color:%2;border-color:%3;}"
              "QMenu::item:selected{background-color:%4;color:%5;}"
-             "QMenu::item:pressed,QMenu::item:checked{"
+             // Checked items keep the plain item background: the indicator
+             // square carries the state, as native menus do.
+             "QMenu::item:pressed{"
              "background-color:%6;color:%7;}"
              "QMenu::item:disabled{color:%8;}"
              "QMenu::separator{background-color:%9;}")

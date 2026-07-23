@@ -188,6 +188,17 @@ QString comfortGeometryStyleSheet(const FontScaledGeometry &geometry) {
           "QRadioButton::indicator{border-radius:%3;}")
           .arg(pixels(geometry.one), pixels(geometry.indicatorExtent),
                pixels((geometry.indicatorExtent + 2 * geometry.border) / 2));
+  // Checkable menu items share the checkbox indicator; every item indents
+  // past the indicator column so labels align whether checkable or not.
+  sheet += QStringLiteral(
+               "QMenu::item{padding-left:%1;}"
+               "QMenu::indicator{width:%2;height:%2;left:%3;"
+               "subcontrol-origin:border;subcontrol-position:left center;"
+               "border:%4 solid transparent;}")
+               .arg(pixels(geometry.indicatorExtent + 2 * geometry.one +
+                           2 * geometry.border),
+                    pixels(geometry.indicatorExtent), pixels(geometry.one),
+                    pixels(geometry.border));
   sheet += QStringLiteral(
                "QGroupBox{margin-top:%1;padding-top:%2;}"
                "QGroupBox::title{subcontrol-origin:margin;"

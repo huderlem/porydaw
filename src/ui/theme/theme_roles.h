@@ -74,6 +74,7 @@ enum class Role {
   indicator_outline,
   indicator_checked_outline,
   indicator_disabled_background,
+  indicator_check_mark,
 
   // QMenuBar, popup menus, and their items.
   menu_bar_background,
