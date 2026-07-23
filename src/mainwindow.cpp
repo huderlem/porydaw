@@ -2507,7 +2507,7 @@ void MainWindow::newVoicegroup()
     updateVoicegroupBrowser(); // the selector's choices now include it
     statusBar()->showMessage(
         tr("Created sound/voicegroups/%1.inc — assign it with the voicegroup "
-           "selector above the instrument list (voicegroup _%1).")
+           "selector above the instrument list (voicegroup_%1).")
             .arg(name),
         10000);
 }

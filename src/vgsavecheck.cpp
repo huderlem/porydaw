@@ -211,19 +211,21 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
               "voicegroup file changed during the -G switch round trip");
 
         // 5b. The dock's voicegroup selector drives the same switch as an
-        // undoable cfg edit, and undo refreshes the selector's text.
+        // undoable cfg edit, and undo refreshes the selector's text. The
+        // selector shows args in display form: the leading underscore folds
+        // into the fixed "voicegroup_" prefix.
         QComboBox *vgCombo =
             m_vgBrowser->findChild<QComboBox *>(QStringLiteral("vgArgCombo"));
         if (check(vgCombo != nullptr, "no voicegroup selector in the dock")) {
             const QString originalArg = tab->doc.cfg().voicegroupArg;
-            const QString shown = originalArg.isEmpty()
-                                      ? QStringLiteral("_dummy")
-                                      : originalArg;
+            const QString shown = SongRegistry::voicegroupDisplayName(
+                originalArg.isEmpty() ? QStringLiteral("_dummy") : originalArg);
             check(vgCombo->isEnabled() && vgCombo->currentText() == shown,
                   "dock selector does not show the song's voicegroup");
-            check(vgCombo->findText(otherArg) >= 0,
+            check(vgCombo->findText(SongRegistry::voicegroupDisplayName(otherArg))
+                      >= 0,
                   "dock selector is missing a known voicegroup arg");
-            vgCombo->setCurrentText(otherArg);
+            vgCombo->setCurrentText(SongRegistry::voicegroupDisplayName(otherArg));
             QMetaObject::invokeMethod(vgCombo, "activated", Qt::DirectConnection,
                                       Q_ARG(int, 0));
             check(tab->doc.cfg().voicegroupArg == otherArg && tab->doc.isDirty(),

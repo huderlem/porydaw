@@ -117,13 +117,16 @@ public:
             QDir(project->root() + QStringLiteral("/sound/voicegroups")).exists();
         if (m_canCreateVoicegroup)
             m_voicegroup->addItem(newVoicegroupText());
-        m_voicegroup->addItems(SongRegistry::voicegroupArgs(project->root()));
+        m_vgArgs = SongRegistry::voicegroupArgs(project->root());
+        const QStringList &args = m_vgArgs;
+        for (const QString &arg : args)
+            m_voicegroup->addItem(SongRegistry::voicegroupDisplayName(arg));
         // Default to the first existing voicegroup, not the create entry.
         if (m_canCreateVoicegroup && m_voicegroup->count() > 1)
             m_voicegroup->setCurrentIndex(1);
         m_voicegroup->setToolTip(
-            tr("mid2agb -G: appended to \"voicegroup\" to form the symbol."));
-        form->addRow(tr("&Voicegroup (-G):"), m_voicegroup);
+            tr("The symbol is \"voicegroup_\" + this name (mid2agb -G)."));
+        form->addRow(tr("&Voicegroup:"), m_voicegroup);
 
         m_volume = new QSpinBox(this);
         m_volume->setRange(0, 127);
@@ -181,7 +184,8 @@ public:
         SongCfg cfg;
         cfg.voicegroupArg = newVoicegroupSelected()
                                 ? QStringLiteral("_") + m_identity->label()
-                                : m_voicegroup->currentText().trimmed();
+                                : SongRegistry::voicegroupArgFromDisplay(
+                                      m_voicegroup->currentText().trimmed(), m_vgArgs);
         cfg.masterVolume = m_volume->value();
         cfg.reverb = m_reverbOn->isChecked() ? m_reverb->value() : -1;
         cfg.priority = m_priority->value();
@@ -201,6 +205,7 @@ private:
     DecompProject *m_project;
     const IdentityPage *m_identity;
     bool m_canCreateVoicegroup = false;
+    QStringList m_vgArgs;
     QComboBox *m_voicegroup;
     QSpinBox *m_volume;
     QCheckBox *m_reverbOn;

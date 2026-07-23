@@ -19,6 +19,8 @@
 
 #include "ui/m4asemantics.h"
 
+#include "project/songregistry.h"
+
 namespace {
 constexpr int kAuditionKey = 60; // middle C; drumkits play that key's percussion
 constexpr int kAuditionVelocity = 112;
@@ -117,14 +119,15 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(::layout::space(::layout::Space::Half));
 
-    // The song's voicegroup (mid2agb -G), shown as the symbol it forms:
-    // a fixed "voicegroup" prefix and the editable arg. Picking or typing
-    // another arg re-targets the song (an undoable cfg edit, via the owner).
+    // The song's voicegroup (mid2agb -G), shown as the symbol it forms: a
+    // fixed "voicegroup_" prefix and the editable name (the -G arg with its
+    // leading underscore assumed into the prefix). Picking or typing another
+    // name re-targets the song (an undoable cfg edit, via the owner).
     auto *vgRow = new QWidget(this);
     auto *vgLayout = new QHBoxLayout(vgRow);
     vgLayout->setContentsMargins(4, 2, 4, 0);
     vgLayout->setSpacing(2);
-    vgLayout->addWidget(new QLabel(tr("voicegroup"), vgRow));
+    vgLayout->addWidget(new QLabel(tr("voicegroup_"), vgRow));
     m_vgCombo = new QComboBox(vgRow);
     m_vgCombo->setObjectName(QStringLiteral("vgArgCombo"));
     m_vgCombo->setEditable(true);
@@ -132,16 +135,17 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent)
     m_vgCombo->setEnabled(false);
     m_vgCombo->lineEdit()->setPlaceholderText(tr("No song loaded"));
     m_vgCombo->setToolTip(
-        tr("The song's voicegroup (mid2agb -G): appended to \"voicegroup\" "
-           "to form the symbol, e.g. \"_abandoned_ship\" → "
-           "voicegroup_abandoned_ship. Changing it is undoable."));
+        tr("The song's voicegroup: the prefix plus this name form the "
+           "symbol, e.g. \"abandoned_ship\" → voicegroup_abandoned_ship "
+           "(mid2agb -G). Changing it is undoable."));
     vgLayout->addWidget(m_vgCombo, 1);
     layout->addWidget(vgRow);
 
     const auto commitVgArg = [this] {
         if (m_updating || !m_vgCombo->isEnabled())
             return;
-        const QString arg = m_vgCombo->currentText().trimmed();
+        const QString arg = SongRegistry::voicegroupArgFromDisplay(
+            m_vgCombo->currentText().trimmed(), m_vgChoices);
         if (arg == m_vgArg)
             return;
         m_vgArg = arg;
@@ -407,7 +411,7 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg)
         m_source = nullptr; // a cleared voicegroup invalidates the source too
     m_tree->clear();
     m_vgCombo->setEnabled(vg != nullptr);
-    m_vgCombo->lineEdit()->setPlaceholderText(vg ? QStringLiteral("_dummy")
+    m_vgCombo->lineEdit()->setPlaceholderText(vg ? QStringLiteral("dummy")
                                                  : tr("No song loaded"));
     if (!vg) {
         m_updating = true;
@@ -466,7 +470,8 @@ void VoicegroupBrowser::setVoicegroupChoices(const QStringList &args)
     m_updating = true;
     const QString text = m_vgCombo->currentText();
     m_vgCombo->clear();
-    m_vgCombo->addItems(args);
+    for (const QString &arg : args)
+        m_vgCombo->addItem(SongRegistry::voicegroupDisplayName(arg));
     m_vgCombo->setCurrentText(text);
     m_updating = false;
 }
@@ -474,10 +479,11 @@ void VoicegroupBrowser::setVoicegroupChoices(const QStringList &args)
 void VoicegroupBrowser::setCurrentVoicegroupArg(const QString &arg)
 {
     m_vgArg = arg;
-    if (m_vgCombo->currentText() == arg)
+    const QString display = SongRegistry::voicegroupDisplayName(arg);
+    if (m_vgCombo->currentText() == display)
         return;
     m_updating = true;
-    m_vgCombo->setCurrentText(arg);
+    m_vgCombo->setCurrentText(display);
     m_updating = false;
 }
 

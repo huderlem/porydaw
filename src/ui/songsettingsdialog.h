@@ -27,6 +27,7 @@ public:
 
 private:
     SongCfg m_original;
+    QStringList m_voicegroupArgs;
     QComboBox *m_voicegroup;
     QSpinBox *m_volume;
     QCheckBox *m_reverbOn;

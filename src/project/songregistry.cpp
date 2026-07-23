@@ -151,6 +151,20 @@ QStringList voicegroupArgs(const QString &projectRoot)
     return args;
 }
 
+QString voicegroupDisplayName(const QString &arg)
+{
+    return arg.startsWith(QLatin1Char('_')) ? arg.mid(1) : arg;
+}
+
+QString voicegroupArgFromDisplay(const QString &text, const QStringList &knownArgs)
+{
+    if (text.isEmpty() || text.startsWith(QLatin1Char('_')))
+        return text;
+    if (!knownArgs.contains(QLatin1Char('_') + text) && knownArgs.contains(text))
+        return text;
+    return QLatin1Char('_') + text;
+}
+
 QVector<MusicPlayer> musicPlayers(const QString &projectRoot)
 {
     // "	.equiv MUSIC_PLAYER_BGM,0"

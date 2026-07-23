@@ -51,6 +51,18 @@ namespace SongRegistry {
 // sound/voicegroups.inc, and sound/voicegroups/ recursively. Sorted.
 QStringList voicegroupArgs(const QString &projectRoot);
 
+// Display form of a -G arg: the leading underscore folds into the fixed
+// "voicegroup_" prefix the UI shows, so "_abandoned_ship" reads as
+// "abandoned_ship". Underscore-less args (vanilla "128"-style symbols)
+// pass through unchanged.
+QString voicegroupDisplayName(const QString &arg);
+
+// The inverse: a name typed under the "voicegroup_" prefix back to a -G
+// arg. A leading underscore means a raw arg was pasted; a verbatim match
+// against knownArgs keeps legacy underscore-less args addressable;
+// everything else assumes the underscore.
+QString voicegroupArgFromDisplay(const QString &text, const QStringList &knownArgs);
+
 // Music players from song_table.inc's ".equiv MUSIC_PLAYER_*,n" lines.
 QVector<MusicPlayer> musicPlayers(const QString &projectRoot);
 

@@ -1,5 +1,7 @@
 #include "songsettingsdialog.h"
 
+#include "project/songregistry.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -11,7 +13,7 @@
 
 SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLabel,
                                        const QStringList &voicegroupArgs, QWidget *parent)
-    : QDialog(parent), m_original(cfg)
+    : QDialog(parent), m_original(cfg), m_voicegroupArgs(voicegroupArgs)
 {
     setWindowTitle(tr("Song Settings — %1").arg(songLabel));
 
@@ -19,12 +21,14 @@ SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLa
 
     m_voicegroup = new QComboBox(this);
     m_voicegroup->setEditable(true);
-    m_voicegroup->addItems(voicegroupArgs);
-    m_voicegroup->setCurrentText(cfg.voicegroupArg);
-    m_voicegroup->lineEdit()->setPlaceholderText(QStringLiteral("_dummy"));
-    m_voicegroup->setToolTip(tr("mid2agb -G: appended to \"voicegroup\" to form the symbol, "
-                                "e.g. \"_abandoned_ship\" → voicegroup_abandoned_ship."));
-    form->addRow(tr("&Voicegroup (-G):"), m_voicegroup);
+    for (const QString &arg : voicegroupArgs)
+        m_voicegroup->addItem(SongRegistry::voicegroupDisplayName(arg));
+    m_voicegroup->setCurrentText(
+        SongRegistry::voicegroupDisplayName(cfg.voicegroupArg));
+    m_voicegroup->lineEdit()->setPlaceholderText(QStringLiteral("dummy"));
+    m_voicegroup->setToolTip(tr("The symbol is \"voicegroup_\" + this name (mid2agb -G), "
+                                "e.g. \"abandoned_ship\" → voicegroup_abandoned_ship."));
+    form->addRow(tr("&Voicegroup:"), m_voicegroup);
 
     m_volume = new QSpinBox(this);
     m_volume->setRange(0, 127);
@@ -88,7 +92,8 @@ SongSettingsDialog::SongSettingsDialog(const SongCfg &cfg, const QString &songLa
 SongCfg SongSettingsDialog::cfg() const
 {
     SongCfg cfg = m_original; // keeps rawFlags and unknown options
-    cfg.voicegroupArg = m_voicegroup->currentText().trimmed();
+    cfg.voicegroupArg = SongRegistry::voicegroupArgFromDisplay(
+        m_voicegroup->currentText().trimmed(), m_voicegroupArgs);
     cfg.masterVolume = m_volume->value();
     cfg.reverb = m_reverbOn->isChecked() ? m_reverb->value() : -1;
     cfg.priority = m_priority->value();
