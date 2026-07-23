@@ -86,12 +86,18 @@ QIcon tintedStandardIcon(QWidget &widget, QStyle::StandardPixmap icon,
     // silently retint playback controls. The hover (Active) and checked (On)
     // variants follow the button ramp's paired text colors, so the glyph
     // stays readable on the hover and checked fills the theme sheet paints.
+    // Disabled gets an explicit theme tint: Qt's generated gray-out barely
+    // shifts a light glyph on a dark toolbar.
     QIcon result(tinted(themes::Role::transport_text));
     result.addPixmap(tinted(themes::Role::button_hover_text), QIcon::Active,
                      QIcon::Off);
     result.addPixmap(tinted(themes::Role::button_pressed_text), QIcon::Normal,
                      QIcon::On);
     result.addPixmap(tinted(themes::Role::button_pressed_text), QIcon::Active,
+                     QIcon::On);
+    result.addPixmap(tinted(themes::Role::disabled_text), QIcon::Disabled,
+                     QIcon::Off);
+    result.addPixmap(tinted(themes::Role::disabled_text), QIcon::Disabled,
                      QIcon::On);
     return result;
 }

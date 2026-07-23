@@ -289,7 +289,9 @@ constexpr PresetColors makeDarkNeutralHigh() {
   auto colors = PresetColors{};
   colors.color(PresetColor::window_background) = "#373737";
   colors.color(PresetColor::window_text) = "#D8D8D8";
-  colors.color(PresetColor::disabled_text) = "#C1C1C1";
+  // 4.55:1 on the window surface, 1.83:1 from enabled text; the old
+  // #C1C1C1 sat 1.26:1 from enabled and read as live.
+  colors.color(PresetColor::disabled_text) = "#A0A0A0";
   colors.color(PresetColor::outline) = "#505050";
   colors.color(PresetColor::selection_background) = "#9FCDD7";
   colors.color(PresetColor::accent) = "#037384";
@@ -318,7 +320,8 @@ constexpr PresetColors makeImmaterial() {
   auto colors = PresetColors{};
   colors.color(PresetColor::window_background) = "#2E3138";
   colors.color(PresetColor::window_text) = "#CBCBCD";
-  colors.color(PresetColor::disabled_text) = "#A9ACB5";
+  // 4.63:1 on the window surface, 1.74:1 from enabled text (was 1.40:1).
+  colors.color(PresetColor::disabled_text) = "#979AA3";
   colors.color(PresetColor::outline) = "#545559";
   colors.color(PresetColor::selection_background) = "#ABCAD2";
   colors.color(PresetColor::accent) = "#008493";

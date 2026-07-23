@@ -97,6 +97,11 @@ QString toolbarStyleSheet(const Theme &theme) {
              "background-color:%5;border-color:%7;color:%6;}"
              "QToolBar#transportToolbar QToolButton:checked{"
              "background-color:%8;border-color:transparent;color:%9;}"
+             // A disabled-but-checked control (Loop before a song loads)
+             // trades the accent fill for the muted indicator fill, like a
+             // disabled checked checkbox; ordered after checked so it wins.
+             "QToolBar#transportToolbar QToolButton:checked:disabled{"
+             "background-color:%10;}"
              "QToolBar#transportToolbar QLabel{background-color:transparent;"
              "color:%4;}")
       .arg(colorName(theme, Role::toolbar_background))
@@ -107,7 +112,8 @@ QString toolbarStyleSheet(const Theme &theme) {
       .arg(colorName(theme, Role::button_hover_text))
       .arg(colorName(theme, Role::focus_outline))
       .arg(colorName(theme, Role::button_pressed_background))
-      .arg(colorName(theme, Role::button_pressed_text));
+      .arg(colorName(theme, Role::button_pressed_text))
+      .arg(colorName(theme, Role::indicator_disabled_background));
 }
 
 QString tabStyleSheet(const Theme &theme) {
@@ -319,11 +325,17 @@ QString spinBoxStyleSheet(const Theme &theme) {
              "QAbstractSpinBox::up-button,QAbstractSpinBox::down-button{"
              "background-color:%7;color:%8;border-color:%4;}"
              "QAbstractSpinBox::up-button:hover,"
-             "QAbstractSpinBox::down-button:hover{background-color:%9;"
-             "border-color:%4;}"
+             "QAbstractSpinBox::down-button:hover{background-color:%9;}"
              "QAbstractSpinBox::up-button:pressed,"
-             "QAbstractSpinBox::down-button:pressed{background-color:%10;"
-             "border-color:%4;}")
+             "QAbstractSpinBox::down-button:pressed{background-color:%10;}"
+             // The button lane sits on the border box, hiding the right run
+             // of the widget's own border; without this the focus outline
+             // stops dead at the lane. States must FOLLOW the subcontrol:
+             // `X:focus::sub` silently drops the :focus and applies always,
+             // painting resting borders in accent. Ordered after
+             // hover/pressed so focus keeps the accent border through both.
+             "QAbstractSpinBox::up-button:focus,"
+             "QAbstractSpinBox::down-button:focus{border-color:%5;}")
       .arg(colorName(theme, Role::spin_box_background))
       .arg(colorName(theme, Role::spin_box_text))
       .arg(colorName(theme, Role::input_highlight_outline))
@@ -342,7 +354,10 @@ QString comboStyleSheet(const Theme &theme) {
              "QComboBox:focus{border-color:%4;}"
              "QComboBox:disabled{color:%5;border-color:%3;}"
              "QComboBox::drop-down{background-color:%6;border-color:%3;}"
-             "QComboBox:focus::drop-down{border-color:%4;}"
+             // State AFTER the subcontrol: `QComboBox:focus::drop-down`
+             // silently drops the :focus and painted every resting combo
+             // border in accent.
+             "QComboBox::drop-down:focus{border-color:%4;}"
              "QComboBox::drop-down:hover{background-color:%7;}"
              "QComboBox::drop-down:pressed,QComboBox::drop-down:on{"
              "background-color:%8;}")

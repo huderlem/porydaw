@@ -180,6 +180,13 @@ void checkDerivedThemes(Reporter &reporter) {
     reporter.check(theme.color(themes::Role::focus_outline) ==
                        theme.color(themes::Role::palette_outline),
                    "a fixed theme does not use a neutral focus outline");
+    // Same bar the derived path holds: on the dark presets disabled text
+    // once sat a bare 1.26:1 from enabled, so disabled transport glyphs
+    // looked live.
+    reporter.check(
+        themes::contrastRatio(theme.color(themes::Role::disabled_text),
+                              theme.color(themes::Role::window_text)) >= 1.3,
+        "a fixed theme's disabled text is indistinguishable from enabled");
     reporter.check(theme.color(themes::Role::tab_pane_background) ==
                        theme.color(themes::Role::toolbar_background),
                    "the fixed theme open-song tab gutter does not use theme "
