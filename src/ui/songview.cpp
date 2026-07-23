@@ -1412,7 +1412,7 @@ protected:
         }
         if (m_drag == Drag::None) {
             // Hover cursor: resize handle at note left/right edges, velocity
-            // handle across the top strip (when zoomed in enough).
+            // handle along the note's velocity bar (when zoomed in enough).
             if (m_cursors.dpr != devicePixelRatioF())
                 m_cursors = loadMidiCursors(devicePixelRatioF());
             const ViewNote *hit =
@@ -1830,15 +1830,12 @@ private:
         if (m_sv->keyHeight() < kVelHandleMinKeyH)
             return false;
         const QRect r = noteRect(note);
+        // The bar itself is 1-2px; grab within a few pixels of it, more
+        // generously on taller notes.
+        const QRect bar = velBarRect(r, note.velocity);
+        const int pad = std::clamp(r.height() / 6, 2, 4);
         return pos.x() > r.left() + kEdgeW && pos.x() < r.right() - kEdgeW
-            && pos.y() < r.top() + velHandleZoneH(r);
-    }
-
-    // Height of the top strip that grabs as the velocity handle: a third of
-    // the note, kept clear of dwarfing the Move zone at low zoom.
-    static int velHandleZoneH(const QRect &noteRect)
-    {
-        return std::clamp(noteRect.height() / 3, 2, 6);
+            && pos.y() >= bar.top() - pad && pos.y() <= bar.bottom() + pad;
     }
 
     // Resolves the current selection to document notes (skips stale ids).
@@ -2014,15 +2011,10 @@ private:
                     vel = std::clamp(int(note.velocity) + m_dVel, 1, 127);
                 c.setAlpha(120 + vel); // velocity shows as opacity
                 p.fillRect(r, c);
-                // Velocity bar (bottom = 0, top = 127) once zoomed in enough
-                // for the full-width handle; it tracks the drag preview.
+                // Velocity bar (bottom = 0, top = 127) once zoomed in
+                // enough; it is the drag handle and tracks the drag preview.
                 if (velZoomed) {
-                    const int barH = r.height() >= 20 ? 2 : 1;
-                    const int innerH = r.height() - 2;
-                    const int y = std::min(
-                        r.top() + 1 + (127 - vel) * (innerH - 1) / 127,
-                        r.bottom() - barH);
-                    p.fillRect(QRect(r.left() + 1, y, std::max(1, r.width() - 2), barH),
+                    p.fillRect(velBarRect(r, vel),
                                SongView::trackColor(note.track).darker(170));
                 }
                 // While a velocity drag is live, every current-track note

@@ -2,7 +2,9 @@
 
 #include <QColor>
 #include <QHash>
+#include <algorithm>
 #include <QList>
+#include <QRect>
 #include <QSet>
 #include <QWidget>
 #include <cstdint>
@@ -39,13 +41,27 @@ class TrackHeaderPanel;
 constexpr int kHeaderW = 210;
 constexpr int kKeyboardW = 52;
 constexpr int kGutterW = kHeaderW + kKeyboardW;
-// Full-width velocity handle (Reaper-style): with at least this much
-// vertical zoom, the top strip of a note drags velocity across its whole
-// width, and a thin horizontal bar inside the note shows the level
-// (bottom = 0, top = 127). Below the threshold notes are all-Move; the
-// right-click menu remains the velocity fallback. Also the default key
-// height, so the handle is available out of the box.
+// Velocity bar handle: with at least this much vertical zoom, each note
+// shows a thin horizontal bar at its velocity level (bottom = 0,
+// top = 127), and that bar — grabbable anywhere across the note's
+// width — drags the velocity. Below the threshold there is no bar and
+// notes are all-Move; the right-click menu remains the velocity
+// fallback. Also the default key height, so the handle is available out
+// of the box.
 constexpr int kVelHandleMinKeyH = 12;
+// The velocity bar's rect inside a note rect; painted by the roll and,
+// from kVelHandleMinKeyH up, the grab target for velocity drags. Exposed
+// for roll interaction checks.
+inline QRect velBarRect(const QRect &noteRect, int velocity)
+{
+    const int barH = noteRect.height() >= 20 ? 2 : 1;
+    const int innerH = noteRect.height() - 2;
+    const int y =
+        std::min(noteRect.top() + 1 + (127 - velocity) * (innerH - 1) / 127,
+                 noteRect.bottom() - barH);
+    return QRect(noteRect.left() + 1, y, std::max(1, noteRect.width() - 2),
+                 barH);
+}
 } // namespace songview
 
 // Song view: time ruler, multi-track piano roll (selected track in full

@@ -10,6 +10,7 @@
 #include <QMenu>
 #include <QPixmap>
 #include <QPoint>
+#include <QRect>
 #include <QString>
 #include <QTimer>
 #include <QWidget>
@@ -190,13 +191,12 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         return false;
     };
 
-    // A free grid cell with click targets: mid-cell x, and a y in the Move
-    // zone (center) or in the top velocity-handle strip.
+    // A free grid cell with a click target at mid-cell x, mid-row y (the
+    // Move zone).
     struct Cell {
         uint64_t tick = 0, dur = 0;
         int key = -1;
         QPoint center;
-        QPoint handle;
     };
     auto findFreeCell = [&]() -> Cell {
         Cell cell;
@@ -221,7 +221,6 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
                 cell.dur = dur;
                 cell.key = key;
                 cell.center = QPoint((x0 + x1) / 2, y + keyH / 2 + 1);
-                cell.handle = QPoint((x0 + x1) / 2, y + 2);
                 return cell;
             }
         }
@@ -310,17 +309,22 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         }
     }
 
-    // Drag latch: pull note B's velocity handle 20px up (1px = 1 step),
-    // 73 -> 93. The latch must follow the dragged value, not the press value.
-    sendMouse(roll, QEvent::MouseButtonPress, b.handle, Qt::LeftButton,
+    // Drag latch: grab note B's velocity bar and pull 20px up (1px = 1
+    // step), 73 -> 93. The latch must follow the dragged value, not the
+    // press value.
+    const QRect bRect(0, (127 - b.key) * keyH - view.scrollY() + 1, 1,
+                      std::max(2, keyH - 1));
+    const QPoint bHandle(b.center.x(),
+                         songview::velBarRect(bRect, 73).center().y());
+    sendMouse(roll, QEvent::MouseButtonPress, bHandle, Qt::LeftButton,
               Qt::LeftButton);
-    sendMouse(roll, QEvent::MouseMove, b.handle - QPoint(0, 20), Qt::NoButton,
+    sendMouse(roll, QEvent::MouseMove, bHandle - QPoint(0, 20), Qt::NoButton,
               Qt::LeftButton);
     // The cursor sits rows above the note now, but the hover mark pins to
     // the note's own pitch for the whole velocity drag.
     if (roll->property("hoverKey").toInt() != b.key)
         fail("velocity drag did not pin the hover mark to the note's key");
-    sendMouse(roll, QEvent::MouseButtonRelease, b.handle - QPoint(0, 20),
+    sendMouse(roll, QEvent::MouseButtonRelease, bHandle - QPoint(0, 20),
               Qt::LeftButton, Qt::NoButton);
     DocNote dragged;
     if (!doc.findNote(track, b.tick, uint8_t(b.key), &dragged)
@@ -339,6 +343,29 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     }
     if (noteC.velocity != 93)
         fail("dragged velocity did not latch into the next draw");
+
+    // The handle rides the velocity bar, not the note's top strip: with
+    // note B's bar parked low (velocity 20), a drag from the note's top
+    // row must Move the note off its key, not change its velocity.
+    // (Skipped when the drag above already displaced note B.)
+    DocNote bNow;
+    if (doc.findNote(track, b.tick, uint8_t(b.key), &bNow)) {
+        doc.setNotesVelocity({bNow}, 20);
+        const QPoint bTop(b.center.x(),
+                          (127 - b.key) * keyH - view.scrollY() + 2);
+        sendMouse(roll, QEvent::MouseButtonPress, bTop, Qt::LeftButton,
+                  Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseMove, bTop - QPoint(0, 2 * keyH),
+                  Qt::NoButton, Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseButtonRelease, bTop - QPoint(0, 2 * keyH),
+                  Qt::LeftButton, Qt::NoButton);
+        if (doc.findNote(track, b.tick, uint8_t(b.key), &bNow))
+            fail("top-of-note drag on a low-velocity note did not move the "
+                 "note (velocity handle still on the top strip?)");
+        doc.undoStack()->undo(); // the move
+        doc.undoStack()->undo(); // the velocity-20 set
+        click(roll, b.center);   // re-latch 93 for the sections below
+    }
 
     // Double-click on a note deletes it (the pencil sections above prove
     // the same event still draws over empty space). Note C goes.
