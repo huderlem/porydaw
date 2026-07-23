@@ -1,4 +1,5 @@
 #include "songview.h"
+#include "theme/color_math.h"
 #include "theme/trackidentitycolors.h"
 #include "theme/themeruntime.h"
 #include "typography.h"
@@ -167,6 +168,31 @@ std::size_t trackIdentityIndex(int track) {
 // labels need contrast against those fills.
 const QColor &trackTextColor(int track) {
   return themes::trackIdentityTextColor(trackIdentityIndex(track)); }
+
+// Ghost notes (unselected tracks) as an opaque faint tint of the track's
+// identity color. A plain 24% alpha composite reads right on light themes,
+// but over a dark roll the light pastels gain enough lightness to compete
+// with the active track; capping the ghost's OKLab lightness offset from
+// the roll background keeps ghosts equally recessive in every theme.
+QColor ghostNoteColor(int track, bool accidentalRow) {
+  const auto &identity = themes::trackIdentityColor(trackIdentityIndex(track));
+  const auto background = themes::color(
+      accidentalRow ? themes::Role::song_view_piano_roll_accidental_lane
+                    : themes::Role::song_view_piano_roll_background);
+  const auto channel = [](int identityChannel, int backgroundChannel) {
+    return (60 * identityChannel + 195 * backgroundChannel + 127) / 255;
+  };
+  const auto mixed = QColor::fromRgb(channel(identity.red(), background.red()),
+                                     channel(identity.green(), background.green()),
+                                     channel(identity.blue(), background.blue()));
+  constexpr auto kMaxGhostLightnessOffset = 0.055;
+  const auto backgroundLightness = themes::oklabLightness(background);
+  const auto offset = themes::oklabLightness(mixed) - backgroundLightness;
+  if (std::abs(offset) <= kMaxGhostLightnessOffset)
+    return mixed;
+  return themes::shiftOklabLightness(
+      mixed, std::copysign(kMaxGhostLightnessOffset, offset) - offset);
+}
 
 // Draw the loop-region band across rect. x positions are
 // computed with origin = local x of timeline tick 0's content position.
@@ -1965,8 +1991,7 @@ private:
                 continue;
             QColor c = SongView::trackColor(note.track);
             if (ghost) {
-                c.setAlpha(60);
-                p.fillRect(r, c);
+                p.fillRect(r, ghostNoteColor(note.track, isBlackKey(note.key)));
             } else {
                 int vel = note.velocity;
                 if (m_drag == Drag::Velocity && m_sv->isSelected(note))
