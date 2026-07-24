@@ -316,8 +316,8 @@ void drawGrid(QPainter &p, const SongView *sv, const QRect &rect, int origin)
     // Batches 0-2 hold sub-grid levels 1-3 (fading lighter), 3 beats, 4
     // finest-grid beats, 5 bars; painted in that order so beats and bars
     // land on top.
-    const std::array<QColor, 6> colors = {gridLineColor(150), gridLineColor(120),
-                                          gridLineColor(95),  gridLineColor(160),
+    const std::array<QColor, 6> colors = {gridLineColor(90),  gridLineColor(70),
+                                          gridLineColor(50),  gridLineColor(160),
                                           gridLineColor(200), gridLineColor()};
     std::array<QVector<QLine>, 6> batches;
     forEachSubGridLine(sv, t0, t1, [&](uint64_t tick, int level) {
