@@ -438,11 +438,11 @@ QFont timeRulerFont(const QFont &source) {
   font.setLetterSpacing(QFont::AbsoluteSpacing, -0.5);
   return font;
 }
-// "bar.beat" labels sit two sizes below the bar numbers so the two label
+// "bar.beat" labels sit one size below the bar numbers so the two label
 // tiers read apart even where the deemphasized color alone wouldn't.
 QFont beatRulerFont(const QFont &source) {
   auto font = timeRulerFont(source);
-  font.setPixelSize(std::max(1, font.pixelSize() - 2 * lyt::singlePixel()));
+  font.setPixelSize(std::max(1, font.pixelSize() - lyt::singlePixel()));
   return font;
 }
 
@@ -587,22 +587,32 @@ protected:
         });
 
         // Bar numbers are the primary labels; the in-between beats only earn
-        // a "bar.beat" label once a beat spans several label-widths, so the
+        // "bar.beat" labels once a beat spans several label-widths, so the
         // ruler stays sparse until the zoom genuinely has room for detail.
+        // One decision per paint, sized to the widest label in view, so a
+        // ruler never shows some beat labels while suppressing others.
         const QColor barTextColor =
             themes::color(themes::Role::song_view_primary_text);
         const double beatLabelZoomFactor = 3.0;
+        int widestDetailWidth = 0;
+        m_sv->forEachGridLine(
+            uint64_t(t0), uint64_t(t1),
+            [&](uint64_t, bool, int barNumber, int beatNumber) {
+                widestDetailWidth = std::max(
+                    widestDetailWidth,
+                    beatMetrics.horizontalAdvance(
+                        QStringLiteral("%1.%2").arg(barNumber).arg(beatNumber)));
+            });
+        const bool showBeatLabels =
+            m_sv->pxPerBeat() >=
+            beatLabelZoomFactor * (barCapWidth + 2 * labelGap +
+                                   beatDetailReserve + widestDetailWidth);
         int lastLabelRight = area.left() - labelGap;
         m_sv->forEachGridLine(uint64_t(t0), uint64_t(t1),
                               [&](uint64_t tick, bool isBar, int barNumber, int beatNumber) {
                                   const int x = kGutterW + m_sv->contentX(double(tick));
           const auto detailedLabel =
               QStringLiteral("%1.%2").arg(barNumber).arg(beatNumber);
-          const bool showBeatLabels =
-              m_sv->pxPerBeat() >=
-              beatLabelZoomFactor *
-                  (barCapWidth + 2 * labelGap + beatDetailReserve +
-                   beatMetrics.horizontalAdvance(detailedLabel));
           if (!isBar && !showBeatLabels) {
             if (drawBeatTicks) {
                                   p.setPen(indicatorColor);
