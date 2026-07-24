@@ -98,15 +98,16 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
         const uint64_t tpb = std::max<uint32_t>(1, tl->ticksPerBeat);
         if (!gridChecked && view.gridSegAt(0).beatTicks == tpb) {
             // Snap-grid semantics on the first song governed by a /4
-            // signature at tick 0: at a fixed 64 px/beat zoom the grid must
-            // follow the feel's subdivision ladder and the minimum-
-            // subdivision floor. No document is attached, so the clock
-            // floor is 1 tick.
+            // signature at tick 0: the grid must follow the feel's
+            // subdivision ladder — a cell earns its place at
+            // kAutoGridMinCellPx and not one pixel sooner — and the
+            // minimum-subdivision floor. Zooms are derived from the
+            // threshold so tuning the knob doesn't invalidate the check.
+            // No document is attached, so the clock floor is 1 tick.
             gridChecked = true;
+            const double cellPx = songview::kAutoGridMinCellPx;
             SongView::ViewState zoom;
             zoom.valid = true;
-            zoom.pxPerBeat = 64.0;
-            view.applyViewState(zoom);
             const auto expectGrid = [&](const char *what, uint64_t expected) {
                 if (view.gridTicksAt(0) != expected) {
                     std::fprintf(stderr,
@@ -118,18 +119,22 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
                     failures++;
                 }
             };
-            expectGrid("straight auto below 9 px",
-                       std::max<uint64_t>(1, tpb / 4));
-            zoom.pxPerBeat = 72.0;
+            zoom.pxPerBeat = 4.0 * cellPx - 1.0; // 1/16 cells just too narrow
             view.applyViewState(zoom);
-            expectGrid("straight auto at 9 px",
-                       std::max<uint64_t>(1, tpb / 8));
-            zoom.pxPerBeat = 64.0;
+            expectGrid("straight auto below threshold",
+                       std::max<uint64_t>(1, tpb / 2));
+            zoom.pxPerBeat = 4.0 * cellPx; // 1/16 cells exactly at threshold
+            view.applyViewState(zoom);
+            expectGrid("straight auto at threshold",
+                       std::max<uint64_t>(1, tpb / 4));
+            zoom.pxPerBeat = 6.0 * cellPx; // sixth-beat triplet cells at threshold
             view.applyViewState(zoom);
             view.setGridFeel(SongView::GridFeel::Triplet);
             expectGrid("triplet auto", std::max<uint64_t>(1, tpb / 6));
             view.setGridMinDenom(8);
             expectGrid("triplet 1/8", std::max<uint64_t>(1, tpb / 3));
+            zoom.pxPerBeat = 4.0 * cellPx;
+            view.applyViewState(zoom);
             view.setGridFeel(SongView::GridFeel::Straight);
             view.setGridMinDenom(16);
             expectGrid("straight 1/16", std::max<uint64_t>(1, tpb / 4));

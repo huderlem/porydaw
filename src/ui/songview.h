@@ -49,6 +49,11 @@ constexpr int kGutterW = kHeaderW + kKeyboardW;
 // fallback. Also the default key height, so the handle is available out
 // of the box.
 constexpr int kVelHandleMinKeyH = 12;
+// Auto snap grid: the zoom-adaptive grid shows the finest subdivision from
+// the feel's ladder whose cells are at least this wide, so lower values
+// mean a busier grid at the same zoom. Exposed so viewcheck derives its
+// expectations from the same knob being tuned.
+constexpr double kAutoGridMinCellPx = 16.0;
 // The velocity bar's rect inside a note rect; painted by the roll and,
 // from kVelHandleMinKeyH up, the grab target for velocity drags. Exposed
 // for roll interaction checks.

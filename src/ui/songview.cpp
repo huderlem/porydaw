@@ -4857,7 +4857,8 @@ uint64_t SongView::gridTicksAt(uint64_t tick) const
 uint64_t SongView::gridTicksIn(const GridSeg &seg) const
 {
     const uint64_t clock = m_document ? m_document->ticksPerClock() : 1;
-  // Finest visible subdivision at least ~9 px wide from the feel's ladder
+  // Finest visible subdivision at least kAutoGridMinCellPx wide from the
+    // feel's ladder
     // (divisions per beat), floored at the mid2agb clock grid and at the
     // user's minimum note value. The floor is one division per beat of the
     // governing signature (1/4 = the beat); triplet feel fits three notes
@@ -4873,7 +4874,7 @@ uint64_t SongView::gridTicksIn(const GridSeg &seg) const
     for (uint64_t div : triplet ? kTriplet : kStraight) {
         if (div > maxDiv)
             continue;
-        if (pxPerSegBeat / double(div) >= 9.0)
+        if (pxPerSegBeat / double(div) >= songview::kAutoGridMinCellPx)
             return std::max(std::max<uint64_t>(1, seg.beatTicks / div), clock);
     }
     return std::max(seg.beatTicks, clock);
