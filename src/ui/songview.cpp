@@ -438,6 +438,13 @@ QFont timeRulerFont(const QFont &source) {
   font.setLetterSpacing(QFont::AbsoluteSpacing, -0.5);
   return font;
 }
+// "bar.beat" labels sit one size below the bar numbers so the two label
+// tiers read apart even where the deemphasized color alone wouldn't.
+QFont beatRulerFont(const QFont &source) {
+  auto font = timeRulerFont(source);
+  font.setPixelSize(std::max(1, font.pixelSize() - lyt::singlePixel()));
+  return font;
+}
 
 } // namespace
 
@@ -521,7 +528,9 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         QPainter p(this);
-        p.setFont(timeRulerFont(p.font()));
+    const QFont rulerFont = timeRulerFont(p.font());
+    const QFont beatFont = beatRulerFont(p.font());
+    p.setFont(rulerFont);
     p.fillRect(rect(), themes::color(themes::Role::song_view_timeline_chrome_background));
         p.setPen(QPen(themes::color(themes::Role::song_view_separator), lyt::singlePixel()));
         p.drawLine(0, rect().bottom(), width(), rect().bottom());
@@ -548,6 +557,7 @@ protected:
     const QRect ticks = tickRow();
     const int tickBottom = ticks.bottom();
     const QFontMetrics tickMetrics(p.font());
+    const QFontMetrics beatMetrics(beatFont);
     const int tickBaseline = ticks.top() + tickMetrics.ascent();
     const auto barCapWidth = lyt::space(Space::Half);
     const auto indicatorRise = lyt::space(Space::Half);
@@ -581,7 +591,7 @@ protected:
               m_sv->pxPerBeat() >=
               beatLabelZoomFactor *
                   (barCapWidth + 2 * labelGap + beatDetailReserve +
-                   tickMetrics.horizontalAdvance(detailedLabel));
+                   beatMetrics.horizontalAdvance(detailedLabel));
           if (!isBar && !showBeatLabels) {
             if (drawBeatTicks) {
                                   p.setPen(indicatorColor);
@@ -592,7 +602,8 @@ protected:
           }
           const auto label =
               isBar ? QString::number(barNumber) : detailedLabel;
-          const int labelWidth = tickMetrics.horizontalAdvance(label);
+          const int labelWidth =
+              (isBar ? tickMetrics : beatMetrics).horizontalAdvance(label);
           const int labelX = x + barCapWidth;
           if (labelX < lastLabelRight + labelGap) {
             if (!isBar && drawBeatTicks) {
@@ -611,12 +622,14 @@ protected:
             p.drawLine(x, ticks.center().y() - indicatorRise, x, tickBottom);
           }
           p.setPen(isBar ? barTextColor : textColor);
+          p.setFont(isBar ? rulerFont : beatFont);
           p.drawText(labelX, tickBaseline, label);
+          p.setFont(rulerFont);
           lastLabelRight = labelX + labelWidth;
                               });
 
         const MidiTimeline *tl = m_sv->timeline();
-    p.setFont(typography::bold( p.font()));
+    p.setFont(typography::bold(rulerFont));
 
     const QRect markers = markerRow();
     const int markerBaseline = textBaseline(markers,
