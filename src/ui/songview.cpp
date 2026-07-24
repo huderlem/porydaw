@@ -438,11 +438,11 @@ QFont timeRulerFont(const QFont &source) {
   font.setLetterSpacing(QFont::AbsoluteSpacing, -0.5);
   return font;
 }
-// "bar.beat" labels sit one size below the bar numbers so the two label
+// "bar.beat" labels sit two sizes below the bar numbers so the two label
 // tiers read apart even where the deemphasized color alone wouldn't.
 QFont beatRulerFont(const QFont &source) {
   auto font = timeRulerFont(source);
-  font.setPixelSize(std::max(1, font.pixelSize() - lyt::singlePixel()));
+  font.setPixelSize(std::max(1, font.pixelSize() - 2 * lyt::singlePixel()));
   return font;
 }
 
@@ -531,7 +531,9 @@ protected:
     const QFont rulerFont = timeRulerFont(p.font());
     const QFont beatFont = beatRulerFont(p.font());
     p.setFont(rulerFont);
-    p.fillRect(rect(), themes::color(themes::Role::song_view_timeline_chrome_background));
+    const QColor chrome =
+        themes::color(themes::Role::song_view_timeline_chrome_background);
+    p.fillRect(rect(), chrome);
         p.setPen(QPen(themes::color(themes::Role::song_view_separator), lyt::singlePixel()));
         p.drawLine(0, rect().bottom(), width(), rect().bottom());
 
@@ -551,8 +553,17 @@ protected:
         const double t0 = std::max(0.0, m_sv->tickAtContentX(0));
         const double t1 = m_sv->tickAtContentX(area.width()) + 1;
         const auto indicatorColor = gridLineColor();
-    const QColor textColor =
+    // Beat labels recede a step past secondary text: blended a quarter of
+    // the way into the ruler chrome so they read as texture next to the
+    // bar numbers, in every theme.
+    const QColor secondary =
         themes::color(themes::Role::song_view_secondary_text);
+    const auto recede = [&](int fg, int bg) {
+      return (191 * fg + 64 * bg + 127) / 255;
+    };
+    const QColor textColor(recede(secondary.red(), chrome.red()),
+                           recede(secondary.green(), chrome.green()),
+                           recede(secondary.blue(), chrome.blue()));
 
     const QRect ticks = tickRow();
     const int tickBottom = ticks.bottom();
