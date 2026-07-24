@@ -1,5 +1,6 @@
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDialog>
 #include <QDir>
 #include <QDirIterator>
 #include <QDockWidget>
@@ -13,6 +14,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <cstdio>
 
 #include "ui/songview.h"
@@ -842,6 +844,43 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             disconnect(c1);
             disconnect(c2);
         }
+    }
+
+    // 11. New… creates the voicegroup file AND assigns it to the current
+    // song — the same undoable cfg edit the selector makes, so undo returns
+    // to the previous voicegroup. The modal dialog is filled and accepted
+    // from a timer inside its own exec() loop.
+    {
+        const QString argBefore = tab->doc.cfg().voicegroupArg;
+        const QString newName = QStringLiteral("vgsavecheck_created");
+        QTimer::singleShot(0, this, [this, newName] {
+            for (QDialog *d : findChildren<QDialog *>()) {
+                if (!d->isVisible() || d->windowTitle() != tr("New Voicegroup"))
+                    continue;
+                if (QLineEdit *edit = d->findChild<QLineEdit *>()) {
+                    edit->setText(newName);
+                    d->accept();
+                } else {
+                    d->reject(); // never hang the harness in exec()
+                }
+                return;
+            }
+        });
+        newVoicegroup();
+        check(QFile::exists(projectRoot + QStringLiteral("/sound/voicegroups/")
+                            + newName + QStringLiteral(".inc")),
+              "New… did not create the voicegroup file");
+        check(tab->doc.cfg().voicegroupArg == QStringLiteral("_") + newName
+                  && tab->doc.isDirty(),
+              "New… did not auto-assign the voicegroup as an undoable edit");
+        check(tab->vgSource
+                  && tab->vgSource->filePath().endsWith(
+                      newName + QStringLiteral(".inc")),
+              "New… auto-assign did not swap the voicegroup source");
+        tab->doc.undoStack()->undo();
+        check(tab->doc.cfg().voicegroupArg == argBefore && tab->vgSource
+                  && tab->vgSource->loadName() == vgLoadName,
+              "undoing the New… auto-assign did not restore the voicegroup");
     }
 
     std::printf("vgsavecheck: %s (%d failures)\n", failures ? "FAIL" : "PASS",

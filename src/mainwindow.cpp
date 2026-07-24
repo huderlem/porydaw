@@ -2505,11 +2505,24 @@ void MainWindow::newVoicegroup()
     }
     invalidateVgCatalog();
     updateVoicegroupBrowser(); // the selector's choices now include it
-    statusBar()->showMessage(
-        tr("Created sound/voicegroups/%1.inc — assign it with the voicegroup "
-           "selector above the instrument list (voicegroup_%1).")
-            .arg(name),
-        10000);
+    if (m_active) {
+        // Assign it to the current song right away — the same undoable cfg
+        // edit the selector makes; onDocumentChanged performs the swap.
+        SongCfg cfg = m_active->doc.cfg();
+        cfg.voicegroupArg = QStringLiteral("_") + name;
+        m_active->doc.setCfg(cfg);
+        statusBar()->showMessage(
+            tr("Created sound/voicegroups/%1.inc and assigned it to %2 "
+               "(voicegroup_%1).")
+                .arg(name, m_active->doc.label()),
+            10000);
+    } else {
+        statusBar()->showMessage(
+            tr("Created sound/voicegroups/%1.inc — assign it with the voicegroup "
+               "selector above the instrument list (voicegroup_%1).")
+                .arg(name),
+            10000);
+    }
 }
 
 bool MainWindow::maybeSaveSession(SongSession &session)
