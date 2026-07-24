@@ -133,6 +133,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     // Cold swap: the audio thread must not be running while pointers change.
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
 
     m_timeline = timeline;
     m_voicegroup = voicegroup;
@@ -179,6 +180,7 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
         return;
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
 
     const uint64_t pos = m_player.position();
     m_timeline = timeline;
@@ -203,12 +205,16 @@ void AudioEngine::seek(uint64_t samplePos)
 {
     if (!m_timeline)
         return;
-    if (m_deviceStarted)
-        ma_device_stop(m_device);
+    m_pendingSeek.store(samplePos, std::memory_order_release);
+}
 
-    // Same recipe as updateTimeline: release sounding notes (their note-offs
-    // are behind the new position) and chase so controller state is exact at
-    // the landing position.
+void AudioEngine::applyPendingSeek()
+{
+    const uint64_t samplePos =
+        m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
+    if (samplePos == kNoPendingSeek || !m_timeline)
+        return;
+
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
     clearTimedPreviews();
@@ -216,9 +222,6 @@ void AudioEngine::seek(uint64_t samplePos)
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
     m_playhead.store(samplePos);
-
-    if (m_deviceStarted)
-        ma_device_start(m_device);
 }
 
 void AudioEngine::updateSettings(const SongSettings &settings)
@@ -313,6 +316,7 @@ void AudioEngine::unloadSong()
 {
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
     m_timeline = nullptr;
     m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
@@ -340,6 +344,7 @@ void AudioEngine::pause()
 
 void AudioEngine::stop()
 {
+    m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
     m_transport.store(static_cast<int>(Transport::Stopped));
 }
 
@@ -604,6 +609,7 @@ void AudioEngine::applyPolyDebug()
 void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 {
     applyTransportTransition();
+    applyPendingSeek();
     applyMuteTransition();
     applyPreviewNote();
     applyTimedPreviews(frameCount);
