@@ -728,10 +728,12 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     const uint64_t overlayTick = a.tick + 3 * a.dur;
     view.setPlayheadSample(timeline->sampleForTick(overlayTick), false);
     view.setEditCursorTick(overlayTick);
-    QImage rollBeforeDrawing(roll->size(),
-                             QImage::Format_ARGB32_Premultiplied);
-    rollBeforeDrawing.fill(Qt::transparent);
-    roll->render(&rollBeforeDrawing);
+    const QPixmap rollBeforePixmap = roll->grab();
+    const QImage rollBeforeDrawing = rollBeforePixmap.toImage();
+    const qreal rasterDpr = rollBeforePixmap.devicePixelRatio();
+    const auto toRasterPixel = [rasterDpr](qreal position) {
+      return qRound(position * rasterDpr);
+    };
     drawNote(roll, a.center);
     DocNote noteA;
     if (!doc.findNote(track, a.tick, uint8_t(a.key), &noteA)) {
@@ -746,34 +748,35 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     // pixel above the bottom edge, whose reserved row must retain the
     // underlying roll. Nothing may paint past the end tick's column.
     view.setEditCursorTick(overlayTick);
-    QImage rollAfterDrawing(roll->size(),
-                            QImage::Format_ARGB32_Premultiplied);
-    rollAfterDrawing.fill(Qt::transparent);
-    roll->render(&rollAfterDrawing);
+    const QPixmap rollAfterPixmap = roll->grab();
+    const QImage rollAfterDrawing = rollAfterPixmap.toImage();
     const int noteLeftX =
         songview::kKeyboardW + view.contentX(double(noteA.tick));
     const int noteRightX = songview::kKeyboardW
         + view.contentX(double(noteA.tick + noteA.duration));
     const QRectF noteFrame =
         rows.noteRect(noteLeftX, noteRightX, noteA.key);
-    const QRect noteInteractionRect = noteFrame.toAlignedRect();
+    const QRectF paintedNoteBox = rows.noteBox(noteFrame);
+    const int noteLeftPixel = toRasterPixel(noteFrame.left());
+    const int noteRightPixel = toRasterPixel(noteFrame.right());
+    const int noteTopPixel = toRasterPixel(noteFrame.top());
+    const int noteFrameBottomPixel = toRasterPixel(noteFrame.bottom());
+    const int paintedNoteBottomPixel =
+        toRasterPixel(paintedNoteBox.bottom());
     bool paintEscapedInteractionRect = false;
-    for (int y = noteInteractionRect.top();
-         y <= noteInteractionRect.bottom(); ++y) {
+    for (int y = noteTopPixel; y < noteFrameBottomPixel; ++y) {
       paintEscapedInteractionRect |=
-          rollAfterDrawing.pixel(noteInteractionRect.right() + 1, y)
-          != rollBeforeDrawing.pixel(noteInteractionRect.right() + 1, y);
+          rollAfterDrawing.pixel(noteRightPixel, y)
+          != rollBeforeDrawing.pixel(noteRightPixel, y);
     }
-    for (int x = noteInteractionRect.left();
-         x <= noteInteractionRect.right(); ++x) {
+    for (int x = noteLeftPixel; x < noteRightPixel; ++x) {
       paintEscapedInteractionRect |=
-          rollAfterDrawing.pixel(x, noteInteractionRect.bottom())
-          != rollBeforeDrawing.pixel(x, noteInteractionRect.bottom());
+          rollAfterDrawing.pixel(x, paintedNoteBottomPixel)
+          != rollBeforeDrawing.pixel(x, paintedNoteBottomPixel);
     }
     if (paintEscapedInteractionRect)
       fail("note color escaped past its black box");
 
-    const QRect paintedNoteBox = rows.noteBox(noteFrame).toAlignedRect();
     const QRectF twoPixelBarNoteRect(
         noteFrame.left(), noteFrame.top(), noteFrame.width(),
         20 * rows.pixel());
@@ -822,7 +825,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
       fail("intermediate velocity note color equals endpoint color");
 
     const QColor expectedNoteColor = SongView::noteColor(track, 100);
-    const QPoint noteInteriorSample = paintedNoteBox.center();
+    const QPoint noteInteriorSample(
+        toRasterPixel(paintedNoteBox.center().x()),
+        toRasterPixel(paintedNoteBox.center().y()));
     if (QColor(rollAfterDrawing.pixel(noteInteriorSample))
         != expectedNoteColor)
       fail("note interior color does not match noteColor(track, 100)");
@@ -834,12 +839,11 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
                 noteA.duration, 100);
     const int abuttingRightX = songview::kKeyboardW
         + view.contentX(double(noteA.tick + 2 * noteA.duration));
-    QImage abuttingImage(roll->size(), QImage::Format_ARGB32_Premultiplied);
-    abuttingImage.fill(Qt::transparent);
-    roll->render(&abuttingImage);
-    const int abuttingMidY = rows.centerY(noteA.key);
+    const QImage abuttingImage = roll->grab().toImage();
+    const int abuttingMidY = toRasterPixel(rows.centerY(noteA.key));
+    const int abuttingRightPixel = toRasterPixel(abuttingRightX);
     bool restGapFound = false;
-    for (int x = noteInteractionRect.left(); x < abuttingRightX; ++x) {
+    for (int x = noteLeftPixel; x < abuttingRightPixel; ++x) {
       restGapFound |= abuttingImage.pixel(x, abuttingMidY)
           == rollBeforeDrawing.pixel(x, abuttingMidY);
     }
@@ -955,23 +959,19 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     const int ghostTrack =
         (selectedTrackBeforeGhostProbe + 1) % doc.engineTrackCount();
     view.selectTrack(ghostTrack);
-    QImage ghostNoteRender(roll->size(),
-                           QImage::Format_ARGB32_Premultiplied);
-    ghostNoteRender.fill(Qt::transparent);
-    roll->render(&ghostNoteRender);
-
+    const QImage ghostNoteRender = roll->grab().toImage();
+    const int ghostCenterX = toRasterPixel(paintedNoteBox.center().x());
+    const int ghostTopPixel = toRasterPixel(paintedNoteBox.top());
+    const int ghostBottomPixel =
+        toRasterPixel(paintedNoteBox.bottom()) - 1;
     const QRgb ghostTopEdge =
-        ghostNoteRender.pixel(paintedNoteBox.center().x(),
-                              paintedNoteBox.top());
+        ghostNoteRender.pixel(ghostCenterX, ghostTopPixel);
     const QRgb ghostTopInterior =
-        ghostNoteRender.pixel(paintedNoteBox.center().x(),
-                              paintedNoteBox.top() + 2);
+        ghostNoteRender.pixel(ghostCenterX, ghostTopPixel + 2);
     const QRgb ghostBottomEdge =
-        ghostNoteRender.pixel(paintedNoteBox.center().x(),
-                              paintedNoteBox.bottom());
+        ghostNoteRender.pixel(ghostCenterX, ghostBottomPixel);
     const QRgb ghostBottomInterior =
-        ghostNoteRender.pixel(paintedNoteBox.center().x(),
-                              paintedNoteBox.bottom() - 2);
+        ghostNoteRender.pixel(ghostCenterX, ghostBottomPixel - 2);
 
     if (ghostTopEdge != ghostTopInterior
         || ghostBottomEdge != ghostBottomInterior)
@@ -1004,36 +1004,24 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     // noteA is a ghost while ghostTrack is selected: flipping the mode must
     // not move a single sampled ghost pixel.
     view.setVelocityColorMode(true);
-    QImage ghostVelocityRender(roll->size(),
-                               QImage::Format_ARGB32_Premultiplied);
-    ghostVelocityRender.fill(Qt::transparent);
-    roll->render(&ghostVelocityRender);
-    if (ghostVelocityRender.pixel(paintedNoteBox.center().x(),
-                                  paintedNoteBox.top()) != ghostTopEdge
-        || ghostVelocityRender.pixel(paintedNoteBox.center().x(),
-                                     paintedNoteBox.top() + 2)
+    const QImage ghostVelocityRender = roll->grab().toImage();
+    if (ghostVelocityRender.pixel(ghostCenterX, ghostTopPixel) != ghostTopEdge
+        || ghostVelocityRender.pixel(ghostCenterX, ghostTopPixel + 2)
             != ghostTopInterior
-        || ghostVelocityRender.pixel(paintedNoteBox.center().x(),
-                                     paintedNoteBox.bottom()) != ghostBottomEdge
-        || ghostVelocityRender.pixel(paintedNoteBox.center().x(),
-                                     paintedNoteBox.bottom() - 2)
+        || ghostVelocityRender.pixel(ghostCenterX, ghostBottomPixel)
+            != ghostBottomEdge
+        || ghostVelocityRender.pixel(ghostCenterX, ghostBottomPixel - 2)
             != ghostBottomInterior)
       fail("velocity-color mode changed a ghost note's rendering");
 
     view.selectTrack(selectedTrackBeforeGhostProbe);
-    QImage velocityModeRender(roll->size(),
-                              QImage::Format_ARGB32_Premultiplied);
-    velocityModeRender.fill(Qt::transparent);
-    roll->render(&velocityModeRender);
+    const QImage velocityModeRender = roll->grab().toImage();
     if (QColor(velocityModeRender.pixel(noteInteriorSample))
         != SongView::velocityNoteColor(100))
       fail("velocity-mode note interior does not match velocityNoteColor(100)");
 
     view.setVelocityColorMode(false);
-    QImage identityRestoredRender(roll->size(),
-                                  QImage::Format_ARGB32_Premultiplied);
-    identityRestoredRender.fill(Qt::transparent);
-    roll->render(&identityRestoredRender);
+    const QImage identityRestoredRender = roll->grab().toImage();
     if (QColor(identityRestoredRender.pixel(noteInteriorSample))
         != expectedNoteColor)
       fail("disabling velocity-color mode did not restore identity fills");

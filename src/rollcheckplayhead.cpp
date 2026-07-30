@@ -28,7 +28,8 @@ namespace {
 #ifdef __APPLE__
 bool usesNativeMacPlayheadRenderer()
 {
-    return QGuiApplication::platformName() == QLatin1String("cocoa");
+    return QGuiApplication::platformName() == QLatin1String("cocoa")
+        && songview::platformPlayheadRendererEnabled();
 }
 #endif
 

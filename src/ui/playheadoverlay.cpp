@@ -78,6 +78,14 @@ const QPainterPath kPlayheadTrianglePath = [] {
 }();
 
 } // namespace
+bool platformPlayheadRendererEnabled()
+{
+#ifdef PORYDAW_USE_DIRECT_PLAYHEAD
+    return !qEnvironmentVariableIsSet("PORYDAW_FORCE_WIDGET_PLAYHEAD");
+#else
+    return false;
+#endif
+}
 
 PlayheadOverlay::PlayheadOverlay(QWidget *owner, TimelineSurfaces surfaces)
     : QWidget(owner)
@@ -280,7 +288,7 @@ void PlayheadOverlay::synchronizeGeometry()
     bool platformCreated = false;
     if (!m_platform && !m_platformAttempted && owner.isVisible()) {
         m_platformAttempted = true;
-        if (!qEnvironmentVariableIsSet("PORYDAW_FORCE_WIDGET_PLAYHEAD")) {
+        if (platformPlayheadRendererEnabled()) {
             initializePlatform(owner);
             platformCreated = true;
         }

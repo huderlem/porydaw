@@ -26,6 +26,9 @@ constexpr qreal kPlayheadLineWidth = 1.0;
 constexpr qreal kPlayheadPeakPlaying = 0.13;
 constexpr qreal kPlayheadPeakPaused = 0.06;
 
+/// Whether the platform-native playhead renderer is enabled for this process.
+bool platformPlayheadRendererEnabled();
+
 class PlayheadOverlay final : public QWidget
 {
 public:
