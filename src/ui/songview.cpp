@@ -1694,7 +1694,8 @@ protected:
             }
         }
         if (m_leftPress && m_drag == Drag::None
-            && event->position().toPoint().x() != m_pressPos.toPoint().x()) {
+            && std::abs(event->position().x() - m_pressPos.x())
+                   >= lyt::space(Space::One)) {
             // The deferred empty-space press turns out to be a draw gesture.
             // ANY horizontal travel starts it — no drag threshold — so the
             // pending note appears immediately; this same event falls

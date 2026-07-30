@@ -30,6 +30,7 @@
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 #include "rollcheckplayhead.h"
+#include "ui/layout.h"
 #include "ui/songview.h"
 
 // --rollcheck <projectRoot> <song> [shot.png]: piano-roll gesture check.
@@ -46,7 +47,7 @@
 // its row at the latched velocity (glissing across rows while held,
 // released on mouse-up) and still parks the edit cursor on release; a
 // press that grows into a draw does not re-attack the sounding key, and
-// any horizontal travel at all grows it (no drag threshold). Holding the
+// a horizontal drag of layout Space::One grows it. Holding the
 // roll.velocity_drag modifier chord (Ctrl by default) turns a vertical
 // drag from anywhere on a note into an Ableton-style velocity drag; a
 // modifier click without the drag keeps Ctrl's selection toggle, resolved
@@ -1288,25 +1289,41 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("the press-grown draw did not commit its note");
     }
 
-    // Any horizontal travel starts the draw — no drag threshold — and the
-    // note first appears at its minimum length, one snap cell.
+    // Drawing begins at a layout Space::One horizontal drag; a shorter
+    // gesture remains a click, while one at the threshold creates a
+    // one-snap-cell note.
     {
+        const int drawStartDistance = layout::space(layout::Space::One);
+        const qreal belowDrawStartDistance =
+            std::max(0.0, double(drawStartDistance) - 0.5);
         const Cell f = findFreeCell();
         if (f.key < 0) {
-            fail("no free grid cell for the tiny-drag draw");
+            fail("no free grid cell for the minimum-distance draw");
             return failures;
         }
+        const QPointF belowDrawEnd =
+            QPointF(f.center) + QPointF(belowDrawStartDistance, 0.0);
         sendMouse(roll, QEvent::MouseButtonPress, f.center, Qt::LeftButton,
                   Qt::LeftButton);
-        sendMouse(roll, QEvent::MouseMove, f.center + QPoint(2, 0), Qt::NoButton,
-                            Qt::LeftButton);
-        sendMouse(roll, QEvent::MouseButtonRelease, f.center + QPoint(2, 0),
+        sendMouse(roll, QEvent::MouseMove, belowDrawEnd, Qt::NoButton,
+                  Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseButtonRelease, belowDrawEnd,
                   Qt::LeftButton, Qt::NoButton);
         DocNote tiny;
+        if (doc.findNote(track, f.tick, uint8_t(f.key), &tiny))
+            fail("a subthreshold horizontal drag drew a note");
+        sendMouse(roll, QEvent::MouseButtonPress, f.center, Qt::LeftButton,
+                  Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseMove,
+                  f.center + QPoint(drawStartDistance, 0), Qt::NoButton,
+                  Qt::LeftButton);
+        sendMouse(roll, QEvent::MouseButtonRelease,
+                  f.center + QPoint(drawStartDistance, 0), Qt::LeftButton,
+                  Qt::NoButton);
         if (!doc.findNote(track, f.tick, uint8_t(f.key), &tiny))
-            fail("a tiny horizontal drag did not draw a note");
+            fail("a Space::One horizontal drag did not draw a note");
         else if (tiny.duration != view.snapTicksAt(f.tick))
-            fail("the tiny-drag note is not one snap cell long");
+            fail("the minimum-distance note is not one snap cell long");
     }
 
     // Modifier velocity gesture (Ableton-style): with the roll.velocity_drag
