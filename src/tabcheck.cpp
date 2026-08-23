@@ -1,5 +1,6 @@
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QEventLoop>
 #include <QFile>
 #include <QFontInfo>
@@ -114,8 +115,8 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA, c
     // inheritance — never by repolishing the stylesheet, which is unsafe
     // while playback is painting on Windows — so playback survives the round
     // trip and the fonts come back without drift.
-    auto *systemFontAction = findChild<QAction *>(QStringLiteral("viewSystemFontAction"));
-    if (check(systemFontAction != nullptr, "Use System Font menu action not found")) {
+    auto *systemFontAction = findChild<QCheckBox *>(QStringLiteral("settingsSystemFont"));
+    if (check(systemFontAction != nullptr, "Settings window's system-font checkbox not found")) {
         const QFont appFontBefore = QApplication::font();
         const QFont tabsFontBefore = m_tabs->font();
         systemFontAction->setChecked(true);

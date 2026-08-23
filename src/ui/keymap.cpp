@@ -45,15 +45,11 @@ const Def kDefs[] = {
     {"edit.redo", Context::Global, QT_TR_NOOP("Edit"), QT_TR_NOOP("Redo"), QKeySequence::Redo, ""},
     {"edit.song_settings", Context::Global, QT_TR_NOOP("Edit"), QT_TR_NOOP("Song Settings"),
      QKeySequence::UnknownKey, ""},
-    {"edit.engine_settings", Context::Global, QT_TR_NOOP("Edit"), QT_TR_NOOP("Engine Settings"),
-     QKeySequence::UnknownKey, ""},
-    {"edit.keyboard_shortcuts", Context::Global, QT_TR_NOOP("Edit"),
-     QT_TR_NOOP("Keyboard Shortcuts"), QKeySequence::UnknownKey, ""},
+    // The platform Preferences key where there is one (⌘, on macOS);
+    // Ctrl+, everywhere the platform leaves it unbound.
+    {"edit.settings", Context::Global, QT_TR_NOOP("Edit"), QT_TR_NOOP("Settings"),
+     QKeySequence::Preferences, "Ctrl+,"},
     // View
-    {"view.theme", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Theme"),
-     QKeySequence::UnknownKey, ""},
-    {"view.system_font", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Use System Font"),
-     QKeySequence::UnknownKey, ""},
     {"view.event_list", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("MIDI Event List"),
      QKeySequence::UnknownKey, "Ctrl+Shift+E"},
     {"view.velocity_colors", Context::Global, QT_TR_NOOP("View"),
@@ -161,8 +157,13 @@ QList<QKeySequence> defaultBindings(const Def &def)
 {
     if (def.modifier) // modifier chords are not key sequences
         return {};
-    if (def.standard != QKeySequence::UnknownKey)
-        return QKeySequence::keyBindings(def.standard);
+    if (def.standard != QKeySequence::UnknownKey) {
+        // A standard key with no binding on this platform (Preferences on
+        // Windows/X11) falls through to the literal fallback.
+        const QList<QKeySequence> platform = QKeySequence::keyBindings(def.standard);
+        if (!platform.isEmpty())
+            return platform;
+    }
     QList<QKeySequence> out;
     const QString keys = QLatin1String(def.keys);
     // ';' separates alternates; QKeySequence's own multi-stroke separator is

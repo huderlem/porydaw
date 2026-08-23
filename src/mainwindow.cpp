@@ -59,18 +59,18 @@
 #include "project/samplereg.h"
 #include "project/sidecar.h"
 #include "project/songregistry.h"
-#include "ui/keyboardshortcutsdialog.h"
+#include "ui/audiosettingspage.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
 #include "ui/newsongwizard.h"
 #include "ui/polyphonypanel.h"
 #include "ui/sampleeditordialog.h"
+#include "ui/settingsdialog.h"
 #include "ui/sf2zonepicker.h"
 #include "ui/songlistpanel.h"
 #include "ui/songsettingsdialog.h"
 #include "ui/songview.h"
 #include "ui/theme/themecontroller.h"
-#include "ui/theme/themedialog.h"
 #include "ui/theme/themeruntime.h"
 #include "ui/typography.h"
 #include "ui/viewsidecar.h"
@@ -91,6 +91,9 @@ const QString kVelocityLaneKey = QStringLiteral("velocityLane");
 const QString kAutomationLanesKey = QStringLiteral("automationLanes");
 const QString kSystemFontKey = QStringLiteral("systemFont");
 const QString kFollowPlayheadKey = QStringLiteral("followPlayhead");
+// Output level in percent of unity (0–200). App-wide, like Follow Playhead:
+// it's the user's listening level, not a property of any song or project.
+const QString kOutputLevelKey = QStringLiteral("outputLevel");
 
 #ifdef Q_OS_WIN
 // These names and values come from the current Windows SDK. The bundled
@@ -222,8 +225,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     typography::setUseSystemFont(m_themeSettings->value(kSystemFontKey, false).toBool());
     m_themeController->restore();
     updateWindowFrameTheme();
-    m_themeDialog = std::make_unique<themes::ThemeDialog>(*m_themeController, this);
     buildUi();
+    buildSettingsDialog();
 
     QSettings settings;
     restoreGeometry(settings.value(QStringLiteral("windowGeometry")).toByteArray());
@@ -345,13 +348,15 @@ void MainWindow::buildUi()
         editMenu->addAction(tr("Song Se&ttings..."), this, &MainWindow::openSongSettings);
     keys.attach(QStringLiteral("edit.song_settings"), m_settingsAction);
     m_settingsAction->setEnabled(false);
-    // Global GBA-accuracy knobs (SPEC §7); not song-scoped, so always enabled.
-    QAction *engineSettingsAction =
-        editMenu->addAction(tr("&Engine Settings..."), this, &MainWindow::openEngineSettings);
-    keys.attach(QStringLiteral("edit.engine_settings"), engineSettingsAction);
-    QAction *shortcutsAction =
-        editMenu->addAction(tr("&Keyboard Shortcuts..."), this, &MainWindow::openKeyboardShortcuts);
-    keys.attach(QStringLiteral("edit.keyboard_shortcuts"), shortcutsAction);
+    editMenu->addSeparator();
+    // App-wide preferences (output level, GBA engine, theme, font,
+    // shortcuts) live in one window; not song-scoped, so always enabled.
+    // PreferencesRole files it under the application menu on macOS.
+    QAction *settingsAction =
+        editMenu->addAction(tr("&Settings..."), this, &MainWindow::openSettings);
+    settingsAction->setObjectName(QStringLiteral("editSettingsAction"));
+    settingsAction->setMenuRole(QAction::PreferencesRole);
+    keys.attach(QStringLiteral("edit.settings"), settingsAction);
     auto *viewMenu = menuBar()->addMenu(tr("&View"));
     // View menu: piano roll vs raw MIDI event list, per tab.
     m_eventListAction = viewMenu->addAction(tr("MIDI &Event List"));
@@ -690,37 +695,10 @@ void MainWindow::buildUi()
     polyDockAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
     viewMenu->addAction(polyDockAction);
 
-    // App-wide appearance preferences, set off by a separator from the
-    // per-song view state above: the theme, the typeface, and the
-    // velocity-hue note fills all persist in QSettings and apply to every
-    // open tab at once.
+    // App-wide view preferences, set off by a separator from the per-song
+    // view state above: these persist in QSettings and apply to every open
+    // tab at once. (The theme and typeface live in Edit → Settings.)
     viewMenu->addSeparator();
-    QAction *themeAction = viewMenu->addAction(tr("&Theme..."), this, [this] {
-        m_themeDialog->show();
-        m_themeDialog->raise();
-        m_themeDialog->activateWindow();
-    });
-    keys.attach(QStringLiteral("view.theme"), themeAction);
-
-    // The typeface: the bundled Atkinson Hyperlegible scale, or the platform
-    // font other Qt applications use.
-    QAction *systemFontAction = viewMenu->addAction(tr("Use System &Font"));
-    systemFontAction->setCheckable(true);
-    systemFontAction->setObjectName(QStringLiteral("viewSystemFontAction"));
-    keys.attach(QStringLiteral("view.system_font"), systemFontAction);
-    {
-        QSettings settings;
-        systemFontAction->setChecked(settings.value(kSystemFontKey, false).toBool());
-    }
-    connect(systemFontAction, &QAction::toggled, this, [this](bool on) {
-        QSettings settings;
-        settings.setValue(kSystemFontKey, on);
-        // Never a theme reapply: repolishing the stylesheet is unsafe while
-        // playback is painting on Windows.
-        typography::applyUseSystemFont(on);
-        refreshDerivedFonts();
-    });
-
     m_velocityColorsAction = viewMenu->addAction(tr("Color Notes by &Velocity"));
     m_velocityColorsAction->setCheckable(true);
     keys.attach(QStringLiteral("view.velocity_colors"), m_velocityColorsAction);
@@ -1829,21 +1807,55 @@ void MainWindow::openSongSettings()
         m_active->doc.setCfg(dialog.cfg());
 }
 
-void MainWindow::openKeyboardShortcuts()
+void MainWindow::openSettings()
 {
-    KeyboardShortcutsDialog dialog(this);
-    dialog.exec();
+    m_settingsDialog->present();
 }
 
-void MainWindow::openEngineSettings()
+// The Settings window is built once and kept; each page applies as it
+// changes, so this is where those changes land and persist.
+void MainWindow::buildSettingsDialog()
 {
-    EngineSettingsDialog dialog(m_engineSettings, this);
-    if (dialog.exec() != QDialog::Accepted)
-        return;
-    m_engineSettings = dialog.settings();
-    m_engineSettings.save();
-    if (m_audioOk && m_active && m_audio.songLoaded())
-        m_audio.updateSettings(songSettingsFor(*m_active));
+    int outputLevel = AudioSettingsPage::kOutputLevelDefault;
+    {
+        QSettings settings;
+        outputLevel = std::clamp(settings.value(kOutputLevelKey, outputLevel).toInt(), 0,
+                                 AudioSettingsPage::kOutputLevelMax);
+    }
+    m_audio.setOutputGain(float(outputLevel) / 100.0f);
+    m_settingsDialog = std::make_unique<SettingsDialog>(
+        *m_themeController, outputLevel, m_engineSettings,
+        m_themeSettings->value(kSystemFontKey, false).toBool(), this);
+    connect(m_settingsDialog.get(), &SettingsDialog::outputLevelChanged, this, [this](int percent) {
+        m_audio.setOutputGain(float(percent) / 100.0f);
+        if (m_persistSession)
+            QSettings().setValue(kOutputLevelKey, percent);
+    });
+    // Applying engine settings stops and restarts the audio device (and
+    // drops any sounding audition), so a held spinbox arrow or wheel must
+    // coalesce into one restart once the knob comes to rest. Persisting is
+    // cheap and stays immediate.
+    m_engineApplyTimer = new QTimer(this);
+    m_engineApplyTimer->setSingleShot(true);
+    m_engineApplyTimer->setInterval(200);
+    connect(m_engineApplyTimer, &QTimer::timeout, this, [this] {
+        if (m_audioOk && m_active && m_audio.songLoaded())
+            m_audio.updateSettings(songSettingsFor(*m_active));
+    });
+    connect(m_settingsDialog.get(), &SettingsDialog::engineSettingsChanged, this,
+            [this](const EngineSettings &settings) {
+                m_engineSettings = settings;
+                m_engineSettings.save();
+                m_engineApplyTimer->start();
+            });
+    connect(m_settingsDialog.get(), &SettingsDialog::useSystemFontChanged, this, [this](bool on) {
+        QSettings settings;
+        settings.setValue(kSystemFontKey, on);
+        // Never a theme reapply: repolishing the stylesheet is unsafe while
+        // playback is painting on Windows.
+        typography::applyUseSystemFont(on);
+        refreshDerivedFonts();
+    });
 }
 
 SongSettings MainWindow::songSettingsFor(const SongSession &session) const
@@ -3273,8 +3285,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     // write-through now, exercised by --onboardcheck against a scratch copy.
     {
         NewSongWizard wizard(&m_project, vgCatalog().groupArgs, this);
-        EngineSettingsDialog engineDialog(m_engineSettings, this);
-        qInfo("selftest: New Song wizard + engine settings dialog constructed");
+        qInfo("selftest: New Song wizard constructed (Settings window built with the main window)");
     }
 
     const double playedSeconds = double(m_audio.playheadSamples()) / m_audio.sampleRate();

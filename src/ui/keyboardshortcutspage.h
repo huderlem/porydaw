@@ -1,6 +1,6 @@
 #pragma once
 
-#include <QDialog>
+#include <QWidget>
 
 class QComboBox;
 class QKeySequenceEdit;
@@ -10,15 +10,15 @@ class QPushButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
-// Edit-menu dialog over keymap::Registry. Changes apply immediately (the
-// registry persists and re-applies them); there is no OK/Cancel staging —
-// per-command Reset and Reset All are the undo story.
-class KeyboardShortcutsDialog : public QDialog
+// Settings window page over keymap::Registry. Changes apply immediately
+// (the registry persists and re-applies them); there is no OK/Cancel
+// staging — per-command Reset and Reset All are the undo story.
+class KeyboardShortcutsPage : public QWidget
 {
     Q_OBJECT
 
   public:
-    explicit KeyboardShortcutsDialog(QWidget *parent = nullptr);
+    explicit KeyboardShortcutsPage(QWidget *parent = nullptr);
 
   private:
     void rebuildTree();

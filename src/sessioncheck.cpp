@@ -1,9 +1,11 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDir>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QSettings>
+#include <QSlider>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <cstdio>
@@ -105,12 +107,28 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
             sort->setCurrentIndex(1);
             search->setText(QStringLiteral("filterme"));
         }
+        // The Settings window's output level is app-wide too: it publishes
+        // the gain to the engine as it moves and persists as it goes. The
+        // window is built with the main window, so its controls are
+        // reachable without showing it.
+        auto *output = window.findChild<QSlider *>(QStringLiteral("settingsOutputLevel"));
+        auto *outputValue = window.findChild<QLabel *>(QStringLiteral("settingsOutputValue"));
+        if (check(output && outputValue, "output level widgets not found")) {
+            check(output->value() == 100 && window.audio().outputGain() == 1.0f,
+                  "output level did not start at unity");
+            output->setValue(150);
+            check(window.audio().outputGain() == 1.5f, "output level did not reach the engine");
+            check(outputValue->text() == QStringLiteral("150%"),
+                  "output level readout did not follow the slider");
+        }
         // Must fit the offscreen platform's 800x600 virtual screen: newer Qt
         // clamps restoreGeometry() to the available screen, so an oversized
         // window would come back shrunk and block 5 would fail.
         window.resize(777, 505);
         check(window.close(), "close was refused");
         QSettings settings;
+        check(settings.value(QStringLiteral("outputLevel")).toInt() == 150,
+              "output level was not persisted");
         check(!settings.value(QStringLiteral("windowGeometry")).toByteArray().isEmpty(),
               "close did not save window geometry");
         check(settings.value(QStringLiteral("lastProjectDir")).toString() == projectRoot,
@@ -142,6 +160,9 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel)
         auto *category = window.findChild<QComboBox *>(QStringLiteral("songListCategory"));
         check(category && category->currentData().toString() == filterCategory,
               "relaunch did not restore the song category filter");
+        auto *output = window.findChild<QSlider *>(QStringLiteral("settingsOutputLevel"));
+        check(output && output->value() == 150 && window.audio().outputGain() == 1.5f,
+              "relaunch did not restore the output level");
     }
 
     if (failures == 0)

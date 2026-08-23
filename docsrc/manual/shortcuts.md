@@ -2,7 +2,8 @@
 
 ## The shortcut editor
 
-<!-- TODO: Edit → Keyboard Shortcuts; search, rebinding, conflicts
+<!-- TODO: Edit → Settings → Keyboard Shortcuts (Ctrl+, / ⌘,); search,
+rebinding, conflicts
 (steal-on-assign), restore defaults; mouse-gesture commands (e.g. the
 velocity drag chord) are rebindable too. -->
 

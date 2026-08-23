@@ -186,6 +186,12 @@ class AudioEngine
     bool loopEnabled() const { return m_loopEnabled.load(); }
     void setMuteMask(uint32_t mask) { m_muteMask.store(mask); }
     void setSoloMask(uint32_t mask) { m_soloMask.store(mask); }
+    // Hot: porydaw's own listening level — a linear gain on the final mix
+    // (song playback and every audition alike), applied per callback. It is
+    // not an m4a concept: never part of the song, never in exported WAVs.
+    // 1.0 is unity; above it the device's float stream is left to clip.
+    void setOutputGain(float gain) { m_outputGain.store(gain); }
+    float outputGain() const { return m_outputGain.load(); }
 
     // Hot: polyphony-overflow debug mode — mutes normal playback and plays
     // only the sounds lost to the polyphony limit (SPEC §6.1 Polyphony dock).
@@ -279,6 +285,7 @@ class AudioEngine
     std::atomic<bool> m_loopEnabled{true};
     std::atomic<uint32_t> m_muteMask{0};
     std::atomic<uint32_t> m_soloMask{0};
+    std::atomic<float> m_outputGain{1.0f};
     // Avoid stop/start stalls: publish the latest seek for the audio callback.
     static constexpr uint64_t kNoPendingSeek = UINT64_MAX;
     std::atomic<uint64_t> m_pendingSeek{kNoPendingSeek};

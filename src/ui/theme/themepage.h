@@ -2,11 +2,12 @@
 
 #include "themecontroller.h"
 #include <QColor>
-#include <QDialog>
 #include <QString>
+#include <QWidget>
+
+#include <optional>
 
 class QButtonGroup;
-class QCloseEvent;
 class QEvent;
 class QSlider;
 class QGroupBox;
@@ -19,20 +20,26 @@ class QWidget;
 
 namespace themes {
 
-/// Modeless editor for a theme draft.
+/// Theme editor for the Settings window's Appearance page.
 ///
-/// The dialog manages controls, text, and the picker. ThemeController owns
+/// The page manages controls, text, and the picker. ThemeController owns
 /// applying, saving, and restoring the application's committed theme.
-class ThemeDialog final : public QDialog
+/// Every valid selection commits as it is made — presets and the contrast
+/// dial at once, Custom colors after a short debounce. A half-typed Custom
+/// pair is the one draft state: while it is invalid the committed theme
+/// stays applied, and rollback() (the Settings window closing) returns the
+/// controls to it.
+class ThemePage final : public QWidget
 {
     Q_OBJECT
 
   public:
-    ThemeDialog(ThemeController &controller, QWidget *parent = nullptr);
+    ThemePage(ThemeController &controller, QWidget *parent = nullptr);
 
-  protected:
-    void reject() override;
-    void closeEvent(QCloseEvent *event) override;
+    /// Lands a pending (debounced) Custom commit, drops an invalid partial
+    /// draft and returns the controls to the committed selection. Called
+    /// when the Settings window closes.
+    void rollback();
 
   private slots:
     void primaryHexEdited();
@@ -40,9 +47,7 @@ class ThemeDialog final : public QDialog
     void primarySwatchClicked();
     void accentSwatchClicked();
     void pickerColorSelected(const QColor &color);
-    void previewDraft();
-    void applyClicked();
-    void closeClicked();
+    void commitDraft();
 
   private:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -53,10 +58,9 @@ class ThemeDialog final : public QDialog
 
     void setField(QLineEdit *field, const QColor &color);
     void readDraftFromFields();
-    void schedulePreview();
+    void scheduleCommit();
     void updateUi();
     void updatePicker();
-    void rollbackToCommitted();
     void clearPartialCustomDraft();
     void resetDraftToCommitted();
     std::optional<ThemeSelection> draftSelection() const;
@@ -82,9 +86,7 @@ class ThemeDialog final : public QDialog
     QLabel *m_pickerTargetLabel = nullptr;
     QWidget *m_picker = nullptr;
     bool m_pickerTargetsPrimary = true;
-    QTimer *m_previewTimer = nullptr;
-    QPushButton *m_applyButton = nullptr;
-    QPushButton *m_closeButton = nullptr;
+    QTimer *m_commitTimer = nullptr;
     bool m_ignoreFieldSignals = false;
 };
 } // namespace themes

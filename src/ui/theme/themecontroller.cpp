@@ -47,12 +47,6 @@ void ThemeController::restore()
     apply(m_application, resolve(m_selection));
 }
 
-void ThemeController::preview(const ThemeSelection &candidate)
-{
-    if (isValid(candidate))
-        apply(m_application, resolve(candidate));
-}
-
 bool ThemeController::commit(const ThemeSelection &candidate)
 {
     auto selection = candidate;
@@ -66,11 +60,6 @@ bool ThemeController::commit(const ThemeSelection &candidate)
     apply(m_application, resolve(selection));
     m_selection = selection;
     return true;
-}
-
-void ThemeController::discardPreview()
-{
-    apply(m_application, resolve(m_selection));
 }
 
 const ThemeSelection &ThemeController::committedSelection() const

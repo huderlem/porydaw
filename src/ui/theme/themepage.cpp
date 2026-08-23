@@ -1,4 +1,4 @@
-#include "themedialog.h"
+#include "themepage.h"
 
 #include "oklchpicker.h"
 #include "themeresolver.h"
@@ -6,7 +6,7 @@
 #include <QSlider>
 
 #include <QButtonGroup>
-#include <QCloseEvent>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QFrame>
@@ -24,8 +24,8 @@
 
 namespace themes {
 
-void ThemeDialog::addModeButton(QVBoxLayout &layout, QWidget &parent, ThemeMode mode,
-                                const QString &label, const QString &objectName)
+void ThemePage::addModeButton(QVBoxLayout &layout, QWidget &parent, ThemeMode mode,
+                              const QString &label, const QString &objectName)
 {
     const auto id = static_cast<int>(mode);
     Q_ASSERT(m_modeButtons->button(id) == nullptr);
@@ -37,22 +37,18 @@ void ThemeDialog::addModeButton(QVBoxLayout &layout, QWidget &parent, ThemeMode 
     layout.addWidget(button);
 }
 
-void ThemeDialog::setCheckedMode(ThemeMode mode)
+void ThemePage::setCheckedMode(ThemeMode mode)
 {
     auto *button = m_modeButtons->button(static_cast<int>(mode));
     Q_ASSERT(button);
     button->setChecked(true);
 }
 
-ThemeDialog::ThemeDialog(ThemeController &controller, QWidget *parent)
-    : QDialog(parent)
+ThemePage::ThemePage(ThemeController &controller, QWidget *parent)
+    : QWidget(parent)
     , m_controller(controller)
     , m_draft{}
 {
-    setWindowTitle(tr("Theme"));
-    setModal(false);
-    setAttribute(Qt::WA_DeleteOnClose, false);
-
     auto *modeGroup = new QWidget(this);
     auto *modeLayout = new QVBoxLayout(modeGroup);
     modeLayout->setContentsMargins(0, 0, 0, 0);
@@ -168,53 +164,41 @@ ThemeDialog::ThemeDialog(ThemeController &controller, QWidget *parent)
     customLayout->addLayout(pickerLegend);
     customLayout->addWidget(m_picker, 1);
 
-    m_applyButton = new QPushButton(tr("Apply"), this);
-    m_applyButton->setObjectName(QStringLiteral("themeApplyButton"));
-    m_closeButton = new QPushButton(tr("Close"), this);
-    m_closeButton->setObjectName(QStringLiteral("themeCloseButton"));
-    auto *buttons = new QHBoxLayout;
-    buttons->addStretch(1);
-    buttons->addWidget(m_applyButton);
-    buttons->addWidget(m_closeButton);
-
     auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(modeGroup);
     layout->addLayout(contrastLayout);
     layout->addWidget(m_customEditorGroup, 1);
-    layout->addLayout(buttons);
 
-    m_previewTimer = new QTimer(this);
-    m_previewTimer->setSingleShot(true);
-    m_previewTimer->setInterval(50);
+    m_commitTimer = new QTimer(this);
+    m_commitTimer->setSingleShot(true);
+    m_commitTimer->setInterval(50);
 
     connect(m_modeButtons, &QButtonGroup::idClicked, this, [this](int id) {
         const auto mode = static_cast<ThemeMode>(id);
         if (mode != m_draft.mode)
             modeChanged(mode);
     });
-    connect(m_primaryHexEdit, &QLineEdit::textChanged, this, &ThemeDialog::primaryHexEdited);
-    connect(m_accentHexEdit, &QLineEdit::textChanged, this, &ThemeDialog::accentHexEdited);
-    connect(m_primarySwatch, &QPushButton::clicked, this, &ThemeDialog::primarySwatchClicked);
-    connect(m_accentSwatch, &QPushButton::clicked, this, &ThemeDialog::accentSwatchClicked);
+    connect(m_primaryHexEdit, &QLineEdit::textChanged, this, &ThemePage::primaryHexEdited);
+    connect(m_accentHexEdit, &QLineEdit::textChanged, this, &ThemePage::accentHexEdited);
+    connect(m_primarySwatch, &QPushButton::clicked, this, &ThemePage::primarySwatchClicked);
+    connect(m_accentSwatch, &QPushButton::clicked, this, &ThemePage::accentSwatchClicked);
     connect(static_cast<OklchPicker *>(m_picker), &OklchPicker::colorSelected, this,
-            &ThemeDialog::pickerColorSelected);
+            &ThemePage::pickerColorSelected);
     connect(m_gridLineContrastSlider, &QSlider::valueChanged, this, [this](int value) {
         m_draft.gridLineContrast = value;
         m_gridLineContrastValueLabel->setText(QString::number(value));
-        schedulePreview();
+        scheduleCommit();
     });
-    connect(m_previewTimer, &QTimer::timeout, this, &ThemeDialog::previewDraft);
-    connect(m_applyButton, &QPushButton::clicked, this, &ThemeDialog::applyClicked);
-    connect(m_closeButton, &QPushButton::clicked, this, &ThemeDialog::closeClicked);
+    connect(m_commitTimer, &QTimer::timeout, this, &ThemePage::commitDraft);
 
     resetDraftToCommitted();
     setCheckedMode(m_draft.mode);
     updateUi();
     updatePicker();
-    resize(sizeHint());
 }
 
-void ThemeDialog::setField(QLineEdit *field, const QColor &color)
+void ThemePage::setField(QLineEdit *field, const QColor &color)
 {
     const bool oldIgnore = m_ignoreFieldSignals;
     m_ignoreFieldSignals = true;
@@ -222,12 +206,12 @@ void ThemeDialog::setField(QLineEdit *field, const QColor &color)
     m_ignoreFieldSignals = oldIgnore;
 }
 
-QString ThemeDialog::canonicalHex(const QColor &color)
+QString ThemePage::canonicalHex(const QColor &color)
 {
     return color.name(QColor::HexRgb).toUpper();
 }
 
-QColor ThemeDialog::parseField(const QLineEdit *field) const
+QColor ThemePage::parseField(const QLineEdit *field) const
 {
     const auto text = field->text().trimmed();
     const auto parsed = QColor(text);
@@ -236,13 +220,13 @@ QColor ThemeDialog::parseField(const QLineEdit *field) const
     return parsed;
 }
 
-void ThemeDialog::readDraftFromFields()
+void ThemePage::readDraftFromFields()
 {
     m_draft.primary = parseField(m_primaryHexEdit);
     m_draft.accent = parseField(m_accentHexEdit);
 }
 
-std::optional<ThemeSelection> ThemeDialog::draftSelection() const
+std::optional<ThemeSelection> ThemePage::draftSelection() const
 {
     auto selection = ThemeSelection{m_draft.mode};
     if (isValidColorPair(m_draft.primary, m_draft.accent))
@@ -253,25 +237,23 @@ std::optional<ThemeSelection> ThemeDialog::draftSelection() const
     return selection;
 }
 
-void ThemeDialog::schedulePreview()
+void ThemePage::scheduleCommit()
 {
-    m_previewTimer->stop();
+    m_commitTimer->stop();
     const auto selection = draftSelection();
-    // Never leave an invalid partial Custom draft installed as the application
-    // preview; fall back to the committed selection until both fields are valid.
-    if (!selection) {
-        m_controller.discardPreview();
+    // An invalid partial Custom draft never reaches the application: the
+    // committed selection stays applied until both fields are valid.
+    if (!selection)
         return;
-    }
     // Continuous Custom edits perform color derivation, so debounce them. Fixed
     // presets are already resolved constants and should respond immediately.
     if (m_draft.mode == ThemeMode::Custom)
-        m_previewTimer->start();
+        m_commitTimer->start();
     else
-        m_controller.preview(*selection);
+        commitDraft();
 }
 
-void ThemeDialog::updatePicker()
+void ThemePage::updatePicker()
 {
     auto *picker = static_cast<OklchPicker *>(m_picker);
     const bool targetPrimary = m_pickerTargetsPrimary;
@@ -285,11 +267,10 @@ void ThemeDialog::updatePicker()
     picker->setSelection(selected, other, otherSet);
 }
 
-void ThemeDialog::updateUi()
+void ThemePage::updateUi()
 {
     const bool custom = m_draft.mode == ThemeMode::Custom;
     m_customEditorGroup->setEnabled(custom);
-    m_applyButton->setEnabled(draftSelection().has_value());
 
     const auto setSwatch = [](QPushButton *button, const QColor &color, bool set) {
         const auto current = button->property("color").toString();
@@ -313,7 +294,7 @@ void ThemeDialog::updateUi()
     setSwatch(m_accentSwatch, m_draft.accent, m_draft.accent.isValid());
 }
 
-void ThemeDialog::primaryHexEdited()
+void ThemePage::primaryHexEdited()
 {
     if (m_ignoreFieldSignals)
         return;
@@ -322,10 +303,10 @@ void ThemeDialog::primaryHexEdited()
         setField(m_primaryHexEdit, m_draft.primary);
     updatePicker();
     updateUi();
-    schedulePreview();
+    scheduleCommit();
 }
 
-void ThemeDialog::accentHexEdited()
+void ThemePage::accentHexEdited()
 {
     if (m_ignoreFieldSignals)
         return;
@@ -334,24 +315,24 @@ void ThemeDialog::accentHexEdited()
         setField(m_accentHexEdit, m_draft.accent);
     updatePicker();
     updateUi();
-    schedulePreview();
+    scheduleCommit();
 }
 
-void ThemeDialog::primarySwatchClicked()
+void ThemePage::primarySwatchClicked()
 {
     m_pickerTargetsPrimary = true;
     m_primaryHexEdit->setFocus(Qt::MouseFocusReason);
     updatePicker();
 }
 
-void ThemeDialog::accentSwatchClicked()
+void ThemePage::accentSwatchClicked()
 {
     m_pickerTargetsPrimary = false;
     m_accentHexEdit->setFocus(Qt::MouseFocusReason);
     updatePicker();
 }
 
-void ThemeDialog::pickerColorSelected(const QColor &color)
+void ThemePage::pickerColorSelected(const QColor &color)
 {
     if (m_draft.mode != ThemeMode::Custom || !color.isValid())
         return;
@@ -361,10 +342,10 @@ void ThemeDialog::pickerColorSelected(const QColor &color)
         m_draft.accent = color;
     setField(m_pickerTargetsPrimary ? m_primaryHexEdit : m_accentHexEdit, color);
     updateUi();
-    schedulePreview();
+    scheduleCommit();
 }
 
-void ThemeDialog::modeChanged(ThemeMode mode)
+void ThemePage::modeChanged(ThemeMode mode)
 {
     m_draft.mode = mode;
     if (mode == ThemeMode::Custom) {
@@ -380,33 +361,19 @@ void ThemeDialog::modeChanged(ThemeMode mode)
     }
     updateUi();
     updatePicker();
-    schedulePreview();
+    scheduleCommit();
 }
 
-void ThemeDialog::previewDraft()
+void ThemePage::commitDraft()
 {
-    const auto selection = draftSelection();
-    if (!selection) {
-        m_controller.discardPreview();
-        return;
-    }
-    m_controller.preview(*selection);
-}
-
-void ThemeDialog::applyClicked()
-{
+    m_commitTimer->stop();
     const auto selection = draftSelection();
     if (!selection)
         return;
-    m_previewTimer->stop();
-    if (!m_controller.commit(*selection))
-        return;
-    resetDraftToCommitted();
-    updateUi();
-    updatePicker();
+    m_controller.commit(*selection);
 }
 
-void ThemeDialog::clearPartialCustomDraft()
+void ThemePage::clearPartialCustomDraft()
 {
     m_draft.primary = QColor();
     m_draft.accent = QColor();
@@ -417,7 +384,7 @@ void ThemeDialog::clearPartialCustomDraft()
     m_ignoreFieldSignals = oldIgnore;
 }
 
-void ThemeDialog::resetDraftToCommitted()
+void ThemePage::resetDraftToCommitted()
 {
     const auto &committed = m_controller.committedSelection();
     m_draft.mode = committed.mode;
@@ -434,34 +401,21 @@ void ThemeDialog::resetDraftToCommitted()
     }
 }
 
-void ThemeDialog::rollbackToCommitted()
+void ThemePage::rollback()
 {
-    m_previewTimer->stop();
-    m_controller.discardPreview();
+    // A valid Custom pair still inside its debounce is a selection the user
+    // made, not a draft to drop: land it first. Nothing is ever previewed,
+    // so the committed theme is already applied and there is nothing to
+    // repolish here.
+    if (m_commitTimer->isActive())
+        commitDraft();
     resetDraftToCommitted();
     setCheckedMode(m_draft.mode);
     updateUi();
     updatePicker();
 }
 
-void ThemeDialog::reject()
-{
-    rollbackToCommitted();
-    QDialog::reject();
-}
-
-void ThemeDialog::closeEvent(QCloseEvent *event)
-{
-    rollbackToCommitted();
-    QDialog::closeEvent(event);
-}
-
-void ThemeDialog::closeClicked()
-{
-    reject();
-}
-
-bool ThemeDialog::eventFilter(QObject *watched, QEvent *event)
+bool ThemePage::eventFilter(QObject *watched, QEvent *event)
 {
     if (event && event->type() == QEvent::FocusIn) {
         if (watched == m_primaryHexEdit) {
@@ -472,7 +426,7 @@ bool ThemeDialog::eventFilter(QObject *watched, QEvent *event)
             updatePicker();
         }
     }
-    return QDialog::eventFilter(watched, event);
+    return QWidget::eventFilter(watched, event);
 }
 
 } // namespace themes

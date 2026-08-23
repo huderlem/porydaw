@@ -2,13 +2,15 @@
 
 ## Themes
 
-<!-- TODO: View → Theme; screenshot strip of the presets (light/dark/...);
-persisted per user. -->
+<!-- TODO: Edit → Settings → Appearance; screenshot strip of the presets
+(light/dark/...); every change applies as you make it; persisted per user.
+Link to [Settings](settings.md). -->
 
 ## Use System Font
 
 <!-- TODO: Bundled Atkinson Hyperlegible (chosen for readability) vs.
-View → Use System Font to match the rest of your desktop; persisted. -->
+Edit → Settings → Appearance → "Use the system font" to match the rest of
+your desktop; persisted. -->
 
 ## Color Notes by Velocity
 

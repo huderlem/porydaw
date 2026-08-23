@@ -10,7 +10,7 @@
 #include "project/decompproject.h"
 #include "project/voicegroupsource.h"
 #include "songsession.h"
-#include "ui/enginesettingsdialog.h"
+#include "ui/enginesettings.h"
 
 class QAction;
 class QChildEvent;
@@ -31,8 +31,8 @@ class VoicegroupBrowser;
 
 namespace themes {
 class ThemeController;
-class ThemeDialog;
 } // namespace themes
+class SettingsDialog;
 
 class MainWindow : public QMainWindow
 {
@@ -43,6 +43,12 @@ class MainWindow : public QMainWindow
   public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
+
+    // The live audio engine, for harnesses that verify what the Settings
+    // window's controls publish to it.
+    const AudioEngine &audio() const { return m_audio; }
+    // The Settings window (built with the main window, shown on demand).
+    SettingsDialog *settingsDialog() const { return m_settingsDialog.get(); }
 
     // Headless smoke test (--selftest <projectRoot> <songLabel>): opens the
     // project, loads the song, plays ~3 seconds through the real audio path,
@@ -101,8 +107,7 @@ class MainWindow : public QMainWindow
     void saveSong();
     void exportWav();
     void openSongSettings();
-    void openEngineSettings();
-    void openKeyboardShortcuts();
+    void openSettings();
     void newSong();
     void importMidi();
     void importSample();
@@ -128,6 +133,7 @@ class MainWindow : public QMainWindow
 
   private:
     void buildUi();
+    void buildSettingsDialog();
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -319,7 +325,7 @@ class MainWindow : public QMainWindow
     QToolBar *m_transportToolbar = nullptr;
     std::unique_ptr<QSettings> m_themeSettings;
     std::unique_ptr<themes::ThemeController> m_themeController;
-    std::unique_ptr<themes::ThemeDialog> m_themeDialog;
+    std::unique_ptr<SettingsDialog> m_settingsDialog;
     QAction *m_newSongAction = nullptr;
     QAction *m_importAction = nullptr;
     QAction *m_importSampleAction = nullptr;
@@ -352,6 +358,7 @@ class MainWindow : public QMainWindow
     QLabel *m_polyLostLabel = nullptr;
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
+    QTimer *m_engineApplyTimer = nullptr; // coalesces Settings → engine restarts
     // Last values applied to the status widgets (uiTick runs at 2 Hz idle,
     // 10 Hz during playback; unchanged values skip the label writes).
     struct PolyStatusSnapshot {

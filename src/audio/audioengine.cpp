@@ -701,6 +701,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     }
 
     M4AEngine *engine = m_engine.get();
+    const float gain = m_outputGain.load();
     uint32_t done = 0;
 
     while (done < frameCount) {
@@ -729,8 +730,8 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
         m4a_engine_process(m_previewEngine.get(), m_pvL.get(), m_pvR.get(), int(n));
 
         for (uint32_t i = 0; i < n; i++) {
-            interleavedOut[(done + i) * 2] = m_bufL[i] + m_pvL[i];
-            interleavedOut[(done + i) * 2 + 1] = m_bufR[i] + m_pvR[i];
+            interleavedOut[(done + i) * 2] = (m_bufL[i] + m_pvL[i]) * gain;
+            interleavedOut[(done + i) * 2 + 1] = (m_bufR[i] + m_pvR[i]) * gain;
         }
         done += n;
     }

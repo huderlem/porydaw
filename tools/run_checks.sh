@@ -119,6 +119,7 @@ run smfcheck         -    --smfcheck
 run transportcheck   -    --transportcheck
 run audiocheck       -    --audiocheck
 run keymapcheck      -    --keymapcheck
+run settingscheck    -    --settingscheck
 run velmodelcheck    -    --velmodelcheck
 run polycheck        -    --polycheck
 

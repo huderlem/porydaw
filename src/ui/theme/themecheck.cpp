@@ -3,7 +3,7 @@
 #include "ui/theme/color_math.h"
 
 #include "ui/theme/themecontroller.h"
-#include "ui/theme/themedialog.h"
+#include "ui/theme/themepage.h"
 #include "ui/theme/themeresolver.h"
 #include "ui/theme/themeruntime.h"
 #include "ui/theme/trackidentitycolors.h"
@@ -12,7 +12,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCursor>
+#include <QElapsedTimer>
 #include <QEvent>
+#include <QEventLoop>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QLabel>
@@ -448,7 +450,7 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application)
     }
     reporter.check(foundInk, "a model foreground brush is overridden by the item "
                              "stylesheet (polyphony event log severity colors)");
-    themes::ThemeDialog dialog(controller);
+    themes::ThemePage dialog(controller);
     auto *custom = dialog.findChild<QRadioButton *>(QStringLiteral("customModeButton"));
     auto *darkNeutralHigh =
         dialog.findChild<QRadioButton *>(QStringLiteral("darkNeutralHighModeButton"));
@@ -456,13 +458,22 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application)
     auto *primary = dialog.findChild<QLineEdit *>(QStringLiteral("primaryHexEdit"));
     auto *accent = dialog.findChild<QLineEdit *>(QStringLiteral("accentHexEdit"));
     auto *gridLineContrast = dialog.findChild<QSlider *>(QStringLiteral("gridLineContrastSlider"));
-    auto *apply = dialog.findChild<QPushButton *>(QStringLiteral("themeApplyButton"));
-    auto *close = dialog.findChild<QPushButton *>(QStringLiteral("themeCloseButton"));
-    const auto controlsFound = custom && darkNeutralHigh && immaterial && primary && accent &&
-                               gridLineContrast && apply && close;
-    reporter.check(controlsFound, "the Theme dialog is missing a core control");
+    const auto controlsFound =
+        custom && darkNeutralHigh && immaterial && primary && accent && gridLineContrast;
+    reporter.check(controlsFound, "the Theme page is missing a core control");
     if (!controlsFound)
         return;
+    // Custom edits commit after a short debounce; presets and the contrast
+    // dial commit at once.
+    const auto settleCustomCommit = [&] {
+        QElapsedTimer clock;
+        clock.start();
+        while (clock.elapsed() < 1000) {
+            application.processEvents(QEventLoop::AllEvents, 20);
+            if (controller.committedSelection().mode == themes::ThemeMode::Custom)
+                return;
+        }
+    };
     dialog.show();
     for (int i = 0; i < 3; ++i)
         application.processEvents();
@@ -542,45 +553,77 @@ void checkThemeWorkflow(Reporter &reporter, QApplication &application)
                    "grid contrast did not repaint its registered paint target");
     darkNeutralHigh->click();
     checkGeometry();
+    reporter.check(controller.committedSelection().mode == themes::ThemeMode::DarkNeutralHigh,
+                   "selecting a preset did not commit it");
     custom->click();
     primary->setText(QStringLiteral("#000000"));
+    // Half a Custom pair is a draft, not a theme: the committed preset stays
+    // applied and nothing is written.
+    reporter.check(controller.committedSelection().mode == themes::ThemeMode::DarkNeutralHigh &&
+                       themes::color(themes::Role::toolbar_background) ==
+                           themes::darkNeutralHigh().color(themes::Role::toolbar_background),
+                   "a partial Custom pair left the committed preset");
     accent->setText(QStringLiteral("#FFFFFF"));
-    reporter.check(apply->isEnabled(), "a valid Custom theme cannot be applied");
     gridLineContrast->setValue(80);
-    apply->click();
-    const auto &committed = controller.committedSelection();
+    settleCustomCommit();
+    const auto committed = controller.committedSelection();
     reporter.check(committed.mode == themes::ThemeMode::Custom && committed.customColors &&
                        committed.customColors->primary == QColor("#000000") &&
                        committed.customColors->accent == QColor("#FFFFFF") &&
                        committed.gridLineContrast == 80,
-                   "Apply did not commit the Custom theme");
+                   "a valid Custom pair did not commit");
+    reporter.check(themes::color(themes::Role::link_text) == QColor("#FFFFFF"),
+                   "the committed Custom theme is not applied");
     darkNeutralHigh->click();
     reporter.check(themes::color(themes::Role::toolbar_background) ==
                        themes::darkNeutralHigh().color(themes::Role::toolbar_background),
-                   "selecting Dark Neutral High did not preview it");
+                   "selecting Dark Neutral High did not apply it");
     immaterial->click();
     reporter.check(themes::color(themes::Role::toolbar_background) ==
                        themes::immaterial().color(themes::Role::toolbar_background),
-                   "selecting Immaterial did not preview it");
+                   "selecting Immaterial did not apply it");
     gridLineContrast->setValue(10);
-    close->click();
-    reporter.check(themes::color(themes::Role::link_text) == QColor("#FFFFFF"),
-                   "closing the dialog did not restore the committed theme");
-    reporter.check(
-        themes::color(themes::Role::song_view_grid) ==
-            themes::withGridLineContrast(themes::derive(QColor("#000000"), QColor("#FFFFFF")), 80)
-                .color(themes::Role::song_view_grid),
-        "closing the dialog did not restore committed grid line contrast");
+    // Presets keep the last Custom pair so returning to Custom restores it.
+    custom->click();
+    reporter.check(primary->text() == QStringLiteral("#000000") &&
+                       accent->text() == QStringLiteral("#FFFFFF"),
+                   "returning to Custom did not restore the last pair");
+    settleCustomCommit();
+    immaterial->click();
+    // Closing the Settings window drops a partial draft and returns the
+    // controls to the committed selection; a committed one is untouched.
+    custom->click();
+    primary->setText(QStringLiteral("#12"));
+    reporter.check(themes::color(themes::Role::toolbar_background) ==
+                       themes::immaterial().color(themes::Role::toolbar_background),
+                   "a partial Custom edit replaced the committed theme");
+    dialog.rollback();
+    reporter.check(immaterial->isChecked() && primary->text().isEmpty(),
+                   "rollback did not return the controls to the committed selection");
+    reporter.check(themes::color(themes::Role::song_view_grid) ==
+                       themes::withGridLineContrast(themes::immaterial(), 10)
+                           .color(themes::Role::song_view_grid),
+                   "rollback did not keep the committed grid line contrast");
+    // A valid Custom pair still inside its commit debounce is a selection,
+    // not a draft: closing the window lands it instead of dropping it.
+    custom->click();
+    primary->setText(QStringLiteral("#000000"));
+    accent->setText(QStringLiteral("#FFFFFF"));
+    dialog.rollback();
+    reporter.check(controller.committedSelection().mode == themes::ThemeMode::Custom &&
+                       custom->isChecked() && accent->text() == QStringLiteral("#FFFFFF"),
+                   "rollback dropped a valid Custom pair pending its commit");
+    immaterial->click();
     settings.sync();
     QSettings restoredSettings(settingsPath, QSettings::IniFormat);
     themes::ThemeController restoredController(application, restoredSettings);
     restoredController.restore();
     const auto &restored = restoredController.committedSelection();
-    reporter.check(restored.mode == themes::ThemeMode::Custom && restored.customColors &&
+    reporter.check(restored.mode == themes::ThemeMode::Immaterial && restored.customColors &&
                        restored.customColors->primary == QColor("#000000") &&
                        restored.customColors->accent == QColor("#FFFFFF") &&
-                       restored.gridLineContrast == 80,
-                   "the committed Custom theme did not survive restore");
+                       restored.gridLineContrast == 10,
+                   "the committed theme (and retained Custom pair) did not survive restore");
     struct StoredMode {
         themes::ThemeMode mode;
         const char *value;

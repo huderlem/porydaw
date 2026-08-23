@@ -69,8 +69,8 @@ qt_add_library(porydaw_app STATIC
     src/ui/theme/themecontroller.h
     src/ui/theme/oklchpicker.cpp
     src/ui/theme/oklchpicker.h
-    src/ui/theme/themedialog.cpp
-    src/ui/theme/themedialog.h
+    src/ui/theme/themepage.cpp
+    src/ui/theme/themepage.h
 
     src/audio/audioengine.cpp
     src/audio/audioengine.h
@@ -136,10 +136,16 @@ qt_add_library(porydaw_app STATIC
     src/ui/voicegroupbrowser.h
     src/ui/keymap.cpp
     src/ui/keymap.h
-    src/ui/keyboardshortcutsdialog.cpp
-    src/ui/keyboardshortcutsdialog.h
-    src/ui/enginesettingsdialog.cpp
-    src/ui/enginesettingsdialog.h
+    src/ui/keyboardshortcutspage.cpp
+    src/ui/keyboardshortcutspage.h
+    src/ui/enginesettings.cpp
+    src/ui/enginesettings.h
+    src/ui/audiosettingspage.cpp
+    src/ui/audiosettingspage.h
+    src/ui/appearancesettingspage.cpp
+    src/ui/appearancesettingspage.h
+    src/ui/settingsdialog.cpp
+    src/ui/settingsdialog.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
     src/ui/polyphonypanel.cpp
@@ -224,6 +230,7 @@ qt_add_executable(porydaw
     src/ignorecheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp
+    src/settingscheck.cpp
     src/keymapcheck.cpp
     src/velcheck.cpp
     resources/fonts.qrc

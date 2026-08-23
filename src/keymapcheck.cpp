@@ -12,7 +12,7 @@
 #include <QTreeWidget>
 #include <cstdio>
 
-#include "ui/keyboardshortcutsdialog.h"
+#include "ui/keyboardshortcutspage.h"
 #include "ui/keymap.h"
 
 // --keymapcheck: user-configurable keyboard shortcuts check (self-contained,
@@ -261,20 +261,20 @@ int runKeymapCheck()
               "a non-modifier token parsed as a chord");
     }
 
-    // 9. Dialog: filter narrows rows, assigning through the capture widget
-    // steals from the conflicting command, and per-row Reset restores it.
-    // Modifier commands swap the key capture for the chord picker.
+    // 9. Settings page: filter narrows rows, assigning through the capture
+    // widget steals from the conflicting command, and per-row Reset restores
+    // it. Modifier commands swap the key capture for the chord picker.
     {
-        KeyboardShortcutsDialog dialog;
-        dialog.show(); // lay the tree out so column geometry is real
+        KeyboardShortcutsPage page;
+        page.show(); // lay the tree out so column geometry is real
         QApplication::processEvents();
-        auto *tree = dialog.findChild<QTreeWidget *>();
-        auto *filter = dialog.findChild<QLineEdit *>();
-        auto *capture = dialog.findChild<QKeySequenceEdit *>();
-        QPushButton *assignButton = findButton(&dialog, QStringLiteral("&Assign"));
-        QPushButton *resetButton = findButton(&dialog, QStringLiteral("&Reset"));
+        auto *tree = page.findChild<QTreeWidget *>();
+        auto *filter = page.findChild<QLineEdit *>();
+        auto *capture = page.findChild<QKeySequenceEdit *>();
+        QPushButton *assignButton = findButton(&page, QStringLiteral("&Assign"));
+        QPushButton *resetButton = findButton(&page, QStringLiteral("&Reset"));
         if (!check(tree && filter && capture && assignButton && resetButton,
-                   "dialog widgets missing")) {
+                   "page widgets missing")) {
             return failures ? 1 : 0;
         }
 
@@ -314,12 +314,12 @@ int runKeymapCheck()
         assignButton->click();
         check(registry.bindings(QStringLiteral("roll.copy")) ==
                   QList<QKeySequence>{QKeySequence(QStringLiteral("Ctrl+S"))},
-              "dialog assign did not apply the binding");
+              "page assign did not apply the binding");
         check(registry.isOverridden(QStringLiteral("file.save_song")) &&
                   registry.bindings(QStringLiteral("file.save_song")).isEmpty(),
               "conflicting command was not unbound by the steal");
         check(tree->verticalScrollBar()->value() == scrollBeforeAssign,
-              "dialog assign did not preserve the list scroll position");
+              "page assign did not preserve the list scroll position");
 
         QTreeWidgetItem *copyItem = findCommandItem(tree, QStringLiteral("roll.copy"));
         check(copyItem &&
@@ -332,7 +332,7 @@ int runKeymapCheck()
         tree->setCurrentItem(copyItem);
         resetButton->click();
         check(!registry.isOverridden(QStringLiteral("roll.copy")),
-              "dialog reset did not clear the override");
+              "page reset did not clear the override");
         tree->setCurrentItem(findCommandItem(tree, QStringLiteral("file.save_song")));
         resetButton->click();
         check(keyMatches(QStringLiteral("file.save_song"), Qt::Key_S, Qt::ControlModifier),
@@ -340,7 +340,7 @@ int runKeymapCheck()
 
         // Modifier row: the chord picker replaces the key capture, assigns
         // through the registry, and per-row Reset restores the default.
-        auto *modCapture = dialog.findChild<QComboBox *>();
+        auto *modCapture = page.findChild<QComboBox *>();
         if (check(modCapture != nullptr, "modifier chord picker missing")) {
             tree->setCurrentItem(findCommandItem(tree, QStringLiteral("roll.velocity_drag")));
             check(modCapture->isVisible() && !capture->isVisible(),

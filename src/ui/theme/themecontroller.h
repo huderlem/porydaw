@@ -28,18 +28,17 @@ struct ThemeSelection {
 
 /// Owns the application's current theme.
 ///
-/// Dialogs send the active mode and any valid Custom colors here. They do not
-/// apply colors or write settings themselves, so previews have one known
-/// committed theme to return to.
+/// The Appearance page sends the active mode and any valid Custom colors
+/// here as they are chosen. It does not apply colors or write settings
+/// itself, and nothing is previewed: the committed theme is the only theme
+/// ever applied (a repolish while playback paints is unsafe on Windows).
 class ThemeController
 {
   public:
     ThemeController(QApplication &application, QSettings &settings);
 
     void restore();
-    void preview(const ThemeSelection &candidate);
     bool commit(const ThemeSelection &candidate);
-    void discardPreview();
     const ThemeSelection &committedSelection() const;
 
   private:

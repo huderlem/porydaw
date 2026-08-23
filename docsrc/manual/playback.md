@@ -21,11 +21,12 @@ how GBA songs loop forever in-game; seamless loop audition. -->
 <!-- TODO: The transport toggle (also View menu): on = the view scrolls with
 playback; off = the camera stays put. Persisted. -->
 
-## Master volume
+## Output level
 
-<!-- TODO: The transport slider — listening volume only, never saved into
-the song. Contrast with track volume and the song's master volume setting
-in [Song Settings](song-settings.md). -->
+<!-- TODO: Edit → Settings → Audio → Output level (0–200%, double-click
+resets to 100%) — listening volume only, never saved into the song, never
+in exported WAVs. Contrast with track volume and the song's master volume
+setting in [Song Settings](song-settings.md). -->
 
 ## It sounds exactly like the game
 

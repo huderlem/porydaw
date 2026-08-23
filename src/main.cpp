@@ -79,9 +79,13 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot = QStrin
 // own scratch projects; the scratch dir must not exist).
 int runIgnoreCheck(const QString &scratchDir);
 // keymapcheck.cpp; user-configurable shortcut check: registry table/matching/
-// persistence + offscreen shortcuts-dialog driving (self-contained, no
+// persistence + offscreen shortcuts-page driving (self-contained, no
 // project needed; redirects QSettings itself).
 int runKeymapCheck();
+// settingscheck.cpp; Settings window check: sections, remembered page,
+// immediate apply + persistence of every page (self-contained, no project
+// needed; redirects QSettings itself).
+int runSettingsCheck(const QString &shotPath);
 // velcheck.cpp; PSG velocity model check: voice classification and the CGB
 // channels' loudness detents (self-contained, no project needed).
 int runVelocityModelCheck();
@@ -188,6 +192,11 @@ int main(int argc, char *argv[])
         return runAudioCheck();
     if (args.contains(QStringLiteral("--keymapcheck")))
         return runKeymapCheck();
+    const int settingsCheck = args.indexOf(QStringLiteral("--settingscheck"));
+    if (settingsCheck >= 0) {
+        const QString shot = settingsCheck + 1 < args.size() ? args[settingsCheck + 1] : QString();
+        return runSettingsCheck(shot);
+    }
     if (args.contains(QStringLiteral("--velmodelcheck")))
         return runVelocityModelCheck();
     const int velCheck = args.indexOf(QStringLiteral("--velcheck"));

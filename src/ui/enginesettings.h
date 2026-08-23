@@ -1,18 +1,13 @@
 #pragma once
 
-#include <QDialog>
-
-class QCheckBox;
-class QComboBox;
-class QSpinBox;
-
 // m4aSoundInit's selectable DirectSound rates (SOUND_MODE_FREQ_*), shared
-// with the Sample Editor target-rate presets.
+// between the Settings window's Audio page and the Sample Editor's
+// target-rate presets.
 extern const int kGbaMixRates[12];
 
 // Global poryaaaa GBA-accuracy knobs (SPEC §7), persisted per user via
 // QSettings. Unlike Song Settings these never touch the project; reverb
-// stays per-song (midi.cfg -R).
+// stays per-song (midi.cfg -R). Edited on the Settings window's Audio page.
 struct EngineSettings {
     int maxPcmChannels = 5;      // pokeemerald m4aSoundInit default
     float pcmMixRate = 13379.0f; // GBA DirectSound rate; 0 = follow host rate
@@ -20,21 +15,11 @@ struct EngineSettings {
 
     static EngineSettings load();
     void save() const;
-};
 
-class EngineSettingsDialog : public QDialog
-{
-    Q_OBJECT
-
-  public:
-    explicit EngineSettingsDialog(const EngineSettings &settings, QWidget *parent = nullptr);
-
-    EngineSettings settings() const;
-
-  private:
-    void applyToWidgets(const EngineSettings &settings);
-
-    QSpinBox *m_polyphony = nullptr;
-    QComboBox *m_mixRate = nullptr;
-    QCheckBox *m_analogFilter = nullptr;
+    bool operator==(const EngineSettings &o) const
+    {
+        return maxPcmChannels == o.maxPcmChannels && pcmMixRate == o.pcmMixRate &&
+               analogFilter == o.analogFilter;
+    }
+    bool operator!=(const EngineSettings &o) const { return !(*this == o); }
 };

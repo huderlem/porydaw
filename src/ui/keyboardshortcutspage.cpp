@@ -1,7 +1,6 @@
-#include "keyboardshortcutsdialog.h"
+#include "keyboardshortcutspage.h"
 
 #include <QComboBox>
-#include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeySequenceEdit>
@@ -14,6 +13,7 @@
 #include <QVBoxLayout>
 
 #include "keymap.h"
+#include "layout.h"
 
 namespace {
 
@@ -65,14 +65,12 @@ QString bindingText(const QList<QKeySequence> &sequences)
 
 } // namespace
 
-KeyboardShortcutsDialog::KeyboardShortcutsDialog(QWidget *parent) : QDialog(parent)
+KeyboardShortcutsPage::KeyboardShortcutsPage(QWidget *parent) : QWidget(parent)
 {
-    setWindowTitle(tr("Keyboard Shortcuts"));
-
     m_filter = new QLineEdit(this);
     m_filter->setPlaceholderText(tr("Filter commands…"));
     m_filter->setClearButtonEnabled(true);
-    connect(m_filter, &QLineEdit::textChanged, this, &KeyboardShortcutsDialog::applyFilter);
+    connect(m_filter, &QLineEdit::textChanged, this, &KeyboardShortcutsPage::applyFilter);
 
     m_tree = new QTreeWidget(this);
     m_tree->setColumnCount(2);
@@ -82,28 +80,28 @@ KeyboardShortcutsDialog::KeyboardShortcutsDialog(QWidget *parent) : QDialog(pare
     m_tree->setAllColumnsShowFocus(true);
     m_tree->header()->setStretchLastSection(true);
     connect(m_tree, &QTreeWidget::currentItemChanged, this,
-            &KeyboardShortcutsDialog::currentRowChanged);
+            &KeyboardShortcutsPage::currentRowChanged);
 
     m_capture = new QKeySequenceEdit(this);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 4, 0)
     m_capture->setMaximumSequenceLength(1);
 #endif
     connect(m_capture, &QKeySequenceEdit::keySequenceChanged, this,
-            &KeyboardShortcutsDialog::captureChanged);
+            &KeyboardShortcutsPage::captureChanged);
 
     // QKeySequenceEdit cannot record a bare modifier chord, so modifier
     // commands pick theirs from a list instead (filled per command, since
     // not every chord is offerable everywhere — see fillModifierChoices).
     m_modCapture = new QComboBox(this);
     m_modCapture->hide();
-    connect(m_modCapture, &QComboBox::activated, this, &KeyboardShortcutsDialog::captureChanged);
+    connect(m_modCapture, &QComboBox::activated, this, &KeyboardShortcutsPage::captureChanged);
 
     m_assignButton = new QPushButton(tr("&Assign"), this);
-    connect(m_assignButton, &QPushButton::clicked, this, &KeyboardShortcutsDialog::assign);
+    connect(m_assignButton, &QPushButton::clicked, this, &KeyboardShortcutsPage::assign);
     m_clearButton = new QPushButton(tr("&Unbind"), this);
-    connect(m_clearButton, &QPushButton::clicked, this, &KeyboardShortcutsDialog::clearBinding);
+    connect(m_clearButton, &QPushButton::clicked, this, &KeyboardShortcutsPage::clearBinding);
     m_resetButton = new QPushButton(tr("&Reset"), this);
-    connect(m_resetButton, &QPushButton::clicked, this, &KeyboardShortcutsDialog::resetBinding);
+    connect(m_resetButton, &QPushButton::clicked, this, &KeyboardShortcutsPage::resetBinding);
 
     m_conflictLabel = new QLabel(this);
     m_conflictLabel->setWordWrap(true);
@@ -115,17 +113,20 @@ KeyboardShortcutsDialog::KeyboardShortcutsDialog(QWidget *parent) : QDialog(pare
     editRow->addWidget(m_clearButton);
     editRow->addWidget(m_resetButton);
 
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    QPushButton *resetAllButton = buttons->addButton(tr("Reset All"), QDialogButtonBox::ResetRole);
-    connect(resetAllButton, &QPushButton::clicked, this, &KeyboardShortcutsDialog::resetAll);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    auto *resetAllButton = new QPushButton(tr("Reset All"), this);
+    resetAllButton->setObjectName(QStringLiteral("settingsShortcutsResetAll"));
+    connect(resetAllButton, &QPushButton::clicked, this, &KeyboardShortcutsPage::resetAll);
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->setContentsMargins(0, 0, 0, 0);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(resetAllButton);
 
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(m_filter);
     layout->addWidget(m_tree, 1);
     layout->addLayout(editRow);
     layout->addWidget(m_conflictLabel);
-    layout->addWidget(buttons);
+    layout->addLayout(buttonRow);
 
     // External changes (another dialog instance, Reset All) refresh the view;
     // m_applying keeps our own writes from resetting the selection mid-edit.
@@ -139,16 +140,18 @@ KeyboardShortcutsDialog::KeyboardShortcutsDialog(QWidget *parent) : QDialog(pare
     // header default truncates most names. Not re-fit on rebuilds, so a
     // manual column drag survives assigning/resetting bindings.
     m_tree->resizeColumnToContents(0);
-    resize(520, 560);
+    // The tree is the page's body; keep enough of it visible that the
+    // Settings window doesn't size down to a few rows.
+    m_tree->setMinimumHeight(::layout::fontPx(22));
 }
 
-QString KeyboardShortcutsDialog::currentCommandId() const
+QString KeyboardShortcutsPage::currentCommandId() const
 {
     QTreeWidgetItem *item = m_tree->currentItem();
     return item ? item->data(0, kIdRole).toString() : QString();
 }
 
-void KeyboardShortcutsDialog::rebuildTree()
+void KeyboardShortcutsPage::rebuildTree()
 {
     const QString selected = currentCommandId();
     const int scrollPosition = m_tree->verticalScrollBar()->value();
@@ -192,7 +195,7 @@ void KeyboardShortcutsDialog::rebuildTree()
     m_tree->verticalScrollBar()->setValue(scrollPosition);
 }
 
-void KeyboardShortcutsDialog::applyFilter()
+void KeyboardShortcutsPage::applyFilter()
 {
     const QString needle = m_filter->text().trimmed();
     for (int i = 0; i < m_tree->topLevelItemCount(); ++i) {
@@ -214,7 +217,7 @@ void KeyboardShortcutsDialog::applyFilter()
 // The chords a modifier command may be bound to. The velocity lane's detent
 // unlock is the one command that cannot take Shift: Shift is its surface's
 // ramp gesture, and the unlock is read from the same press.
-void KeyboardShortcutsDialog::fillModifierChoices(const QString &id)
+void KeyboardShortcutsPage::fillModifierChoices(const QString &id)
 {
     const QSignalBlocker blocker(m_modCapture);
     m_modCapture->clear();
@@ -228,7 +231,7 @@ void KeyboardShortcutsDialog::fillModifierChoices(const QString &id)
     }
 }
 
-void KeyboardShortcutsDialog::currentRowChanged()
+void KeyboardShortcutsPage::currentRowChanged()
 {
     const QString id = currentCommandId();
     const bool hasCommand = !id.isEmpty();
@@ -258,7 +261,7 @@ void KeyboardShortcutsDialog::currentRowChanged()
     m_resetButton->setEnabled(registry.isOverridden(id));
 }
 
-void KeyboardShortcutsDialog::captureChanged()
+void KeyboardShortcutsPage::captureChanged()
 {
     m_conflictLabel->clear();
     const QString id = currentCommandId();
@@ -289,7 +292,7 @@ void KeyboardShortcutsDialog::captureChanged()
         tr("Also bound to %1 — assigning will unbind it there.").arg(names.join(tr(", "))));
 }
 
-void KeyboardShortcutsDialog::assign()
+void KeyboardShortcutsPage::assign()
 {
     const QString id = currentCommandId();
     if (id.isEmpty())
@@ -325,7 +328,7 @@ void KeyboardShortcutsDialog::assign()
     rebuildTree();
 }
 
-void KeyboardShortcutsDialog::clearBinding()
+void KeyboardShortcutsPage::clearBinding()
 {
     const QString id = currentCommandId();
     if (id.isEmpty())
@@ -340,7 +343,7 @@ void KeyboardShortcutsDialog::clearBinding()
     rebuildTree();
 }
 
-void KeyboardShortcutsDialog::resetBinding()
+void KeyboardShortcutsPage::resetBinding()
 {
     const QString id = currentCommandId();
     if (id.isEmpty())
@@ -351,7 +354,7 @@ void KeyboardShortcutsDialog::resetBinding()
     rebuildTree();
 }
 
-void KeyboardShortcutsDialog::resetAll()
+void KeyboardShortcutsPage::resetAll()
 {
     const auto answer = QMessageBox::question(this, tr("Reset All Shortcuts"),
                                               tr("Reset every shortcut to its default?"));
