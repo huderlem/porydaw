@@ -3038,6 +3038,20 @@ class AutomationArea : public TimelineSurface
         m_hiddenLanes = keys;
         rebuildRows(); // the rows leave/return now, not on a later rebuild
     }
+    // The global tempo row, hidden by default (SongView::tempoLaneVisible).
+    bool tempoLaneVisible() const { return m_tempoLaneVisible; }
+    void setTempoLaneVisible(bool visible)
+    {
+        if (m_tempoLaneVisible == visible)
+            return;
+        // Same rule as hiding a CC lane: a range edit must never touch an
+        // invisible row's events, so a lane-scope selection covering the
+        // row goes with it.
+        if (!visible && m_sv->timeSelectionCoversRow(-1, DOC_CC_TEMPO))
+            m_sv->clearTimeSelection();
+        m_tempoLaneVisible = visible;
+        rebuildRows();
+    }
 
     // Pencil mode (automation.pencil_mode, default B): a left drag always
     // freehand-draws — never a point grab or a Shift ramp — and holding
@@ -3106,7 +3120,8 @@ class AutomationArea : public TimelineSurface
             m_pointMenu->hide();
         m_pointMenuTarget.reset();
         if (m_sv->timeline()) {
-            m_rows.push_back({Row::Tempo});
+            if (m_tempoLaneVisible)
+                m_rows.push_back({Row::Tempo});
             const SongViewModel &model = m_sv->model();
             const int selected = m_sv->selectedTrack();
             // The voice row shows whenever the track has changes; with a
@@ -3502,9 +3517,12 @@ class AutomationArea : public TimelineSurface
         if (event->position().x() < kGutterW) {
             // The menu works from the row's identity, not a live model lane,
             // so a CC row keeps its menu even when its lane left the model.
-            if (row.kind == Row::Lane &&
-                (event->button() == Qt::LeftButton || event->button() == Qt::RightButton))
-                showLaneMenu(row, event->globalPosition().toPoint());
+            if (event->button() == Qt::LeftButton || event->button() == Qt::RightButton) {
+                if (row.kind == Row::Lane)
+                    showLaneMenu(row, event->globalPosition().toPoint());
+                else if (row.kind == Row::Tempo)
+                    showTempoMenu(event->globalPosition().toPoint());
+            }
             return;
         }
         if (event->button() == Qt::RightButton) {
@@ -4478,14 +4496,21 @@ class AutomationArea : public TimelineSurface
                 hidden.push_back(keyCc);
         }
         std::sort(hidden.begin(), hidden.end());
+        // The global tempo row is hidden by default (the transport bar's
+        // Tempo spinner covers the constant-tempo case), so it shows up here
+        // as one more hidden lane. Keyed past the Show range.
+        static constexpr int kShowTempo = 512;
+        const bool tempoHidden = !m_tempoLaneVisible;
         // The placeholder would be a lie right above a "Show: …" entry, so
         // it only stands in when both sections are empty.
-        if (menu.isEmpty() && hidden.empty())
+        if (menu.isEmpty() && hidden.empty() && !tempoHidden)
             menu.addAction(SongView::tr("All parameters already have lanes"))->setEnabled(false);
-        if (!hidden.empty()) {
+        if (!hidden.empty() || tempoHidden) {
             if (!menu.isEmpty())
                 menu.addSeparator();
             menu.addAction(SongView::tr("Hidden lanes"))->setEnabled(false);
+            if (tempoHidden)
+                menu.addAction(SongView::tr("Show: Tempo (hidden)"))->setData(kShowTempo);
             for (const uint8_t cc : hidden)
                 menu.addAction(SongView::tr("Show: %1 (hidden)").arg(ccLaneLabel(cc)))
                     ->setData(256 + int(cc));
@@ -4494,7 +4519,10 @@ class AutomationArea : public TimelineSurface
         if (!chosen || !chosen->data().isValid())
             return;
         const int value = chosen->data().toInt();
-        if (value >= 256) {
+        if (value == kShowTempo) {
+            m_sv->setTempoLaneVisible(true);
+            m_sv->announce(SongView::tr("Showed the Tempo lane"));
+        } else if (value >= 256) {
             const uint8_t cc = uint8_t(value - 256);
             m_hiddenLanes.remove(laneKey(track, cc));
             if (!m_sv->model().findLane(track, cc)) {
@@ -4508,6 +4536,19 @@ class AutomationArea : public TimelineSurface
         } else {
             m_sv->addEmptyLane(track, uint8_t(value));
         }
+    }
+
+    // Gutter menu on the global tempo row: hide it (view-only, the tempo
+    // metas stay; the add-lane menu's "Hidden lanes" section and the
+    // transport bar's tempo warning bring it back).
+    void showTempoMenu(const QPoint &globalPos)
+    {
+        QMenu menu;
+        QAction *hide = menu.addAction(SongView::tr("Hide lane"));
+        if (menu.exec(globalPos) != hide)
+            return;
+        m_sv->setTempoLaneVisible(false);
+        m_sv->announce(SongView::tr("Hid the Tempo lane"));
     }
 
     // Gutter menu on a CC/bend lane: clear its events (the lane stays,
@@ -5686,6 +5727,7 @@ class AutomationArea : public TimelineSurface
     QHash<QString, int> m_rowHeights; // individual row heights (rowKey → px)
     QHash<QString, int> m_rowRanges;  // display max per lane (rowKey → value;
                                       // 0 = auto-fit); absent = CC default
+    bool m_tempoLaneVisible = false;  // the global tempo row is in m_rows
     QSet<QString> m_hiddenLanes;      // hidden CC lanes (laneKey); their rows
                                       // are skipped by rebuildRows
     int m_resizeRow = -1;             // row whose bottom divider is being dragged
@@ -8473,6 +8515,27 @@ void SongView::setAutomationLanesVisible(bool visible)
     emit automationLanesVisibilityChanged(visible);
 }
 
+bool SongView::tempoLaneVisible() const
+{
+    return m_lanes && m_lanes->tempoLaneVisible();
+}
+
+void SongView::setTempoLaneVisible(bool visible)
+{
+    if (!m_lanes)
+        return;
+    // A row shown into a closed pane is shown nowhere: open the pane too —
+    // before the no-change return, because the row flag can already be set
+    // with the pane closed (closing the pane leaves the flag alone, and a
+    // sidecar restore sets the row directly), and showing the row must mean
+    // showing it.
+    if (visible)
+        setAutomationLanesVisible(true);
+    if (tempoLaneVisible() == visible)
+        return;
+    m_lanes->setTempoLaneVisible(visible);
+}
+
 void SongView::focusContent()
 {
     if (eventListVisible())
@@ -8553,6 +8616,7 @@ SongView::ViewState SongView::viewState() const
     state.laneHeights = m_lanes->rowHeightOverrides();
     state.laneRanges = m_lanes->rowRangeOverrides();
     state.hiddenLanes = m_lanes->hiddenLaneKeys();
+    state.tempoLane = m_lanes->tempoLaneVisible();
     state.splitterSizes = m_splitter->sizes();
     state.emptyLanes = m_emptyLanes;
     state.gridMinDenom = m_gridMinDenom;
@@ -8579,6 +8643,9 @@ void SongView::applyViewState(const ViewState &state)
     m_lanes->setViewHeights(state.laneHeight, state.laneHeights);
     m_lanes->setRowRanges(state.laneRanges);
     m_lanes->setHiddenLanes(state.hiddenLanes); // rebuildRows below drops the rows
+    // Restored straight into the rows, not through SongView's setter: a
+    // restore must not force the (app-wide) automation pane open.
+    m_lanes->setTempoLaneVisible(state.tempoLane);
     if (state.selectedTrack >= 0 && state.selectedTrack < 16 &&
         m_timeline->tracks[state.selectedTrack].used)
         selectTrack(state.selectedTrack);

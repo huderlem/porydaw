@@ -11,6 +11,7 @@
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QToolButton>
 #include <QUndoGroup>
 #include <algorithm>
 #include <cstdio>
@@ -189,6 +190,86 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA, c
             digitOverride.ignore();
             QApplication::sendEvent(volEdit, &digitOverride);
             check(digitOverride.isAccepted(), "volume spinbox no longer claims plain digit keys");
+        }
+    }
+
+    // 5c. The transport Tempo spinbox shows the active tab's starting
+    // tempo, writes it as one undoable document edit, follows tab switches
+    // and undo, and grows a warning (a button that shows the Tempo lane)
+    // whenever the song changes tempo after the start — while the Tempo
+    // lane itself starts hidden.
+    auto *tempoSpin = findChild<QSpinBox *>(QStringLiteral("transportTempo"));
+    auto *tempoWarning = findChild<QToolButton *>(QStringLiteral("transportTempoWarning"));
+    // The warning's visibility is the toolbar action's (the button itself
+    // is re-synced from it only on relayout, which an unshown window never
+    // gets to).
+    auto *tempoWarningAction = findChild<QAction *>(QStringLiteral("transportTempoWarningAction"));
+    if (check(tempoSpin != nullptr && tempoWarning != nullptr && tempoWarningAction != nullptr,
+              "transport tempo spinbox or warning not found")) {
+        check(tempoSpin->isEnabled() && tempoSpin->value() == tabA->doc.startTempo(),
+              "tempo spinbox does not show the active tab's starting tempo");
+        check(!tabA->view->tempoLaneVisible() && !tabB->view->tempoLaneVisible(),
+              "the Tempo lane did not start hidden");
+        check(tempoWarningAction->isVisible() == (tabA->doc.tempoChangesAfterStart() > 0),
+              "tempo warning does not reflect the song's later tempo changes");
+        const int tempoBefore = tabA->doc.startTempo();
+        const int tempoEdited = tempoBefore == 100 ? 101 : 100;
+        tempoSpin->setValue(tempoEdited);
+        check(tabA->doc.startTempo() == tempoEdited && tabA->doc.isDirty(),
+              "tempo spinbox edit did not land as an undoable tempo change");
+        check(m_undoGroup->activeStack()->text(m_undoGroup->activeStack()->index() - 1) ==
+                  QStringLiteral("set tempo"),
+              "tempo spinbox edit is not labeled 'set tempo'");
+        check(tabA->timeline && !tabA->timeline->tempoMap.empty() &&
+                  int(tabA->timeline->tempoMap.front().bpm + 0.5) == tempoEdited,
+              "tempo spinbox edit did not reach the rebuilt timeline");
+        m_tabs->setCurrentWidget(tabB->view);
+        check(tempoSpin->value() == tabB->doc.startTempo(),
+              "tempo spinbox did not follow the tab switch");
+        check(!tabB->doc.isDirty(), "tab switch leaked a tempo edit into the other tab");
+        m_tabs->setCurrentWidget(tabA->view);
+        check(tempoSpin->value() == tempoEdited,
+              "tempo spinbox lost the edited tab's tempo across the round trip");
+        m_undoGroup->activeStack()->undo();
+        check(tabA->doc.startTempo() == tempoBefore && !tabA->doc.isDirty(),
+              "undo did not revert the tempo spinbox's edit");
+        check(tempoSpin->value() == tempoBefore,
+              "undo did not sync the tempo spinbox back to the old tempo");
+
+        // A tempo change later in the song: the warning appears (and goes
+        // with undo), and clicking it reveals the Tempo lane, opening the
+        // automation pane if it was shut.
+        const int laterChanges = tabA->doc.tempoChangesAfterStart();
+        tabA->doc.addLanePoint(-1, DOC_CC_TEMPO, 96, tempoBefore + 10);
+        check(tabA->doc.tempoChangesAfterStart() == laterChanges + 1 &&
+                  tempoWarningAction->isVisible(),
+              "a later tempo change did not show the tempo warning");
+        check(tempoSpin->value() == tempoBefore,
+              "a later tempo change moved the start-tempo spinbox");
+        tabA->view->setAutomationLanesVisible(false);
+        check(tempoWarning->isEnabled(), "the tempo warning button is disabled");
+        tempoWarning->click();
+        check(tabA->view->tempoLaneVisible() && tabA->view->automationLanesVisible(),
+              "clicking the tempo warning did not show the Tempo lane");
+        check(!tabB->view->tempoLaneVisible(),
+              "showing one tab's Tempo lane leaked into the other tab");
+        tabA->view->setTempoLaneVisible(false);
+        check(!tabA->view->tempoLaneVisible(), "the Tempo lane did not hide again");
+        m_undoGroup->activeStack()->undo();
+        check(tabA->doc.tempoChangesAfterStart() == laterChanges &&
+                  tempoWarningAction->isVisible() == (laterChanges > 0),
+              "undoing the later tempo change did not clear the tempo warning");
+        tabA->view->setAutomationLanesVisible(true);
+
+        // Space passthrough, like the volume spinbox's.
+        auto *tempoEdit = tempoSpin->findChild<QLineEdit *>();
+        if (check(tempoEdit != nullptr, "tempo spinbox has no line edit")) {
+            QKeyEvent spaceOverride(QEvent::ShortcutOverride, Qt::Key_Space, Qt::NoModifier,
+                                    QStringLiteral(" "));
+            spaceOverride.ignore();
+            QApplication::sendEvent(tempoEdit, &spaceOverride);
+            check(!spaceOverride.isAccepted(),
+                  "tempo spinbox claimed Space from the play/pause shortcut");
         }
     }
 

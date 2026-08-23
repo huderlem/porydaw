@@ -47,6 +47,9 @@ bool load(const QString &projectRoot, const QString &songLabel, SongView::ViewSt
     const QJsonObject ranges = obj.value(QLatin1String("laneRanges")).toObject();
     for (auto it = ranges.begin(); it != ranges.end(); ++it)
         loaded.laneRanges.insert(it.key(), it.value().toInt());
+    // Additive key; the tempo row is opt-in, so files predating it (and
+    // files from before the row could hide at all) load with it hidden.
+    loaded.tempoLane = obj.value(QLatin1String("tempoLane")).toBool(false);
     // Additive key: files predating it load with nothing hidden.
     for (const QJsonValue &v : obj.value(QLatin1String("hiddenLanes")).toArray())
         if (!v.toString().isEmpty())
@@ -88,6 +91,7 @@ bool save(const QString &projectRoot, const QString &songLabel, const SongView::
     obj.insert(QLatin1String("gridMinDenom"), state.gridMinDenom);
     obj.insert(QLatin1String("gridTriplet"), state.gridTriplet);
     obj.insert(QLatin1String("eventList"), state.eventList);
+    obj.insert(QLatin1String("tempoLane"), state.tempoLane);
     if (!state.laneHeights.isEmpty()) {
         QJsonObject lanes;
         for (auto it = state.laneHeights.begin(); it != state.laneHeights.end(); ++it)

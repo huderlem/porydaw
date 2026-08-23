@@ -274,6 +274,41 @@ int removeRedundantSetterEvents(SmfFile *smf)
     return removed;
 }
 
+int moveTempoMetasToFirstChunk(SmfFile *smf)
+{
+    if (smf->tracks.size() < 2)
+        return 0;
+    std::vector<SmfEvent> moved;
+    for (size_t t = 1; t < smf->tracks.size(); t++) {
+        std::vector<SmfEvent> &evs = smf->tracks[t].events;
+        for (const SmfEvent &ev : evs) {
+            if (ev.isMeta() && ev.metaType == 0x51)
+                moved.push_back(ev);
+        }
+        evs.erase(
+            std::remove_if(evs.begin(), evs.end(),
+                           [](const SmfEvent &ev) { return ev.isMeta() && ev.metaType == 0x51; }),
+            evs.end());
+    }
+    if (moved.empty())
+        return 0;
+    // Chunks were walked in order and each is tick-sorted, so a stable sort
+    // by tick keeps chunk order within a tick (the file-order winner stays
+    // last); merge() then places first-chunk events ahead of moved ones at
+    // equal ticks for the same reason.
+    std::stable_sort(moved.begin(), moved.end(),
+                     [](const SmfEvent &a, const SmfEvent &b) { return a.tick < b.tick; });
+    SmfTrack &first = smf->tracks.front();
+    std::vector<SmfEvent> merged;
+    merged.reserve(first.events.size() + moved.size());
+    std::merge(first.events.begin(), first.events.end(), moved.begin(), moved.end(),
+               std::back_inserter(merged),
+               [](const SmfEvent &a, const SmfEvent &b) { return a.tick < b.tick; });
+    first.events = std::move(merged);
+    first.endTick = std::max(first.endTick, moved.back().tick);
+    return int(moved.size());
+}
+
 void rescaleDivision(SmfFile *smf, uint16_t newDivision)
 {
     if (newDivision == 0 || smf->division == 0 || smf->division == newDivision)

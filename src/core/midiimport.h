@@ -85,3 +85,14 @@ void rescaleDivision(SmfFile *smf, uint16_t newDivision);
 // coupled-protocol CCs: MEMACC plumbing, XCMD, the loop Label) are never
 // touched. Returns the number of events removed.
 int removeRedundantSetterEvents(SmfFile *smf);
+
+// Move tempo metas (0x51) from later chunks into the first chunk. mid2agb
+// reads tempo from the first chunk only, so a foreign format-1 file that
+// keeps its tempo map elsewhere would silently play at 120 BPM in-game (and
+// in the app, whose timeline mirrors mid2agb); moving the metas at import
+// makes them real. Tick order is preserved, and at a shared tick the moved
+// metas land after the first chunk's own (and in chunk order among
+// themselves), so the file-order winner of same-tick duplicates keeps
+// winning — run before removeRedundantSetterEvents, which then collapses
+// the losers. Returns the number of metas moved.
+int moveTempoMetasToFirstChunk(SmfFile *smf);

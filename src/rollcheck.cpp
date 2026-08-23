@@ -279,6 +279,15 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     // one ladder step finer than the drawn grid (the floor is display-only),
     // so the snap grid here is half-beats — 16px snap cells.
     view.setGridMinDenom(4);
+    // The global tempo row is hidden by default (the transport bar's Tempo
+    // spinner covers the constant-tempo case); the row-geometry mirrors
+    // below count it as row 0, so show it the way the add-lane menu would.
+    if (view.tempoLaneVisible()) {
+        std::fprintf(stderr, "rollcheck: FAIL %s: the tempo row did not start hidden\n",
+                     qUtf8Printable(songLabel));
+        return 1;
+    }
+    view.setTempoLaneVisible(true);
     (void)view.grab(); // force layout so child geometry is real
 
     int failures = 0;

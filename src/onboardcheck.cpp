@@ -1529,6 +1529,75 @@ int runOnboardCheck(const QString &projectRoot, const QString &mid2agbPath)
         check(cleaned.tracks.size() == 2 && countEvents(cleaned.tracks[1], 0xB, 7) == 3 &&
                   countEvents(cleaned.tracks[1], 0xC, -1) == 2,
               "wizard: songFile() did not dedup same-tick setters");
+
+        // Foreign tempo maps: mid2agb reads tempo from the first chunk only,
+        // so import moves later-chunk 0x51 metas there — tick order kept,
+        // the file-order winner of a shared tick still last (later chunk
+        // after earlier, moved after resident), other events untouched —
+        // and the dedup that follows collapses the losers.
+        SmfFile stray;
+        stray.format = 1;
+        stray.division = 24;
+        SmfTrack sConductor;
+        sConductor.events.push_back(metaEvent(0, 0x51, QByteArray("\x06\x1A\x80", 3)));   // 150
+        sConductor.events.push_back(metaEvent(192, 0x51, QByteArray("\x0A\x2C\x2B", 3))); // 90
+        sConductor.endTick = 192;
+        stray.tracks.push_back(sConductor);
+        SmfTrack sLead;
+        sLead.events.push_back(metaEvent(0, 0x01, QByteArrayLiteral("keep me")));
+        sLead.events.push_back(metaEvent(0, 0x51, QByteArray("\x07\xA1\x20", 3))); // 120
+        sLead.events.push_back(channelEvent(0x90, 0, 60, 100));
+        sLead.events.push_back(metaEvent(48, 0x51, QByteArray("\x0F\x42\x40", 3))); // 60
+        sLead.events.push_back(channelEvent(0x80, 96, 60, 0));
+        sLead.endTick = 192;
+        stray.tracks.push_back(sLead);
+        SmfTrack sExtra;
+        sExtra.events.push_back(metaEvent(48, 0x51, QByteArray("\x0C\x35\x00", 3)));  // 75
+        sExtra.events.push_back(metaEvent(240, 0x51, QByteArray("\x09\x27\xC0", 3))); // 100
+        sExtra.endTick = 240;
+        stray.tracks.push_back(sExtra);
+
+        SmfFile movedFile = stray;
+        check(moveTempoMetasToFirstChunk(&movedFile) == 4, "tempo move: wrong moved count");
+        check(moveTempoMetasToFirstChunk(&movedFile) == 0, "tempo move: not idempotent");
+        const auto tempoBlobs = [](const SmfTrack &track) {
+            QList<QByteArray> blobs;
+            for (const SmfEvent &ev : track.events)
+                if (ev.isMeta() && ev.metaType == 0x51)
+                    blobs.push_back(ev.blob);
+            return blobs;
+        };
+        check(tempoBlobs(movedFile.tracks[1]).isEmpty() &&
+                  tempoBlobs(movedFile.tracks[2]).isEmpty(),
+              "tempo move: metas left behind");
+        check(movedFile.tracks[1].events.size() == 3 && movedFile.tracks[2].events.size() == 0,
+              "tempo move: touched non-tempo events");
+        check(tempoBlobs(movedFile.tracks[0]) ==
+                  (QList<QByteArray>{QByteArray("\x06\x1A\x80", 3), QByteArray("\x07\xA1\x20", 3),
+                                     QByteArray("\x0F\x42\x40", 3), QByteArray("\x0C\x35\x00", 3),
+                                     QByteArray("\x0A\x2C\x2B", 3), QByteArray("\x09\x27\xC0", 3)}),
+              "tempo move: wrong order in the first chunk");
+        {
+            uint64_t prev = 0;
+            for (const SmfEvent &ev : movedFile.tracks[0].events) {
+                check(ev.tick >= prev, "tempo move: tick order regressed");
+                prev = ev.tick;
+            }
+        }
+        check(movedFile.tracks[0].endTick == 240, "tempo move: endTick not extended");
+        removeRedundantSetterEvents(&movedFile);
+        check(tempoBlobs(movedFile.tracks[0]) ==
+                  (QList<QByteArray>{QByteArray("\x07\xA1\x20", 3), QByteArray("\x0C\x35\x00", 3),
+                                     QByteArray("\x0A\x2C\x2B", 3), QByteArray("\x09\x27\xC0", 3)}),
+              "tempo move: dedup kept the wrong same-tick winners");
+
+        // The wizard end applies the move (then the dedup) silently.
+        NewSongWizard strayWizard(&project, stray, QStringLiteral("stray.mid"), vgArgs);
+        const SmfFile strayCleaned = strayWizard.songFile();
+        check(strayCleaned.tracks.size() == 3 && tempoBlobs(strayCleaned.tracks[1]).isEmpty() &&
+                  tempoBlobs(strayCleaned.tracks[2]).isEmpty() &&
+                  tempoBlobs(strayCleaned.tracks[0]).size() == 4,
+              "wizard: songFile() did not move foreign tempo metas");
     }
 
     const QString importLabel = QStringLiteral("mus_onboardcheck_import");

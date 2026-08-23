@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - Added an Output level control (Settings → Audio) for porydaw's output volume.
+- Added a Tempo input to the transport bar for the song's starting tempo. A warning appears next to it when the tempo changes later in the song. Click it to show the Tempo automation lane.
 
 ## Changed
 - Unified settings into a main Settings window.

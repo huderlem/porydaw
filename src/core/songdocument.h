@@ -188,6 +188,32 @@ class SongDocument : public QObject
     void nudgeNotesVelocity(const std::vector<DocNote> &notes, int delta);
 
     void addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int value);
+    // The one tempo range, shared by every tempo read, write, and the
+    // transport spinner. The floor is 4, not 1: SMF's tempo meta is a
+    // 24-bit microseconds-per-beat field, and 0xFFFFFF us rounds to 4 BPM —
+    // anything slower would overflow the field and store a wrong tempo.
+    static constexpr int kTempoMin = 4;
+    static constexpr int kTempoMax = 999;
+    static constexpr int kTempoDefault = 120; // SMF's tempo when a song sets none
+    // The song's starting tempo, the transport bar's Tempo spinner: the
+    // tempo in effect at tick 0 (the last tick-0 tempo meta in the seq
+    // chunk; kTempoDefault when the song sets none). Reads clamp a foreign
+    // file's out-of-range meta into kTempoMin-kTempoMax, matching the write
+    // clamp. setStartTempo writes a tick-0 tempo meta, replacing any already
+    // there (addLanePoint's rule), clamped the same way; a value the song
+    // already starts at pushes nothing. Later tempo changes are untouched.
+    int startTempo() const;
+    void setStartTempo(int bpm);
+    // How many tempo metas sit after tick 0 — nonzero means the song's
+    // tempo is not a single number, and the start tempo alone does not
+    // describe it.
+    int tempoChangesAfterStart() const;
+    // How many tempo metas sit outside the first chunk. mid2agb reads tempo
+    // from the first chunk only, so these never play — in-game or in the app
+    // (MidiTimeline mirrors mid2agb). Import moves them into the first chunk
+    // (moveTempoMetasToFirstChunk); a nonzero count here means a hand-placed
+    // foreign file, surfaced on the transport's tempo warning.
+    int tempoMetasOutsideFirstChunk() const;
     // Gesture write (freehand sweep / line ramp): replaces every point of the
     // lane inside [tickBegin, tickEnd] with the given stream, as one undoable
     // command. An empty stream just clears the range; a call with nothing to
@@ -479,6 +505,7 @@ class SongDocument : public QObject
     bool laneEventMatches(const SmfEvent &ev, uint8_t cc) const;
     int laneValue(const SmfEvent &ev, uint8_t cc) const;
     SmfEvent makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick, int value) const;
+    void addLanePoint(const QString &text, int engineTrack, uint8_t cc, uint64_t tick, int value);
     // Locates the loop marker event, mirroring MidiTimeline::build's rule
     // (first matching text meta in track/event order). Returns false if absent.
     bool findLoopMarkerEvent(bool endMarker, int *smfTrack, size_t *index) const;

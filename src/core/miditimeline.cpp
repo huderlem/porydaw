@@ -161,8 +161,23 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                 const QByteArray &blob = sev.blob;
                 if (metaType == 0x51 && blob.size() == 3) {
                     const uint8_t *p = reinterpret_cast<const uint8_t *>(blob.constData());
-                    tempos.push_back({tick, (static_cast<uint32_t>(p[0]) << 16) |
-                                                (static_cast<uint32_t>(p[1]) << 8) | p[2]});
+                    const uint32_t usPerBeat = (static_cast<uint32_t>(p[0]) << 16) |
+                                               (static_cast<uint32_t>(p[1]) << 8) | p[2];
+                    if (t == 0) {
+                        tempos.push_back({tick, usPerBeat});
+                    } else {
+                        // mid2agb reads tempo from the first chunk only, so
+                        // the game never sees this meta — playing it here
+                        // would diverge from the cartridge. Import moves
+                        // such metas into the first chunk
+                        // (moveTempoMetasToFirstChunk); a hand-placed file
+                        // keeps them, listed but silent.
+                        rawOthers.push_back(
+                            {tick, uint16_t(t),
+                             QStringLiteral("Tempo %1 BPM (ignored: the game reads tempo "
+                                            "from the first track only)")
+                                 .arg(qRound(60000000.0 / double(std::max(1u, usPerBeat))))});
+                    }
                 } else if (metaType == 0x58 && blob.size() >= 2) {
                     timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
                 } else if (metaType == 0x20 && blob.size() >= 1) {

@@ -143,6 +143,7 @@ class SongView : public QWidget
         QHash<QString, int> laneRanges;                  // per-lane display max (AutomationArea
                                                          // keys); 0 = auto-fit to the data
         QSet<QString> hiddenLanes;                       // hidden CC lanes (AutomationArea keys)
+        bool tempoLane = false;                          // the global tempo row is shown
         QList<int> splitterSizes;                        // roll pane, lanes pane
         std::vector<std::pair<int, uint8_t>> emptyLanes; // (track, cc)
         int gridMinDenom = 0;                            // drawn-grid floor as a note denominator
@@ -181,6 +182,15 @@ class SongView : public QWidget
     // and per-lane "Hide lane" stays a separate, per-song thing.
     bool automationLanesVisible() const;
     void setAutomationLanesVisible(bool visible);
+
+    // The global Tempo row inside the automation lanes. Hidden by default:
+    // a song's tempo is usually one number, which the transport bar's Tempo
+    // spinner already shows and edits, so the row only earns its space when
+    // the tempo moves mid-song. Per-song view state (sidecar), like the
+    // per-lane "Hide lane"; showing it also opens the automation pane so
+    // the row actually appears.
+    bool tempoLaneVisible() const;
+    void setTempoLaneVisible(bool visible);
 
     // Raw MIDI event list: an alternative to the piano roll in the same
     // screen space (the ruler, headers, and automation lanes stay). Per-song

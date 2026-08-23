@@ -1166,7 +1166,10 @@ SmfEvent SongDocument::makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick,
         ev.tick = tick;
         ev.status = 0xFF;
         ev.metaType = 0x51;
-        const uint32_t usPerBeat = uint32_t(60000000.0 / double(std::clamp(value, 1, 999)) + 0.5);
+        // kTempoMin keeps usPerBeat inside the meta's 24-bit field (see the
+        // header): 4 BPM -> 15,000,000 us, comfortably under 0xFFFFFF.
+        const uint32_t usPerBeat =
+            uint32_t(60000000.0 / double(std::clamp(value, kTempoMin, kTempoMax)) + 0.5);
         ev.blob.resize(3);
         ev.blob[0] = char((usPerBeat >> 16) & 0xFF);
         ev.blob[1] = char((usPerBeat >> 8) & 0xFF);
@@ -1184,6 +1187,51 @@ SmfEvent SongDocument::makeLaneEvent(uint8_t cc, uint8_t channel, uint64_t tick,
 }
 
 void SongDocument::addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int value)
+{
+    addLanePoint(cc == DOC_CC_VOICE ? tr("add voice change") : tr("add automation point"),
+                 engineTrack, cc, tick, value);
+}
+
+int SongDocument::startTempo() const
+{
+    DocLanePoint pt;
+    if (!findLanePoint(-1, DOC_CC_TEMPO, 0, &pt))
+        return kTempoDefault;
+    // Clamped like the writes: a foreign file's out-of-range meta must not
+    // make the read disagree with what setStartTempo would store (or hand
+    // the transport spinner a value outside its range).
+    return std::clamp(pt.value, kTempoMin, kTempoMax);
+}
+
+void SongDocument::setStartTempo(int bpm)
+{
+    bpm = std::clamp(bpm, kTempoMin, kTempoMax);
+    if (m_smf.tracks.empty() || startTempo() == bpm)
+        return;
+    addLanePoint(tr("set tempo"), -1, DOC_CC_TEMPO, 0, bpm);
+}
+
+int SongDocument::tempoChangesAfterStart() const
+{
+    int count = 0;
+    for (const DocLanePoint &pt : lanePoints(-1, DOC_CC_TEMPO))
+        if (pt.tick > 0)
+            count++;
+    return count;
+}
+
+int SongDocument::tempoMetasOutsideFirstChunk() const
+{
+    int count = 0;
+    for (size_t t = 1; t < m_smf.tracks.size(); t++)
+        for (const SmfEvent &ev : m_smf.tracks[t].events)
+            if (ev.isMeta() && ev.metaType == 0x51)
+                count++;
+    return count;
+}
+
+void SongDocument::addLanePoint(const QString &text, int engineTrack, uint8_t cc, uint64_t tick,
+                                int value)
 {
     const int smfTrack = cc == DOC_CC_TEMPO ? 0 : smfTrackFor(engineTrack);
     if (smfTrack < 0 || m_smf.tracks.empty())
@@ -1203,8 +1251,7 @@ void SongDocument::addLanePoint(int engineTrack, uint8_t cc, uint64_t tick, int 
     op.smfTrack = smfTrack;
     op.event = makeLaneEvent(cc, channelFor(engineTrack), tick, value);
     ops.push_back(op);
-    pushEdit(cc == DOC_CC_VOICE ? tr("add voice change") : tr("add automation point"),
-             std::move(ops));
+    pushEdit(text, std::move(ops));
 }
 
 void SongDocument::writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBegin,

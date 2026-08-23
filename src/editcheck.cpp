@@ -716,6 +716,103 @@ int documentContractFailures()
         }
     }
 
+    // Start tempo (the transport bar's Tempo spinner): the tick-0 tempo
+    // meta read back as BPM (SMF's 120 when the song sets none), written as
+    // one "set tempo" undo entry that replaces the tick-0 meta in place —
+    // same-tick duplicates included — and never touches later changes.
+    if (ok) {
+        SmfFile tempoSmf;
+        tempoSmf.format = 1;
+        tempoSmf.division = 24;
+        SmfTrack seq;
+        seq.events.push_back(meta(0, 0x51, QByteArray("\x07\xA1\x20", 3)));  // 120 (shadowed)
+        seq.events.push_back(meta(0, 0x51, QByteArray("\x06\x1A\x80", 3)));  // 150 (audible)
+        seq.events.push_back(meta(48, 0x51, QByteArray("\x0F\x42\x40", 3))); // 60 at tick 48
+        seq.events.push_back(chEvent(0xC0, 0, 6, 0));
+        seq.events.push_back(chEvent(0x90, 0, 60, 100));
+        seq.events.push_back(chEvent(0x80, 24, 60, 0));
+        seq.endTick = 96;
+        tempoSmf.tracks.push_back(seq);
+        // A foreign-file shape: a tempo meta outside the first chunk. The
+        // game (mid2agb reads tempo from the first chunk only) and the
+        // timeline both ignore it; the document counts it for the warning.
+        SmfTrack foreign;
+        foreign.events.push_back(meta(0, 0x51, QByteArray("\x04\x93\xE0", 3))); // 200 BPM
+        foreign.events.push_back(chEvent(0x91, 0, 64, 100));
+        foreign.events.push_back(chEvent(0x81, 24, 64, 0));
+        foreign.endTick = 96;
+        tempoSmf.tracks.push_back(foreign);
+        {
+            // The first chunk's three metas (two at tick 0, one at 48) form
+            // the tempo map; the foreign 200 BPM must not appear in it, only
+            // in the event list's ignored row.
+            const auto timeline = MidiTimeline::build(tempoSmf, 48000.0);
+            bool listed = false;
+            for (const OtherEvent &oe : timeline->otherEvents)
+                listed = listed || oe.label.contains(QStringLiteral("ignored"));
+            bool foreignPlayed = false;
+            for (const TempoPoint &tp : timeline->tempoMap)
+                foreignPlayed = foreignPlayed || tp.bpm > 190.0;
+            expect(timeline->tempoMap.size() == 3 && !foreignPlayed && listed,
+                   "timeline did not ignore (and list) the foreign tempo meta");
+        }
+        const QString tempoPath = tmp.path() + QStringLiteral("/start-tempo.mid");
+        SongInfo tempoInfo = info;
+        tempoInfo.label = QStringLiteral("start tempo");
+        tempoInfo.midPath = tempoPath;
+        SongDocument tempoDoc;
+        const bool loaded =
+            tempoSmf.writeFile(tempoPath, &error) && tempoDoc.load(tempoInfo, &error);
+        expect(loaded, "could not load the start-tempo fixture");
+        if (!loaded)
+            return failures;
+        expect(tempoDoc.startTempo() == 150 && tempoDoc.tempoChangesAfterStart() == 1,
+               "start tempo did not read the audible tick-0 meta");
+        expect(tempoDoc.tempoMetasOutsideFirstChunk() == 1,
+               "foreign tempo meta not counted for the warning");
+        const int undoBefore = tempoDoc.undoStack()->index();
+        tempoDoc.setStartTempo(150); // already there: nothing to push
+        expect(tempoDoc.undoStack()->index() == undoBefore && !tempoDoc.isDirty(),
+               "setting the start tempo to its current value pushed an edit");
+        tempoDoc.setStartTempo(1200); // clamped like every tempo write
+        auto tick0Metas = [&tempoDoc] {
+            int count = 0;
+            for (const SmfEvent &ev : tempoDoc.smf().tracks[0].events)
+                if (ev.tick == 0 && ev.isMeta() && ev.metaType == 0x51)
+                    count++;
+            return count;
+        };
+        expect(tempoDoc.startTempo() == 999 && tick0Metas() == 1 &&
+                   tempoDoc.tempoChangesAfterStart() == 1 &&
+                   tempoDoc.lanePoints(-1, DOC_CC_TEMPO).back().value == 60 &&
+                   tempoDoc.undoStack()->index() == undoBefore + 1 &&
+                   tempoDoc.undoStack()->text(undoBefore) == QStringLiteral("set tempo"),
+               "setStartTempo did not replace the tick-0 metas as one clamped 'set tempo' edit");
+        tempoDoc.undoStack()->undo();
+        expect(tempoDoc.startTempo() == 150 && tick0Metas() == 2,
+               "undoing the start tempo did not restore the tick-0 metas");
+        // A song that sets no tempo at all reads as SMF's default; setting
+        // one inserts the tick-0 meta.
+        SmfFile bare = tempoSmf;
+        bare.tracks[0].events.erase(bare.tracks[0].events.begin(),
+                                    bare.tracks[0].events.begin() + 3);
+        const QString barePath = tmp.path() + QStringLiteral("/no-tempo.mid");
+        SongInfo bareInfo = info;
+        bareInfo.label = QStringLiteral("no tempo");
+        bareInfo.midPath = barePath;
+        SongDocument bareDoc;
+        const bool bareLoaded = bare.writeFile(barePath, &error) && bareDoc.load(bareInfo, &error);
+        expect(bareLoaded, "could not load the no-tempo fixture");
+        if (bareLoaded) {
+            expect(bareDoc.startTempo() == 120 && bareDoc.tempoChangesAfterStart() == 0,
+                   "a song without tempo metas did not read as 120 BPM");
+            bareDoc.setStartTempo(90);
+            expect(bareDoc.startTempo() == 90 && bareDoc.isDirty() &&
+                       bareDoc.lanePoints(-1, DOC_CC_TEMPO).size() == 1,
+                   "setStartTempo did not insert a tick-0 tempo meta");
+        }
+    }
+
     // Two indistinguishable unterminated notes crossing each other: the
     // merge test is keyed by noteId, so B moving onto A's old spot is a NEW
     // gesture, never merged into A's command.

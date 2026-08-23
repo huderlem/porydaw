@@ -34,10 +34,13 @@
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUndoGroup>
 
 #include <QChildEvent>
 #include <QCloseEvent>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 
 #ifdef Q_OS_WIN
@@ -540,6 +543,62 @@ void MainWindow::buildUi()
         m_active->doc.setCfg(cfg);
     });
     transport->addWidget(m_masterVolSpin);
+
+    // The song's starting tempo. A song's tempo is usually one number, so
+    // it lives up here beside Volume and the Tempo automation lane stays
+    // hidden by default; the spinbox edits the tick-0 tempo meta through
+    // the same undoable document path as the lane (dirties the song,
+    // applies to playback live, follows undo/redo). When the song changes
+    // tempo later on, a warning appears beside the spinbox — the number is
+    // only where the song starts — and clicking it shows the Tempo lane.
+    transport->addSeparator();
+    const QString tempoTip = tr("Tempo at the start of the song (BPM). Tempo changes "
+                                "later in the song are edited in the Tempo automation "
+                                "lane.");
+    m_tempoCaption = new QLabel(tr("Tempo"), this);
+    m_tempoCaption->setContentsMargins(::layout::space(::layout::Space::Two), 0,
+                                       ::layout::space(::layout::Space::One), 0);
+    m_tempoCaption->setToolTip(tempoTip);
+    m_tempoCaption->setEnabled(false);
+    transport->addWidget(m_tempoCaption);
+    m_tempoSpin = new QSpinBox(this);
+    m_tempoSpin->setObjectName(QStringLiteral("transportTempo"));
+    m_tempoSpin->setRange(SongDocument::kTempoMin, SongDocument::kTempoMax);
+    m_tempoSpin->setSuffix(tr(" BPM"));
+    m_tempoSpin->setValue(SongDocument::kTempoDefault);
+    m_tempoSpin->setToolTip(tempoTip);
+    m_tempoSpin->setEnabled(false);
+    m_tempoSpin->setKeyboardTracking(false); // one undo entry per typed value
+    m_tempoSpin->installEventFilter(this);   // Space stays play/pause (eventFilter)
+    if (auto *tempoEdit = m_tempoSpin->findChild<QLineEdit *>())
+        tempoEdit->installEventFilter(this);
+    connect(m_tempoSpin, &QSpinBox::valueChanged, this, [this](int value) {
+        // setStartTempo owns the no-op rule: it clamps and pushes nothing
+        // when the song already starts at the value.
+        if (m_active)
+            m_active->doc.setStartTempo(value);
+    });
+    transport->addWidget(m_tempoSpin);
+    m_tempoWarning = new QToolButton(this);
+    m_tempoWarning->setObjectName(QStringLiteral("transportTempoWarning"));
+    m_tempoWarning->setAutoRaise(true);
+    // The style's own warning glyph, untinted: unlike the transport
+    // controls this one is meant to stand out from the toolbar.
+    m_tempoWarning->setIcon(style()->standardIcon(QStyle::SP_MessageBoxWarning));
+    m_tempoWarning->setIconSize(transport->iconSize());
+    m_tempoWarning->setFocusPolicy(Qt::TabFocus);
+    m_tempoWarning->setAccessibleName(tr("Tempo changes after the start"));
+    connect(m_tempoWarning, &QToolButton::clicked, this, [this] {
+        if (m_active)
+            m_active->view->setTempoLaneVisible(true);
+    });
+    // Shown and hidden through the wrapper action, never the button: a
+    // widget hidden before addWidget makes its QWidgetAction invisible
+    // (and the toolbar disables it), and the toolbar re-syncs the widget
+    // from the action on every relayout anyway.
+    m_tempoWarningAction = transport->addWidget(m_tempoWarning);
+    m_tempoWarningAction->setObjectName(QStringLiteral("transportTempoWarningAction"));
+    m_tempoWarningAction->setVisible(false);
 
     // Dock titles and the tab strip share this metric-derived outer height so
     // neither clips when the platform font or small-icon metric changes.
@@ -1056,6 +1115,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     m_active = session;
     m_undoGroup->setActiveStack(session ? session->doc.undoStack() : nullptr);
     syncMasterVolumeControl();
+    syncTempoControl();
 
     const bool loaded = session != nullptr;
     m_saveAction->setEnabled(loaded);
@@ -1564,6 +1624,9 @@ void MainWindow::onDocumentChanged(SongSession &session)
         // Cfg may have changed from any source (Song Settings, undo/redo);
         // the toolbar spinbox mirrors it.
         syncMasterVolumeControl();
+        // Tempo metas may have changed from any edit (lane, event list,
+        // undo/redo); the spinbox and its warning follow the document.
+        syncTempoControl();
     }
 }
 
@@ -3106,7 +3169,10 @@ void MainWindow::updateTransportActions()
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    if ((watched == m_masterVolSpin || watched->parent() == m_masterVolSpin) &&
+    const auto isSpinOrEdit = [watched](QSpinBox *spin) {
+        return watched == spin || watched->parent() == spin;
+    };
+    if ((isSpinOrEdit(m_masterVolSpin) || isSpinOrEdit(m_tempoSpin)) &&
         event->type() == QEvent::ShortcutOverride &&
         static_cast<QKeyEvent *>(event)->key() == Qt::Key_Space) {
         event->ignore();
@@ -3122,6 +3188,34 @@ void MainWindow::syncMasterVolumeControl()
     m_masterVolSpin->setEnabled(loaded);
     QSignalBlocker blocker(m_masterVolSpin);
     m_masterVolSpin->setValue(loaded ? m_active->doc.cfg().masterVolume : SongCfg().masterVolume);
+}
+
+void MainWindow::syncTempoControl()
+{
+    const bool loaded = m_active != nullptr;
+    m_tempoCaption->setEnabled(loaded);
+    m_tempoSpin->setEnabled(loaded);
+    {
+        QSignalBlocker blocker(m_tempoSpin);
+        m_tempoSpin->setValue(loaded ? m_active->doc.startTempo() : SongDocument::kTempoDefault);
+    }
+    const int later = loaded ? m_active->doc.tempoChangesAfterStart() : 0;
+    const int stray = loaded ? m_active->doc.tempoMetasOutsideFirstChunk() : 0;
+    m_tempoWarningAction->setVisible(later > 0 || stray > 0);
+    QStringList tips;
+    if (later > 0) {
+        tips << tr("The tempo is not constant: it changes %n more time(s) after the start. "
+                   "Click to show the Tempo lane, where those changes are edited.",
+                   nullptr, later);
+    }
+    if (stray > 0) {
+        tips << tr("%n tempo event(s) sit outside the first track. The game reads tempo "
+                   "from the first track only, so they will not play. Importing the song "
+                   "as a new song moves them into the first track.",
+                   nullptr, stray);
+    }
+    if (!tips.isEmpty())
+        m_tempoWarning->setToolTip(tips.join(QStringLiteral("\n\n")));
 }
 
 bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabel)
@@ -3462,6 +3556,12 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             hide.hiddenLanes.insert(QStringLiteral("cc:0:1"));
             tab->view->applyViewState(hide);
         }
+        // setTempoLaneVisible force-opens the automation pane, whose signal
+        // flips the View-menu action and, through it, the user's persisted
+        // preference (the selftest runs on the real QSettings). Snapshot the
+        // pane here and restore it below so no trace leaks into real runs.
+        const bool lanesWereVisible = tab->view->automationLanesVisible();
+        tab->view->setTempoLaneVisible(true); // the opt-in tempo row, ditto
         const SongView::ViewState saved = tab->view->viewState();
         ok = ViewSidecar::save(m_project.root(), target->label, saved);
         tab->view->zoomAroundContentX(2.0, 0); // knock the view off the state
@@ -3473,6 +3573,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             unhide.hiddenLanes.clear();
             tab->view->applyViewState(unhide);
         }
+        tab->view->setTempoLaneVisible(false);
         SongView::ViewState loaded;
         ok = ok && ViewSidecar::load(m_project.root(), target->label, &loaded);
         if (ok) {
@@ -3488,14 +3589,17 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
                  restored.laneHeight == saved.laneHeight && restored.gridMinDenom == 8 &&
                  restored.gridTriplet &&
                  restored.laneRanges.value(QStringLiteral("cc:0:1"), -1) == 16 &&
-                 restored.hiddenLanes.contains(QStringLiteral("cc:0:1")) &&
+                 restored.hiddenLanes.contains(QStringLiteral("cc:0:1")) && restored.tempoLane &&
+                 tab->view->tempoLaneVisible() &&
                  SongRegistry::loadRegistrationMeta(m_project.root(), target->label, &constant,
                                                     &player) &&
                  constant == QLatin1String("MUS_SELFTEST");
         }
         // Legacy sidecar shape: with nothing hidden the key is omitted —
         // byte-wise the file an older build writes — and loading such a
-        // file must come back with nothing hidden.
+        // file must come back with nothing hidden. The tempo row is the
+        // other way around (opt-in), so a file without its key — every
+        // sidecar from before the row could hide — loads with it hidden.
         if (ok) {
             SongView::ViewState legacy = saved;
             legacy.hiddenLanes.clear();
@@ -3506,6 +3610,25 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             SongView::ViewState reloaded;
             ok = ok && ViewSidecar::load(m_project.root(), target->label, &reloaded) &&
                  reloaded.hiddenLanes.isEmpty();
+            if (ok) {
+                sidecar.close();
+                QJsonObject root;
+                if (sidecar.open(QIODevice::ReadOnly)) {
+                    root = QJsonDocument::fromJson(sidecar.readAll()).object();
+                    sidecar.close();
+                }
+                QJsonObject view = root.value(QLatin1String("view")).toObject();
+                ok = view.value(QLatin1String("tempoLane")).toBool(false);
+                view.remove(QLatin1String("tempoLane"));
+                root.insert(QLatin1String("view"), view);
+                ok = ok && sidecar.open(QIODevice::WriteOnly | QIODevice::Truncate);
+                if (ok) {
+                    sidecar.write(QJsonDocument(root).toJson());
+                    sidecar.close();
+                    SongView::ViewState pre;
+                    ok = ViewSidecar::load(m_project.root(), target->label, &pre) && !pre.tempoLane;
+                }
+            }
         }
         QFile::remove(ViewSidecar::pathFor(m_project.root(), target->label));
         tab->view->setGridMinDenom(0);                        // don't leak the test grid into a
@@ -3516,6 +3639,10 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             reset.hiddenLanes.clear();
             tab->view->applyViewState(reset);
         }
+        tab->view->setTempoLaneVisible(false); // nor the shown tempo row
+        // Nor the forced-open pane: this walks the same signal path back, so
+        // the action and the persisted preference return to their old state.
+        tab->view->setAutomationLanesVisible(lanesWereVisible);
         if (ok)
             qInfo("selftest: sidecar view-state round trip OK");
         else

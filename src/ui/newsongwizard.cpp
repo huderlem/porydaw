@@ -568,6 +568,11 @@ SmfFile NewSongWizard::songFile() const
     if (!m_importMode)
         return SongRegistry::blankSong();
     SmfFile smf = m_imported;
+    // Tempo first: the game reads tempo from the first chunk only, so a
+    // foreign file's later-chunk tempo map must move there to play at all.
+    // Before the dedup, which then collapses the same-tick losers the move
+    // brings together.
+    moveTempoMetasToFirstChunk(&smf);
     // Before the rescale, so only duplicates present in the source collapse —
     // tick collisions the floor rescale itself creates were distinct points
     // the author drew, and they play the same either way.

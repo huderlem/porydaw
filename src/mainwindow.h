@@ -20,6 +20,7 @@ class QTabWidget;
 class QSettings;
 class QSpinBox;
 class QToolBar;
+class QToolButton;
 class QTimer;
 class QWidget;
 class QUndoGroup;
@@ -262,6 +263,11 @@ class MainWindow : public QMainWindow
     // Points the transport toolbar's master-volume spinbox at the active
     // tab's cfg (disabled with no tab). Never emits valueChanged.
     void syncMasterVolumeControl();
+    // Points the transport toolbar's Tempo spinbox at the active tab's
+    // starting tempo (disabled with no tab), and shows the warning beside
+    // it when the song changes tempo after the start. Never emits
+    // valueChanged.
+    void syncTempoControl();
     void synchronizePlayhead();
     void updateTimeLabel();
     void updatePolyStatus();
@@ -348,6 +354,10 @@ class MainWindow : public QMainWindow
     QAction *m_automationLanesAction = nullptr;
     QLabel *m_masterVolCaption = nullptr;
     QSpinBox *m_masterVolSpin = nullptr;
+    QLabel *m_tempoCaption = nullptr;
+    QSpinBox *m_tempoSpin = nullptr;
+    QToolButton *m_tempoWarning = nullptr;
+    QAction *m_tempoWarningAction = nullptr; // the toolbar's wrapper; owns visibility
     QLabel *m_timeLabel = nullptr;
     QLabel *m_songLabel = nullptr;
     QWidget *m_polyMeter = nullptr;
