@@ -482,9 +482,9 @@ void AudioEngine::applyTransportTransition()
 
     // Every transition cuts hard. Pause and Stop must fall silent — a
     // note-off alone leaves a slow-release voice ringing for seconds — and
-    // entering Playing must halt auditions before the song sounds (Space
-    // toggles pause, so playback usually starts from Paused, where a
-    // preview can ring or still be counting down). Preview bookkeeping is
+    // entering Playing must halt auditions before the song sounds (while
+    // stopped or paused a preview can ring or still be counting down).
+    // Preview bookkeeping is
     // dropped with the sound (queued-but-unstarted previews too) so no
     // stale note-off can later cut a playback note on the same track and
     // key.

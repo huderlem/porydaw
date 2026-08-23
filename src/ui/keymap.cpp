@@ -64,7 +64,7 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, "Home"},
     {"transport.play", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Play"),
      QKeySequence::UnknownKey, ""},
-    {"transport.play_pause", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Play/Pause"),
+    {"transport.play_pause", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Play/Stop"),
      QKeySequence::UnknownKey, "Space"},
     {"transport.pause", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Pause"),
      QKeySequence::UnknownKey, ""},

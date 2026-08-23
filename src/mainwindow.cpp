@@ -431,15 +431,17 @@ void MainWindow::buildUi()
     connect(m_playAction, &QAction::triggered, this, [this] { startPlayback(); });
     transport->addAction(m_playAction);
 
-    // Space toggles play/pause (Reaper-style); a window-level action so it
+    // Space toggles play/stop (Reaper-style); a window-level action so it
     // works wherever focus is, like the old Space=Play binding did. Starting
-    // (or unpausing) with Space always restarts from the edit cursor; the
-    // Play button is the resume-from-pause path.
-    m_playPauseAction = new QAction(tr("Play/Pause"), this);
+    // (or unpausing) with Space always restarts from the edit cursor, and
+    // stopping returns the playhead there; the Pause/Play buttons are the
+    // hold-position path. The keymap id keeps its historical name so saved
+    // bindings survive.
+    m_playPauseAction = new QAction(tr("Play/Stop"), this);
     keys.attach(QStringLiteral("transport.play_pause"), m_playPauseAction);
     connect(m_playPauseAction, &QAction::triggered, this, [this] {
         if (m_audio.transport() == Transport::Playing)
-            pausePlayback();
+            stopPlayback();
         else
             startPlayback(/*fromEditCursor=*/true);
     });
@@ -3078,6 +3080,16 @@ void MainWindow::stopPlayback()
     m_audio.stop();
     updateTransportActions();
     synchronizePlayhead();
+    // Stop rewinds the engine to 0, but the playhead belongs back at the
+    // edit cursor (the next Play starts there anyway). Seek the engine so
+    // its reported position agrees, and show the target now: the seek lands
+    // within one audio period and the playhead timer is no longer running
+    // to pick it up.
+    if (m_audioOk && m_active && m_audio.songLoaded()) {
+        const uint64_t target = m_audio.timeline()->sampleForTick(m_active->view->editCursorTick());
+        m_audio.seek(target);
+        m_active->view->setPlayheadSample(target, false);
+    }
 }
 
 void MainWindow::updateTransportActions()
@@ -3372,13 +3384,28 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
         loop.exec();
         const uint64_t afterSeek = m_audio.playheadSamples();
         stopPlayback();
+        // Stop returns the playhead to the edit cursor: visibly at once, and
+        // in the engine once the seek lands on top of the stop-time rewind.
+        const double stoppedViewTick = tab->view->playheadTick();
         QTimer::singleShot(200, &loop, &QEventLoop::quit);
         loop.exec();
+        const uint64_t stoppedSample = m_audio.playheadSamples();
+        const bool stopOk = std::abs(stoppedViewTick - double(seekTick)) <= 0.25 &&
+                            stoppedSample == seekSample &&
+                            m_audio.transport() == Transport::Stopped;
+        if (stopOk)
+            qInfo("selftest: stop returned playhead to edit cursor OK (%.2fs)",
+                  double(stoppedSample) / m_audio.sampleRate());
+        else
+            qWarning("selftest: stop-to-edit-cursor FAILED (cursor %llu ticks, view %.3f ticks, "
+                     "engine %.2fs)",
+                     static_cast<unsigned long long>(seekTick), stoppedViewTick,
+                     double(stoppedSample) / m_audio.sampleRate());
         startPlayback(); // Stopped: must seek back to the edit cursor
         QTimer::singleShot(300, &loop, &QEventLoop::quit);
         loop.exec();
         const uint64_t afterRestart = m_audio.playheadSamples();
-        ok = afterSeek >= seekSample && m_audio.transport() == Transport::Playing &&
+        ok = stopOk && afterSeek >= seekSample && m_audio.transport() == Transport::Playing &&
              afterRestart >= seekSample;
         if (ok)
             qInfo("selftest: edit-cursor seek + play-from-cursor OK (cursor %.2fs)",
