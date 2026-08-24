@@ -96,7 +96,8 @@ class MidiTimeline
     int droppedTracks = 0; // SMF tracks beyond the 16 engine tracks
 
     // Viewer data (never touched by the audio thread).
-    uint32_t ticksPerBeat = 24;
+    static constexpr uint32_t kDefaultTicksPerBeat = 24; // mid2agb's default division
+    uint32_t ticksPerBeat = kDefaultTicksPerBeat;
     uint64_t lengthTicks = 0;
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;

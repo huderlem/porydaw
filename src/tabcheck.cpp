@@ -104,6 +104,112 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA, c
     check(!m_tabs->tabText(m_tabs->indexOf(tabB->view)).endsWith(QLatin1Char('*')),
           "clean tab title grew an asterisk");
 
+    // 3b. The clipboard is app-shared: a range copied in tab A pastes into
+    // tab B (single-source-track clips retarget to the destination's
+    // selected track), and a clip stamped with a foreign MIDI resolution
+    // comes back musically rescaled from clipForPaste — downscale
+    // collisions keep the later event, the editor's same-tick convention.
+    {
+        SongView *viewA = tabA->view;
+        SongView *viewB = tabB->view;
+        SongView::TimeSelection sel;
+        sel.startTick = base + 96;
+        sel.endTick = base + 120;
+        viewA->setTimeSelection(sel);
+        viewA->copyTimeSelection();
+        const SongView::Clip &shared = SongView::clipboard();
+        check(shared.span == 24 && !shared.tracks.empty() &&
+                  shared.tracks.front().notes.size() == 1,
+              "range copy did not land on the shared clipboard");
+        check(shared.ticksPerBeat == tabA->timeline->ticksPerBeat,
+              "copy did not stamp the source song's resolution");
+        viewA->clearTimeSelection();
+
+        m_tabs->setCurrentWidget(tabB->view);
+        // A view sidecar in the scratch project can restore a selected
+        // track and edit cursor; pin both so the paste target is known.
+        viewB->selectTrack(0);
+        viewB->commitEditCursor(0);
+        viewB->pasteRangeAtEditCursor();
+        bool found = false;
+        for (const DocNote &note : tabB->doc.notesForTrack(0))
+            found = found || (note.tick == 0 && note.key == 72 && note.velocity == 93);
+        check(found, "range copied in one tab did not paste into the other");
+        check(tabB->doc.isDirty(), "cross-tab paste did not dirty the destination");
+        tabB->doc.undoStack()->undo();
+        check(!tabB->doc.isDirty(), "undoing the cross-tab paste left the destination dirty");
+
+        // Pretend the clip came from a song at double resolution: ticks,
+        // durations and the span halve on the way in.
+        {
+            SongView::Clip foreign = SongView::clipboard();
+            foreign.ticksPerBeat *= 2;
+            SongView::storeClipboard(std::move(foreign));
+        }
+        const SongView::Clip scaled = viewB->clipForPaste();
+        check(scaled.span == 12 && scaled.ticksPerBeat == tabB->timeline->ticksPerBeat &&
+                  !scaled.tracks.empty() && scaled.tracks.front().notes.size() == 1 &&
+                  scaled.tracks.front().notes.front().duration == 12,
+              "clipForPaste did not rescale a foreign-resolution clip");
+
+        // Two same-key notes (and two lane points) a source tick apart at
+        // 4x resolution land on one destination tick; the later one wins.
+        SongView::Clip collide;
+        collide.span = 8;
+        collide.tracks.push_back({0, {{0, 60, 4, 10}, {1, 60, 4, 99}}});
+        collide.lanes.push_back({0, 7, {{0, 20}, {1, 90}}});
+        // A voice change too: its stamped name is the SOURCE voicegroup's,
+        // so a mismatching destination reports it as a foreign voice.
+        collide.lanes.push_back({0, DOC_CC_VOICE, {{0, 3}}});
+        viewB->setClipboard(std::move(collide));
+        {
+            SongView::Clip foreign = SongView::clipboard();
+            foreign.ticksPerBeat *= 4;
+            foreign.voiceNames[3] = QStringLiteral("not_a_voice_here");
+            SongView::storeClipboard(std::move(foreign));
+        }
+        const SongView::Clip merged = viewB->clipForPaste();
+        check(!merged.tracks.empty() && merged.tracks.front().notes.size() == 1 &&
+                  merged.tracks.front().notes.front().velocity == 99 && !merged.lanes.empty() &&
+                  merged.lanes.front().points.size() == 1 &&
+                  merged.lanes.front().points.front().second == 90,
+              "downscale collisions did not keep the later event");
+        check(viewB->foreignVoiceCount(merged) == 1,
+              "a voice change stamped with a foreign voice name was not reported");
+
+        // An event in the source span's last fraction of a tick (relTick 24
+        // of a 25-tick span at 4x) must stay inside the scaled span, and
+        // abutting same-key notes must stay abutting rather than overlap.
+        SongView::Clip edge;
+        edge.span = 25;
+        edge.tracks.push_back({0, {{2, 60, 6, 80}, {8, 60, 4, 80}, {24, 62, 4, 80}}});
+        viewB->setClipboard(std::move(edge));
+        {
+            SongView::Clip foreign = SongView::clipboard();
+            foreign.ticksPerBeat *= 4;
+            SongView::storeClipboard(std::move(foreign));
+        }
+        const SongView::Clip edged = viewB->clipForPaste();
+        bool inside = true;
+        for (const SongView::ClipNote &cn : edged.tracks.front().notes)
+            inside = inside && cn.relTick < edged.span;
+        check(inside, "a scaled event escaped the scaled span");
+        check(edged.tracks.front().notes.size() == 3 &&
+                  edged.tracks.front().notes[0].relTick + edged.tracks.front().notes[0].duration <=
+                      edged.tracks.front().notes[1].relTick,
+              "downscale rounding overlapped abutting same-key notes");
+
+        // Leave the real cross-tab copy on the clipboard (step 8 checks it
+        // survives an in-place song swap), not these mis-stamped fixtures.
+        m_tabs->setCurrentWidget(tabA->view);
+        viewA->setTimeSelection(sel);
+        viewA->copyTimeSelection();
+        viewA->clearTimeSelection();
+        check(SongView::clipboard().ticksPerBeat == tabA->timeline->ticksPerBeat &&
+                  SongView::clipboard().span == 24,
+              "re-copy did not restore the shared clipboard");
+    }
+
     // 4. Switching tabs stops playback in the tab being left.
     m_audio.play();
     wait(200);
@@ -293,6 +399,8 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA, c
           "activating a song did not replace the current tab's");
     check(m_audio.timeline() == tabB->timeline.get(),
           "engine did not rebind after the in-place replace");
+    check(!SongView::clipboard().empty(),
+          "the app-shared clipboard did not survive an in-place song swap");
 
     // 8b. Re-activating the current tab's own song reloads it from disk —
     // the only reload path for a .mid edited externally. The cleared undo

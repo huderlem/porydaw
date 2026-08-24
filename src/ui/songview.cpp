@@ -55,6 +55,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <set>
 #include <utility>
 
 #include <optional>
@@ -2433,7 +2434,7 @@ class PianoRoll : public TimelineSurface
                  note.duration ? note.duration : uint32_t(m_sv->gridTicksAt(note.tick)),
                  note.velocity});
         clip.tracks.push_back(std::move(ct));
-        m_sv->clipboard() = std::move(clip);
+        m_sv->setClipboard(std::move(clip));
         m_sv->announce(SongView::tr("Copied %n note(s)", nullptr, int(notes.size())));
     }
 
@@ -2443,7 +2444,7 @@ class PianoRoll : public TimelineSurface
     void pasteAtEditCursor()
     {
         SongDocument *doc = m_sv->document();
-        const SongView::Clip &clip = m_sv->clipboard();
+        const SongView::Clip clip = m_sv->clipForPaste();
         if (!doc || clip.span != 0 || clip.tracks.empty() || clip.tracks.front().notes.empty())
             return;
         const uint64_t base = m_sv->snapTick(double(m_sv->editCursorTick()));
@@ -4624,7 +4625,7 @@ class AutomationArea : public TimelineSurface
             for (const DocLanePoint &pt : points)
                 cl.points.push_back({uint32_t(pt.tick), pt.value});
             clip.lanes.push_back(std::move(cl));
-            m_sv->clipboard() = std::move(clip);
+            m_sv->setClipboard(std::move(clip));
             m_sv->announce(
                 SongView::tr("Copied the %1 lane (%n point(s))", nullptr, int(points.size()))
                     .arg(name));
@@ -4634,14 +4635,26 @@ class AutomationArea : public TimelineSurface
             // Replace this lane's whole contents with the clipboard lane at
             // its original ticks (values clamp to this lane's range), as one
             // undoable command.
+            // Re-check: the clipboard is app-shared and the menu's nested
+            // event loop could have replaced it since the enablement check.
+            const SongView::Clip clip = m_sv->clipForPaste();
+            if (!clip.wholeLane || clip.lanes.empty())
+                return;
             SongDocument::RangeEdit edit;
             edit.removePoints = points;
             SongDocument::RangeEdit::LaneWrite lw{track, cc, {}};
-            for (const std::pair<uint32_t, int> &pv : m_sv->clipboard().lanes.front().points)
+            for (const std::pair<uint32_t, int> &pv : clip.lanes.front().points)
                 lw.points.push_back({uint64_t(pv.first), pv.second});
             edit.addPoints.push_back(std::move(lw));
             doc->applyRangeEdit(SongView::tr("paste lane"), edit);
-            m_sv->announce(SongView::tr("Replaced the %1 lane").arg(name));
+            const int foreign = cc == DOC_CC_VOICE ? m_sv->foreignVoiceCount(clip) : 0;
+            if (foreign > 0)
+                m_sv->announce(SongView::tr("Replaced the %1 lane · %n voice change(s) name a "
+                                            "different instrument in this voicegroup",
+                                            nullptr, foreign)
+                                   .arg(name));
+            else
+                m_sv->announce(SongView::tr("Replaced the %1 lane").arg(name));
             return;
         }
         if (chosen == clear) {
@@ -8323,7 +8336,9 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_emptyLanes.clear();
     m_selection.clear();
     m_timeSel = TimeSelection();
-    m_clip = Clip();
+    // The clipboard is deliberately NOT cleared: it is app-shared and
+    // self-contained, so a copy made in another song (or this one, before
+    // the swap) pastes here — clipForPaste rescales its ticks.
     m_muteMask = 0;
     m_soloMask = 0;
     emit muteMaskChanged(0);
@@ -8936,6 +8951,138 @@ std::vector<uint8_t> SongView::trackCcs(int track) const
     return ccs;
 }
 
+uint32_t SongView::songTicksPerBeat() const
+{
+    return m_timeline ? std::max<uint32_t>(1u, m_timeline->ticksPerBeat)
+                      : MidiTimeline::kDefaultTicksPerBeat;
+}
+
+namespace {
+// App-shared: one clipboard for every tab/SongView, so a copy made in one
+// song pastes into another (a different tab, or a song opened over this
+// one). Purely value data — no pointers into a document, timeline, or
+// voicegroup — so it safely outlives its source song.
+SongView::Clip &clipboardStorage()
+{
+    static SongView::Clip clip;
+    return clip;
+}
+} // namespace
+
+const SongView::Clip &SongView::clipboard()
+{
+    return clipboardStorage();
+}
+
+void SongView::storeClipboard(Clip clip)
+{
+    clipboardStorage() = std::move(clip);
+}
+
+void SongView::setClipboard(Clip clip)
+{
+    clip.ticksPerBeat = songTicksPerBeat();
+    clip.voiceNames.clear();
+    for (const ClipLane &cl : clip.lanes) {
+        if (cl.cc != DOC_CC_VOICE)
+            continue;
+        for (const std::pair<uint32_t, int> &pv : cl.points) {
+            if (pv.second < 0 || pv.second >= VOICEGROUP_SIZE)
+                continue;
+            clip.voiceNames[pv.second] =
+                m_voicegroup ? QString::fromUtf8(m_voicegroup->voiceNames[pv.second]) : QString();
+        }
+    }
+    storeClipboard(std::move(clip));
+}
+
+int SongView::foreignVoiceCount(const Clip &clip) const
+{
+    int count = 0;
+    for (const ClipLane &cl : clip.lanes) {
+        if (cl.cc != DOC_CC_VOICE)
+            continue;
+        for (const std::pair<uint32_t, int> &pv : cl.points) {
+            const auto it = clip.voiceNames.find(pv.second);
+            if (it == clip.voiceNames.end())
+                continue;
+            const QString here = m_voicegroup && pv.second >= 0 && pv.second < VOICEGROUP_SIZE
+                                     ? QString::fromUtf8(m_voicegroup->voiceNames[pv.second])
+                                     : QString();
+            if (here != it->second)
+                ++count;
+        }
+    }
+    return count;
+}
+
+SongView::Clip SongView::clipForPaste() const
+{
+    Clip clip = clipboard();
+    const uint32_t dst = songTicksPerBeat();
+    const uint32_t src = std::max<uint32_t>(1u, clip.ticksPerBeat);
+    if (src == dst)
+        return clip;
+    // Cross-song paste between differing MIDI divisions: rescale so the
+    // music keeps its length (a quarter note stays a quarter note).
+    // Nearest rounding, unlike rescaleDivision (midiimport.cpp), which
+    // floors to reproduce mid2agb's import arithmetic; a paste has no such
+    // contract and nearest keeps the pasted music closest to the original.
+    // Rounding can land two events on one tick — the later one wins (the
+    // editor's same-tick convention), deduped here so the document never
+    // sees colliding inserts. Note ends are scaled as ticks rather than
+    // durations: scaling is monotonic, so a note that ended at or before
+    // the next same-key note's start still does, and rounding can never
+    // create an overlap between pasted notes (a note collapsed to zero
+    // length keeps one tick, colliding only with a note at that same tick,
+    // which the dedup settles).
+    const auto scale = [&](uint64_t tick) {
+        return uint64_t(std::llround(double(tick) * double(dst) / double(src)));
+    };
+    uint64_t lastTick = 0; // furthest scaled event start
+    for (ClipTrack &ct : clip.tracks) {
+        for (ClipNote &cn : ct.notes) {
+            const uint64_t start = scale(cn.relTick);
+            const uint64_t end = scale(uint64_t(cn.relTick) + cn.duration);
+            cn.relTick = uint32_t(start);
+            cn.duration = uint32_t(std::max<uint64_t>(1, end - start));
+            lastTick = std::max(lastTick, start);
+        }
+        if (src > dst) {
+            std::set<std::pair<uint32_t, uint8_t>> seen;
+            std::vector<ClipNote> kept;
+            for (auto it = ct.notes.rbegin(); it != ct.notes.rend(); ++it)
+                if (seen.insert({it->relTick, it->key}).second)
+                    kept.push_back(*it);
+            std::reverse(kept.begin(), kept.end());
+            ct.notes = std::move(kept);
+        }
+    }
+    for (ClipLane &cl : clip.lanes) {
+        for (std::pair<uint32_t, int> &pv : cl.points) {
+            pv.first = uint32_t(scale(pv.first));
+            lastTick = std::max<uint64_t>(lastTick, pv.first);
+        }
+        if (src > dst) {
+            std::set<uint32_t> seen;
+            std::vector<std::pair<uint32_t, int>> kept;
+            for (auto it = cl.points.rbegin(); it != cl.points.rend(); ++it)
+                if (seen.insert(it->first).second)
+                    kept.push_back(*it);
+            std::reverse(kept.begin(), kept.end());
+            cl.points = std::move(kept);
+        }
+    }
+    // The span rounds independently of the events inside it, so an event in
+    // the source span's last fraction of a tick can round to the scaled
+    // span itself — outside the [start, start + span) window a range paste
+    // clears. Grow the span to keep every event inside it.
+    if (clip.span > 0)
+        clip.span = std::max<uint64_t>({1, scale(clip.span), lastTick + 1});
+    clip.ticksPerBeat = dst;
+    return clip;
+}
+
 void SongView::copyTimeSelection()
 {
     if (!m_document || !m_timeSel.active())
@@ -8978,7 +9125,7 @@ void SongView::copyTimeSelection()
                 copyLanePoints(t, cc);
         }
     }
-    m_clip = std::move(clip);
+    setClipboard(std::move(clip));
     announce(tr("Copied range: %1 note(s), %2 automation point(s)").arg(noteCount).arg(pointCount));
 }
 
@@ -9136,10 +9283,11 @@ void SongView::removeTimeSelectionContents()
 
 void SongView::pasteRangeAtEditCursor()
 {
-    if (!m_document || m_clip.span == 0 || m_clip.empty())
+    if (!m_document || clipboard().span == 0 || clipboard().empty())
         return;
+    const Clip clip = clipForPaste();
     const uint64_t s = snapTick(double(m_editCursorTick));
-    const uint64_t e = s + m_clip.span;
+    const uint64_t e = s + clip.span;
 
     // A clip whose content came from one track retargets to the selected
     // track (cross-track copy); multi-track clips paste back in place.
@@ -9153,19 +9301,27 @@ void SongView::pasteRangeAtEditCursor()
         else if (sole != track)
             multi = true;
     };
-    for (const ClipTrack &ct : m_clip.tracks)
+    for (const ClipTrack &ct : clip.tracks)
         consider(ct.track);
-    for (const ClipLane &cl : m_clip.lanes)
+    for (const ClipLane &cl : clip.lanes)
         consider(cl.track);
     const auto mapTrack = [&](int track) {
         return track < 0 ? -1 : (multi ? track : m_selectedTrack);
     };
 
     SongDocument::RangeEdit edit;
-    for (const ClipTrack &ct : m_clip.tracks) {
+    // Cross-song, a multi-track clip can name tracks this song doesn't
+    // have; they're skipped, and the announcement says so.
+    std::set<int> skippedTracks;
+    bool landed = false; // any of the clip's content found a track here
+    for (const ClipTrack &ct : clip.tracks) {
         const int t = mapTrack(ct.track);
-        if (t < 0 || m_document->smfTrackFor(t) < 0)
+        if (t < 0 || m_document->smfTrackFor(t) < 0) {
+            if (!ct.notes.empty())
+                skippedTracks.insert(ct.track);
             continue;
+        }
+        landed = true;
         // Replace: whatever notes start inside the destination span go away.
         for (const DocNote &note : m_document->notesForTrack(t)) {
             if (note.tick >= s && note.tick < e)
@@ -9178,10 +9334,14 @@ void SongView::pasteRangeAtEditCursor()
             edit.addNotes.push_back(std::move(tn));
         }
     }
-    for (const ClipLane &cl : m_clip.lanes) {
+    for (const ClipLane &cl : clip.lanes) {
         const int t = mapTrack(cl.track);
-        if (t >= 0 && m_document->smfTrackFor(t) < 0)
+        if (t >= 0 && m_document->smfTrackFor(t) < 0) {
+            if (!cl.points.empty())
+                skippedTracks.insert(cl.track);
             continue;
+        }
+        landed = true;
         const int query = t < 0 ? m_selectedTrack : t;
         for (const DocLanePoint &pt : m_document->lanePoints(query, cl.cc)) {
             if (pt.tick >= s && pt.tick < e)
@@ -9194,6 +9354,13 @@ void SongView::pasteRangeAtEditCursor()
             edit.addPoints.push_back(std::move(lw));
         }
     }
+    if (!landed) {
+        // Nothing to paste (cross-song, every source track is missing here):
+        // no edit, so no cursor move or selection change either — those
+        // would read as a paste that never happened.
+        announce(tr("Nothing pasted · none of the copied tracks exist in this song"));
+        return;
+    }
     m_document->applyRangeEdit(tr("paste range"), edit);
 
     // Set up for tiling: the edit cursor advances to the end of the pasted
@@ -9204,7 +9371,17 @@ void SongView::pasteRangeAtEditCursor()
     // Anchor on the start of the pasted span, not the advanced cursor:
     // seeing the content that just landed is what confirms the paste.
     ensureTickVisible(s);
-    announce(tr("Pasted range · edit cursor moved to its end — paste again to repeat"));
+    QStringList notes;
+    if (!skippedTracks.empty())
+        notes << tr("%n source track(s) skipped (no matching track here)", nullptr,
+                    int(skippedTracks.size()));
+    if (const int foreign = foreignVoiceCount(clip); foreign > 0)
+        notes << tr("%n voice change(s) name a different instrument in this voicegroup", nullptr,
+                    foreign);
+    if (notes.isEmpty())
+        announce(tr("Pasted range · edit cursor moved to its end — paste again to repeat"));
+    else
+        announce(tr("Pasted range · %1").arg(notes.join(QStringLiteral(" · "))));
 }
 
 // Maps the four transpose commands to their semitone step, 0 when the event
@@ -9260,7 +9437,8 @@ bool SongView::handleEditKey(QKeyEvent *event)
         event->accept();
         return true;
     }
-    if (keys.matches(event, QStringLiteral("roll.paste")) && m_clip.span > 0 && !m_clip.empty()) {
+    if (keys.matches(event, QStringLiteral("roll.paste")) && clipboard().span > 0 &&
+        !clipboard().empty()) {
         pasteRangeAtEditCursor();
         event->accept();
         return true;
@@ -9358,7 +9536,7 @@ void SongView::showTimeSelectionMenu(const QPoint &globalPos)
     QAction *removeContents = menu.addAction(tr("Remove contents (shift left)"));
     QAction *paste = menu.addAction(tr("Paste at edit cursor"));
     paste->setShortcut(keys.bindings(QStringLiteral("roll.paste")).value(0));
-    paste->setEnabled(m_clip.span > 0 && !m_clip.empty());
+    paste->setEnabled(clipboard().span > 0 && !clipboard().empty());
     menu.addSeparator();
     QAction *clear = menu.addAction(tr("Clear selection"));
     QAction *chosen = menu.exec(globalPos);
@@ -9475,7 +9653,7 @@ qreal SongView::displayX(double tick, qreal origin, qreal dpr) const
 
 double SongView::pxPerBeat() const
 {
-    return m_timeline ? m_pxPerTick * m_timeline->ticksPerBeat : m_pxPerTick * 24.0;
+    return m_pxPerTick * double(songTicksPerBeat());
 }
 
 void SongView::selectTrack(int track)

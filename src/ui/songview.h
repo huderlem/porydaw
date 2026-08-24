@@ -5,11 +5,13 @@
 #include <QList>
 #include <QRectF>
 #include <QSet>
+#include <QString>
 #include <QWidget>
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -540,12 +542,21 @@ class SongView : public QWidget
     // Copy/Cut/Delete/Paste/Clear context menu on the active selection.
     void showTimeSelectionMenu(const QPoint &globalPos);
 
-    // App-internal clipboard. A plain note copy (roll selection) has span 0
-    // and pastes additively; a range copy carries span > 0 plus lane
-    // segments and pastes with replace semantics. Ticks are offsets from
-    // the copied block's start so paste can re-anchor at the edit cursor.
-    // Survives track switches and document rebuilds; cleared on song swap
-    // (another song's ticks-per-beat may differ).
+    // App-shared clipboard: one clipboard for every tab/SongView, so copies
+    // travel between songs (paste into another tab, or into a song opened
+    // over this one). A plain note copy (roll selection) has span 0 and
+    // pastes additively; a range copy carries span > 0 plus lane segments
+    // and pastes with replace semantics. Ticks are offsets from the copied
+    // block's start so paste can re-anchor at the edit cursor, and are in
+    // the SOURCE song's resolution: copies stamp ticksPerBeat (see
+    // setClipboard) and pastes rescale through clipForPaste, so the music
+    // keeps its length across songs with different MIDI divisions. Entirely
+    // self-contained value data — no pointers into a document, timeline, or
+    // voicegroup — so it safely outlives the song it came from. Voice-change
+    // values are indices into the source song's voicegroup, which another
+    // song's may lay out differently; copies stamp the referenced voices'
+    // names (voiceNames) so a paste can say when they'd sound as different
+    // instruments (see foreignVoiceCount).
     struct ClipNote {
         uint32_t relTick;
         uint8_t key;
@@ -564,11 +575,36 @@ class SongView : public QWidget
     struct Clip {
         uint64_t span = 0;      // ticks covered; 0 = plain note clip
         bool wholeLane = false; // gutter "Copy lane" (paste-lane anchor is 0)
+        // Source song's resolution at copy time.
+        uint32_t ticksPerBeat = MidiTimeline::kDefaultTicksPerBeat;
+        // Source voicegroup's name for each voice index the lanes' voice
+        // changes reference (empty for square/noise voices, which have no
+        // symbol). Only indices actually referenced are present.
+        std::map<int, QString> voiceNames;
         std::vector<ClipTrack> tracks;
         std::vector<ClipLane> lanes;
         bool empty() const { return tracks.empty() && lanes.empty(); }
     };
-    Clip &clipboard() { return m_clip; }
+    // Read-only: the clipboard only changes through setClipboard, which
+    // stamps the clip, so pastes can trust the stamps.
+    static const Clip &clipboard();
+    // The one way onto the clipboard for copies: stamps this song's
+    // ticksPerBeat and the referenced voices' names into the clip so a paste
+    // into another song knows how to rescale and what the voices meant.
+    void setClipboard(Clip clip);
+    // Stores a clip as given, stamps included — for the harnesses' foreign-
+    // resolution fixtures. Copies go through setClipboard.
+    static void storeClipboard(Clip clip);
+    // The clipboard's contents rescaled to this song's resolution (identity
+    // when they match — the common case). Downscaling rounds and can land
+    // two events on one tick; the later one wins, matching the editor's
+    // same-tick convention, so paste sites never see colliding events.
+    Clip clipForPaste() const;
+    // How many of the clip's voice changes would sound as a different
+    // instrument here: their stamped source voice name differs from this
+    // song's voicegroup's name at the same index. 0 when the clip carries no
+    // voice changes. Exposed for the harnesses.
+    int foreignVoiceCount(const Clip &clip) const;
 
     // "velocity 93 → plays 96 · length 25 → 24 clocks" for the status bar.
     void announceNote(const ViewNote &note);
@@ -702,6 +738,9 @@ class SongView : public QWidget
     // model lanes plus the voice changes).
     std::vector<int> timeSelectionTracks() const;
     std::vector<uint8_t> trackCcs(int track) const;
+    // This song's MIDI resolution, clamped to at least 1 (the default when
+    // no song is loaded). Copy and paste both derive theirs from here.
+    uint32_t songTicksPerBeat() const;
 
     const MidiTimeline *m_timeline = nullptr;
     const LoadedVoiceGroup *m_voicegroup = nullptr;
@@ -720,7 +759,6 @@ class SongView : public QWidget
     uint32_t m_soloMask = 0;
     std::vector<NoteKey> m_selection;
     TimeSelection m_timeSel;
-    Clip m_clip;
     uint32_t m_trackSelMask = 0; // header multi-selection (see trackSelectionMask)
     GridFeel m_gridFeel = GridFeel::Straight;
     int m_gridMinDenom = 0;                            // note denominator; 0 = clock-grid floor
