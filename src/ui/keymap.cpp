@@ -20,6 +20,10 @@ struct Def {
     // Mouse-gesture modifier command ("hold X and drag"): bound to a bare
     // modifier chord, never a key sequence.
     bool modifier;
+    // Mouse-wheel command ("scroll with X held"): a modifier chord where
+    // "None" in `keys` means the bare wheel — a real binding, unlike the
+    // modifier commands' NoModifier-means-unbound.
+    bool wheel;
 };
 
 // Stable order: the settings UI lists commands exactly as they appear here.
@@ -142,6 +146,19 @@ const Def kDefs[] = {
      QT_TR_NOOP("Move Event Up (Same Tick)"), QKeySequence::UnknownKey, "Alt+Up"},
     {"eventlist.move_down", Context::EventList, QT_TR_NOOP("MIDI Event List"),
      QT_TR_NOOP("Move Event Down (Same Tick)"), QKeySequence::UnknownKey, "Alt+Down"},
+    // Mouse wheel: which held chord makes scrolling zoom or pan the song
+    // view. Every DAW picks these differently, so all four are rebindable;
+    // the defaults keep porydaw's REAPER-style feel. Each surface maps the
+    // vertical pair to its own axis (key height in the roll, lane-row
+    // height in the automation lanes) and falls back where it has none.
+    {"wheel.zoom_timeline", Context::Wheel, QT_TR_NOOP("Mouse Wheel"),
+     QT_TR_NOOP("Zoom In/Out (Timeline)"), QKeySequence::UnknownKey, "None", false, true},
+    {"wheel.zoom_vertical", Context::Wheel, QT_TR_NOOP("Mouse Wheel"),
+     QT_TR_NOOP("Zoom In/Out (Key/Lane Height)"), QKeySequence::UnknownKey, "Ctrl", false, true},
+    {"wheel.pan_horizontal", Context::Wheel, QT_TR_NOOP("Mouse Wheel"),
+     QT_TR_NOOP("Pan Left/Right"), QKeySequence::UnknownKey, "Shift", false, true},
+    {"wheel.pan_vertical", Context::Wheel, QT_TR_NOOP("Mouse Wheel"), QT_TR_NOOP("Pan Up/Down"),
+     QKeySequence::UnknownKey, "Alt", false, true},
 };
 
 const Def *findDef(const QString &id)
@@ -155,7 +172,7 @@ const Def *findDef(const QString &id)
 
 QList<QKeySequence> defaultBindings(const Def &def)
 {
-    if (def.modifier) // modifier chords are not key sequences
+    if (def.modifier || def.wheel) // chords are not key sequences
         return {};
     if (def.standard != QKeySequence::UnknownKey) {
         // A standard key with no binding on this platform (Preferences on
@@ -181,6 +198,18 @@ QString settingsKey(const QString &id)
     return QStringLiteral("keymap/") + id;
 }
 
+// Wheel chord text: "None" is the bare wheel; anything else must parse as
+// a chord, and garbage reports nullopt so callers can fall back.
+std::optional<Qt::KeyboardModifiers> wheelFromText(const QString &text)
+{
+    if (text.compare(QLatin1String("None"), Qt::CaseInsensitive) == 0)
+        return Qt::KeyboardModifiers(Qt::NoModifier);
+    const Qt::KeyboardModifiers mods = Registry::modifierFromText(text);
+    if (mods == Qt::NoModifier)
+        return std::nullopt;
+    return mods;
+}
+
 // Global shortcuts stay live while any local context has focus.
 bool contextsOverlap(Context a, Context b)
 {
@@ -192,6 +221,22 @@ Qt::KeyboardModifiers shortcutModifiers(Qt::KeyboardModifiers modifiers)
     return modifiers &
            (Qt::ControlModifier | Qt::ShiftModifier | Qt::AltModifier | Qt::MetaModifier);
 }
+
+// Wheel chords never bind Meta (the picker does not offer it), so it is
+// masked rather than mismatching: on macOS the physical Ctrl key arrives
+// as Meta, and a resting Ctrl must not kill the wheel.
+Qt::KeyboardModifiers wheelModifiers(Qt::KeyboardModifiers modifiers)
+{
+    return shortcutModifiers(modifiers) & ~Qt::MetaModifier;
+}
+
+// Wheel command id per WheelAction, indexed by int(action) - 1.
+constexpr const char *kWheelActionIds[kWheelActionCount] = {
+    "wheel.zoom_timeline",
+    "wheel.zoom_vertical",
+    "wheel.pan_horizontal",
+    "wheel.pan_vertical",
+};
 
 } // namespace
 
@@ -209,7 +254,7 @@ QList<CommandInfo> Registry::commands() const
     out.reserve(int(std::size(kDefs)));
     for (const Def &def : kDefs) {
         out.append({QLatin1String(def.id), def.context, tr(def.category), tr(def.name),
-                    defaultBindings(def), def.modifier});
+                    defaultBindings(def), def.modifier, def.wheel});
     }
     return out;
 }
@@ -220,15 +265,15 @@ CommandInfo Registry::command(const QString &id) const
     Q_ASSERT(def);
     if (!def)
         return {};
-    return {QLatin1String(def->id), def->context,          tr(def->category),
-            tr(def->name),          defaultBindings(*def), def->modifier};
+    return {QLatin1String(def->id), def->context,  tr(def->category), tr(def->name),
+            defaultBindings(*def),  def->modifier, def->wheel};
 }
 
 QList<QKeySequence> Registry::bindings(const QString &id) const
 {
     const Def *def = findDef(id);
     Q_ASSERT(def);
-    if (!def || def->modifier)
+    if (!def || def->modifier || def->wheel)
         return {};
     const QSettings settings;
     const QString key = settingsKey(id);
@@ -252,8 +297,8 @@ bool Registry::isOverridden(const QString &id) const
 void Registry::setBinding(const QString &id, const QKeySequence &sequence)
 {
     const Def *def = findDef(id);
-    Q_ASSERT(def && !def->modifier);
-    if (!def || def->modifier)
+    Q_ASSERT(def && !def->modifier && !def->wheel);
+    if (!def || def->modifier || def->wheel)
         return;
     QSettings settings;
     // Setting a command back to its (sole) default is a reset, keeping the
@@ -264,7 +309,7 @@ void Registry::setBinding(const QString &id, const QKeySequence &sequence)
     else
         settings.setValue(settingsKey(id), sequence.toString(QKeySequence::PortableText));
     applyToActions();
-    emit bindingsChanged();
+    storeChanged();
 }
 
 Qt::KeyboardModifiers Registry::modifierBinding(const QString &id) const
@@ -311,7 +356,94 @@ void Registry::setModifierBinding(const QString &id, Qt::KeyboardModifiers mods)
         settings.remove(settingsKey(id));
     else
         settings.setValue(settingsKey(id), mods == Qt::NoModifier ? QString() : modifierText(mods));
+    storeChanged();
+}
+
+std::optional<Qt::KeyboardModifiers> Registry::wheelBinding(const QString &id) const
+{
+    const Def *def = findDef(id);
+    Q_ASSERT(def && def->wheel);
+    if (!def || !def->wheel)
+        return std::nullopt;
+    const QSettings settings;
+    const QString key = settingsKey(id);
+    if (!settings.contains(key))
+        return wheelFromText(QLatin1String(def->keys));
+    const QString stored = settings.value(key).toString();
+    if (stored.isEmpty()) // explicitly unbound: the wheel action is off
+        return std::nullopt;
+    const auto mods = wheelFromText(stored);
+    if (!mods) // unparseable hand-edited value: fall back
+        return wheelFromText(QLatin1String(def->keys));
+    return mods;
+}
+
+void Registry::setWheelBinding(const QString &id, std::optional<Qt::KeyboardModifiers> mods)
+{
+    const Def *def = findDef(id);
+    Q_ASSERT(def && def->wheel);
+    if (!def || !def->wheel)
+        return;
+    QSettings settings;
+    // Same delta-only store as the other kinds: the default is a reset,
+    // unbound persists as the empty marker, and the bare wheel as "None".
+    const QString text = !mods                     ? QString()
+                         : *mods == Qt::NoModifier ? QStringLiteral("None")
+                                                   : modifierText(*mods);
+    if (mods && mods == wheelFromText(QLatin1String(def->keys)))
+        settings.remove(settingsKey(id));
+    else
+        settings.setValue(settingsKey(id), text);
+    storeChanged();
+}
+
+bool Registry::matchesWheel(Qt::KeyboardModifiers mods, const QString &id) const
+{
+    const auto binding = wheelBinding(id);
+    return binding && *binding == wheelModifiers(mods);
+}
+
+const std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount> &
+Registry::wheelChords() const
+{
+    if (!m_wheelChords) {
+        std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount> chords;
+        for (int i = 0; i < kWheelActionCount; ++i)
+            chords[i] = wheelBinding(QLatin1String(kWheelActionIds[i]));
+        m_wheelChords = chords;
+    }
+    return *m_wheelChords;
+}
+
+WheelAction Registry::wheelAction(Qt::KeyboardModifiers mods) const
+{
+    const Qt::KeyboardModifiers chord = wheelModifiers(mods);
+    const auto &chords = wheelChords();
+    for (int i = 0; i < kWheelActionCount; ++i) {
+        if (chords[i] && *chords[i] == chord)
+            return WheelAction(i + 1);
+    }
+    return WheelAction::None;
+}
+
+void Registry::storeChanged()
+{
+    m_wheelChords.reset();
     emit bindingsChanged();
+}
+
+QStringList Registry::wheelConflicts(const QString &excludeId, Qt::KeyboardModifiers mods) const
+{
+    QStringList out;
+    for (const Def &def : kDefs) {
+        const QString id = QLatin1String(def.id);
+        if (!def.wheel || id == excludeId)
+            continue;
+        const auto binding = wheelBinding(id);
+        if (binding && *binding == wheelModifiers(mods))
+            out.append(id);
+    }
+    return out;
 }
 
 QString Registry::modifierText(Qt::KeyboardModifiers mods)
@@ -355,7 +487,7 @@ void Registry::resetBinding(const QString &id)
     QSettings settings;
     settings.remove(settingsKey(id));
     applyToActions();
-    emit bindingsChanged();
+    storeChanged();
 }
 
 void Registry::resetAll()
@@ -363,7 +495,7 @@ void Registry::resetAll()
     QSettings settings;
     settings.remove(QStringLiteral("keymap"));
     applyToActions();
-    emit bindingsChanged();
+    storeChanged();
 }
 
 QStringList Registry::conflicts(const QString &excludeId, Context context,
@@ -415,7 +547,7 @@ bool Registry::matches(const QKeyEvent *event, const QString &id) const
 
 void Registry::attach(const QString &id, QAction *action)
 {
-    Q_ASSERT(findDef(id) && !findDef(id)->modifier);
+    Q_ASSERT(findDef(id) && !findDef(id)->modifier && !findDef(id)->wheel);
     m_actions.append({id, QPointer<QAction>(action)});
     action->setShortcuts(bindings(id));
 }

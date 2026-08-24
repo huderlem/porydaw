@@ -261,6 +261,98 @@ int runKeymapCheck()
               "a non-modifier token parsed as a chord");
     }
 
+    // 8b. Wheel commands: the four scroll actions ship on their
+    // REAPER-style chords, the bare wheel is a real binding distinct from
+    // unbound, and conflicts stay within the wheel kind — vertical zoom and
+    // the velocity-drag gesture share Ctrl by design.
+    {
+        const QString zoomT = QStringLiteral("wheel.zoom_timeline");
+        const QString zoomV = QStringLiteral("wheel.zoom_vertical");
+        const QString panH = QStringLiteral("wheel.pan_horizontal");
+        const QString panV = QStringLiteral("wheel.pan_vertical");
+        check(registry.command(zoomT).wheel && !registry.command(zoomT).modifier,
+              "zoom timeline is not a wheel command");
+        check(registry.wheelBinding(zoomT) == Qt::KeyboardModifiers(Qt::NoModifier),
+              "timeline zoom does not default to the bare wheel");
+        check(registry.wheelBinding(zoomV) == Qt::KeyboardModifiers(Qt::ControlModifier),
+              "vertical zoom does not default to Ctrl");
+        check(registry.wheelBinding(panH) == Qt::KeyboardModifiers(Qt::ShiftModifier),
+              "horizontal pan does not default to Shift");
+        check(registry.wheelBinding(panV) == Qt::KeyboardModifiers(Qt::AltModifier),
+              "vertical pan does not default to Alt");
+        check(registry.bindings(zoomT).isEmpty(), "wheel command reports key-sequence bindings");
+        for (const QString &id : {zoomT, zoomV, panH, panV}) {
+            check(registry.wheelConflicts(id, *registry.wheelBinding(id)).isEmpty(),
+                  "two wheel actions ship on one chord");
+        }
+
+        check(registry.matchesWheel(Qt::NoModifier, zoomT),
+              "the bare wheel should match timeline zoom");
+        check(registry.matchesWheel(Qt::ControlModifier | Qt::KeypadModifier, zoomV),
+              "the keypad flag should not break a wheel chord match");
+        check(!registry.matchesWheel(Qt::ControlModifier, zoomT),
+              "Ctrl must not match the bare-wheel binding");
+        check(registry.command(zoomT).defaults.isEmpty(),
+              "wheel command reports key-sequence defaults");
+        // Meta is not a wheel chord (macOS reports physical Ctrl as Meta),
+        // so it is ignored rather than mismatching.
+        check(registry.matchesWheel(Qt::MetaModifier, zoomT),
+              "Meta should not break the bare-wheel match");
+        check(registry.wheelAction(Qt::MetaModifier | Qt::ControlModifier) ==
+                  keymap::WheelAction::ZoomVertical,
+              "Meta+Ctrl should resolve to the Ctrl wheel action");
+        check(registry.wheelAction(Qt::NoModifier) == keymap::WheelAction::ZoomTimeline &&
+                  registry.wheelAction(Qt::ShiftModifier) == keymap::WheelAction::PanHorizontal &&
+                  registry.wheelAction(Qt::AltModifier) == keymap::WheelAction::PanVertical &&
+                  registry.wheelAction(Qt::ControlModifier | Qt::ShiftModifier) ==
+                      keymap::WheelAction::None,
+              "default wheel chords resolve to the wrong actions");
+
+        check(!registry
+                   .modifierConflicts(QStringLiteral("roll.velocity_drag"),
+                                      keymap::Context::PianoRoll, Qt::ControlModifier)
+                   .contains(zoomV),
+              "a wheel command leaked into modifier-gesture conflicts");
+        check(!registry.wheelConflicts(zoomV, Qt::ControlModifier)
+                   .contains(QStringLiteral("roll.velocity_drag")),
+              "a modifier gesture leaked into wheel conflicts");
+        check(registry.wheelConflicts(zoomT, Qt::ControlModifier).contains(zoomV),
+              "wheel conflicts on Ctrl missed vertical zoom");
+
+        // Override / bare / unbind / reset through the same delta-only
+        // store; the bare chord persists as "None", unbound as the empty
+        // marker.
+        registry.setWheelBinding(panV, Qt::ControlModifier | Qt::AltModifier);
+        check(registry.wheelBinding(panV) == (Qt::ControlModifier | Qt::AltModifier) &&
+                  registry.isOverridden(panV),
+              "wheel override did not apply");
+        // The cached chord table must follow every store mutation.
+        check(registry.wheelAction(Qt::ControlModifier | Qt::AltModifier) ==
+                      keymap::WheelAction::PanVertical &&
+                  registry.wheelAction(Qt::AltModifier) == keymap::WheelAction::None,
+              "wheel action cache did not follow the override");
+        check(QSettings().value(QStringLiteral("keymap/wheel.pan_vertical")).toString() ==
+                  QStringLiteral("Ctrl+Alt"),
+              "wheel override not persisted as portable text");
+        registry.setWheelBinding(panV, Qt::KeyboardModifiers(Qt::NoModifier));
+        check(registry.wheelBinding(panV) == Qt::KeyboardModifiers(Qt::NoModifier),
+              "bare-wheel override did not apply");
+        check(QSettings().value(QStringLiteral("keymap/wheel.pan_vertical")).toString() ==
+                  QStringLiteral("None"),
+              "bare-wheel binding not persisted as None");
+        registry.setWheelBinding(panV, std::nullopt);
+        check(!registry.wheelBinding(panV).has_value() && registry.isOverridden(panV),
+              "wheel unbind did not persist as an empty delta");
+        check(!registry.matchesWheel(Qt::AltModifier, panV), "unbound wheel action still matches");
+        registry.resetBinding(panV);
+        check(registry.wheelBinding(panV) == Qt::KeyboardModifiers(Qt::AltModifier),
+              "wheel reset did not restore Alt");
+        check(registry.wheelAction(Qt::AltModifier) == keymap::WheelAction::PanVertical,
+              "wheel action cache did not follow the reset");
+        registry.setWheelBinding(panV, Qt::KeyboardModifiers(Qt::AltModifier));
+        check(!registry.isOverridden(panV), "re-assigning the default wheel chord stored a delta");
+    }
+
     // 9. Settings page: filter narrows rows, assigning through the capture
     // widget steals from the conflicting command, and per-row Reset restores
     // it. Modifier commands swap the key capture for the chord picker.
@@ -376,6 +468,46 @@ int runKeymapCheck()
             tree->setCurrentItem(findCommandItem(tree, QStringLiteral("roll.copy")));
             check(!modCapture->isVisible() && capture->isVisible(),
                   "leaving the modifier row did not restore the key capture");
+
+            // Wheel row: the chord picker gains the bare "Scroll" choice,
+            // assigning it steals the bare wheel from timeline zoom (which
+            // goes unbound, showing an empty chord), and per-row Reset
+            // restores both defaults.
+            tree->setCurrentItem(findCommandItem(tree, QStringLiteral("wheel.pan_vertical")));
+            check(modCapture->isVisible() && !capture->isVisible(),
+                  "wheel row did not swap in the chord picker");
+            const int bareIndex = modCapture->findData(0);
+            if (check(bareIndex >= 0, "wheel chord picker offers no bare Scroll")) {
+#ifndef Q_OS_MACOS
+                check(modCapture->itemText(bareIndex) == QStringLiteral("Scroll") &&
+                          modCapture->itemText(modCapture->findData(int(Qt::AltModifier))) ==
+                              QStringLiteral("Alt+Scroll"),
+                      "wheel chord picker does not spell out the scroll");
+#endif
+                modCapture->setCurrentIndex(bareIndex);
+                assignButton->click();
+                check(registry.wheelBinding(QStringLiteral("wheel.pan_vertical")) ==
+                          Qt::KeyboardModifiers(Qt::NoModifier),
+                      "wheel assign did not apply the bare chord");
+                check(!registry.wheelBinding(QStringLiteral("wheel.zoom_timeline")).has_value(),
+                      "assigning the bare chord did not steal it from timeline zoom");
+                QTreeWidgetItem *zoomItem =
+                    findCommandItem(tree, QStringLiteral("wheel.zoom_timeline"));
+                check(zoomItem && zoomItem->text(1).isEmpty(),
+                      "an unbound wheel action still shows a chord");
+                tree->setCurrentItem(findCommandItem(tree, QStringLiteral("wheel.pan_vertical")));
+                resetButton->click();
+                check(registry.wheelBinding(QStringLiteral("wheel.pan_vertical")) ==
+                          Qt::KeyboardModifiers(Qt::AltModifier),
+                      "wheel page reset did not restore Alt");
+                // Re-found on purpose: every registry change rebuilds the
+                // tree, deleting the old items.
+                tree->setCurrentItem(findCommandItem(tree, QStringLiteral("wheel.zoom_timeline")));
+                resetButton->click();
+                check(registry.wheelBinding(QStringLiteral("wheel.zoom_timeline")) ==
+                          Qt::KeyboardModifiers(Qt::NoModifier),
+                      "wheel page reset did not restore the bare default");
+            }
         }
     }
 

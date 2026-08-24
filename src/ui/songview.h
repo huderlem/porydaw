@@ -646,6 +646,15 @@ class SongView : public QWidget
     void zoomKeyHeight(const QWheelEvent *event);
     void scrollByPx(double dx);
     void scrollRollBy(double dy);
+    // The configurable wheel actions (Settings → Keyboard Shortcuts → Mouse
+    // Wheel), applied for one child surface. headerW is the surface's
+    // header column (no timeline under the cursor there); pan names the
+    // vertical camera the surface owns; zoomVertical is its own vertical
+    // zoom, taking the wheel delta, or empty to fall back to the timeline
+    // zoom. Returns false when the event is not the surface's to consume.
+    enum class WheelPan { Roll, Lanes, None };
+    bool applyWheel(QWheelEvent *event, int headerW, WheelPan pan,
+                    const std::function<void(int delta)> &zoomVertical = {});
     // Scrolls horizontally so the tick sits a third of the way into the
     // viewport if it is currently off-screen; on-screen ticks are left
     // alone. Pastes anchor at the edit cursor, which can be scrolled out

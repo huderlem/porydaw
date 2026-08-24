@@ -35,6 +35,7 @@
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 #include "rollcheckplayhead.h"
+#include "ui/keymap.h"
 #include "ui/layout.h"
 #include "ui/songview.h"
 #include "ui/typography.h"
@@ -117,10 +118,11 @@ void sendMouse(QWidget *w, QEvent::Type type, QPointF pos, Qt::MouseButton butto
 }
 
 void sendWheel(QWidget *w, QPointF pos, int angleDeltaY, int pixelDeltaY = 0,
-               Qt::KeyboardModifiers mods = Qt::ControlModifier, int pixelDeltaX = 0)
+               Qt::KeyboardModifiers mods = Qt::ControlModifier, int pixelDeltaX = 0,
+               int angleDeltaX = 0)
 {
     QWheelEvent ev(pos, QPointF(w->mapToGlobal(pos.toPoint())), QPoint(pixelDeltaX, pixelDeltaY),
-                   QPoint(0, angleDeltaY), Qt::NoButton, mods, Qt::NoScrollPhase, false);
+                   QPoint(angleDeltaX, angleDeltaY), Qt::NoButton, mods, Qt::NoScrollPhase, false);
     QCoreApplication::sendEvent(w, &ev);
 }
 
@@ -391,6 +393,68 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("legacy integer vertical view state no longer applies");
         view.applyViewState(original);
         (void)view.grab(); // consume the restoration repaint before later probes
+        QCoreApplication::processEvents();
+    }
+
+    // The wheel actions are rebindable (Settings → Keyboard Shortcuts →
+    // Mouse Wheel): Alt pans the roll vertically and Shift horizontally by
+    // default, a chord matching no action moves nothing, and a rebound
+    // chord takes the action with it.
+    {
+        const SongView::ViewState original = view.viewState();
+        SongView::ViewState zoom = original;
+        zoom.keyHeight = 8.0;
+        zoom.scrollY = 300.0;
+        zoom.scrollPx = 200.0;
+        view.applyViewState(zoom);
+        const QPointF anchor(songview::kKeyboardW + 40.0, 200.0);
+        const double scale = view.pxPerBeat();
+
+        sendWheel(roll, anchor, -120, 0, Qt::AltModifier);
+        if (std::abs(view.scrollY() - 360.0) > 1e-12)
+            fail("Alt-wheel did not pan the roll vertically");
+        if (view.keyHeight() != 8.0 || view.pxPerBeat() != scale ||
+            view.viewState().scrollPx != 200.0)
+            fail("Alt-wheel pan moved a camera axis it does not own");
+        sendWheel(roll, anchor, 120, 0, Qt::AltModifier);
+        if (std::abs(view.scrollY() - 300.0) > 1e-12)
+            fail("equal Alt-wheel pans did not restore the camera");
+
+        // Qt's xcb and Windows plugins deliver Alt + a vertical notch as a
+        // horizontal-only angleDelta; the roll must read it as the wheel's
+        // own axis, not as a sideways trackpad pan.
+        sendWheel(roll, anchor, 0, 0, Qt::AltModifier, 0, -120);
+        if (std::abs(view.scrollY() - 360.0) > 1e-12 || view.viewState().scrollPx != 200.0)
+            fail("platform-re-axised Alt-wheel did not pan the roll vertically");
+        sendWheel(roll, anchor, 0, 0, Qt::AltModifier, 0, 120);
+        if (std::abs(view.scrollY() - 300.0) > 1e-12)
+            fail("equal re-axised Alt-wheel pans did not restore the camera");
+
+        sendWheel(roll, anchor, -120, 0, Qt::ShiftModifier);
+        if (std::abs(view.viewState().scrollPx - 320.0) > 1e-12 || view.pxPerBeat() != scale)
+            fail("Shift-wheel did not pan the timeline");
+        sendWheel(roll, anchor, 120, 0, Qt::ShiftModifier);
+
+        // Ctrl+Shift matches no default wheel action: nothing may move.
+        sendWheel(roll, anchor, 120, 0, Qt::ControlModifier | Qt::ShiftModifier);
+        if (view.scrollY() != 300.0 || view.viewState().scrollPx != 200.0 ||
+            view.keyHeight() != 8.0 || view.pxPerBeat() != scale)
+            fail("a wheel chord bound to no action moved the camera");
+
+        // Rebind: vertical pan moves to Ctrl+Shift, and Alt goes dead.
+        auto &registry = keymap::Registry::instance();
+        registry.setWheelBinding(QStringLiteral("wheel.pan_vertical"),
+                                 Qt::ControlModifier | Qt::ShiftModifier);
+        sendWheel(roll, anchor, -120, 0, Qt::AltModifier);
+        if (view.scrollY() != 300.0)
+            fail("the unbound Alt chord still panned the roll");
+        sendWheel(roll, anchor, -120, 0, Qt::ControlModifier | Qt::ShiftModifier);
+        if (std::abs(view.scrollY() - 360.0) > 1e-12)
+            fail("the rebound wheel chord did not pan the roll");
+        registry.resetBinding(QStringLiteral("wheel.pan_vertical"));
+
+        view.applyViewState(original);
+        (void)view.grab();
         QCoreApplication::processEvents();
     }
 

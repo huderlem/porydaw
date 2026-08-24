@@ -41,6 +41,21 @@ QString modifierDisplayText(Qt::KeyboardModifiers mods)
 #endif
 }
 
+// Wheel commands spell the wheel into the chord ("Ctrl+Scroll", bare =
+// "Scroll"); an unbound action shows nothing.
+QString wheelDisplayText(std::optional<Qt::KeyboardModifiers> mods)
+{
+    if (!mods)
+        return {};
+    if (*mods == Qt::NoModifier)
+        return QObject::tr("Scroll");
+#ifdef Q_OS_MACOS
+    return modifierDisplayText(*mods) + QObject::tr("Scroll");
+#else
+    return modifierDisplayText(*mods) + QLatin1Char('+') + QObject::tr("Scroll");
+#endif
+}
+
 QKeySequence capturedKeySequence(const QKeySequence &sequence)
 {
     if (sequence.isEmpty())
@@ -168,7 +183,8 @@ void KeyboardShortcutsPage::rebuildTree()
             font.setBold(true);
             categoryItem->setFont(0, font);
         }
-        const QString binding = info.modifier
+        const QString binding = info.wheel ? wheelDisplayText(registry.wheelBinding(info.id))
+                                : info.modifier
                                     ? modifierDisplayText(registry.modifierBinding(info.id))
                                     : bindingText(registry.bindings(info.id));
         auto *item = new QTreeWidgetItem(categoryItem, {info.name, binding});
@@ -221,13 +237,21 @@ void KeyboardShortcutsPage::fillModifierChoices(const QString &id)
 {
     const QSignalBlocker blocker(m_modCapture);
     m_modCapture->clear();
+    const bool wheel = keymap::Registry::instance().command(id).wheel;
+    if (wheel) {
+        // The bare wheel is a real chord for wheel actions ("plain scroll"),
+        // unlike the hold-and-drag gestures, which need a key to hold.
+        m_modCapture->addItem(wheelDisplayText(Qt::KeyboardModifiers(Qt::NoModifier)),
+                              int(Qt::KeyboardModifiers(Qt::NoModifier).toInt()));
+    }
     for (const auto mods :
          {Qt::KeyboardModifiers(Qt::ControlModifier), Qt::KeyboardModifiers(Qt::ShiftModifier),
           Qt::KeyboardModifiers(Qt::AltModifier), Qt::ControlModifier | Qt::ShiftModifier,
           Qt::ControlModifier | Qt::AltModifier, Qt::ShiftModifier | Qt::AltModifier}) {
         if (id == QStringLiteral("velocity.detent_unlock") && mods.testFlag(Qt::ShiftModifier))
             continue;
-        m_modCapture->addItem(modifierDisplayText(mods), int(mods.toInt()));
+        m_modCapture->addItem(wheel ? wheelDisplayText(mods) : modifierDisplayText(mods),
+                              int(mods.toInt()));
     }
 }
 
@@ -245,14 +269,30 @@ void KeyboardShortcutsPage::currentRowChanged()
         return;
     }
     auto &registry = keymap::Registry::instance();
-    const bool modifier = registry.command(id).modifier;
-    m_capture->setVisible(!modifier);
-    m_modCapture->setVisible(modifier);
-    if (modifier) {
+    const keymap::CommandInfo info = registry.command(id);
+    const bool chordPicker = info.modifier || info.wheel;
+    m_capture->setVisible(!chordPicker);
+    m_modCapture->setVisible(chordPicker);
+    if (chordPicker) {
         fillModifierChoices(id);
-        const int index = m_modCapture->findData(int(registry.modifierBinding(id).toInt()));
-        const QSignalBlocker blocker(m_modCapture);
-        m_modCapture->setCurrentIndex(std::max(0, index));
+        int stored;
+        if (info.wheel) {
+            // An unbound wheel action selects nothing findable and lands on
+            // the first row (the bare wheel, which timeline zoom holds by
+            // default), so the conflict label must show what Assign would
+            // steal — captureChanged() below, since the blocker mutes it.
+            const auto binding = registry.wheelBinding(id);
+            stored = binding ? int(binding->toInt()) : -1;
+        } else {
+            stored = int(registry.modifierBinding(id).toInt());
+        }
+        const int index = m_modCapture->findData(stored);
+        {
+            const QSignalBlocker blocker(m_modCapture);
+            m_modCapture->setCurrentIndex(std::max(0, index));
+        }
+        if (index < 0)
+            captureChanged();
     } else {
         const QList<QKeySequence> bindings = registry.bindings(id);
         const QSignalBlocker blocker(m_capture); // loading isn't a user edit
@@ -269,7 +309,10 @@ void KeyboardShortcutsPage::captureChanged()
         return;
     auto &registry = keymap::Registry::instance();
     QStringList conflicts;
-    if (registry.command(id).modifier) {
+    if (registry.command(id).wheel) {
+        conflicts = registry.wheelConflicts(
+            id, Qt::KeyboardModifiers(QFlag(m_modCapture->currentData().toInt())));
+    } else if (registry.command(id).modifier) {
         conflicts = registry.modifierConflicts(
             id, registry.command(id).context,
             Qt::KeyboardModifiers(QFlag(m_modCapture->currentData().toInt())));
@@ -298,6 +341,20 @@ void KeyboardShortcutsPage::assign()
     if (id.isEmpty())
         return;
     auto &registry = keymap::Registry::instance();
+    if (registry.command(id).wheel) {
+        // The bare chord assigns like any other, so no NoModifier refusal;
+        // unbinding goes through the Unbind button instead.
+        const Qt::KeyboardModifiers mods(QFlag(m_modCapture->currentData().toInt()));
+        m_applying = true;
+        // Same steal as the other kinds, among the wheel actions.
+        const QStringList conflicts = registry.wheelConflicts(id, mods);
+        for (const QString &other : conflicts)
+            registry.setWheelBinding(other, std::nullopt);
+        registry.setWheelBinding(id, mods);
+        m_applying = false;
+        rebuildTree();
+        return;
+    }
     if (registry.command(id).modifier) {
         const Qt::KeyboardModifiers mods(QFlag(m_modCapture->currentData().toInt()));
         if (mods == Qt::NoModifier)
@@ -335,7 +392,9 @@ void KeyboardShortcutsPage::clearBinding()
         return;
     auto &registry = keymap::Registry::instance();
     m_applying = true;
-    if (registry.command(id).modifier)
+    if (registry.command(id).wheel)
+        registry.setWheelBinding(id, std::nullopt);
+    else if (registry.command(id).modifier)
         registry.setModifierBinding(id, Qt::NoModifier);
     else
         registry.setBinding(id, QKeySequence());

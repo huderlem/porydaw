@@ -114,7 +114,17 @@ double scrollDips(int units)
 QPoint wheelDelta(const QWheelEvent *event)
 {
     const QPoint pixelDelta = event->pixelDelta();
-    return pixelDelta.isNull() ? event->angleDelta() : pixelDelta;
+    if (!pixelDelta.isNull())
+        return pixelDelta;
+    QPoint delta = event->angleDelta();
+    // Qt's xcb and Windows plugins re-axis a vertical wheel notch to a
+    // horizontal angleDelta while Alt is held (their "Alt scrolls
+    // sideways" convenience), which would make every Alt chord look like
+    // a trackpad's horizontal pan. Undo it: Alt chords are the user's to
+    // bind, and Shift already covers sideways scrolling.
+    if ((event->modifiers() & Qt::AltModifier) && delta.x() && !delta.y())
+        delta = QPoint(0, delta.x());
+    return delta;
 }
 
 double wheelAngleUnits(const QWheelEvent *event)
@@ -130,6 +140,7 @@ double cursorAnchoredScroll(double anchor, double oldScale, double oldScroll, do
     const double content = (anchor + oldScroll) / oldScale;
     return content * newScale - anchor;
 }
+
 constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
 constexpr int kVoiceAuditionVel = 112;
 // Resize hit-zone reach at a note's left/right edges (rollcheck probes
@@ -797,20 +808,9 @@ class TimeRuler : public QWidget
 
     void wheelEvent(QWheelEvent *event) override
     {
-        // Same bindings as the roll's notes area: plain wheel zooms the
-        // timeline; Shift (or a trackpad's horizontal delta) scrolls it.
-        const QPoint delta = wheelDelta(event);
-        if (event->modifiers() & Qt::ShiftModifier) {
-            m_sv->scrollByPx(-(delta.y() ? delta.y() : delta.x()));
-        } else if (delta.x() && !delta.y()) {
-            m_sv->scrollByPx(-delta.x());
-        } else {
-            const double zoomDelta = wheelAngleUnits(event);
-            if (zoomDelta != 0.0)
-                m_sv->zoomAroundContentX(std::pow(1.0015, zoomDelta),
-                                         event->position().x() - kGutterW);
-        }
-        event->accept();
+        // The ruler has no vertical axis of its own: vertical zoom falls
+        // back to the timeline zoom, and vertical pan moves the roll below.
+        event->setAccepted(m_sv->applyWheel(event, kGutterW, SongView::WheelPan::Roll));
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -1428,27 +1428,9 @@ class PianoRoll : public TimelineSurface
 
     void wheelEvent(QWheelEvent *event) override
     {
-        // Reaper-style bindings: plain wheel over the notes area zooms the
-        // timeline, over the keyboard column it scrolls the note range.
-        // Ctrl+wheel zooms the key height (the track-height analog); Shift
-        // (or a trackpad's horizontal delta) scrolls horizontally.
-        const QPoint delta = wheelDelta(event);
-        const int d = delta.y() ? delta.y() : delta.x();
-        if (event->modifiers() & Qt::ControlModifier) {
-            m_sv->zoomKeyHeight(event);
-        } else if (event->modifiers() & Qt::ShiftModifier) {
-            m_sv->scrollByPx(-d);
-        } else if (delta.x() && !delta.y()) {
-            m_sv->scrollByPx(-delta.x());
-        } else if (event->position().x() < kKeyboardW) {
-            m_sv->scrollRollBy(-delta.y() / 2.0);
-        } else {
-            const double zoomDelta = wheelAngleUnits(event);
-            if (zoomDelta != 0.0)
-                m_sv->zoomAroundContentX(std::pow(1.0015, zoomDelta),
-                                         event->position().x() - kKeyboardW);
-        }
-        event->accept();
+        // Vertical zoom is the key height here (the track-height analog).
+        event->setAccepted(m_sv->applyWheel(event, kKeyboardW, SongView::WheelPan::Roll,
+                                            [this, event](int) { m_sv->zoomKeyHeight(event); }));
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -3450,29 +3432,12 @@ class AutomationArea : public TimelineSurface
         // both ways; the readout clears like on a press, and the next idle
         // move re-derives it.
         clearHover();
-        // Same bindings as the roll's notes area: plain wheel over the plot
-        // zooms the timeline; Ctrl+wheel resizes the lane rows (the roll's
-        // key-height analog); Shift (or a trackpad's horizontal delta)
-        // scrolls horizontally. Over the gutter the wheel pages the lane
-        // list vertically via the scroll area.
-        const QPoint delta = wheelDelta(event);
-        const int d = delta.y() ? delta.y() : delta.x();
-        if (event->modifiers() & Qt::ControlModifier) {
-            zoomLaneHeight(d, int(event->position().y()));
-        } else if (event->modifiers() & Qt::ShiftModifier) {
-            m_sv->scrollByPx(-d);
-        } else if (delta.x() && !delta.y()) {
-            m_sv->scrollByPx(-delta.x());
-        } else if (event->position().x() < kGutterW) {
-            event->ignore();
-            return;
-        } else {
-            const double zoomDelta = wheelAngleUnits(event);
-            if (zoomDelta != 0.0)
-                m_sv->zoomAroundContentX(std::pow(1.0015, zoomDelta),
-                                         event->position().x() - kGutterW);
-        }
-        event->accept();
+        // Vertical zoom resizes the lane rows (the roll's key-height
+        // analog), and vertical pan scrolls the lane list.
+        event->setAccepted(
+            m_sv->applyWheel(event, kGutterW, SongView::WheelPan::Lanes, [this, event](int d) {
+                zoomLaneHeight(d, int(event->position().y()));
+            }));
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -6051,26 +6016,10 @@ class VelocityLane : public TimelineSurface
 
     void wheelEvent(QWheelEvent *event) override
     {
-        // The roll's bindings: plain wheel over the plot zooms the timeline
-        // at the cursor, Shift (or a trackpad's horizontal delta) scrolls.
-        // The lane has no vertical zoom, so the ruler column swallows
-        // nothing and simply passes the wheel on.
-        const QPoint delta = wheelDelta(event);
-        const int d = delta.y() ? delta.y() : delta.x();
-        if (event->modifiers() & Qt::ShiftModifier) {
-            m_sv->scrollByPx(-d);
-        } else if (delta.x() && !delta.y()) {
-            m_sv->scrollByPx(-delta.x());
-        } else if (event->position().x() < kGutterW) {
-            event->ignore();
-            return;
-        } else {
-            const double zoomDelta = wheelAngleUnits(event);
-            if (zoomDelta != 0.0)
-                m_sv->zoomAroundContentX(std::pow(1.0015, zoomDelta),
-                                         event->position().x() - kGutterW);
-        }
-        event->accept();
+        // The lane is a fixed-height strip with no vertical camera: vertical
+        // zoom falls back to the timeline zoom, and vertical pan is passed
+        // on to the parent.
+        event->setAccepted(m_sv->applyWheel(event, kGutterW, SongView::WheelPan::None));
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -10331,6 +10280,66 @@ void SongView::scrollByPx(double dx)
 void SongView::scrollRollBy(double dy)
 {
     setVScroll(m_scrollY + dy);
+}
+
+bool SongView::applyWheel(QWheelEvent *event, int headerW, WheelPan pan,
+                          const std::function<void(int)> &zoomVertical)
+{
+    using keymap::WheelAction;
+    const QPoint delta = wheelDelta(event);
+    const int d = delta.y() ? delta.y() : delta.x();
+    // A trackpad's horizontal-only delta always pans horizontally, whatever
+    // chord is held: the device already chose the axis (wheelDelta has
+    // undone the platforms' Alt re-axising by now).
+    WheelAction action = delta.x() && !delta.y()
+                             ? WheelAction::PanHorizontal
+                             : keymap::Registry::instance().wheelAction(event->modifiers());
+    if (action == WheelAction::ZoomVertical && !zoomVertical)
+        action = WheelAction::ZoomTimeline;
+    // The header column (piano keys, lane names) has no timeline under
+    // the cursor to anchor a zoom: the zoom chord — and a chord bound to
+    // nothing — scrolls vertically there instead, the classic bare-wheel
+    // behavior over the keys, kept wherever the user moves the zoom chord.
+    if (event->position().x() < headerW &&
+        (action == WheelAction::ZoomTimeline || action == WheelAction::None))
+        action = WheelAction::PanVertical;
+    switch (action) {
+    case WheelAction::ZoomVertical:
+        zoomVertical(d);
+        return true;
+    case WheelAction::PanHorizontal:
+        scrollByPx(-d);
+        return true;
+    case WheelAction::PanVertical:
+        switch (pan) {
+        case WheelPan::Roll:
+            scrollRollBy(-delta.y() / 2.0);
+            return true;
+        case WheelPan::Lanes: {
+            // Driven directly rather than re-dispatched to the QScrollArea:
+            // QAbstractSlider pages a whole viewport per notch when the
+            // chord holds Ctrl or Shift, and the roll's pan rate is the
+            // step users expect.
+            QScrollBar *bar = m_lanesScroll->verticalScrollBar();
+            bar->setValue(bar->value() - qRound(delta.y() / 2.0));
+            return true;
+        }
+        case WheelPan::None:
+            return false;
+        }
+        return false;
+    case WheelAction::ZoomTimeline: {
+        const double zoomDelta = wheelAngleUnits(event);
+        if (zoomDelta != 0.0)
+            zoomAroundContentX(std::pow(1.0015, zoomDelta), event->position().x() - headerW);
+        return true;
+    }
+    case WheelAction::None:
+        // An unmatched chord scrolls nothing rather than falling back to
+        // the zoom, so a rebind never leaves a stray gesture behind.
+        return true;
+    }
+    return true;
 }
 
 void SongView::setHScroll(double px)

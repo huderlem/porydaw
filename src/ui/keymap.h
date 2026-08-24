@@ -5,6 +5,8 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <array>
+#include <optional>
 
 class QAction;
 class QKeyEvent;
@@ -22,7 +24,18 @@ enum class Context {
     // drags — the pointer is only ever in one of the two surfaces.
     Velocity,
     EventList,
+    // The mouse-wheel actions. Their conflicts are settled among
+    // themselves (wheelConflicts), never against key sequences or the
+    // hold-and-drag modifier gestures — a wheel chord and a drag chord can
+    // share Ctrl without ambiguity, as today's defaults do.
+    Wheel,
 };
+
+// The four wheel commands, as the song view's surfaces consume them. None
+// is an unmatched or unbound chord: it scrolls nothing rather than falling
+// back to a zoom.
+enum class WheelAction { None, ZoomTimeline, ZoomVertical, PanHorizontal, PanVertical };
+constexpr int kWheelActionCount = 4;
 
 struct CommandInfo {
     QString id; // stable, never shown ("roll.transpose_up")
@@ -33,6 +46,10 @@ struct CommandInfo {
     // Mouse-gesture modifier command: bound to a bare modifier chord
     // ("hold Ctrl and drag"), not a key sequence.
     bool modifier = false;
+    // Mouse-wheel command ("scroll with X held"): also a modifier chord,
+    // but NoModifier is a real binding (the plain wheel), so unbound is a
+    // distinct state rather than the modifier commands' NoModifier.
+    bool wheel = false;
 };
 
 // Central shortcut table: every user-configurable binding flows through here.
@@ -89,6 +106,25 @@ class Registry : public QObject
     QStringList modifierConflicts(const QString &excludeId, Context context,
                                   Qt::KeyboardModifiers mods) const;
 
+    // Wheel commands: the chord held while scrolling. NoModifier means the
+    // bare wheel (a real binding, stored as "None"); nullopt means the
+    // action is unbound (stored as the empty marker) and never matches.
+    std::optional<Qt::KeyboardModifiers> wheelBinding(const QString &id) const;
+    void setWheelBinding(const QString &id, std::optional<Qt::KeyboardModifiers> mods);
+    // Exact chord match after ignoring non-shortcut modifiers, like
+    // matchesModifier — but the bare chord can match here. Meta is also
+    // ignored: it is not a bindable wheel chord, and macOS reports the
+    // physical Ctrl key as Meta.
+    bool matchesWheel(Qt::KeyboardModifiers mods, const QString &id) const;
+    // The wheel action bound to the chord, from a cache of the four
+    // effective chords (wheel events arrive at trackpad rates, too fast to
+    // consult QSettings each time). None when no action matches.
+    WheelAction wheelAction(Qt::KeyboardModifiers mods) const;
+    // Other wheel commands whose effective chord equals mods. Two wheel
+    // actions on one chord would be ambiguous under the same cursor, so
+    // conflicts stay within the wheel kind and ignore Context.
+    QStringList wheelConflicts(const QString &excludeId, Qt::KeyboardModifiers mods) const;
+
     // Single-keystroke match against the command's effective bindings.
     // Keypad/GroupSwitch modifiers are ignored so numpad arrows keep working.
     bool matches(const QKeyEvent *event, const QString &id) const;
@@ -103,6 +139,13 @@ class Registry : public QObject
   private:
     Registry();
     void applyToActions();
+    // Every store mutation funnels through here: drops the wheel-chord
+    // cache and notifies listeners.
+    void storeChanged();
+    // Effective chord per wheel action, rebuilt lazily after storeChanged().
+    const std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount> &wheelChords() const;
+    mutable std::optional<std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount>>
+        m_wheelChords;
 
     struct Attached {
         QString id;
