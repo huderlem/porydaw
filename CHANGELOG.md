@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a Tempo input to the transport bar for the song's starting tempo. A warning appears next to it when the tempo changes later in the song. Click it to show the Tempo automation lane.
 - Added vertical panning with `Alt` + mouse scroll.
 - Added key rebinding support for all four scroll actions in `Settings -> Keyboard Shortcuts -> Mouse Wheel`.
+- Added ability to create a time selection by left-click dragging on the ruler.
+- Added `Alt` + drag inside a time selection to move its contents horizontally, and `Ctrl+Alt` + drag to duplicate and move its contents horizontally.
 
 ## Changed
 - Unified settings into a main Settings window.

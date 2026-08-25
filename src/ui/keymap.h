@@ -23,6 +23,12 @@ enum class Context {
     // the lane and the roll may bind the same modifier chord to their own
     // drags — the pointer is only ever in one of the two surfaces.
     Velocity,
+    // The active time selection's own drag gestures (move / duplicate the
+    // band's contents). Its own group in Settings, but unlike Velocity it
+    // is an overlay, not a separate surface: inside the band its chord is
+    // checked before the roll's and the lanes' own press handling, so it
+    // conflicts with PianoRoll and Velocity bindings (contextsOverlap).
+    TimeSelection,
     EventList,
     // The mouse-wheel actions. Their conflicts are settled among
     // themselves (wheelConflicts), never against key sequences or the

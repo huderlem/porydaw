@@ -7,6 +7,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <tuple>
 
 #include "core/miditimeline.h"
 #include "project/songregistry.h"
@@ -736,6 +737,40 @@ void SongDocument::appendRemoveOps(std::vector<EditOp> &ops, int smfTrack,
         op.smfTrack = smfTrack;
         op.index = index;
         ops.push_back(op);
+    }
+}
+
+namespace {
+// Two lane events of the same lane: same tempo meta, or the same channel
+// status (type + channel) and, for controllers, the same controller.
+bool sameLane(const SmfEvent &a, const SmfEvent &b)
+{
+    if (metaIsTempo(a) || metaIsTempo(b))
+        return metaIsTempo(a) && metaIsTempo(b);
+    if (!a.isChannel() || !b.isChannel() || a.status != b.status)
+        return false;
+    return a.typeNibble() != 0xB || a.data0 == b.data0;
+}
+} // namespace
+
+void SongDocument::appendLaneLandingRemovals(const std::vector<DocLanePoint> &points, int64_t dTick,
+                                             std::vector<std::vector<size_t>> &removals) const
+{
+    for (const DocLanePoint &pt : points) {
+        if (pt.smfTrack < 0 || pt.smfTrack >= int(m_smf.tracks.size()))
+            continue;
+        const std::vector<SmfEvent> &events = m_smf.tracks[size_t(pt.smfTrack)].events;
+        if (pt.index >= events.size())
+            continue;
+        const SmfEvent &source = events[pt.index];
+        const uint64_t dest = uint64_t(std::max<int64_t>(0, int64_t(pt.tick) + dTick));
+        auto it = std::lower_bound(events.begin(), events.end(), dest,
+                                   [](const SmfEvent &ev, uint64_t t) { return ev.tick < t; });
+        for (; it != events.end() && it->tick == dest; ++it) {
+            const size_t index = size_t(it - events.begin());
+            if (index != pt.index && sameLane(*it, source))
+                removals[size_t(pt.smfTrack)].push_back(index);
+        }
     }
 }
 
@@ -1527,6 +1562,7 @@ void SongDocument::moveRange(const std::vector<DocNote> &notes,
     std::vector<std::vector<size_t>> removals = moved;
     std::vector<EditOp> trims;
     resolveNoteOverlaps(written, notes, removals, trims);
+    appendLaneLandingRemovals(points, dTick, removals);
 
     std::vector<EditOp> ops;
     // All removals first (indices are read at apply time), then the events'
@@ -1546,6 +1582,80 @@ void SongDocument::moveRange(const std::vector<DocNote> &notes,
     }
     ops.insert(ops.end(), trims.begin(), trims.end());
     pushEdit(tr("move range"), std::move(ops));
+}
+
+void SongDocument::duplicateRange(const std::vector<DocNote> &notes,
+                                  const std::vector<DocLanePoint> &points, int64_t dTick)
+{
+    if ((notes.empty() && points.empty()) || dTick == 0 || m_smf.tracks.empty())
+        return;
+    std::vector<std::vector<size_t>> copied(m_smf.tracks.size());
+    const auto mark = [&](int smfTrack, size_t index) {
+        if (smfTrack >= 0 && smfTrack < int(copied.size()))
+            copied[size_t(smfTrack)].push_back(index);
+    };
+    // A copy coinciding exactly with an existing note would only replace
+    // it with a fresh identity (a run of equal notes duplicated by one step
+    // lands on itself): that copy is not written and the note stays.
+    std::map<int, std::set<std::tuple<uint8_t, uint64_t, uint32_t>>> existing;
+    const auto coincides = [&](int engineTrack, uint8_t key, uint64_t tick, uint32_t duration) {
+        auto it = existing.find(engineTrack);
+        if (it == existing.end()) {
+            it = existing.emplace(engineTrack, std::set<std::tuple<uint8_t, uint64_t, uint32_t>>())
+                     .first;
+            for (const DocNote &n : notesForTrack(engineTrack)) {
+                if (!n.unterminated())
+                    it->second.emplace(n.key, n.tick, n.duration);
+            }
+        }
+        return it->second.count({key, tick, duration}) > 0;
+    };
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notes) {
+        if (note.unterminated())
+            continue;
+        const uint64_t newTick = uint64_t(std::max<int64_t>(0, int64_t(note.tick) + dTick));
+        if (coincides(note.engineTrack, note.key, newTick, note.duration))
+            continue;
+        mark(note.smfTrack, note.onIndex);
+        mark(note.smfTrack, note.endIndex);
+        written.push_back({note.engineTrack, note.key, newTick, newTick + note.duration});
+    }
+    for (const DocLanePoint &pt : points)
+        mark(pt.smfTrack, pt.index);
+    for (std::vector<size_t> &indices : copied) {
+        std::sort(indices.begin(), indices.end());
+        indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    }
+    // Nothing is edited in place: every existing note the copies land on is
+    // a trim victim, the originals included (the pairing rule cannot hold a
+    // same-key overlap, so a copy shorter than its delta trims its source
+    // exactly as a drawn note would).
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, {}, removals, trims);
+    appendLaneLandingRemovals(points, dTick, removals);
+    const bool hasCopies = std::any_of(copied.begin(), copied.end(),
+                                       [](const std::vector<size_t> &c) { return !c.empty(); });
+    if (!hasCopies)
+        return;
+
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
+    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+        for (size_t index : copied[t]) {
+            EditOp op;
+            op.type = EditOp::InsertEvent;
+            op.smfTrack = int(t);
+            op.event = m_smf.tracks[t].events[index];
+            op.event.tick = uint64_t(std::max<int64_t>(0, int64_t(op.event.tick) + dTick));
+            op.event.noteId = {}; // a copy, not the original: applyOps mints its id
+            ops.push_back(op);
+        }
+    }
+    ops.insert(ops.end(), trims.begin(), trims.end());
+    pushEdit(tr("duplicate range"), std::move(ops));
 }
 
 bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick, const RippleScope &scope)

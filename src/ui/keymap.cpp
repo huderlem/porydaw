@@ -140,6 +140,17 @@ const Def kDefs[] = {
     // under it; a Shift ramp adds its Shift to whatever this is bound to.
     {"velocity.detent_unlock", Context::Velocity, QT_TR_NOOP("Velocity Lane"),
      QT_TR_NOOP("Unlock Detents (Hold)"), QKeySequence::UnknownKey, "Ctrl", true},
+    // Time selection: hold the chord and drag anywhere inside the band (roll,
+    // lanes or ruler) to slide its contents horizontally; the duplicate
+    // chord leaves the originals and drops a copy where the drag lands.
+    // Alt rather than Ctrl: inside the band the range chord pre-empts the
+    // roll's own Ctrl gestures (velocity drag, click-to-toggle selection),
+    // so sharing Ctrl would silently shadow them.
+    {"range.move", Context::TimeSelection, QT_TR_NOOP("Time Selection"),
+     QT_TR_NOOP("Move Contents (Hold + Drag Band)"), QKeySequence::UnknownKey, "Alt", true},
+    {"range.duplicate", Context::TimeSelection, QT_TR_NOOP("Time Selection"),
+     QT_TR_NOOP("Duplicate Contents (Hold + Drag Band)"), QKeySequence::UnknownKey, "Ctrl+Alt",
+     true},
     // MIDI event list: same-tick reorder nudges (the keyboard face of the
     // row drag).
     {"eventlist.move_up", Context::EventList, QT_TR_NOOP("MIDI Event List"),
@@ -210,10 +221,21 @@ std::optional<Qt::KeyboardModifiers> wheelFromText(const QString &text)
     return mods;
 }
 
+// The active time selection is an overlay on the roll and the lanes, not a
+// focus scope of its own: inside the band its chord fires on the same press
+// the surface's own gestures would take, so the two must not share one.
+bool bandOverlays(Context c)
+{
+    return c == Context::PianoRoll || c == Context::Velocity;
+}
+
 // Global shortcuts stay live while any local context has focus.
 bool contextsOverlap(Context a, Context b)
 {
-    return a == b || a == Context::Global || b == Context::Global;
+    if (a == b || a == Context::Global || b == Context::Global)
+        return true;
+    return (a == Context::TimeSelection && bandOverlays(b)) ||
+           (b == Context::TimeSelection && bandOverlays(a));
 }
 
 Qt::KeyboardModifiers shortcutModifiers(Qt::KeyboardModifiers modifiers)

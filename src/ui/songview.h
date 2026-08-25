@@ -33,6 +33,8 @@ class QSplitter;
 class QStackedWidget;
 class QWheelEvent;
 class SongDocument;
+struct DocNote;
+struct DocLanePoint;
 
 namespace songview {
 class TimeRuler;
@@ -542,6 +544,40 @@ class SongView : public QWidget
     // Copy/Cut/Delete/Paste/Clear context menu on the active selection.
     void showTimeSelectionMenu(const QPoint &globalPos);
 
+    // Mouse drag of the time selection's contents: with the range.move
+    // chord (Ctrl by default) held, a left drag anywhere inside the band —
+    // roll, lanes area or ruler — slides the covered notes and automation
+    // points horizontally; range.duplicate (Ctrl+Alt) leaves the originals
+    // and drops a copy where the drag lands. The band itself stays where it
+    // was swept (a dashed landing frame previews the destination); only the
+    // contents move. The delta snaps so the band's start stays on the
+    // grid and can never cross tick 0; the gesture is one SongView-level
+    // state so the three surfaces share the preview and the commit (a
+    // single moveRange/duplicateRange undo command, released with no
+    // travel pushes nothing). The chord is latched at the press.
+    enum class RangeGesture { None, Move, Duplicate };
+    RangeGesture rangeGestureFor(Qt::KeyboardModifiers mods) const;
+    struct RangeDrag {
+        bool active = false;
+        bool duplicate = false;
+        double pressTick = 0.0; // raw tick under the press
+        bool armed = false;     // travelled past the drag threshold once
+        int64_t dTick = 0;      // live snapped delta
+        TimeSelection sel;      // the band latched at the press
+    };
+    const RangeDrag &rangeDrag() const { return m_rangeDrag; }
+    // pressTick is the raw (unsnapped) tick under the cursor. Fails when no
+    // selection is active.
+    bool beginRangeDrag(double pressTick, bool duplicate);
+    void updateRangeDrag(double cursorTick);
+    void commitRangeDrag();
+    void cancelRangeDrag();
+    // Whether an event at tick on the given track (or lane row) is carried
+    // by the live drag: covered by the latched band. Surfaces displace (or
+    // ghost, for a duplicate) those events by rangeDrag().dTick.
+    bool rangeDragCarriesTrackTick(int track, uint64_t tick) const;
+    bool rangeDragCarriesRowTick(int track, uint8_t cc, uint64_t tick) const;
+
     // App-shared clipboard: one clipboard for every tab/SongView, so copies
     // travel between songs (paste into another tab, or into a song opened
     // over this one). A plain note copy (roll selection) has span 0 and
@@ -768,6 +804,12 @@ class SongView : public QWidget
     uint32_t m_soloMask = 0;
     std::vector<NoteKey> m_selection;
     TimeSelection m_timeSel;
+    RangeDrag m_rangeDrag;
+    // The notes and lane points the active time selection covers, with the
+    // selection's scope resolved (nudge, move and duplicate all act on the
+    // same set).
+    void gatherTimeSelectionContents(std::vector<DocNote> &notes,
+                                     std::vector<DocLanePoint> &points) const;
     uint32_t m_trackSelMask = 0; // header multi-selection (see trackSelectionMask)
     GridFeel m_gridFeel = GridFeel::Straight;
     int m_gridMinDenom = 0;                            // note denominator; 0 = clock-grid floor

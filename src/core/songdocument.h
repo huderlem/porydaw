@@ -279,6 +279,18 @@ class SongDocument : public QObject
     // their precise microseconds and unterminated notes stay unterminated.
     void moveRange(const std::vector<DocNote> &notes, const std::vector<DocLanePoint> &points,
                    int64_t dTick);
+    // Time-selection duplicate: the same events copied to +dTick as one
+    // undoable command. Copies land with their exact bytes (fresh note
+    // identities); existing notes the copies overlap — the originals
+    // included, when |dTick| is shorter than a note — are trimmed the way
+    // a draw trims them, since the pairing rule cannot represent a
+    // same-key overlap. A copy that would coincide exactly with an
+    // existing note (a run of equal notes duplicated by one step) is not
+    // written, so that note keeps its identity. Lane points landing on an
+    // occupied tick replace the point there (moveRange too). Unterminated
+    // notes have no end to copy and are skipped.
+    void duplicateRange(const std::vector<DocNote> &notes, const std::vector<DocLanePoint> &points,
+                        int64_t dTick);
 
     // Ripple delete (time-selection "Remove contents"): erases [startTick,
     // endTick) on the scoped streams and closes the gap — everything at or
@@ -469,6 +481,12 @@ class SongDocument : public QObject
     void appendNoteInsertOps(std::vector<EditOp> &ops, int smfTrack, uint8_t channel, uint64_t tick,
                              uint8_t key, uint32_t duration, uint8_t velocity) const;
     void appendRemoveOps(std::vector<EditOp> &ops, int smfTrack, std::vector<size_t> indices) const;
+    // Lane points landing (at +dTick) on an occupied tick of their own lane
+    // replace the point sitting there — addLanePoint's same-tick rule; only
+    // the last same-tick duplicate is audible, so keeping it would leave an
+    // inert ghost under the arrival.
+    void appendLaneLandingRemovals(const std::vector<DocLanePoint> &points, int64_t dTick,
+                                   std::vector<std::vector<size_t>> &removals) const;
     // Same-key overlap resolution for edits that write notes. The pairing
     // rule (every note-on takes the first same-key end after it) cannot
     // represent two overlapping notes on one key — a written note landing

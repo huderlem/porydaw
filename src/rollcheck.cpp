@@ -2530,6 +2530,150 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
     if (view.timeSelection().startTick != d.tick + 2 * snapCell)
         fail("time-selection band did not follow the nudge");
 
+    // Mouse gestures on the time selection. The ruler's left drag sweeps a
+    // band (the press still parks the edit cursor; a plain click stays a
+    // cursor click); with the range.move chord (Alt) a left drag inside
+    // the band — roll, ruler or lanes — slides its contents horizontally
+    // with the band following, range.duplicate (Ctrl+Alt) drops a copy
+    // instead, and Escape mid-drag commits nothing.
+    {
+        auto *ruler = view.findChild<QWidget *>(QStringLiteral("timeRuler"));
+        if (!ruler || ruler->height() <= 0) {
+            fail("time ruler not found");
+        } else {
+            const uint64_t t0 = d.tick + 2 * snapCell; // the nudged note's tick
+            const int key = d.key - 10;
+            const int noteY = rows.centerY(key);
+            auto rollX = [&](uint64_t tick) {
+                return view.displayX(double(tick), songview::kKeyboardW, roll->devicePixelRatioF());
+            };
+            auto rulerX = [&](uint64_t tick) {
+                return view.displayX(double(tick), songview::kGutterW, ruler->devicePixelRatioF());
+            };
+            const int rulerY = ruler->height() - 3; // the tick row
+            auto leftDrag = [&](QWidget *w, QPointF from, QPointF to, Qt::KeyboardModifiers mods) {
+                sendMouse(w, QEvent::MouseButtonPress, from, Qt::LeftButton, Qt::LeftButton, mods);
+                sendMouse(w, QEvent::MouseMove, (from + to) / 2, Qt::NoButton, Qt::LeftButton,
+                          mods);
+                sendMouse(w, QEvent::MouseMove, to, Qt::NoButton, Qt::LeftButton, mods);
+                sendMouse(w, QEvent::MouseButtonRelease, to, Qt::LeftButton, Qt::NoButton, mods);
+            };
+            const int before = doc.undoStack()->count();
+
+            // Ruler left sweep from t0 to t0 + 2 cells (and back to a click).
+            view.clearTimeSelection();
+            leftDrag(ruler, QPointF(rulerX(t0) + 1, rulerY),
+                     QPointF(rulerX(t0 + 2 * snapCell) + 1, rulerY), Qt::NoModifier);
+            if (!view.timeSelection().active() || view.timeSelection().startTick != t0 ||
+                view.timeSelection().endTick != t0 + 2 * snapCell)
+                fail("ruler left drag did not sweep a time selection");
+            if (view.editCursorTick() != t0)
+                fail("ruler left press did not park the edit cursor at the press");
+            sendMouse(ruler, QEvent::MouseButtonPress, QPointF(rulerX(t0 + snapCell) + 1, rulerY),
+                      Qt::LeftButton, Qt::LeftButton);
+            sendMouse(ruler, QEvent::MouseButtonRelease, QPointF(rulerX(t0 + snapCell) + 1, rulerY),
+                      Qt::LeftButton, Qt::NoButton);
+            if (view.editCursorTick() != t0 + snapCell)
+                fail("ruler left click no longer places the edit cursor");
+            if (doc.undoStack()->count() != before)
+                fail("ruler sweep pushed an undo command");
+
+            // Alt+drag in the roll, pressed ON the covered note: the band
+            // wins over the note, and the contents slide 2 cells right.
+            SongView::TimeSelection one;
+            one.startTick = t0;
+            one.endTick = t0 + snapCell;
+            view.setTimeSelection(one);
+            leftDrag(roll, QPointF(rollX(t0) + 4, noteY),
+                     QPointF(rollX(t0 + 2 * snapCell) + 4, noteY), Qt::AltModifier);
+            DocNote moved;
+            if (doc.findNote(track, t0, uint8_t(key), &moved) ||
+                !doc.findNote(track, t0 + 2 * snapCell, uint8_t(key), &moved))
+                fail("Alt+drag inside the band did not move the covered note");
+            if (view.timeSelection().startTick != t0 ||
+                view.timeSelection().endTick != t0 + snapCell)
+                fail("band moved with the Alt+drag (it must stay put)");
+            // Follow the content for the next gestures.
+            one.startTick = t0 + 2 * snapCell;
+            one.endTick = t0 + 3 * snapCell;
+            view.setTimeSelection(one);
+            if (doc.undoStack()->count() != before + 1)
+                fail("Alt+drag move was not one undo command");
+
+            // Ctrl+Alt+drag duplicates: the original stays, a copy lands 2
+            // cells later and the band moves onto the copy.
+            leftDrag(roll, QPointF(rollX(t0 + 2 * snapCell) + 4, noteY),
+                     QPointF(rollX(t0 + 4 * snapCell) + 4, noteY),
+                     Qt::ControlModifier | Qt::AltModifier);
+            if (!doc.findNote(track, t0 + 2 * snapCell, uint8_t(key), &moved) ||
+                !doc.findNote(track, t0 + 4 * snapCell, uint8_t(key), &moved))
+                fail("Ctrl+Alt+drag inside the band did not duplicate the covered note");
+            if (view.timeSelection().startTick != t0 + 2 * snapCell)
+                fail("band moved with the duplicate (it must stay put)");
+            one.startTick = t0 + 4 * snapCell;
+            one.endTick = t0 + 5 * snapCell;
+            view.setTimeSelection(one);
+            if (doc.undoStack()->count() != before + 2)
+                fail("Ctrl+Alt+drag duplicate was not one undo command");
+
+            // The same move from the ruler's band, one cell left.
+            leftDrag(ruler, QPointF(rulerX(t0 + 4 * snapCell) + 3, rulerY),
+                     QPointF(rulerX(t0 + 3 * snapCell) + 3, rulerY), Qt::AltModifier);
+            if (doc.findNote(track, t0 + 4 * snapCell, uint8_t(key), &moved) ||
+                !doc.findNote(track, t0 + 3 * snapCell, uint8_t(key), &moved))
+                fail("Alt+drag on the ruler band did not move the contents");
+            if (view.timeSelection().startTick != t0 + 4 * snapCell)
+                fail("band moved with the ruler Alt+drag (it must stay put)");
+            one.startTick = t0 + 3 * snapCell;
+            one.endTick = t0 + 4 * snapCell;
+            view.setTimeSelection(one);
+            if (doc.undoStack()->count() != before + 3)
+                fail("ruler Alt+drag move was not one undo command");
+
+            // Escape mid-drag: nothing commits, the release is inert.
+            sendMouse(roll, QEvent::MouseButtonPress, QPointF(rollX(t0 + 3 * snapCell) + 4, noteY),
+                      Qt::LeftButton, Qt::LeftButton, Qt::AltModifier);
+            sendMouse(roll, QEvent::MouseMove, QPointF(rollX(t0 + 5 * snapCell) + 4, noteY),
+                      Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+            if (!view.rangeDrag().active || view.rangeDrag().dTick != int64_t(2 * snapCell))
+                fail("Alt+drag did not preview a snapped 2-cell delta");
+            sendKey(roll, Qt::Key_Escape, Qt::NoModifier);
+            sendMouse(roll, QEvent::MouseButtonRelease,
+                      QPointF(rollX(t0 + 5 * snapCell) + 4, noteY), Qt::LeftButton, Qt::NoButton,
+                      Qt::AltModifier);
+            if (view.rangeDrag().active || doc.undoStack()->count() != before + 3 ||
+                !doc.findNote(track, t0 + 3 * snapCell, uint8_t(key), &moved))
+                fail("Escape did not cancel the range drag");
+
+            // A one-pixel wobble under the drag threshold is a click and
+            // commits nothing — with the band's start off the current grid
+            // too, where the old absolute snap would have turned the
+            // residue into a move. A real drag from that band still moves
+            // by whole cells, never by the residue.
+            leftDrag(roll, QPointF(rollX(t0 + 3 * snapCell) + 4, noteY),
+                     QPointF(rollX(t0 + 3 * snapCell) + 5, noteY), Qt::AltModifier);
+            if (doc.undoStack()->count() != before + 3 ||
+                !doc.findNote(track, t0 + 3 * snapCell, uint8_t(key), &moved))
+                fail("a sub-threshold Alt wobble inside the band committed a move");
+            const uint64_t residue = std::max<uint64_t>(1, snapCell / 4);
+            one.startTick = t0 + 3 * snapCell - residue;
+            one.endTick = t0 + 4 * snapCell;
+            view.setTimeSelection(one);
+            leftDrag(roll, QPointF(rollX(t0 + 3 * snapCell) + 4, noteY),
+                     QPointF(rollX(t0 + 3 * snapCell) + 5, noteY), Qt::AltModifier);
+            if (doc.undoStack()->count() != before + 3 ||
+                !doc.findNote(track, t0 + 3 * snapCell, uint8_t(key), &moved))
+                fail("a sub-threshold wobble on an off-grid band committed a move");
+            leftDrag(roll, QPointF(rollX(t0 + 3 * snapCell) + 4, noteY),
+                     QPointF(rollX(t0 + 5 * snapCell) + 4, noteY), Qt::AltModifier);
+            if (doc.undoStack()->count() != before + 4 ||
+                !doc.findNote(track, t0 + 5 * snapCell, uint8_t(key), &moved))
+                fail("an off-grid band did not move its contents by whole cells");
+            doc.undoStack()->undo();
+            view.clearTimeSelection();
+        }
+    }
+
     // Playhead follow-scroll pauses while a mouse gesture is live: with a
     // middle-button pan held in the roll (or the lanes), a playing playhead
     // far past the right edge must not move the view; releasing the button
@@ -5371,6 +5515,77 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         if (lanesImage() != voiceBase)
             fail("voice-row hover over a marker was not suppressed");
 
+        // Range-drag preview on the voice row: a track-scope band carrying
+        // the marker draws its line at the live delta and no longer at rest
+        // (a move), or at both with the copy ghosted (a duplicate) — the
+        // commit takes the track's voice changes with everything else, so
+        // the preview must show them going.
+        {
+            leaveLanes();
+            auto markerInk = [&](const QImage &img, qreal x) {
+                const QColor ink = SongView::trackColor(laneTrack);
+                int hits = 0;
+                for (int y = yVoice - 8; y <= yVoice + 8; y++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        const QColor c = pixelAt(img, x + dx, y);
+                        if (std::abs(c.red() - ink.red()) + std::abs(c.green() - ink.green()) +
+                                std::abs(c.blue() - ink.blue()) <
+                            60)
+                            hits++;
+                    }
+                }
+                return hits;
+            };
+            SongView::TimeSelection band;
+            band.startTick = tM;
+            band.endTick = tM + view.snapTicksAt(tM);
+            view.setTimeSelection(band);
+            const QImage resting = lanesImage();
+            const double cursor = view.tickAtContentX(xM + 80 - songview::kGutterW);
+            for (const bool duplicate : {false, true}) {
+                if (!view.beginRangeDrag(double(tM), duplicate))
+                    fail("voice-row preview: range drag did not begin");
+                view.updateRangeDrag(cursor);
+                const int64_t dTick = view.rangeDrag().dTick;
+                if (dTick <= 0)
+                    fail("voice-row preview: the drag did not arm");
+                const QImage live = lanesImage();
+                const qreal xTo = dotX(uint64_t(int64_t(tM) + dTick));
+                // The ghost is translucent (alpha 110 over whatever rested
+                // there), so it is probed as that blend of the track's ink
+                // over the resting pixel — never as "the column changed",
+                // which the live drag's own overlay would satisfy.
+                auto ghostInk = [&](qreal x) {
+                    const QColor ink = SongView::trackColor(laneTrack);
+                    int hits = 0;
+                    for (int y = yVoice - 8; y <= yVoice + 8; y++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            const QColor bg = pixelAt(resting, x + dx, y);
+                            const QColor c = pixelAt(live, x + dx, y);
+                            auto blend = [&](int b, int i) { return b + (i - b) * 110 / 255; };
+                            if (std::abs(c.red() - blend(bg.red(), ink.red())) +
+                                    std::abs(c.green() - blend(bg.green(), ink.green())) +
+                                    std::abs(c.blue() - blend(bg.blue(), ink.blue())) <
+                                45)
+                                hits++;
+                        }
+                    }
+                    return hits;
+                };
+                if (duplicate ? ghostInk(xTo) < 8 : markerInk(live, xTo) < 8)
+                    fail(duplicate ? "voice-row duplicate preview drew no ghost marker"
+                                   : "voice-row move preview did not carry the marker");
+                if (duplicate ? markerInk(live, xM) < markerInk(resting, xM)
+                              : markerInk(live, xM) >= markerInk(resting, xM))
+                    fail(duplicate ? "voice-row duplicate preview dropped the original"
+                                   : "voice-row move preview left the marker at rest");
+                view.cancelRangeDrag();
+                if (lanesImage() != resting)
+                    fail("cancelling the range drag did not restore the voice row");
+            }
+            view.clearTimeSelection();
+        }
+
         // Region hygiene: a hover walk across rows, then leaving, restores
         // the resting pixels bit-for-bit — no readout trails — and clears
         // the node-hover mirror. Each step grabs (and discards) an image so
@@ -5878,13 +6093,14 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("keyboard mute/solo touched the undo stack");
     }
 
-    // Twenty commands: draw, set, draw, nudge, draw, the double-click
+    // Twenty-three commands: draw, set, draw, nudge, draw, the double-click
     // delete, the press-grown draw, the tiny-drag draw, the modifier
     // velocity nudge, the abutting-note fixture add, add, two resizes, the
     // three note-selection presses MERGED into one, the off-grid
     // behind-the-back move, Ctrl+Left (all the scroll-follow presses merge
     // into it), two time-selection moves (kept separate by the clean-index
-    // save point), the inline rename, and the mid-song voice change — plus,
+    // save point), the three mouse range drags (move, duplicate, ruler
+    // move), the inline rename, and the mid-song voice change — plus,
     // when the song has a second track, the header-drag track move and the
     // editor commit the drop flushes. Undoing them all must restore the
     // original bytes.
@@ -5893,7 +6109,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         doc.undoStack()->undo();
         undos++;
     }
-    if (undos != 20 + (reordered ? (dragRenamed ? 2 : 1) : 0))
+    if (undos != 23 + (reordered ? (dragRenamed ? 2 : 1) : 0))
         fail("gesture pass pushed an unexpected number of undo commands");
     if (doc.smf().write() != baseline)
         fail("undoing every gesture did not restore the original bytes");

@@ -311,6 +311,25 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, qreal orig
             p.drawLine(QLineF(x0, rect.top(), x0, rect.bottom()));
             p.drawLine(QLineF(x1, rect.top(), x1, rect.bottom()));
         }
+        // A live range drag: the band itself stays put; where the contents
+        // will land shows as a separate dashed landing frame.
+        const SongView::RangeDrag &drag = sv->rangeDrag();
+        if (drag.active && drag.dTick != 0) {
+            const qreal lx0 =
+                sv->displayX(double(int64_t(tsel.startTick) + drag.dTick), origin, dpr);
+            const qreal lx1 = sv->displayX(double(int64_t(tsel.endTick) + drag.dTick), origin, dpr);
+            if (lx1 > rect.left() && lx0 < rect.right()) {
+                QColor fill = themes::color(themes::Role::song_view_edit_preview_outline);
+                fill.setAlpha(18);
+                const QRectF landing(lx0, rect.top(), lx1 - lx0, rect.height());
+                p.fillRect(landing.intersected(QRectF(rect)), fill);
+                QPen pen(themes::color(themes::Role::song_view_edit_preview_outline), 1);
+                pen.setStyle(Qt::DashLine);
+                p.setPen(pen);
+                p.drawLine(QLineF(lx0, rect.top(), lx0, rect.bottom()));
+                p.drawLine(QLineF(lx1, rect.top(), lx1, rect.bottom()));
+            }
+        }
     }
     if (tl->loopStartTick != UINT64_MAX || tl->loopEndTick != UINT64_MAX) {
         const bool hasStart = tl->loopStartTick != UINT64_MAX;
@@ -578,6 +597,7 @@ class TimeRuler : public QWidget
         const auto rulerHeight = m_markerHeight + tickMetrics.height() + tickRowPadding;
         setFixedHeight(rulerHeight);
         setMouseTracking(true);
+        setObjectName(QStringLiteral("timeRuler")); // findChild for tests
 
         // Snap-grid controls in the gutter left of the timeline: minimum
         // subdivision (Auto = zoom-adaptive down to the clock grid) and
@@ -630,7 +650,7 @@ class TimeRuler : public QWidget
     bool gestureActive() const
     {
         return m_dragMarker >= 0 || m_dragTimeSig || m_placingCursor || m_rightPress ||
-               m_dragSelEdge >= 0;
+               m_dragSelEdge >= 0 || m_rangeDragging;
     }
 
   protected:
@@ -857,9 +877,21 @@ class TimeRuler : public QWidget
         m_dragSelEdge = doc ? hitSelEdge(event->position()) : -1;
         if (m_dragSelEdge >= 0)
             return;
-        // Elsewhere on the ruler: place the edit cursor (drag scrubs it;
-        // playback follows on release).
+        // Inside the band with the range chord held: drag its contents.
+        const SongView::RangeGesture gesture = m_sv->rangeGestureFor(event->modifiers());
+        if (doc && gesture != SongView::RangeGesture::None && insideBand(event->position().x()) &&
+            m_sv->beginRangeDrag(m_sv->tickAtContentX(event->position().x() - kGutterW),
+                                 gesture == SongView::RangeGesture::Duplicate)) {
+            m_rangeDragging = true;
+            return;
+        }
+        // Elsewhere on the ruler: place the edit cursor (playback follows on
+        // release). Deferred like the right press: a drag past the click
+        // threshold sweeps out a time selection from the press instead.
         m_placingCursor = true;
+        m_leftPressPos = event->position();
+        m_leftSweep = false;
+        m_selAnchor = clickTick;
         m_sv->setEditCursorTick(clickTick);
     }
 
@@ -881,6 +913,11 @@ class TimeRuler : public QWidget
                 sel.endTick = std::max(m_selAnchor, tick);
                 m_sv->setTimeSelection(sel); // scope: the selected tracks
             }
+            return;
+        }
+        if (m_rangeDragging) {
+            m_sv->updateRangeDrag(
+                m_sv->tickAtContentX(std::max(qreal(kGutterW), event->position().x()) - kGutterW));
             return;
         }
         if (m_dragMarker >= 0 || m_dragTimeSig) {
@@ -905,18 +942,32 @@ class TimeRuler : public QWidget
             return;
         }
         if (m_placingCursor) {
-            m_sv->setEditCursorTick(dragTick());
+            if (!m_leftSweep &&
+                (event->position().toPoint() - m_leftPressPos.toPoint()).manhattanLength() >=
+                    QApplication::startDragDistance())
+                m_leftSweep = true;
+            if (m_leftSweep) {
+                const uint64_t tick = dragTick();
+                SongView::TimeSelection sel;
+                sel.startTick = std::min(m_selAnchor, tick);
+                sel.endTick = std::max(m_selAnchor, tick);
+                m_sv->setTimeSelection(sel); // scope: the selected tracks
+            }
             return;
         }
         uint64_t sigTick;
         int sigNum, sigDen;
         bool sigImplicit;
-        setCursor(
-            m_sv->document() &&
-                    (hitMarker(event->position()) >= 0 || hitSelEdge(event->position()) >= 0 ||
-                     hitTimeSigChip(event->position(), &sigTick, &sigNum, &sigDen, &sigImplicit))
-                ? Qt::SplitHCursor
-                : Qt::ArrowCursor);
+        if (m_sv->document() &&
+            (hitMarker(event->position()) >= 0 || hitSelEdge(event->position()) >= 0 ||
+             hitTimeSigChip(event->position(), &sigTick, &sigNum, &sigDen, &sigImplicit)))
+            setCursor(Qt::SplitHCursor);
+        else if (m_sv->document() &&
+                 m_sv->rangeGestureFor(event->modifiers()) != SongView::RangeGesture::None &&
+                 insideBand(event->position().x()))
+            setCursor(Qt::SizeHorCursor);
+        else
+            setCursor(Qt::ArrowCursor);
     }
 
     void mouseReleaseEvent(QMouseEvent *event) override
@@ -936,8 +987,21 @@ class TimeRuler : public QWidget
         }
         if (event->button() != Qt::LeftButton)
             return;
+        if (m_rangeDragging) {
+            m_rangeDragging = false;
+            m_sv->commitRangeDrag();
+            return;
+        }
         if (m_placingCursor) {
             m_placingCursor = false;
+            if (m_leftSweep) {
+                m_leftSweep = false;
+                if (m_sv->timeSelection().active())
+                    m_sv->announceTimeSelection();
+                else
+                    m_sv->clearTimeSelection();
+                return;
+            }
             m_sv->commitEditCursor(m_sv->editCursorTick());
             return;
         }
@@ -1113,6 +1177,17 @@ class TimeRuler : public QWidget
         }
     }
 
+    // Whether x (widget coords) lies inside the active band, either row.
+    bool insideBand(qreal x) const
+    {
+        const SongView::TimeSelection &sel = m_sv->timeSelection();
+        if (!sel.active())
+            return false;
+        const qreal dpr = devicePixelRatioF();
+        return x >= m_sv->displayX(double(sel.startTick), kGutterW, dpr) &&
+               x < m_sv->displayX(double(sel.endTick), kGutterW, dpr);
+    }
+
     // 0 = selection start edge, 1 = end edge, -1 = neither near pos.
     int hitSelEdge(QPointF pos) const
     {
@@ -1196,11 +1271,14 @@ class TimeRuler : public QWidget
     uint64_t m_dragTick = 0;
     bool m_dragTimeSig = false;     // chip drag is live; commits moveTimeSig
     uint64_t m_dragTimeSigFrom = 0; // the dragged signature's original tick
-    bool m_placingCursor = false;
-    bool m_rightPress = false; // right button held; sweep vs. menu undecided
-    bool m_selSweep = false;   // right-drag time-selection sweep is live
+    bool m_placingCursor = false;   // left button held; click vs. sweep undecided
+    bool m_leftSweep = false;       // left-drag time-selection sweep is live
+    QPointF m_leftPressPos;
+    bool m_rangeDragging = false; // this surface owns the SongView range drag
+    bool m_rightPress = false;    // right button held; sweep vs. menu undecided
+    bool m_selSweep = false;      // right-drag time-selection sweep is live
     QPointF m_rightPressPos;
-    uint64_t m_selAnchor = 0;         // snapped tick of the right press
+    uint64_t m_selAnchor = 0;         // snapped tick of the press (either button)
     int m_dragSelEdge = -1;           // selection edge being left-dragged (0/1)
     QComboBox *m_divCombo = nullptr;  // minimum snap subdivision (gutter)
     QComboBox *m_feelCombo = nullptr; // straight / triplet
@@ -1489,6 +1567,17 @@ class PianoRoll : public TimelineSurface
         m_dVel = 0;
         m_velModDrag = false;
 
+        // Inside the band with the range chord held, the band wins over
+        // whatever note sits under the press: the drag slides (or
+        // duplicates) the selection's contents.
+        const SongView::RangeGesture rangeGesture = m_sv->rangeGestureFor(event->modifiers());
+        if (doc && rangeGesture != SongView::RangeGesture::None &&
+            insideTimeSelection(event->position().x()) &&
+            m_sv->beginRangeDrag(m_pressTick, rangeGesture == SongView::RangeGesture::Duplicate)) {
+            m_drag = Drag::RangeMove;
+            return;
+        }
+
         if (hit) {
             const bool rightEdge = nearRightEdge(*hit, event->position());
             const bool leftEdge = nearLeftEdge(*hit, event->position());
@@ -1692,6 +1781,10 @@ class PianoRoll : public TimelineSurface
             // existed; re-pin the mark to the note's row now.
             setHoverKey(m_velAnchor.key);
         }
+        if (m_drag == Drag::RangeMove) {
+            m_sv->updateRangeDrag(m_sv->tickAtContentX(event->position().x() - kKeyboardW));
+            return;
+        }
         if (m_drag == Drag::None) {
             // Hover cursor: resize handle at note left/right edges, velocity
             // handle along the note's velocity bar (when zoomed in enough).
@@ -1700,10 +1793,15 @@ class PianoRoll : public TimelineSurface
             const ViewNote *hit = m_sv->document() && event->position().x() >= kKeyboardW
                                       ? hitNote(event->position())
                                       : nullptr;
-            // Resize edges win over both velocity-hover paths.
+            // Resize edges win over both velocity-hover paths; the band's
+            // range chord wins over everything inside the band.
             const auto &keys = keymap::Registry::instance();
             const auto hoverMods = event->modifiers();
-            if (hit && nearRightEdge(*hit, event->position()))
+            if (m_sv->document() &&
+                m_sv->rangeGestureFor(hoverMods) != SongView::RangeGesture::None &&
+                insideTimeSelection(event->position().x()))
+                setCursor(Qt::SizeHorCursor);
+            else if (hit && nearRightEdge(*hit, event->position()))
                 setCursor(m_cursors.rightEdge);
             else if (hit && nearLeftEdge(*hit, event->position()))
                 setCursor(m_cursors.leftEdge);
@@ -1909,6 +2007,11 @@ class PianoRoll : public TimelineSurface
         const bool velModDrag = m_velModDrag;
         m_velModDrag = false;
 
+        if (drag == Drag::RangeMove) {
+            m_sv->commitRangeDrag();
+            invalidateContent();
+            return;
+        }
         if (doc && drag == Drag::Draw) {
             doc->addNote(m_sv->selectedTrack(), m_drawTick, uint8_t(m_drawKey), uint32_t(m_drawDur),
                          m_lastVelocity);
@@ -2074,7 +2177,7 @@ class PianoRoll : public TimelineSurface
     }
 
   private:
-    enum class Drag { None, Band, TimeSel, Move, Resize, ResizeLeft, Velocity, Draw };
+    enum class Drag { None, Band, TimeSel, Move, Resize, ResizeLeft, Velocity, Draw, RangeMove };
 
     // Whether pos falls inside the active time selection's band as this
     // widget draws it (the selection must cover the shown track).
@@ -2565,6 +2668,38 @@ class PianoRoll : public TimelineSurface
                 drawNoteBoxBorder(painter, noteBox, note.unterminated);
             }
         }
+
+        // Range duplicate preview: the originals stay where they are (drawn
+        // above); the copies ghost in at the live delta as translucent boxes
+        // — in each pass for its own tracks, so the other covered tracks'
+        // ghost notes show their copies too.
+        const SongView::RangeDrag &range = m_sv->rangeDrag();
+        if (range.active && range.duplicate && range.dTick != 0) {
+            const qreal dpr = devicePixelRatioF();
+            for (const ViewNote &note : model.notes) {
+                if ((note.track != selectedTrack) != drawingGhostNotes || note.unterminated ||
+                    !m_sv->rangeDragCarriesTrackTick(note.track, note.startTick))
+                    continue;
+                const QRectF r = noteRect(
+                    m_sv->displayX(double(int64_t(note.startTick) + range.dTick), kKeyboardW, dpr),
+                    m_sv->displayX(double(int64_t(note.endTick) + range.dTick), kKeyboardW, dpr),
+                    note.key);
+                if (r.right() < kKeyboardW || r.left() > width() || r.bottom() < 0 ||
+                    r.top() > height())
+                    continue;
+                const QRectF box = this->noteBox(r);
+                if (drawingGhostNotes) {
+                    QColor fill = ghostNoteColor(note.track, isBlackKey(note.key));
+                    fill.setAlpha(fill.alpha() * 110 / 255);
+                    painter.fillRect(box, fill);
+                    continue;
+                }
+                QColor fill = m_sv->noteFillColor(note.track, note.velocity);
+                fill.setAlpha(110);
+                painter.fillRect(box, fill);
+                drawNoteBoxBorder(painter, box, false);
+            }
+        }
     }
 
     // The pitch label stays inside the note face. A note that cannot fit the
@@ -2643,6 +2778,17 @@ class PianoRoll : public TimelineSurface
     // the clamping applied on release in mouseReleaseEvent.
     QRectF displayedNoteRect(const ViewNote &note) const
     {
+        const SongView::RangeDrag &range = m_sv->rangeDrag();
+        if (range.active && !range.duplicate &&
+            m_sv->rangeDragCarriesTrackTick(note.track, note.startTick)) {
+            // A range move carries every covered note by the live delta (a
+            // duplicate leaves them and ghosts the copies in drawNotes).
+            const int64_t tick = int64_t(note.startTick) + range.dTick;
+            const int64_t endTick = int64_t(note.endTick) + range.dTick;
+            const qreal dpr = devicePixelRatioF();
+            return noteRect(m_sv->displayX(double(tick), kKeyboardW, dpr),
+                            m_sv->displayX(double(endTick), kKeyboardW, dpr), note.key);
+        }
         const bool dragging =
             m_drag == Drag::Move || m_drag == Drag::Resize || m_drag == Drag::ResizeLeft;
         if (!dragging || !m_sv->isSelected(note))
@@ -3065,7 +3211,7 @@ class AutomationArea : public TimelineSurface
     bool gestureActive() const
     {
         return m_panning || m_gesture != Gesture::None || m_dragRow >= 0 || m_resizeRow >= 0 ||
-               m_rightPress;
+               m_rightPress || m_rangeDragging;
     }
     void setViewHeights(int laneH, const QHash<QString, int> &overrides)
     {
@@ -3155,15 +3301,22 @@ class AutomationArea : public TimelineSurface
         // Group drag preview: every affected row's curve redrawn with the
         // selected nodes at their pending positions, so a cross-lane move
         // is visible in full before it commits.
-        if (m_gesture == Gesture::Point && !m_group.empty() && m_dragRow >= 0) {
-            const int64_t dTick = int64_t(m_dragTick) - m_dragOrigTick;
-            const int dValue = m_dragValue - m_dragOrigValue;
+        // The range drag (from any surface) previews the same way: every
+        // covered node of every covered row carried by the live delta — a
+        // duplicate keeps the originals in the curve as well.
+        const SongView::RangeDrag &range = m_sv->rangeDrag();
+        const bool groupDrag = m_gesture == Gesture::Point && !m_group.empty() && m_dragRow >= 0;
+        if (groupDrag || (range.active && range.dTick != 0)) {
+            const std::vector<GroupNode> movers = groupDrag ? m_group : collectRangeNodes();
+            const int64_t dTick = groupDrag ? int64_t(m_dragTick) - m_dragOrigTick : range.dTick;
+            const int dValue = groupDrag ? m_dragValue - m_dragOrigValue : 0;
+            const bool keepOrigins = !groupDrag && range.duplicate;
             p.save();
             p.setPen(QPen(themes::color(themes::Role::song_view_edit_preview_outline), 1));
             p.setBrush(Qt::NoBrush);
             auto tickX = [&](uint64_t t) { return m_sv->displayX(double(t), kGutterW, dpr); };
             for (int ri = 0; ri < int(m_rows.size()); ri++) {
-                const RowPreview preview = previewRow(ri, dTick, dValue);
+                const RowPreview preview = previewRow(ri, movers, dTick, dValue, keepOrigins);
                 if (preview.moved.empty())
                     continue;
                 auto valueY = [&](int v) { return valueYFor(ri, v, preview.minV, preview.maxV); };
@@ -3503,6 +3656,21 @@ class AutomationArea : public TimelineSurface
                                              event->modifiers() & Qt::AltModifier);
             return;
         }
+        // Inside the band on a covered row with the range chord held: the
+        // drag slides (or duplicates) the selection's contents. Checked
+        // before the row's own press handling — the band wins.
+        if (event->button() == Qt::LeftButton) {
+            const SongView::RangeGesture gesture = m_sv->rangeGestureFor(event->modifiers());
+            const std::pair<int, uint8_t> id = rowIdentity(row);
+            if (gesture != SongView::RangeGesture::None &&
+                m_sv->timeSelectionCoversRow(id.first, id.second) &&
+                insideBand(event->position().x()) &&
+                m_sv->beginRangeDrag(rawTickAt(event->position().x()),
+                                     gesture == SongView::RangeGesture::Duplicate)) {
+                m_rangeDragging = true;
+                return;
+            }
+        }
         if (row.kind == Row::Voice) {
             voiceRowPress(event);
             return;
@@ -3627,9 +3795,22 @@ class AutomationArea : public TimelineSurface
                 updateSelSweep(event);
             return;
         }
+        if (m_rangeDragging) {
+            m_sv->updateRangeDrag(rawTickAt(event->position().x()));
+            return;
+        }
         if (m_dragRow < 0) {
+            const int hoverRow = rowIndexAt(event->pos().y());
+            const bool bandHover =
+                hoverRow >= 0 &&
+                m_sv->rangeGestureFor(event->modifiers()) != SongView::RangeGesture::None &&
+                m_sv->timeSelectionCoversRow(rowIdentity(m_rows[hoverRow]).first,
+                                             rowIdentity(m_rows[hoverRow]).second) &&
+                insideBand(event->position().x());
             if (rowBoundaryAt(event->pos().y()) >= 0)
                 setCursor(Qt::SplitVCursor);
+            else if (bandHover)
+                setCursor(Qt::SizeHorCursor);
             else if (m_pencilMode && drawableAt(event->position().x(), event->pos().y()))
                 setCursor(pencilCursor());
             else
@@ -3715,6 +3896,11 @@ class AutomationArea : public TimelineSurface
             } else {
                 rightClickInPlace(event);
             }
+            return;
+        }
+        if (event->button() == Qt::LeftButton && m_rangeDragging) {
+            m_rangeDragging = false;
+            m_sv->commitRangeDrag();
             return;
         }
         if (event->button() == Qt::LeftButton && m_resizeRow >= 0) {
@@ -3922,6 +4108,7 @@ class AutomationArea : public TimelineSurface
             }
             m_rightPress = false;
             m_selSweep = false;
+            m_rangeDragging = false; // clearTimeSelection drops the SongView drag too
             m_sv->clearTimeSelection();
             event->accept();
             return;
@@ -4059,6 +4246,39 @@ class AutomationArea : public TimelineSurface
     // The derived selection as document points, with the row each node came
     // from. Skips the voice row: its markers are voice identities, not value
     // nodes, and have no drag editing.
+    // The nodes the live SongView range drag carries: every point of every
+    // covered row inside the latched band.
+    std::vector<GroupNode> collectRangeNodes() const
+    {
+        std::vector<GroupNode> nodes;
+        SongDocument *doc = m_sv->document();
+        if (!doc || !m_sv->rangeDrag().active)
+            return nodes;
+        for (size_t i = 0; i < m_rows.size(); i++) {
+            uint8_t cc;
+            int track;
+            const std::pair<int, uint8_t> id = rowIdentity(m_rows[i]);
+            if (!m_sv->timeSelectionCoversRow(id.first, id.second) ||
+                !rowTarget(m_rows[i], &cc, &track))
+                continue;
+            for (const DocLanePoint &pt : doc->lanePoints(track, cc))
+                if (m_sv->rangeDragCarriesRowTick(id.first, id.second, pt.tick))
+                    nodes.push_back({int(i), track, cc, pt});
+        }
+        return nodes;
+    }
+
+    // Whether x (widget coords) lies inside the active band's tick span.
+    bool insideBand(qreal x) const
+    {
+        const SongView::TimeSelection &sel = m_sv->timeSelection();
+        if (!sel.active())
+            return false;
+        const qreal dpr = devicePixelRatioF();
+        return x >= m_sv->displayX(double(sel.startTick), kGutterW, dpr) &&
+               x < m_sv->displayX(double(sel.endTick), kGutterW, dpr);
+    }
+
     std::vector<GroupNode> collectSelectedNodes() const
     {
         std::vector<GroupNode> nodes;
@@ -4113,13 +4333,15 @@ class AutomationArea : public TimelineSurface
         std::vector<std::pair<uint64_t, int>> moved; // this row's destinations
         int minV = 0, maxV = 127;                    // row range, for valueYFor
     };
-    RowPreview previewRow(int ri, int64_t dTick, int dValue) const
+    // keepOrigins: the movers stay in the curve too (a duplicate preview).
+    RowPreview previewRow(int ri, const std::vector<GroupNode> &movers, int64_t dTick, int dValue,
+                          bool keepOrigins = false) const
     {
         RowPreview out;
         const Row &row = m_rows[ri];
         rowRange(row, &out.minV, &out.maxV);
-        std::vector<uint64_t> origins; // sorted: m_group holds document order
-        for (const GroupNode &n : m_group) {
+        std::vector<uint64_t> origins; // sorted: movers hold document order
+        for (const GroupNode &n : movers) {
             if (n.row != ri)
                 continue;
             origins.push_back(n.point.tick);
@@ -4138,7 +4360,7 @@ class AutomationArea : public TimelineSurface
             for (const LanePoint &pt : *points) {
                 while (o < origins.size() && origins[o] < pt.tick)
                     o++;
-                if (o < origins.size() && origins[o] == pt.tick)
+                if (!keepOrigins && o < origins.size() && origins[o] == pt.tick)
                     continue; // a mover's origin: drawn at its destination
                 while (m < out.moved.size() && out.moved[m].first < pt.tick)
                     out.curve.push_back(out.moved[m++]);
@@ -5660,31 +5882,57 @@ class AutomationArea : public TimelineSurface
     {
         const SongViewModel &model = m_sv->model();
         const int selected = m_sv->selectedTrack();
-        std::vector<const VoiceChange *> changes;
-        for (const VoiceChange &vc : model.voices)
-            if (vc.track == selected)
-                changes.push_back(&vc);
+        // The range drag previews here too: a voice change the band carries
+        // is committed by moveRange/duplicateRange like any lane point (the
+        // gather takes every CC of the track, DOC_CC_VOICE included), so a
+        // move shows it at the live delta and a duplicate ghosts its copy.
+        struct Shown {
+            int64_t tick;
+            uint8_t program;
+            bool ghost;
+        };
+        std::vector<Shown> changes;
+        const SongView::RangeDrag &range = m_sv->rangeDrag();
+        const bool previewing = range.active && range.dTick != 0;
+        for (const VoiceChange &vc : model.voices) {
+            if (vc.track != selected)
+                continue;
+            const bool carried =
+                previewing && m_sv->rangeDragCarriesRowTick(selected, DOC_CC_VOICE, vc.tick);
+            if (!carried || range.duplicate)
+                changes.push_back({int64_t(vc.tick), vc.program, false});
+            if (carried)
+                changes.push_back({int64_t(vc.tick) + range.dTick, vc.program, range.duplicate});
+        }
+        std::stable_sort(changes.begin(), changes.end(),
+                         [](const Shown &a, const Shown &b) { return a.tick < b.tick; });
 
         const QColor color = SongView::trackColor(selected);
         const qreal dpr = p.device()->devicePixelRatioF();
         for (size_t i = 0; i < changes.size(); i++) {
-            const qreal x = m_sv->displayX(double(changes[i]->tick), kGutterW, dpr);
+            const qreal x = m_sv->displayX(double(changes[i].tick), kGutterW, dpr);
             const qreal xEnd = i + 1 < changes.size()
-                                   ? m_sv->displayX(double(changes[i + 1]->tick), kGutterW, dpr)
+                                   ? m_sv->displayX(double(changes[i + 1].tick), kGutterW, dpr)
                                    : plot.right();
             if (xEnd < plot.left() || x > plot.right())
                 continue;
-            p.setPen(QPen(color, 2));
+            QColor line = color;
+            QColor text = themes::color(themes::Role::song_view_primary_text);
+            if (changes[i].ghost) {
+                line.setAlpha(110);
+                text.setAlpha(110);
+            }
+            p.setPen(QPen(line, 2));
             p.drawLine(QLineF(x, plot.top() + 4, x, plot.bottom() - 4));
-            p.setPen(themes::color(themes::Role::song_view_primary_text));
-            const QString text = m_sv->voiceLabel(changes[i]->program);
+            p.setPen(text);
+            const QString label = m_sv->voiceLabel(changes[i].program);
             // Keep the label readable while its voice region is scrolled
             // partially off the left edge.
             const qreal textX = std::max<qreal>(x + 4, plot.left() + 4);
             const qreal textW = std::max<qreal>(10.0, xEnd - textX - 4);
             p.drawText(QRectF(textX, plot.top() + 4, textW, plot.height() - 8),
                        Qt::AlignLeft | Qt::AlignVCenter,
-                       fontMetrics().elidedText(text, Qt::ElideRight, qFloor(textW)));
+                       fontMetrics().elidedText(label, Qt::ElideRight, qFloor(textW)));
         }
     }
 
@@ -5716,7 +5964,8 @@ class AutomationArea : public TimelineSurface
     bool m_rightPress = false; // right button held; sweep vs. click undecided
     bool m_selSweep = false;   // right-drag time-selection sweep is live
     QPoint m_rightPressPos;
-    int m_rightRow = -1; // row of the right press
+    int m_rightRow = -1;          // row of the right press
+    bool m_rangeDragging = false; // this surface owns the SongView range drag
     uint64_t m_selAnchorTick = 0;
     Gesture m_gesture = Gesture::None;
     int m_dragRow = -1;
@@ -8826,6 +9075,7 @@ void SongView::setTimeSelection(const TimeSelection &sel)
 void SongView::clearTimeSelection()
 {
     m_timeSel = TimeSelection();
+    m_rangeDrag = RangeDrag(); // a drag of a band that no longer exists commits nothing
     refreshTimelineViews();
 }
 
@@ -9164,6 +9414,24 @@ void SongView::nudgeTimeSelection(bool right)
         return;
     std::vector<DocNote> notes;
     std::vector<DocLanePoint> points;
+    gatherTimeSelectionContents(notes, points);
+    m_document->moveRange(notes, points, dTick);
+    // The band follows even over empty content, so repeated nudges keep
+    // aiming at the same region.
+    TimeSelection moved = m_timeSel;
+    moved.startTick = uint64_t(int64_t(s) + dTick);
+    moved.endTick = uint64_t(int64_t(e) + dTick);
+    setTimeSelection(moved);
+    ensureRangeVisible(moved.startTick, moved.endTick, right);
+}
+
+void SongView::gatherTimeSelectionContents(std::vector<DocNote> &notes,
+                                           std::vector<DocLanePoint> &points) const
+{
+    if (!m_document || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
     const auto gatherLanePoints = [&](int track, uint8_t cc) {
         const int query = track < 0 ? m_selectedTrack : track;
         for (const DocLanePoint &pt : m_document->lanePoints(query, cc)) {
@@ -9175,6 +9443,11 @@ void SongView::nudgeTimeSelection(bool right)
         for (const std::pair<int, uint8_t> &id : m_timeSel.lanes)
             gatherLanePoints(id.first, id.second);
     } else {
+        // Every CC of the track, hidden lanes and the voice changes
+        // included — the band's contents are what copy and delete take,
+        // not what the lane area happens to show. The voice row previews
+        // the drag (paintVoiceRow); a hidden lane cannot, so its points
+        // move unseen with the rest.
         for (int t : timeSelectionTracks()) {
             for (const DocNote &note : m_document->notesForTrack(t)) {
                 if (note.tick >= s && note.tick < e)
@@ -9184,14 +9457,123 @@ void SongView::nudgeTimeSelection(bool right)
                 gatherLanePoints(t, cc);
         }
     }
-    m_document->moveRange(notes, points, dTick);
-    // The band follows even over empty content, so repeated nudges keep
-    // aiming at the same region.
-    TimeSelection moved = m_timeSel;
-    moved.startTick = uint64_t(int64_t(s) + dTick);
-    moved.endTick = uint64_t(int64_t(e) + dTick);
-    setTimeSelection(moved);
-    ensureRangeVisible(moved.startTick, moved.endTick, right);
+}
+
+SongView::RangeGesture SongView::rangeGestureFor(Qt::KeyboardModifiers mods) const
+{
+    if (!m_timeSel.active())
+        return RangeGesture::None;
+    const auto &keys = keymap::Registry::instance();
+    // The duplicate chord is checked first: with the defaults it is a
+    // superset of the move chord, and matchesModifier is exact anyway.
+    if (keys.matchesModifier(mods, QStringLiteral("range.duplicate")))
+        return RangeGesture::Duplicate;
+    if (keys.matchesModifier(mods, QStringLiteral("range.move")))
+        return RangeGesture::Move;
+    return RangeGesture::None;
+}
+
+bool SongView::beginRangeDrag(double pressTick, bool duplicate)
+{
+    if (!m_document || !m_timeSel.active())
+        return false;
+    m_rangeDrag = RangeDrag();
+    m_rangeDrag.active = true;
+    m_rangeDrag.duplicate = duplicate;
+    m_rangeDrag.pressTick = pressTick;
+    m_rangeDrag.sel = m_timeSel;
+    return true;
+}
+
+void SongView::updateRangeDrag(double cursorTick)
+{
+    if (!m_rangeDrag.active)
+        return;
+    // Under the platform drag threshold the press is still a click and
+    // carries nothing: the band's start need not sit on the current grid
+    // (a fine sweep, a zoom since), so even a one-pixel wobble could
+    // otherwise snap to a whole cell and commit a move on release.
+    if (!m_rangeDrag.armed) {
+        const double travelPx =
+            std::abs(displayX(cursorTick, 0.0, 1.0) - displayX(m_rangeDrag.pressTick, 0.0, 1.0));
+        if (travelPx < QApplication::startDragDistance())
+            return;
+        m_rangeDrag.armed = true;
+    }
+    // The band's start rides the cursor's travel and lands on the snap grid;
+    // the delta is measured from the start's own snapped position, so an
+    // off-grid band moves by whole cells rather than by its grid residue.
+    // It never crosses tick 0 (moveRange would clamp events individually,
+    // smearing the range's internal spacing).
+    const double start = double(m_rangeDrag.sel.startTick);
+    const double target = std::max(0.0, start + (cursorTick - m_rangeDrag.pressTick));
+    const int64_t dTick = std::max(int64_t(snapTick(target)) - int64_t(snapTick(start)),
+                                   -int64_t(m_rangeDrag.sel.startTick));
+    if (dTick == m_rangeDrag.dTick)
+        return;
+    m_rangeDrag.dTick = dTick;
+    refreshTimelineViews();
+}
+
+void SongView::commitRangeDrag()
+{
+    if (!m_rangeDrag.active)
+        return;
+    const RangeDrag drag = m_rangeDrag;
+    m_rangeDrag = RangeDrag();
+    // A band re-swept or cleared mid-gesture (Escape, a song swap) is not
+    // ours to move.
+    if (drag.dTick == 0 || !m_document || !m_timeline || !m_timeSel.active() ||
+        m_timeSel.startTick != drag.sel.startTick || m_timeSel.endTick != drag.sel.endTick ||
+        m_timeSel.scope != drag.sel.scope || m_timeSel.lanes != drag.sel.lanes) {
+        refreshTimelineViews();
+        return;
+    }
+    std::vector<DocNote> notes;
+    std::vector<DocLanePoint> points;
+    gatherTimeSelectionContents(notes, points);
+    if (drag.duplicate)
+        m_document->duplicateRange(notes, points, drag.dTick);
+    else
+        m_document->moveRange(notes, points, drag.dTick);
+    // The band stays where it was swept (unlike the keyboard nudge): the
+    // gesture moves content, not the selection.
+    refreshTimelineViews();
+    const double beats =
+        double(std::abs(drag.dTick)) / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
+    if (notes.empty() && points.empty())
+        emit statusMessage(tr("Nothing to %1 in the time selection")
+                               .arg(drag.duplicate ? tr("duplicate") : tr("move")));
+    else if (drag.duplicate)
+        emit statusMessage(tr("Duplicated the time selection %1 beats %2")
+                               .arg(beats, 0, 'g', 4)
+                               .arg(drag.dTick > 0 ? tr("later") : tr("earlier")));
+    else
+        emit statusMessage(tr("Moved the time selection %1 beats %2")
+                               .arg(beats, 0, 'g', 4)
+                               .arg(drag.dTick > 0 ? tr("later") : tr("earlier")));
+}
+
+void SongView::cancelRangeDrag()
+{
+    if (!m_rangeDrag.active)
+        return;
+    m_rangeDrag = RangeDrag();
+    refreshTimelineViews();
+}
+
+bool SongView::rangeDragCarriesTrackTick(int track, uint64_t tick) const
+{
+    const TimeSelection &sel = m_rangeDrag.sel;
+    return m_rangeDrag.active && sel.scope == TimeSelection::Tracks && sel.active() &&
+           tick >= sel.startTick && tick < sel.endTick && timeSelectionCoversTrack(track);
+}
+
+bool SongView::rangeDragCarriesRowTick(int track, uint8_t cc, uint64_t tick) const
+{
+    const TimeSelection &sel = m_rangeDrag.sel;
+    return m_rangeDrag.active && sel.active() && tick >= sel.startTick && tick < sel.endTick &&
+           timeSelectionCoversRow(track, cc);
 }
 
 void SongView::removeTimeSelectionContents()

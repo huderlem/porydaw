@@ -319,6 +319,29 @@ int runKeymapCheck()
         check(registry.wheelConflicts(zoomT, Qt::ControlModifier).contains(zoomV),
               "wheel conflicts on Ctrl missed vertical zoom");
 
+        // The time selection overlays the roll and the lanes: its chord
+        // fires on the same press as theirs, so the two must conflict
+        // even though the contexts differ (and not with the event list).
+        check(registry
+                  .modifierConflicts(QStringLiteral("range.move"), keymap::Context::TimeSelection,
+                                     Qt::ControlModifier)
+                  .contains(QStringLiteral("roll.velocity_drag")),
+              "range.move on Ctrl should conflict with the roll's velocity drag");
+        check(registry
+                  .modifierConflicts(QStringLiteral("roll.velocity_drag"),
+                                     keymap::Context::PianoRoll, Qt::AltModifier)
+                  .contains(QStringLiteral("range.move")),
+              "velocity drag on Alt should conflict with range.move");
+        check(registry
+                  .modifierConflicts(QStringLiteral("velocity.detent_unlock"),
+                                     keymap::Context::Velocity, Qt::AltModifier)
+                  .contains(QStringLiteral("range.move")),
+              "detent unlock on Alt should conflict with range.move");
+        check(registry.modifierBinding(QStringLiteral("range.move")) == Qt::AltModifier &&
+                  registry.modifierBinding(QStringLiteral("roll.velocity_drag")) ==
+                      Qt::ControlModifier,
+              "range.move and velocity drag defaults must not share a chord");
+
         // Override / bare / unbind / reset through the same delta-only
         // store; the bare chord persists as "None", unbound as the empty
         // marker.

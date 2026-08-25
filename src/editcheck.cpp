@@ -1317,6 +1317,171 @@ int runEditCheck(const QString &projectRoot)
                         doc.undoStack()->redo();
                     }
                 }
+                // Range duplicate: the same set copied by a delta as ONE
+                // command, originals intact, copies with fresh identities.
+                if (ok) {
+                    std::vector<DocNote> dupNotes;
+                    for (const DocNote &dn : doc.notesForTrack(track)) {
+                        if (dn.tick >= base + step * 83 && dn.tick < base + step * 87)
+                            dupNotes.push_back(dn);
+                    }
+                    std::vector<DocLanePoint> dupPoints;
+                    for (const DocLanePoint &dp : doc.lanePoints(track, 7)) {
+                        if (dp.tick == base + step * 83)
+                            dupPoints.push_back(dp);
+                    }
+                    const int dupBefore = doc.undoStack()->count();
+                    doc.duplicateRange(dupNotes, dupPoints, step * 200);
+                    mutateAndCheck("events unsorted after duplicateRange");
+                    DocNote copy;
+                    if (!doc.findNote(track, base + step * 83, 60, &n) ||
+                        !doc.findNote(track, base + step * 283, 60, &copy) ||
+                        copy.duration != step * 2 || copy.noteId == n.noteId ||
+                        !doc.findNote(track, base + step * 285, 64, &copy) ||
+                        !doc.findLanePoint(track, 7, base + step * 83, &p) ||
+                        !doc.findLanePoint(track, 7, base + step * 283, &p) || p.value != 45 ||
+                        doc.undoStack()->count() != dupBefore + 1) {
+                        fail("duplicateRange produced wrong content");
+                        ok = false;
+                    } else {
+                        doc.duplicateRange(dupNotes, dupPoints, 0); // no-op guard
+                        doc.undoStack()->undo();
+                        if (doc.findNote(track, base + step * 283, 60, &copy) ||
+                            !doc.findNote(track, base + step * 83, 60, &n)) {
+                            fail("duplicateRange was not a single undo command");
+                            ok = false;
+                        } else {
+                            doc.undoStack()->redo();
+                        }
+                    }
+                }
+                // Duplicate landing on its own source: the copy trims the
+                // original like a drawn note would (the pairing rule cannot
+                // hold a same-key overlap) — one command, undo restores it.
+                if (ok) {
+                    std::vector<DocNote> self;
+                    DocNote src;
+                    if (!doc.findNote(track, base + step * 83, 60, &src)) {
+                        fail("self-overlap source missing");
+                        ok = false;
+                    } else {
+                        self.push_back(src);
+                        const int selfBefore = doc.undoStack()->count();
+                        doc.duplicateRange(self, {}, step);
+                        mutateAndCheck("events unsorted after self-overlapping duplicateRange");
+                        DocNote head, copy;
+                        if (!doc.findNote(track, base + step * 83, 60, &head) ||
+                            head.duration != step || head.noteId != src.noteId ||
+                            !doc.findNote(track, base + step * 84, 60, &copy) ||
+                            copy.duration != step * 2 || copy.noteId == src.noteId ||
+                            doc.undoStack()->count() != selfBefore + 1) {
+                            fail("self-overlapping duplicateRange did not trim the source");
+                            ok = false;
+                        } else {
+                            doc.undoStack()->undo();
+                            if (!doc.findNote(track, base + step * 83, 60, &head) ||
+                                head.duration != step * 2 ||
+                                doc.findNote(track, base + step * 84, 60, &copy)) {
+                                fail("self-overlapping duplicateRange undo did not restore");
+                                ok = false;
+                            }
+                        }
+                    }
+                }
+                // A run of equal notes duplicated by one step: the copies
+                // that coincide with existing notes are not written (those
+                // notes keep their identities); only the new one lands.
+                if (ok) {
+                    doc.addNotes(track, {{base + step * 300, 62, step, 90},
+                                         {base + step * 301, 62, step, 90},
+                                         {base + step * 302, 62, step, 90}});
+                    std::vector<DocNote> run;
+                    for (const DocNote &rn : doc.notesForTrack(track)) {
+                        if (rn.key == 62 && rn.tick >= base + step * 300 &&
+                            rn.tick < base + step * 303)
+                            run.push_back(rn);
+                    }
+                    const int runBefore = doc.undoStack()->count();
+                    doc.duplicateRange(run, {}, step);
+                    mutateAndCheck("events unsorted after coinciding duplicateRange");
+                    int count = 0;
+                    bool idsKept = true;
+                    for (const DocNote &rn : doc.notesForTrack(track)) {
+                        if (rn.key != 62 || rn.tick < base + step * 300)
+                            continue;
+                        count++;
+                        for (const DocNote &orig : run) {
+                            if (orig.tick == rn.tick && orig.noteId != rn.noteId)
+                                idsKept = false;
+                        }
+                    }
+                    DocNote tail;
+                    if (run.size() != 3 || count != 4 || !idsKept ||
+                        !doc.findNote(track, base + step * 303, 62, &tail) ||
+                        tail.duration != step || doc.undoStack()->count() != runBefore + 1) {
+                        fail("coinciding duplicateRange rewrote the notes it landed on");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->undo(); // the duplicate
+                        doc.undoStack()->undo(); // the run
+                    }
+                }
+                // Lane points landing on an occupied tick replace the point
+                // there (addLanePoint's same-tick rule), for a duplicate and
+                // a move alike — never a shadowing same-tick pair.
+                if (ok) {
+                    doc.addLanePoint(track, 7, base + step * 310, 20);
+                    doc.addLanePoint(track, 7, base + step * 312, 90);
+                    std::vector<DocLanePoint> lp;
+                    for (const DocLanePoint &dp : doc.lanePoints(track, 7)) {
+                        if (dp.tick == base + step * 310)
+                            lp.push_back(dp);
+                    }
+                    auto pointsAt = [&](uint64_t tick, int *value) {
+                        int found = 0;
+                        for (const DocLanePoint &dp : doc.lanePoints(track, 7)) {
+                            if (dp.tick == tick) {
+                                found++;
+                                *value = dp.value;
+                            }
+                        }
+                        return found;
+                    };
+                    int value = -1;
+                    doc.duplicateRange({}, lp, step * 2);
+                    mutateAndCheck("events unsorted after lane-landing duplicateRange");
+                    if (lp.size() != 1 || pointsAt(base + step * 312, &value) != 1 || value != 20 ||
+                        pointsAt(base + step * 310, &value) != 1 || value != 20) {
+                        fail("duplicateRange left a same-tick lane duplicate");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->undo();
+                        if (pointsAt(base + step * 312, &value) != 1 || value != 90) {
+                            fail("lane-landing duplicateRange undo did not restore");
+                            ok = false;
+                        }
+                    }
+                    if (ok) {
+                        doc.moveRange({}, lp, step * 2);
+                        mutateAndCheck("events unsorted after lane-landing moveRange");
+                        if (pointsAt(base + step * 312, &value) != 1 || value != 20 ||
+                            pointsAt(base + step * 310, &value) != 0) {
+                            fail("moveRange left a same-tick lane duplicate");
+                            ok = false;
+                        } else {
+                            doc.undoStack()->undo();
+                            if (pointsAt(base + step * 312, &value) != 1 || value != 90 ||
+                                pointsAt(base + step * 310, &value) != 1 || value != 20) {
+                                fail("lane-landing moveRange undo did not restore");
+                                ok = false;
+                            }
+                        }
+                    }
+                    if (ok) {
+                        doc.undoStack()->undo(); // point at 312
+                        doc.undoStack()->undo(); // point at 310
+                    }
+                }
             }
 
             // Bulk lane-point move: several automation points shift by
