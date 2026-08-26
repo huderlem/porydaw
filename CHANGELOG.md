@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## Changed
 - Unified settings into a main Settings window.
 
+## Fixed
+- Fixed issue where deleting every note and event from a track would cause the track to be deleted.
+
 ## [1.1.0] - 2026-08-20
 
 ## Added

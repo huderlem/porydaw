@@ -1270,6 +1270,135 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Stripping EVERY channel event from a track (a time-selection
+            // delete from tick 0 takes the voice seed too) must not make the
+            // track vanish from the engine map: the edit re-seeds a tick-0
+            // program change carrying the voice the track had.
+            if (ok && !doc.canAddTrack()) {
+                fail("keep-alive check needs a free track slot");
+                ok = false;
+            }
+            if (ok) {
+                const int before = doc.engineTrackCount();
+                const int t = doc.addTrack(42);
+                // Deleting the lone tick-0 seed of an empty track would only
+                // re-seed it: the document must stay untouched, no command.
+                const int undoCount = doc.undoStack()->count();
+                doc.deleteLanePoints(t, DOC_CC_VOICE, doc.lanePoints(t, DOC_CC_VOICE));
+                DocLanePoint p;
+                if (doc.undoStack()->count() != undoCount || doc.smfTrackFor(t) < 0 ||
+                    !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 42) {
+                    fail("deleting an empty track's lone voice seed was not a no-op");
+                    ok = false;
+                }
+                doc.addNotes(t, {{base, 60, step, 90}});
+                doc.addLanePoint(t, 7, base, 80);
+                SongDocument::RangeEdit edit;
+                for (const DocNote &n : doc.notesForTrack(t))
+                    edit.removeNotes.push_back(n);
+                for (uint8_t cc : {uint8_t(7), DOC_CC_VOICE})
+                    for (const DocLanePoint &pt : doc.lanePoints(t, cc))
+                        edit.removePoints.push_back(pt);
+                doc.applyRangeEdit(QStringLiteral("delete range"), edit);
+                mutateAndCheck("events unsorted after emptying range edit");
+                if (doc.engineTrackCount() != before + 1 || doc.smfTrackFor(t) < 0) {
+                    fail("range delete of all channel events dropped the track");
+                    ok = false;
+                } else if (!doc.notesForTrack(t).empty() || !doc.lanePoints(t, 7).empty() ||
+                           !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 42) {
+                    fail("emptied track did not keep a tick-0 voice re-seed");
+                    ok = false;
+                } else {
+                    // Same guarantee through deleteNotes, on a track whose
+                    // only channel events are notes (the re-seed itself).
+                    for (const DocLanePoint &vp : doc.lanePoints(t, DOC_CC_VOICE))
+                        doc.addNotes(t, {{vp.tick + step, 64, step, 90}});
+                    std::vector<DocLanePoint> seeds = doc.lanePoints(t, DOC_CC_VOICE);
+                    doc.deleteLanePoints(t, DOC_CC_VOICE, seeds);
+                    if (doc.smfTrackFor(t) < 0 || doc.findLanePoint(t, DOC_CC_VOICE, 0, &p)) {
+                        fail("deleting the voice seed beside a note re-seeded (it should not)");
+                        ok = false;
+                    }
+                    // A program change later in the track is not its initial
+                    // voice: the re-seed must not promote it to tick 0.
+                    doc.addLanePoint(t, DOC_CC_VOICE, base + step * 3, 30);
+                    doc.deleteNotes(doc.notesForTrack(t));
+                    for (const DocLanePoint &vp : doc.lanePoints(t, DOC_CC_VOICE))
+                        doc.deleteLanePoints(t, DOC_CC_VOICE, {vp});
+                    if (doc.engineTrackCount() != before + 1 || doc.smfTrackFor(t) < 0 ||
+                        !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 0 ||
+                        doc.lanePoints(t, DOC_CC_VOICE).size() != 1) {
+                        fail("deleteNotes/deleteLanePoints of the last channel events dropped "
+                             "the track or re-seeded a later voice");
+                        ok = false;
+                    }
+                    // Undo unwinds the re-seed along with the delete (two
+                    // commands: the note delete, then the voice delete).
+                    doc.undoStack()->undo();
+                    doc.undoStack()->undo();
+                    if (doc.notesForTrack(t).size() != 1 ||
+                        doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) ||
+                        doc.lanePoints(t, DOC_CC_VOICE).size() != 1) {
+                        fail("undo after keep-alive delete did not restore the note / drop the "
+                             "re-seed");
+                        ok = false;
+                    }
+                    doc.undoStack()->redo();
+                    doc.undoStack()->redo();
+                    // A range delete on a track kept alive by an event the
+                    // view has no lane for (portamento, CC5) must still keep
+                    // the tick-0 voice — unless the edit writes its own.
+                    doc.addNotes(t, {{base, 60, step, 90}});
+                    doc.addLanePoint(t, 5, base + step, 3);
+                    doc.deleteLanePoints(t, DOC_CC_VOICE, doc.lanePoints(t, DOC_CC_VOICE));
+                    doc.addLanePoint(t, DOC_CC_VOICE, 0, 42);
+                    SongDocument::RangeEdit sweep;
+                    for (const DocNote &n : doc.notesForTrack(t))
+                        sweep.removeNotes.push_back(n);
+                    for (const DocLanePoint &vp : doc.lanePoints(t, DOC_CC_VOICE))
+                        sweep.removePoints.push_back(vp);
+                    doc.applyRangeEdit(QStringLiteral("delete range"), sweep);
+                    if (!doc.notesForTrack(t).empty() || doc.lanePoints(t, 5).size() != 1 ||
+                        doc.lanePoints(t, DOC_CC_VOICE).size() != 1 ||
+                        !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 42) {
+                        fail("range delete over a CC5-kept track lost the tick-0 voice");
+                        ok = false;
+                    }
+                    SongDocument::RangeEdit over;
+                    for (const DocLanePoint &vp : doc.lanePoints(t, DOC_CC_VOICE))
+                        over.removePoints.push_back(vp);
+                    over.addPoints.push_back({t, DOC_CC_VOICE, {{0, 50}}});
+                    doc.applyRangeEdit(QStringLiteral("paste range"), over);
+                    if (doc.lanePoints(t, DOC_CC_VOICE).size() != 1 ||
+                        !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 50) {
+                        fail("range paste of a tick-0 voice did not replace the seed");
+                        ok = false;
+                    }
+                    doc.deleteLanePoints(t, 5, doc.lanePoints(t, 5));
+                    doc.deleteLanePoints(t, DOC_CC_VOICE, doc.lanePoints(t, DOC_CC_VOICE));
+                    // Ripple delete of the whole track content re-seeds too.
+                    doc.addNotes(t, {{base, 60, step, 90}});
+                    doc.deleteLanePoints(t, DOC_CC_VOICE, doc.lanePoints(t, DOC_CC_VOICE));
+                    SongDocument::RippleScope scope;
+                    scope.tracks = {t};
+                    if (!doc.removeTimeRange(0, base + step * 8, scope)) {
+                        fail("keep-alive ripple delete reported nothing to do");
+                        ok = false;
+                    }
+                    if (doc.smfTrackFor(t) < 0 || !doc.notesForTrack(t).empty() ||
+                        !doc.findLanePoint(t, DOC_CC_VOICE, 0, &p) || p.value != 0) {
+                        fail("ripple delete of the last channel events dropped the track");
+                        ok = false;
+                    }
+                }
+                if (ok)
+                    doc.deleteTrack(t);
+                if (ok && doc.engineTrackCount() != before) {
+                    fail("keep-alive track could not be deleted normally");
+                    ok = false;
+                }
+            }
+
             // Range move (time-selection nudge): notes plus CC and tempo
             // points shift together by a tick delta as ONE undoable command,
             // with values intact (events move as raw bytes).

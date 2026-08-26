@@ -740,6 +740,117 @@ void SongDocument::appendRemoveOps(std::vector<EditOp> &ops, int smfTrack,
     }
 }
 
+void SongDocument::appendVoiceSeedOp(std::vector<EditOp> &ops, int smfTrack, uint8_t channel,
+                                     int voice) const
+{
+    EditOp seed;
+    seed.type = EditOp::InsertEvent;
+    seed.smfTrack = smfTrack;
+    seed.event = makeLaneEvent(DOC_CC_VOICE, channel, 0, voice);
+    ops.push_back(seed);
+}
+
+void SongDocument::keepInitialVoiceOps(std::vector<EditOp> &ops,
+                                       const std::vector<std::vector<size_t>> &removals) const
+{
+    for (size_t t = 0; t < removals.size() && t < m_smf.tracks.size(); t++) {
+        if (removals[t].empty())
+            continue;
+        const int engineTrack = engineTrackForChunk(int(t));
+        if (engineTrack < 0)
+            continue;
+        const uint8_t channel = channelFor(engineTrack);
+        const auto isSeed = [&](const SmfEvent &ev) {
+            return ev.tick == 0 && ev.isChannel() && ev.typeNibble() == 0xC &&
+                   ev.channel() == channel;
+        };
+        // An edit that writes its own tick-0 voice replaces the seed (the
+        // same-tick rule); keeping the old one too would leave a duplicate.
+        bool replaced = false;
+        for (const EditOp &op : ops) {
+            if (op.type == EditOp::InsertEvent && op.smfTrack == int(t) && isSeed(op.event)) {
+                replaced = true;
+                break;
+            }
+        }
+        if (replaced)
+            continue;
+        const std::vector<SmfEvent> &evs = m_smf.tracks[t].events;
+        ops.erase(std::remove_if(ops.begin(), ops.end(),
+                                 [&](const EditOp &op) {
+                                     return op.type == EditOp::RemoveEvent &&
+                                            op.smfTrack == int(t) && op.index < evs.size() &&
+                                            isSeed(evs[op.index]);
+                                 }),
+                  ops.end());
+    }
+}
+
+void SongDocument::appendTrackKeepAliveOps(std::vector<EditOp> &ops,
+                                           const std::vector<std::vector<size_t>> &removals) const
+{
+    for (size_t t = 0; t < removals.size() && t < m_smf.tracks.size(); t++) {
+        if (removals[t].empty())
+            continue;
+        const int engineTrack = engineTrackForChunk(int(t));
+        if (engineTrack < 0)
+            continue;
+        // A chunk the edit writes a channel event into stays an engine
+        // track on its own (the inserts are already in `ops`).
+        bool keepsChannel = false;
+        for (const EditOp &op : ops) {
+            if (op.type == EditOp::InsertEvent && op.smfTrack == int(t) && op.event.isChannel()) {
+                keepsChannel = true;
+                break;
+            }
+        }
+        if (keepsChannel)
+            continue;
+        const std::vector<SmfEvent> &evs = m_smf.tracks[t].events;
+        std::vector<bool> removed(evs.size(), false);
+        for (size_t index : removals[t]) {
+            if (index < removed.size())
+                removed[index] = true;
+        }
+        const uint8_t channel = channelFor(engineTrack);
+        bool survives = false;
+        size_t removedChannelCount = 0;
+        size_t lastRemoved = 0;
+        // The voice in effect at tick 0: the track's tick-0 program change
+        // (the last one there wins, as in playback) or, without one, the
+        // engine default of 0. A later program change is not the initial
+        // voice and must not become one.
+        int voice = 0;
+        for (size_t i = 0; i < evs.size() && !survives; i++) {
+            if (!evs[i].isChannel())
+                continue;
+            if (!removed[i]) {
+                survives = true;
+                continue;
+            }
+            removedChannelCount++;
+            lastRemoved = i;
+            if (evs[i].tick == 0 && evs[i].typeNibble() == 0xC && evs[i].channel() == channel)
+                voice = evs[i].data0;
+        }
+        if (survives)
+            continue;
+        const SmfEvent seed = makeLaneEvent(DOC_CC_VOICE, channel, 0, voice);
+        if (removedChannelCount == 1 && evs[lastRemoved] == seed) {
+            // Deleting the lone seed would only re-seed it: drop the removal
+            // instead so the command doesn't land as a dirtying no-op.
+            ops.erase(std::remove_if(ops.begin(), ops.end(),
+                                     [&](const EditOp &op) {
+                                         return op.type == EditOp::RemoveEvent &&
+                                                op.smfTrack == int(t) && op.index == lastRemoved;
+                                     }),
+                      ops.end());
+            continue;
+        }
+        appendVoiceSeedOp(ops, int(t), channel, voice);
+    }
+}
+
 namespace {
 // Two lane events of the same lane: same tempo meta, or the same channel
 // status (type + channel) and, for controllers, the same controller.
@@ -932,17 +1043,17 @@ void SongDocument::deleteNotes(const std::vector<DocNote> &notes)
     // Group removal indices per SMF track so each track's removals apply in
     // descending order.
     std::vector<EditOp> ops;
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocNote &note : notes) {
-            if (note.smfTrack != int(t))
-                continue;
-            indices.push_back(note.onIndex);
-            if (!note.unterminated())
-                indices.push_back(note.endIndex);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    for (const DocNote &note : notes) {
+        if (note.smfTrack < 0 || note.smfTrack >= int(removals.size()))
+            continue;
+        removals[size_t(note.smfTrack)].push_back(note.onIndex);
+        if (!note.unterminated())
+            removals[size_t(note.smfTrack)].push_back(note.endIndex);
     }
+    for (size_t t = 0; t < removals.size(); t++)
+        appendRemoveOps(ops, int(t), removals[t]);
+    appendTrackKeepAliveOps(ops, removals);
     pushEdit(tr("delete %n note(s)", nullptr, int(notes.size())), std::move(ops));
 }
 
@@ -1305,7 +1416,9 @@ void SongDocument::writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBeg
     }
     if (overwritten.empty() && points.empty())
         return;
-    appendRemoveOps(ops, smfTrack, std::move(overwritten));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    removals[size_t(smfTrack)] = std::move(overwritten);
+    appendRemoveOps(ops, smfTrack, removals[size_t(smfTrack)]);
     const uint8_t channel = channelFor(engineTrack);
     for (const LanePointValue &pt : points) {
         EditOp op;
@@ -1314,6 +1427,7 @@ void SongDocument::writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBeg
         op.event = makeLaneEvent(cc, channel, pt.tick, pt.value);
         ops.push_back(op);
     }
+    appendTrackKeepAliveOps(ops, removals);
     pushEdit(tr("draw automation points"), std::move(ops));
 }
 
@@ -1460,14 +1574,14 @@ void SongDocument::deleteLanePoints(int engineTrack, uint8_t cc,
     if (points.empty())
         return;
     std::vector<EditOp> ops;
-    for (size_t t = 0; t < m_smf.tracks.size(); t++) {
-        std::vector<size_t> indices;
-        for (const DocLanePoint &pt : points) {
-            if (pt.smfTrack == int(t))
-                indices.push_back(pt.index);
-        }
-        appendRemoveOps(ops, int(t), std::move(indices));
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    for (const DocLanePoint &pt : points) {
+        if (pt.smfTrack >= 0 && pt.smfTrack < int(removals.size()))
+            removals[size_t(pt.smfTrack)].push_back(pt.index);
     }
+    for (size_t t = 0; t < removals.size(); t++)
+        appendRemoveOps(ops, int(t), removals[t]);
+    appendTrackKeepAliveOps(ops, removals);
     pushEdit(cc == DOC_CC_VOICE ? tr("delete voice change(s)") : tr("delete automation point(s)"),
              std::move(ops));
 }
@@ -1501,7 +1615,7 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
     // All removals first (per SMF track, descending — appendRemoveOps sorts
     // and dedups), so every recorded index stays valid at apply time.
     for (size_t t = 0; t < m_smf.tracks.size(); t++)
-        appendRemoveOps(ops, int(t), std::move(removals[t]));
+        appendRemoveOps(ops, int(t), removals[t]);
 
     for (const RangeEdit::TrackNotes &tn : edit.addNotes) {
         const int smfTrack = smfTrackFor(tn.engineTrack);
@@ -1526,6 +1640,8 @@ void SongDocument::applyRangeEdit(const QString &text, const RangeEdit &edit)
         }
     }
     ops.insert(ops.end(), trims.begin(), trims.end());
+    keepInitialVoiceOps(ops, removals);
+    appendTrackKeepAliveOps(ops, removals);
     pushEdit(text, std::move(ops));
 }
 
@@ -1825,8 +1941,10 @@ bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick, const R
 
     std::vector<EditOp> ops;
     for (size_t t = 0; t < m_smf.tracks.size(); t++)
-        appendRemoveOps(ops, int(t), std::move(removals[t]));
+        appendRemoveOps(ops, int(t), removals[t]);
     ops.insert(ops.end(), inserts.begin(), inserts.end());
+    keepInitialVoiceOps(ops, removals);
+    appendTrackKeepAliveOps(ops, removals);
     ops.insert(ops.end(), trackEnds.begin(), trackEnds.end());
     if (ops.empty())
         return false;
@@ -2100,11 +2218,7 @@ int SongDocument::addTrack(int voice)
     insert.type = EditOp::InsertTrack;
     insert.smfTrack = smfTrack;
     ops.push_back(insert);
-    EditOp seed;
-    seed.type = EditOp::InsertEvent;
-    seed.smfTrack = smfTrack;
-    seed.event = makeChannelEvent(0xC, uint8_t(channel), 0, uint8_t(std::clamp(voice, 0, 127)), 0);
-    ops.push_back(seed);
+    appendVoiceSeedOp(ops, smfTrack, uint8_t(channel), voice);
     pushEdit(tr("add track"), std::move(ops));
 
     for (int t = 0; t < engineTrackCount(); t++) {

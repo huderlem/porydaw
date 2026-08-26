@@ -481,6 +481,34 @@ class SongDocument : public QObject
     void appendNoteInsertOps(std::vector<EditOp> &ops, int smfTrack, uint8_t channel, uint64_t tick,
                              uint8_t key, uint32_t duration, uint8_t velocity) const;
     void appendRemoveOps(std::vector<EditOp> &ops, int smfTrack, std::vector<size_t> indices) const;
+    // The tick-0 program change a new track is born with (addTrack), also
+    // the keep-alive re-seed below.
+    void appendVoiceSeedOp(std::vector<EditOp> &ops, int smfTrack, uint8_t channel,
+                           int voice) const;
+    // A chunk is an engine track only while it holds a channel event
+    // (rebuildTrackMap), so a musical edit that strips the last one would
+    // silently delete the track. Appends, for every chunk whose channel
+    // events are ALL in `removals` and that no InsertEvent already in `ops`
+    // gives a new channel event, a tick-0 program-change re-seed on the
+    // track's channel carrying the voice in effect at tick 0 — the track
+    // survives, empty. When the only removed channel event IS that seed, the
+    // removal is dropped instead (no dirtying no-op command). Call after the
+    // removals AND inserts are in `ops`. The raw event-list edits
+    // (deleteRawEvents/modifyRawEvent) deliberately bypass this: they are how
+    // a track is turned back into a metadata chunk.
+    void appendTrackKeepAliveOps(std::vector<EditOp> &ops,
+                                 const std::vector<std::vector<size_t>> &removals) const;
+    // Range gestures (a time-selection delete/cut/paste, a ripple delete)
+    // sweep every lane, the voice lane included, so a range from tick 0
+    // would take the track's initial voice with it even when other events
+    // (advanced CCs with no lane, say) keep the track alive. Drops the
+    // removal of every tick-0 program change on the track's channel from
+    // `ops` — unless an InsertEvent in `ops` writes a new tick-0 voice, which
+    // replaces it. Call after removals AND inserts are in `ops`, before
+    // appendTrackKeepAliveOps. Explicit voice-node deletes (deleteLanePoints)
+    // don't go through this: there the user asked for exactly that.
+    void keepInitialVoiceOps(std::vector<EditOp> &ops,
+                             const std::vector<std::vector<size_t>> &removals) const;
     // Lane points landing (at +dTick) on an occupied tick of their own lane
     // replace the point sitting there — addLanePoint's same-tick rule; only
     // the last same-tick duplicate is audible, so keeping it would leave an
