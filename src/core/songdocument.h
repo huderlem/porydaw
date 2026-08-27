@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "core/noteid.h"
+#include "core/ripplescope.h"
 #include "core/smf.h"
 #include "project/decompproject.h"
 
@@ -304,12 +305,28 @@ class SongDocument : public QObject
     // markers and other metas (moved to the seam, never deleted), and each
     // chunk's end-of-track tick, so the song itself gets shorter. One
     // undoable command; returns false when nothing would change.
-    struct RippleScope {
-        std::vector<int> tracks;                    // engine tracks (ignored when wholeSong)
-        std::vector<std::pair<int, uint8_t>> lanes; // (engineTrack, cc); -1 = tempo
-        bool wholeSong = false;
-    };
+    using RippleScope = ::RippleScope;
     bool removeTimeRange(uint64_t startTick, uint64_t endTick, const RippleScope &scope);
+    // Ripple insert (time-selection "Insert empty space", the insert-space
+    // drag): the inverse of removeTimeRange. Opens a gap of `span` ticks at
+    // atTick on the scoped streams — everything at or after atTick moves
+    // right by the span. Notes travel as pairs keyed on their note-on, so a
+    // note starting before the seam keeps its length and stays put. Value
+    // streams need no seam rescue: the last point before the gap simply
+    // keeps governing it. The one exception is a gap at tick 0: the song's
+    // setup events there (voice, CCs, tempo, time signature, metas) stay at
+    // tick 0 — they are the initial state, not content — while notes shift.
+    // wholeSong shifts every engine track plus the global rows and grows
+    // each chunk's end-of-track tick, so the song itself gets longer. One
+    // undoable command; returns false when nothing would change.
+    bool insertTimeRange(uint64_t atTick, uint64_t span, const RippleScope &scope);
+    // insertTimeRange's rule for non-note events, shared with the drag
+    // preview so the two can't drift: an event at `tick` shifts when the
+    // gap opens at `at` — except the tick-0 setup when the gap opens at 0.
+    static bool insertShiftsEvent(uint64_t at, uint64_t tick)
+    {
+        return tick >= at && !(at == 0 && tick == 0);
+    }
 
     // Raw SMF edits (the MIDI event list view): direct event-level operations
     // on one chunk, indices being current positions in its event vector.

@@ -341,6 +341,26 @@ int runKeymapCheck()
                   registry.modifierBinding(QStringLiteral("roll.velocity_drag")) ==
                       Qt::ControlModifier,
               "range.move and velocity drag defaults must not share a chord");
+        // The insert-space chord starts from the same surfaces (no band
+        // needed), so it must sit clear of the band chords, the roll's
+        // velocity drag and the velocity lane's detent unlock.
+        check(registry.modifierBinding(QStringLiteral("range.insert_space")) ==
+                  (Qt::ShiftModifier | Qt::AltModifier),
+              "range.insert_space should default to Shift+Alt");
+        check(registry
+                  .modifierConflicts(QStringLiteral("range.insert_space"),
+                                     keymap::Context::TimeSelection, Qt::AltModifier)
+                  .contains(QStringLiteral("range.move")),
+              "range.insert_space on Alt should conflict with range.move");
+        check(registry
+                  .modifierConflicts(QStringLiteral("range.insert_space"),
+                                     keymap::Context::TimeSelection, Qt::ControlModifier)
+                  .contains(QStringLiteral("roll.velocity_drag")),
+              "range.insert_space on Ctrl should conflict with the roll's velocity drag");
+        check(registry.matchesModifier(Qt::ShiftModifier | Qt::AltModifier,
+                                       QStringLiteral("range.insert_space")) &&
+                  !registry.matchesModifier(Qt::AltModifier, QStringLiteral("range.insert_space")),
+              "range.insert_space should match exactly Shift+Alt");
 
         // Override / bare / unbind / reset through the same delta-only
         // store; the bare chord persists as "None", unbound as the empty

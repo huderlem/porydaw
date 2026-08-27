@@ -151,6 +151,14 @@ const Def kDefs[] = {
     {"range.duplicate", Context::TimeSelection, QT_TR_NOOP("Time Selection"),
      QT_TR_NOOP("Duplicate Contents (Hold + Drag Band)"), QKeySequence::UnknownKey, "Ctrl+Alt",
      true},
+    // Insert empty space: no band needed — hold the chord and drag right
+    // from anywhere on the ruler (whole song), the roll (the selected tracks)
+    // or a lane row (that row) to open a gap there; everything after it
+    // shifts right. Shift+Alt keeps it in the Alt family with the two band
+    // chords and clear of Alt alone (fine snap) and Ctrl (velocity drag,
+    // axis lock) on the surfaces it starts from.
+    {"range.insert_space", Context::TimeSelection, QT_TR_NOOP("Time Selection"),
+     QT_TR_NOOP("Insert Empty Space (Hold + Drag)"), QKeySequence::UnknownKey, "Shift+Alt", true},
     // MIDI event list: same-tick reorder nudges (the keyboard face of the
     // row drag).
     {"eventlist.move_up", Context::EventList, QT_TR_NOOP("MIDI Event List"),
@@ -340,16 +348,24 @@ Qt::KeyboardModifiers Registry::modifierBinding(const QString &id) const
     Q_ASSERT(def && def->modifier);
     if (!def || !def->modifier)
         return Qt::NoModifier;
-    const QSettings settings;
-    const QString key = settingsKey(id);
-    if (!settings.contains(key))
-        return modifierFromText(QLatin1String(def->keys));
-    const QString stored = settings.value(key).toString();
-    if (stored.isEmpty()) // explicitly unbound: the gesture is off
-        return Qt::NoModifier;
-    const Qt::KeyboardModifiers mods = modifierFromText(stored);
-    if (mods == Qt::NoModifier) // unparseable hand-edited value: fall back
-        return modifierFromText(QLatin1String(def->keys));
+    const auto cached = m_modifierChords.constFind(id);
+    if (cached != m_modifierChords.constEnd())
+        return *cached;
+    const auto resolve = [&]() -> Qt::KeyboardModifiers {
+        const QSettings settings;
+        const QString key = settingsKey(id);
+        if (!settings.contains(key))
+            return modifierFromText(QLatin1String(def->keys));
+        const QString stored = settings.value(key).toString();
+        if (stored.isEmpty()) // explicitly unbound: the gesture is off
+            return Qt::NoModifier;
+        const Qt::KeyboardModifiers mods = modifierFromText(stored);
+        if (mods == Qt::NoModifier) // unparseable hand-edited value: fall back
+            return modifierFromText(QLatin1String(def->keys));
+        return mods;
+    };
+    const Qt::KeyboardModifiers mods = resolve();
+    m_modifierChords.insert(id, mods);
     return mods;
 }
 
@@ -451,6 +467,7 @@ WheelAction Registry::wheelAction(Qt::KeyboardModifiers mods) const
 void Registry::storeChanged()
 {
     m_wheelChords.reset();
+    m_modifierChords.clear();
     emit bindingsChanged();
 }
 

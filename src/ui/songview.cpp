@@ -291,13 +291,35 @@ QColor ghostNoteColor(int track, bool accidentalRow)
 // timeSelCovered says whether this widget (or row) is inside the active time
 // selection's scope, so the selection band tints exactly the covered content.
 void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, qreal origin,
-                  bool timeSelCovered)
+                  bool timeSelCovered, bool insertCovered)
 {
     const MidiTimeline *tl = sv->timeline();
     if (!tl)
         return;
 
     const qreal dpr = p.device()->devicePixelRatioF();
+    // A live insert-space drag: the opening gap, hatched, with dashed edges
+    // — only on the rows the gap will actually open on.
+    const SongView::RangeDrag &insertDrag = sv->rangeDrag();
+    if (insertCovered && insertDrag.active && insertDrag.insert && insertDrag.dTick > 0) {
+        const qreal gx0 = sv->displayX(double(insertDrag.at), origin, dpr);
+        const qreal gx1 =
+            sv->displayX(double(insertDrag.at) + double(insertDrag.dTick), origin, dpr);
+        if (gx1 > rect.left() && gx0 < rect.right()) {
+            QColor fill = themes::color(themes::Role::song_view_edit_preview_outline);
+            fill.setAlpha(26);
+            const QRectF gap(gx0, rect.top(), gx1 - gx0, rect.height());
+            p.fillRect(gap.intersected(QRectF(rect)), fill);
+            QBrush hatch(fill, Qt::BDiagPattern);
+            hatch.setColor(QColor(fill.red(), fill.green(), fill.blue(), 70));
+            p.fillRect(gap.intersected(QRectF(rect)), hatch);
+            QPen pen(themes::color(themes::Role::song_view_edit_preview_outline), 1);
+            pen.setStyle(Qt::DashLine);
+            p.setPen(pen);
+            p.drawLine(QLineF(gx0, rect.top(), gx0, rect.bottom()));
+            p.drawLine(QLineF(gx1, rect.top(), gx1, rect.bottom()));
+        }
+    }
     const SongView::TimeSelection &tsel = sv->timeSelection();
     if (timeSelCovered && tsel.active()) {
         const qreal x0 = sv->displayX(double(tsel.startTick), origin, dpr);
@@ -312,9 +334,11 @@ void drawOverlays(QPainter &p, const SongView *sv, const QRect &rect, qreal orig
             p.drawLine(QLineF(x1, rect.top(), x1, rect.bottom()));
         }
         // A live range drag: the band itself stays put; where the contents
-        // will land shows as a separate dashed landing frame.
+        // will land shows as a separate dashed landing frame. An insert
+        // drag never moves the band, so it draws no frame (its gap is the
+        // hatch above).
         const SongView::RangeDrag &drag = sv->rangeDrag();
-        if (drag.active && drag.dTick != 0) {
+        if (drag.active && !drag.insert && drag.dTick != 0) {
             const qreal lx0 =
                 sv->displayX(double(int64_t(tsel.startTick) + drag.dTick), origin, dpr);
             const qreal lx1 = sv->displayX(double(int64_t(tsel.endTick) + drag.dTick), origin, dpr);
@@ -678,8 +702,10 @@ class TimeRuler : public QWidget
         p.setClipRect(area);
         drawPreRoll(p, m_sv, area, kGutterW, chrome);
 
-        // Loop band across the whole ruler height.
-        drawOverlays(p, m_sv, area, kGutterW, true);
+        // Loop band across the whole ruler height. The ruler previews every
+        // scope (like the landing frame): it shows where in time the edit
+        // happens, not which rows it touches.
+        drawOverlays(p, m_sv, area, kGutterW, true, true);
 
         const qreal physicalPixel = logicalPhysicalPixel(dpr);
         const qreal roundingMargin = physicalPixel / 2.0;
@@ -885,6 +911,17 @@ class TimeRuler : public QWidget
             m_rangeDragging = true;
             return;
         }
+        // The insert-space chord anywhere on the ruler: a drag opens a gap
+        // across the whole song from the press.
+        if (doc && m_sv->insertGestureFor(event->modifiers())) {
+            SongView::InsertScope scope;
+            scope.wholeSong = true;
+            if (m_sv->beginInsertDrag(m_sv->tickAtContentX(event->position().x() - kGutterW),
+                                      scope)) {
+                m_rangeDragging = true;
+                return;
+            }
+        }
         // Elsewhere on the ruler: place the edit cursor (playback follows on
         // release). Deferred like the right press: a drag past the click
         // threshold sweeps out a time selection from the press instead.
@@ -966,6 +1003,8 @@ class TimeRuler : public QWidget
                  m_sv->rangeGestureFor(event->modifiers()) != SongView::RangeGesture::None &&
                  insideBand(event->position().x()))
             setCursor(Qt::SizeHorCursor);
+        else if (m_sv->document() && m_sv->insertGestureFor(event->modifiers()))
+            setCursor(Qt::SplitHCursor);
         else
             setCursor(Qt::ArrowCursor);
     }
@@ -1218,12 +1257,15 @@ class TimeRuler : public QWidget
         remove->setEnabled(tl->loopStartTick != UINT64_MAX || tl->loopEndTick != UINT64_MAX);
         QAction *loopFromSel = nullptr;
         QAction *removeContents = nullptr;
+        QAction *insertSpace = nullptr;
         QAction *clearSel = nullptr;
         const SongView::TimeSelection sel = m_sv->timeSelection();
         if (sel.active()) {
             menu.addSeparator();
             loopFromSel = menu.addAction(SongView::tr("Set loop to selection"));
             removeContents = menu.addAction(SongView::tr("Remove selection contents (shift left)"));
+            insertSpace =
+                menu.addAction(SongView::tr("Insert empty space at selection (shift right)"));
             clearSel = menu.addAction(SongView::tr("Clear time selection"));
         }
         menu.addSeparator();
@@ -1255,6 +1297,8 @@ class TimeRuler : public QWidget
             doc->setLoopTick(true, int64_t(sel.endTick));
         } else if (chosen && chosen == removeContents) {
             m_sv->removeTimeSelectionContents();
+        } else if (chosen && chosen == insertSpace) {
+            m_sv->insertTimeSelectionSpace();
         } else if (chosen && chosen == clearSel) {
             m_sv->clearTimeSelection();
         } else if (chosen == editSig) {
@@ -1498,7 +1542,8 @@ class PianoRoll : public TimelineSurface
         }
 
         drawOverlays(p, m_sv, grid, kKeyboardW,
-                     m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()));
+                     m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()),
+                     m_sv->rangeDragCoversTrack(m_sv->selectedTrack()));
 
         p.restore();
         drawKeyboard(p);
@@ -1576,6 +1621,19 @@ class PianoRoll : public TimelineSurface
             m_sv->beginRangeDrag(m_pressTick, rangeGesture == SongView::RangeGesture::Duplicate)) {
             m_drag = Drag::RangeMove;
             return;
+        }
+        // The insert-space chord: a drag from anywhere in the roll opens a
+        // gap from the press on the header-selected tracks — every used
+        // track selected means the whole song, like a band's ripple scope
+        // (the ruler always does the whole song). Shares the range drag's
+        // preview and release path.
+        if (doc && m_sv->insertGestureFor(event->modifiers())) {
+            SongView::InsertScope scope;
+            if (m_sv->selectedTracksInsertScope(&scope) &&
+                m_sv->beginInsertDrag(m_pressTick, scope)) {
+                m_drag = Drag::RangeMove;
+                return;
+            }
         }
 
         if (hit) {
@@ -1797,10 +1855,14 @@ class PianoRoll : public TimelineSurface
             // range chord wins over everything inside the band.
             const auto &keys = keymap::Registry::instance();
             const auto hoverMods = event->modifiers();
+            SongView::InsertScope insertScope; // the press falls through without one
             if (m_sv->document() &&
                 m_sv->rangeGestureFor(hoverMods) != SongView::RangeGesture::None &&
                 insideTimeSelection(event->position().x()))
                 setCursor(Qt::SizeHorCursor);
+            else if (m_sv->document() && m_sv->insertGestureFor(hoverMods) &&
+                     m_sv->selectedTracksInsertScope(&insertScope))
+                setCursor(Qt::SplitHCursor);
             else if (hit && nearRightEdge(*hit, event->position()))
                 setCursor(m_cursors.rightEdge);
             else if (hit && nearLeftEdge(*hit, event->position()))
@@ -3670,6 +3732,16 @@ class AutomationArea : public TimelineSurface
                 m_rangeDragging = true;
                 return;
             }
+            // The insert-space chord: a drag opens a gap on the pressed row
+            // alone (its lane, the voice stream, or the tempo row).
+            if (m_sv->document() && m_sv->insertGestureFor(event->modifiers())) {
+                SongView::InsertScope scope;
+                scope.lanes = {id};
+                if (m_sv->beginInsertDrag(rawTickAt(event->position().x()), scope)) {
+                    m_rangeDragging = true;
+                    return;
+                }
+            }
         }
         if (row.kind == Row::Voice) {
             voiceRowPress(event);
@@ -3811,6 +3883,9 @@ class AutomationArea : public TimelineSurface
                 setCursor(Qt::SplitVCursor);
             else if (bandHover)
                 setCursor(Qt::SizeHorCursor);
+            else if (hoverRow >= 0 && m_sv->document() &&
+                     m_sv->insertGestureFor(event->modifiers()))
+                setCursor(Qt::SplitHCursor);
             else if (m_pencilMode && drawableAt(event->position().x(), event->pos().y()))
                 setCursor(pencilCursor());
             else
@@ -4258,7 +4333,7 @@ class AutomationArea : public TimelineSurface
             uint8_t cc;
             int track;
             const std::pair<int, uint8_t> id = rowIdentity(m_rows[i]);
-            if (!m_sv->timeSelectionCoversRow(id.first, id.second) ||
+            if (!m_sv->rangeDragCoversRow(id.first, id.second) ||
                 !rowTarget(m_rows[i], &cc, &track))
                 continue;
             for (const DocLanePoint &pt : doc->lanePoints(track, cc))
@@ -5593,7 +5668,8 @@ class AutomationArea : public TimelineSurface
         }
 
         const std::pair<int, uint8_t> id = rowIdentity(row);
-        drawOverlays(p, m_sv, plot, kGutterW, m_sv->timeSelectionCoversRow(id.first, id.second));
+        drawOverlays(p, m_sv, plot, kGutterW, m_sv->timeSelectionCoversRow(id.first, id.second),
+                     m_sv->rangeDragCoversRow(id.first, id.second));
         p.restore();
     }
 
@@ -6258,8 +6334,8 @@ class VelocityLane : public TimelineSurface
             p.fillRect(m_bandRect, band);
             p.drawRect(m_bandRect);
         }
-        drawOverlays(p, m_sv, plot, kGutterW,
-                     m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()));
+        drawOverlays(p, m_sv, plot, kGutterW, m_sv->timeSelectionCoversTrack(m_sv->selectedTrack()),
+                     m_sv->rangeDragCoversTrack(m_sv->selectedTrack()));
         p.restore();
     }
 
@@ -7661,7 +7737,7 @@ class OtherStrip : public TimelineSurface
         p.setClipRect(area, Qt::IntersectClip);
         drawPreRoll(p, m_sv, area, kGutterW,
                     themes::color(themes::Role::song_view_timeline_chrome_background));
-        drawOverlays(p, m_sv, area, kGutterW, false);
+        drawOverlays(p, m_sv, area, kGutterW, false, false);
 
         const int cy = height() / 2;
         for (const StripItem &item : model.strip) {
@@ -9473,6 +9549,41 @@ SongView::RangeGesture SongView::rangeGestureFor(Qt::KeyboardModifiers mods) con
     return RangeGesture::None;
 }
 
+// Names a ripple scope for the status line — one wording for the drag
+// commit and the menu actions alike.
+static QString insertScopeText(const RippleScope &scope)
+{
+    if (scope.wholeSong)
+        return SongView::tr("all tracks");
+    if (scope.tracks.size() == 1)
+        return SongView::tr("track %1").arg(scope.tracks.front() + 1);
+    if (!scope.tracks.empty())
+        return SongView::tr("%n track(s)", nullptr, int(scope.tracks.size()));
+    if (!scope.lanes.empty() && scope.lanes.front().first < 0)
+        return SongView::tr("the tempo lane");
+    return SongView::tr("%n lane(s)", nullptr, int(scope.lanes.size()));
+}
+
+bool SongView::insertGestureFor(Qt::KeyboardModifiers mods) const
+{
+    if (!m_document)
+        return false;
+    return keymap::Registry::instance().matchesModifier(mods, QStringLiteral("range.insert_space"));
+}
+
+bool SongView::beginInsertDrag(double pressTick, const InsertScope &scope)
+{
+    if (!m_document)
+        return false;
+    m_rangeDrag = RangeDrag();
+    m_rangeDrag.active = true;
+    m_rangeDrag.insert = true;
+    m_rangeDrag.pressTick = pressTick;
+    m_rangeDrag.at = snapTick(std::max(0.0, pressTick));
+    m_rangeDrag.insertScope = scope;
+    return true;
+}
+
 bool SongView::beginRangeDrag(double pressTick, bool duplicate)
 {
     if (!m_document || !m_timeSel.active())
@@ -9500,6 +9611,18 @@ void SongView::updateRangeDrag(double cursorTick)
             return;
         m_rangeDrag.armed = true;
     }
+    if (m_rangeDrag.insert) {
+        // The gap grows rightward from the snapped press to the snapped
+        // cursor; a leftward drag opens nothing (it never ripples left —
+        // that is "Remove contents", a deliberate menu action).
+        const int64_t width = std::max<int64_t>(0, int64_t(snapTick(std::max(0.0, cursorTick))) -
+                                                       int64_t(m_rangeDrag.at));
+        if (width == m_rangeDrag.dTick)
+            return;
+        m_rangeDrag.dTick = width;
+        refreshTimelineViews();
+        return;
+    }
     // The band's start rides the cursor's travel and lands on the snap grid;
     // the delta is measured from the start's own snapped position, so an
     // off-grid band moves by whole cells rather than by its grid residue.
@@ -9521,6 +9644,36 @@ void SongView::commitRangeDrag()
         return;
     const RangeDrag drag = m_rangeDrag;
     m_rangeDrag = RangeDrag();
+    if (drag.insert) {
+        if (drag.dTick <= 0 || !m_document || !m_timeline) {
+            refreshTimelineViews();
+            return;
+        }
+        const RippleScope &scope = drag.insertScope;
+        const uint64_t span = uint64_t(drag.dTick);
+        if (!m_document->insertTimeRange(drag.at, span, scope)) {
+            refreshTimelineViews();
+            emit statusMessage(tr("Nothing to shift after the insert point"));
+            return;
+        }
+        // A whole-song gap carries the band with the content it framed: a
+        // band past the seam moves whole, one straddling it grows by the
+        // span (its tail moved). A partial gap leaves it (the other tracks
+        // did not move). The edit cursor stays, like the move/duplicate
+        // drag — only the menu actions park it at the seam.
+        if (scope.wholeSong && m_timeSel.active()) {
+            if (m_timeSel.startTick >= drag.at)
+                m_timeSel.startTick += span;
+            if (m_timeSel.endTick >= drag.at)
+                m_timeSel.endTick += span;
+        }
+        refreshTimelineViews();
+        const double beats = double(span) / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
+        emit statusMessage(tr("Inserted %1 beats of empty space on %2 — later events shifted right")
+                               .arg(beats, 0, 'g', 4)
+                               .arg(insertScopeText(scope)));
+        return;
+    }
     // A band re-swept or cleared mid-gesture (Escape, a song swap) is not
     // ours to move.
     if (drag.dTick == 0 || !m_document || !m_timeline || !m_timeSel.active() ||
@@ -9564,6 +9717,8 @@ void SongView::cancelRangeDrag()
 
 bool SongView::rangeDragCarriesTrackTick(int track, uint64_t tick) const
 {
+    if (m_rangeDrag.insert)
+        return m_rangeDrag.active && tick >= m_rangeDrag.at && rangeDragCoversTrack(track);
     const TimeSelection &sel = m_rangeDrag.sel;
     return m_rangeDrag.active && sel.scope == TimeSelection::Tracks && sel.active() &&
            tick >= sel.startTick && tick < sel.endTick && timeSelectionCoversTrack(track);
@@ -9571,9 +9726,98 @@ bool SongView::rangeDragCarriesTrackTick(int track, uint64_t tick) const
 
 bool SongView::rangeDragCarriesRowTick(int track, uint8_t cc, uint64_t tick) const
 {
+    if (m_rangeDrag.insert) {
+        // The document's rule (the tick-0 setup stays put when the gap opens
+        // at tick 0), so the preview never shows something the commit keeps.
+        return m_rangeDrag.active && SongDocument::insertShiftsEvent(m_rangeDrag.at, tick) &&
+               rangeDragCoversRow(track, cc);
+    }
     const TimeSelection &sel = m_rangeDrag.sel;
     return m_rangeDrag.active && sel.active() && tick >= sel.startTick && tick < sel.endTick &&
            timeSelectionCoversRow(track, cc);
+}
+
+bool SongView::rangeDragCoversTrack(int track) const
+{
+    if (!m_rangeDrag.active)
+        return false;
+    if (!m_rangeDrag.insert)
+        return m_rangeDrag.sel.scope == TimeSelection::Tracks && timeSelectionCoversTrack(track);
+    const InsertScope &scope = m_rangeDrag.insertScope;
+    return scope.wholeSong ||
+           std::find(scope.tracks.begin(), scope.tracks.end(), track) != scope.tracks.end();
+}
+
+bool SongView::rangeDragCoversRow(int track, uint8_t cc) const
+{
+    if (!m_rangeDrag.active)
+        return false;
+    if (!m_rangeDrag.insert)
+        return timeSelectionCoversRow(track, cc);
+    const InsertScope &scope = m_rangeDrag.insertScope;
+    if (scope.wholeSong)
+        return true;
+    if (cc != DOC_CC_TEMPO &&
+        std::find(scope.tracks.begin(), scope.tracks.end(), track) != scope.tracks.end())
+        return true;
+    return std::find(scope.lanes.begin(), scope.lanes.end(), std::pair<int, uint8_t>(track, cc)) !=
+           scope.lanes.end();
+}
+
+// The header-selected tracks as a ripple scope — every used track selected
+// means the whole song. False when nothing usable is selected.
+bool SongView::selectedTracksInsertScope(InsertScope *scope) const
+{
+    if (!m_timeline)
+        return false;
+    scope->tracks = timeSelectionTracks();
+    if (scope->tracks.empty())
+        return false;
+    int used = 0;
+    for (int t = 0; t < 16; t++)
+        used += m_timeline->tracks[t].used ? 1 : 0;
+    scope->wholeSong = int(scope->tracks.size()) == used;
+    return true;
+}
+
+// The ripple scope of the active time selection: its lanes, or its tracks
+// — every used track selected means the whole song.
+bool SongView::timeSelectionRippleScope(InsertScope *scope, QString *scopeText) const
+{
+    if (!m_timeline || !m_timeSel.active())
+        return false;
+    if (m_timeSel.scope == TimeSelection::Lanes) {
+        scope->lanes = m_timeSel.lanes;
+        if (scope->lanes.empty())
+            return false;
+    } else if (!selectedTracksInsertScope(scope)) {
+        return false;
+    }
+    *scopeText = insertScopeText(*scope);
+    return true;
+}
+
+void SongView::insertTimeSelectionSpace()
+{
+    if (!m_document || !m_timeline || !m_timeSel.active())
+        return;
+    const uint64_t s = m_timeSel.startTick;
+    const uint64_t e = m_timeSel.endTick;
+    InsertScope scope;
+    QString scopeText;
+    if (!timeSelectionRippleScope(&scope, &scopeText))
+        return;
+    if (!m_document->insertTimeRange(s, e - s, scope)) {
+        announce(tr("Nothing to shift after the time selection"));
+        return;
+    }
+    // The band stays: it now frames exactly the empty space. Park the edit
+    // cursor at its start, where the gap begins.
+    commitEditCursor(s);
+    const double beats = double(e - s) / double(std::max<uint32_t>(1, m_timeline->ticksPerBeat));
+    announce(tr("Inserted %1 beats of empty space on %2 — later events shifted right")
+                 .arg(beats, 0, 'g', 4)
+                 .arg(scopeText));
 }
 
 void SongView::removeTimeSelectionContents()
@@ -9582,22 +9826,10 @@ void SongView::removeTimeSelectionContents()
         return;
     const uint64_t s = m_timeSel.startTick;
     const uint64_t e = m_timeSel.endTick;
-    SongDocument::RippleScope scope;
+    InsertScope scope;
     QString scopeText;
-    if (m_timeSel.scope == TimeSelection::Lanes) {
-        scope.lanes = m_timeSel.lanes;
-        scopeText = tr("%n lane(s)", nullptr, int(scope.lanes.size()));
-    } else {
-        scope.tracks = timeSelectionTracks();
-        if (scope.tracks.empty())
-            return;
-        int used = 0;
-        for (int t = 0; t < 16; t++)
-            used += m_timeline->tracks[t].used ? 1 : 0;
-        scope.wholeSong = int(scope.tracks.size()) == used;
-        scopeText = scope.wholeSong ? tr("all tracks")
-                                    : tr("%n track(s)", nullptr, int(scope.tracks.size()));
-    }
+    if (!timeSelectionRippleScope(&scope, &scopeText))
+        return;
     if (!m_document->removeTimeRange(s, e, scope)) {
         announce(tr("Nothing to remove in the time selection"));
         return;
@@ -9865,6 +10097,7 @@ void SongView::showTimeSelectionMenu(const QPoint &globalPos)
     cut->setShortcut(keys.bindings(QStringLiteral("roll.cut")).value(0));
     QAction *del = menu.addAction(tr("Delete range"));
     QAction *removeContents = menu.addAction(tr("Remove contents (shift left)"));
+    QAction *insertSpace = menu.addAction(tr("Insert empty space (shift right)"));
     QAction *paste = menu.addAction(tr("Paste at edit cursor"));
     paste->setShortcut(keys.bindings(QStringLiteral("roll.paste")).value(0));
     paste->setEnabled(clipboard().span > 0 && !clipboard().empty());
@@ -9880,6 +10113,8 @@ void SongView::showTimeSelectionMenu(const QPoint &globalPos)
         deleteTimeSelection();
     } else if (chosen == removeContents) {
         removeTimeSelectionContents();
+    } else if (chosen == insertSpace) {
+        insertTimeSelectionSpace();
     } else if (chosen == paste) {
         pasteRangeAtEditCursor();
     } else if (chosen == clear) {

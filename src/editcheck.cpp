@@ -1892,6 +1892,190 @@ int runEditCheck(const QString &projectRoot)
                 }
             }
 
+            // Ripple insert (insertTimeRange): a gap opens at the seam and
+            // everything at or after it shifts right by the span; a note
+            // starting before the seam keeps its length; the last point
+            // before the gap keeps governing it (no seam rescue). ONE
+            // undoable command.
+            if (ok) {
+                doc.addNotes(track, {{base + step * 70, 60, step * 4, 90}, // straddles the seam
+                                     {base + step * 72, 62, step, 90},
+                                     {base + step * 76, 64, step, 90}});
+                doc.addLanePoint(track, 7, base + step * 71, 30);
+                doc.addLanePoint(track, 7, base + step * 72, 40);
+                SongDocument::RippleScope scope;
+                scope.tracks = {track};
+                if (!doc.insertTimeRange(base + step * 72, step * 3, scope)) {
+                    fail("insertTimeRange reported nothing to do");
+                    ok = false;
+                }
+                mutateAndCheck("events unsorted after insertTimeRange");
+                DocNote n;
+                DocLanePoint p;
+                if (ok &&
+                    (!doc.findNote(track, base + step * 70, 60, &n) || n.duration != step * 4 ||
+                     !doc.findNote(track, base + step * 75, 62, &n) ||
+                     !doc.findNote(track, base + step * 79, 64, &n) ||
+                     !doc.findLanePoint(track, 7, base + step * 71, &p) || p.value != 30 ||
+                     !doc.findLanePoint(track, 7, base + step * 75, &p) || p.value != 40 ||
+                     doc.findLanePoint(track, 7, base + step * 72, &p))) {
+                    fail("ripple insert produced wrong content");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 72, 62, &n) ||
+                        !doc.findNote(track, base + step * 76, 64, &n) ||
+                        !doc.findLanePoint(track, 7, base + step * 72, &p) || p.value != 40) {
+                        fail("insertTimeRange was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+                // A zero span is a no-op, never a command.
+                const int countBefore = doc.undoStack()->count();
+                if (doc.insertTimeRange(base + step * 72, 0, scope) ||
+                    doc.undoStack()->count() != countBefore) {
+                    fail("a zero-span insertTimeRange should do nothing");
+                    ok = false;
+                }
+            }
+
+            // Whole-song insert: the globals travel too — a time signature,
+            // a tempo change and a loop marker past the seam shift right,
+            // and the end-of-track ticks open the gap so the song gets
+            // longer. A gap at tick 0 leaves the tick-0 setup (voice,
+            // tempo, signature) in place while notes shift.
+            if (ok) {
+                const auto maxEnd = [&doc] {
+                    uint64_t end = 0;
+                    for (const SmfTrack &tr : doc.smf().tracks)
+                        end = std::max(end, tr.endTick);
+                    return end;
+                };
+                doc.setTimeSig(base + step * 82, 5, 4);
+                doc.addLanePoint(track, DOC_CC_TEMPO, base + step * 83, 160);
+                doc.addNotes(track, {{base + step * 84, 66, step, 90}});
+                doc.setLoopTick(true, int64_t(base + step * 85));
+                // A far track end, so its growth is the op's doing and not
+                // the shifted note's own end extending the chunk.
+                doc.setTrackEndTick(0, maxEnd() + step * 20);
+                const uint64_t endBefore = maxEnd();
+                const uint64_t loopStartBefore = doc.loopTick(false);
+                SongDocument::RippleScope scope;
+                scope.wholeSong = true;
+                if (!doc.insertTimeRange(base + step * 81, step * 2, scope)) {
+                    fail("whole-song insertTimeRange reported nothing to do");
+                    ok = false;
+                }
+                mutateAndCheck("events unsorted after whole-song insertTimeRange");
+                DocNote n;
+                DocLanePoint p;
+                bool sigShifted = false;
+                for (const DocTimeSig &sig : doc.timeSigs()) {
+                    if (sig.tick == base + step * 84 && sig.numerator == 5)
+                        sigShifted = true;
+                }
+                if (ok &&
+                    (!sigShifted || !doc.findLanePoint(track, DOC_CC_TEMPO, base + step * 85, &p) ||
+                     p.value != 160 || !doc.findNote(track, base + step * 86, 66, &n) ||
+                     maxEnd() != endBefore + step * 2 || doc.loopTick(true) != base + step * 87 ||
+                     doc.loopTick(false) != loopStartBefore)) {
+                    fail("whole-song insert produced wrong content");
+                    ok = false;
+                }
+                if (ok) {
+                    doc.undoStack()->undo();
+                    if (!doc.findNote(track, base + step * 84, 66, &n) || maxEnd() != endBefore ||
+                        doc.loopTick(true) != base + step * 85) {
+                        fail("whole-song insertTimeRange was not a single undo command");
+                        ok = false;
+                    } else {
+                        doc.undoStack()->redo();
+                    }
+                }
+                // Gap at tick 0: the initial voice/tempo stay at 0, notes go.
+                if (ok) {
+                    doc.addLanePoint(track, DOC_CC_VOICE, 0, 3);
+                    doc.addLanePoint(track, DOC_CC_TEMPO, 0, 120);
+                    doc.addNotes(track, {{0, 40, step, 90}});
+                    if (!doc.insertTimeRange(0, step, scope)) {
+                        fail("tick-0 insertTimeRange reported nothing to do");
+                        ok = false;
+                    }
+                    mutateAndCheck("events unsorted after tick-0 insertTimeRange");
+                    if (ok &&
+                        (!doc.findLanePoint(track, DOC_CC_VOICE, 0, &p) || p.value != 3 ||
+                         !doc.findLanePoint(track, DOC_CC_TEMPO, 0, &p) || p.value != 120 ||
+                         doc.findNote(track, 0, 40, &n) || !doc.findNote(track, step, 40, &n))) {
+                        fail("tick-0 insert moved the setup events (or left the note)");
+                        ok = false;
+                    }
+                    if (ok)
+                        doc.undoStack()->undo();
+                }
+                // A gap past every chunk's end still appends: the longest
+                // chunks end at the seam plus the span.
+                if (ok) {
+                    const uint64_t endBefore2 = maxEnd();
+                    if (!doc.insertTimeRange(endBefore2 + step * 3, step * 2, scope)) {
+                        fail("past-the-end insertTimeRange reported nothing to do");
+                        ok = false;
+                    } else if (maxEnd() != endBefore2 + step * 5) {
+                        fail("past-the-end insert did not grow the song to seam + span");
+                        ok = false;
+                    }
+                    if (ok)
+                        doc.undoStack()->undo();
+                }
+                // Two same-key note-ons sharing one note-off (a mid2agb-style
+                // shared end): a gap between them shifts the later note-on
+                // AND the shared end, so the later note keeps its length
+                // (the straddling note lengthens instead).
+                if (ok) {
+                    const int smf = doc.smfTrackFor(track);
+                    DocNote existing;
+                    if (!doc.findNote(track, base + step * 50, 60, &existing)) {
+                        fail("shared-end setup: reference note missing");
+                        ok = false;
+                    }
+                    SmfEvent on;
+                    on.status = uint8_t(0x90 | (existing.channel & 0xF));
+                    on.data0 = 70;
+                    on.data1 = 90;
+                    on.tick = base + step * 90;
+                    doc.insertRawEvent(smf, on);
+                    on.tick = base + step * 92;
+                    doc.insertRawEvent(smf, on);
+                    SmfEvent off = on;
+                    off.data1 = 0;
+                    off.tick = base + step * 94;
+                    doc.insertRawEvent(smf, off);
+                    SongDocument::RippleScope trackScope;
+                    trackScope.tracks = {track};
+                    if (!doc.insertTimeRange(base + step * 91, step * 2, trackScope)) {
+                        fail("shared-end insertTimeRange reported nothing to do");
+                        ok = false;
+                    }
+                    mutateAndCheck("events unsorted after shared-end insertTimeRange");
+                    DocNote n;
+                    if (ok &&
+                        (!doc.findNote(track, base + step * 94, 70, &n) || n.duration != step * 2 ||
+                         !doc.findNote(track, base + step * 90, 70, &n) ||
+                         n.duration != step * 6)) {
+                        fail("shared note end did not shift with the later note-on");
+                        ok = false;
+                    }
+                    if (ok) {
+                        doc.undoStack()->undo(); // the insert
+                        doc.undoStack()->undo(); // the three raw events
+                        doc.undoStack()->undo();
+                        doc.undoStack()->undo();
+                    }
+                }
+            }
+
             // Voice ops: add, value-only modify (must not reorder within the
             // tick), move to a new tick, delete.
             if (ok) {

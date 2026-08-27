@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "core/miditimeline.h"
+#include "core/ripplescope.h"
 #include "core/velocitymodel.h"
 #include "ui/songviewmodel.h"
 #include "ui/timelinesurface.h"
@@ -514,6 +515,11 @@ class SongView : public QWidget
     // track ends ripple too); a partial scope shifts only its own tracks or
     // lanes so the rest of the song keeps its alignment.
     void removeTimeSelectionContents();
+    // "Insert empty space": ripple insert — a gap the size of the selection
+    // opens at its start and everything after it shifts right (the mirror
+    // of removeTimeSelectionContents, same scope rules). The band stays,
+    // now framing the empty space.
+    void insertTimeSelectionSpace();
     void pasteRangeAtEditCursor();
     // Ctrl+Up/Down on the selection: transpose every covered note (all
     // scoped tracks at once). Same all-or-nothing rule as the roll's note
@@ -557,6 +563,11 @@ class SongView : public QWidget
     // travel pushes nothing). The chord is latched at the press.
     enum class RangeGesture { None, Move, Duplicate };
     RangeGesture rangeGestureFor(Qt::KeyboardModifiers mods) const;
+    // Which streams an insert-space drag ripples: the whole song (a ruler
+    // drag), the tracks (a roll drag: the shown track) or the lane rows (a
+    // lanes-area drag: the pressed row; track -1 = tempo). The document's
+    // own scope type, so the commit hands it over as is.
+    using InsertScope = RippleScope;
     struct RangeDrag {
         bool active = false;
         bool duplicate = false;
@@ -564,11 +575,24 @@ class SongView : public QWidget
         bool armed = false;     // travelled past the drag threshold once
         int64_t dTick = 0;      // live snapped delta
         TimeSelection sel;      // the band latched at the press
+        // Insert-space drag (no band needed): the gap opens at `at` (the
+        // snapped press) and dTick is its live width — everything at or
+        // past `at` on the scoped streams previews displaced by it.
+        bool insert = false;
+        uint64_t at = 0;
+        InsertScope insertScope;
     };
     const RangeDrag &rangeDrag() const { return m_rangeDrag; }
     // pressTick is the raw (unsnapped) tick under the cursor. Fails when no
     // selection is active.
     bool beginRangeDrag(double pressTick, bool duplicate);
+    // The insert-space chord (range.insert_space), live with or without a
+    // band: a drag from the press opens a gap there on release.
+    bool insertGestureFor(Qt::KeyboardModifiers mods) const;
+    bool beginInsertDrag(double pressTick, const InsertScope &scope);
+    // The header-selected tracks as an InsertScope (every used track
+    // selected = whole song); false when nothing usable is selected.
+    bool selectedTracksInsertScope(InsertScope *scope) const;
     void updateRangeDrag(double cursorTick);
     void commitRangeDrag();
     void cancelRangeDrag();
@@ -577,6 +601,11 @@ class SongView : public QWidget
     // ghost, for a duplicate) those events by rangeDrag().dTick.
     bool rangeDragCarriesTrackTick(int track, uint64_t tick) const;
     bool rangeDragCarriesRowTick(int track, uint8_t cc, uint64_t tick) const;
+    // Whether the live drag's scope covers the track / lane row at all
+    // (the band's scope for a move or duplicate, the latched InsertScope
+    // for an insert). Surfaces use it to decide which rows preview.
+    bool rangeDragCoversTrack(int track) const;
+    bool rangeDragCoversRow(int track, uint8_t cc) const;
 
     // App-shared clipboard: one clipboard for every tab/SongView, so copies
     // travel between songs (paste into another tab, or into a song opened
@@ -782,6 +811,9 @@ class SongView : public QWidget
     // document-mapped), and the copyable lane identities of one track (its
     // model lanes plus the voice changes).
     std::vector<int> timeSelectionTracks() const;
+    // The ripple scope of the active time selection; false when it resolves
+    // to nothing.
+    bool timeSelectionRippleScope(InsertScope *scope, QString *scopeText) const;
     std::vector<uint8_t> trackCcs(int track) const;
     // This song's MIDI resolution, clamped to at least 1 (the default when
     // no song is loaded). Copy and paste both derive theirs from here.

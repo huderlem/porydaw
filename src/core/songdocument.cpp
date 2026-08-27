@@ -1952,6 +1952,131 @@ bool SongDocument::removeTimeRange(uint64_t startTick, uint64_t endTick, const R
     return true;
 }
 
+bool SongDocument::insertTimeRange(uint64_t atTick, uint64_t span, const RippleScope &scope)
+{
+    if (span == 0 || m_smf.tracks.empty())
+        return false;
+    const uint64_t at = atTick;
+
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<EditOp> inserts;
+    // Marked once decided, so overlapping scopes (or the wholeSong meta
+    // catch-all) can't shift the same event twice.
+    std::vector<std::vector<bool>> taken(m_smf.tracks.size());
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        taken[t].assign(m_smf.tracks[t].events.size(), false);
+
+    // Raw re-insertion at the shifted tick, so moved events keep their exact
+    // bytes (status form, meta payload, metronome bytes, ...).
+    const auto shiftEvent = [&](int smfTrack, size_t index) {
+        if (taken[smfTrack][index])
+            return;
+        taken[smfTrack][index] = true;
+        const SmfEvent &ev = m_smf.tracks[smfTrack].events[index];
+        removals[smfTrack].push_back(index);
+        EditOp op;
+        op.type = EditOp::InsertEvent;
+        op.smfTrack = smfTrack;
+        op.event = ev;
+        op.event.tick = ev.tick + span;
+        op.preservesNoteId = op.event.isNoteOn(); // shifted, not new
+        inserts.push_back(op);
+    };
+    // Non-note events at or past the seam shift — except the tick-0 setup
+    // when the gap opens at tick 0 (see the header).
+    const auto shiftsState = [&](uint64_t tick) { return insertShiftsEvent(at, tick); };
+
+    const auto shiftTrack = [&](int engineTrack) {
+        const int smfTrack = smfTrackFor(engineTrack);
+        if (smfTrack < 0)
+            return;
+        // Notes move as pairs so durations survive the shift; a note that
+        // starts before the seam keeps its length and its end. Its end is
+        // not marked taken, though: several same-key note-ons may share one
+        // end (notesForTrack), and a sharer starting at or past the seam
+        // must still carry it — the straddling note then lengthens rather
+        // than the later note collapsing to nothing.
+        for (const DocNote &note : notesForTrack(engineTrack)) {
+            if (note.tick < at) {
+                taken[note.smfTrack][note.onIndex] = true;
+                continue;
+            }
+            shiftEvent(note.smfTrack, note.onIndex);
+            if (!note.unterminated())
+                shiftEvent(note.smfTrack, note.endIndex);
+        }
+        const auto &evs = m_smf.tracks[smfTrack].events;
+        for (size_t i = 0; i < evs.size(); i++) {
+            const SmfEvent &ev = evs[i];
+            if (!ev.isChannel() || ev.typeNibble() <= 0x9)
+                continue;
+            if (shiftsState(ev.tick))
+                shiftEvent(smfTrack, i);
+            else
+                taken[smfTrack][i] = true;
+        }
+    };
+
+    std::vector<EditOp> trackEnds;
+    if (scope.wholeSong) {
+        for (int t = 0; t < engineTrackCount(); t++)
+            shiftTrack(t);
+        // Every meta and sysex — tempo, time signatures, loop markers, text
+        // commands, markers — shifts with the content it precedes.
+        for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+            const auto &evs = m_smf.tracks[t].events;
+            for (size_t i = 0; i < evs.size(); i++) {
+                if (taken[t][i] || evs[i].isChannel())
+                    continue;
+                if (shiftsState(evs[i].tick))
+                    shiftEvent(int(t), i);
+            }
+        }
+        // The song itself gets longer: end-of-track ticks open the gap too.
+        // A gap past every chunk's end (a press in the post-end scratch
+        // space) still appends: the longest chunks end at at + span, so the
+        // previewed gap materializes instead of nothing changing.
+        uint64_t maxEnd = 0;
+        for (const SmfTrack &tr : m_smf.tracks)
+            maxEnd = std::max(maxEnd, tr.endTick);
+        for (size_t t = 0; t < m_smf.tracks.size(); t++) {
+            const uint64_t end = m_smf.tracks[t].endTick;
+            if (end < at && !(at > maxEnd && end == maxEnd))
+                continue;
+            EditOp op;
+            op.type = EditOp::SetTrackEnd;
+            op.smfTrack = int(t);
+            op.event.tick = std::max(end, at) + span;
+            trackEnds.push_back(op);
+        }
+    } else {
+        // A partial scope leaves the end-of-track ticks alone (as a partial
+        // remove does): the song's length belongs to the whole-song edit.
+        // InsertEvent auto-grows a chunk whose content shifts past its end.
+        for (int t : scope.tracks)
+            shiftTrack(t);
+        for (const std::pair<int, uint8_t> &lane : scope.lanes) {
+            if (lane.first < 0 && lane.second != DOC_CC_TEMPO)
+                continue;
+            for (const DocLanePoint &pt :
+                 lanePoints(lane.first < 0 ? 0 : lane.first, lane.second)) {
+                if (shiftsState(pt.tick))
+                    shiftEvent(pt.smfTrack, pt.index);
+            }
+        }
+    }
+
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), removals[t]);
+    ops.insert(ops.end(), inserts.begin(), inserts.end());
+    ops.insert(ops.end(), trackEnds.begin(), trackEnds.end());
+    if (ops.empty())
+        return false;
+    pushEdit(tr("insert time"), std::move(ops));
+    return true;
+}
+
 void SongDocument::insertRawEvent(int smfTrack, const SmfEvent &event)
 {
     if (smfTrack < 0 || smfTrack >= int(m_smf.tracks.size()))

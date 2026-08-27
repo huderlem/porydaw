@@ -96,6 +96,7 @@ qt_add_library(porydaw_app STATIC
     src/core/miditimeline.cpp
     src/core/miditimeline.h
     src/core/noteid.h
+    src/core/ripplescope.h
     src/core/smf.cpp
     src/core/smf.h
     src/core/songdocument.cpp

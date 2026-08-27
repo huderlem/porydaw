@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QHash>
 #include <QKeySequence>
 #include <QList>
 #include <QObject>
@@ -28,6 +29,8 @@ enum class Context {
     // is an overlay, not a separate surface: inside the band its chord is
     // checked before the roll's and the lanes' own press handling, so it
     // conflicts with PianoRoll and Velocity bindings (contextsOverlap).
+    // The insert-space chord lives here too: it fires on the same surfaces
+    // (band or not), so the same overlap rule covers it.
     TimeSelection,
     EventList,
     // The mouse-wheel actions. Their conflicts are settled among
@@ -152,6 +155,9 @@ class Registry : public QObject
     const std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount> &wheelChords() const;
     mutable std::optional<std::array<std::optional<Qt::KeyboardModifiers>, kWheelActionCount>>
         m_wheelChords;
+    // Effective chord per modifier command, filled lazily and dropped by
+    // storeChanged(): the gesture hover paths ask on every mouse move.
+    mutable QHash<QString, Qt::KeyboardModifiers> m_modifierChords;
 
     struct Attached {
         QString id;

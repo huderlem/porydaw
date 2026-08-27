@@ -5586,6 +5586,72 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             view.clearTimeSelection();
         }
 
+        // Insert-space drag (no band): everything at or past the press
+        // previews displaced by the live gap width, the voice marker
+        // included; cancelling restores the row; committing opens the gap
+        // in the document as one undo command.
+        {
+            leaveLanes();
+            auto markerInk = [&](const QImage &img, qreal x) {
+                const QColor ink = SongView::trackColor(laneTrack);
+                int hits = 0;
+                for (int y = yVoice - 8; y <= yVoice + 8; y++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        const QColor c = pixelAt(img, x + dx, y);
+                        if (std::abs(c.red() - ink.red()) + std::abs(c.green() - ink.green()) +
+                                std::abs(c.blue() - ink.blue()) <
+                            60)
+                            hits++;
+                    }
+                }
+                return hits;
+            };
+            const QImage resting = lanesImage();
+            const double cursor = view.tickAtContentX(xM + 80 - songview::kGutterW);
+            SongView::InsertScope scope;
+            scope.wholeSong = true;
+            if (!view.beginInsertDrag(double(tM), scope))
+                fail("insert-space: the drag did not begin");
+            view.updateRangeDrag(cursor);
+            const int64_t width = view.rangeDrag().dTick;
+            if (!view.rangeDrag().insert || view.rangeDrag().at != tM || width <= 0)
+                fail("insert-space: the drag did not arm with a gap at the press");
+            const QImage live = lanesImage();
+            const qreal xTo = dotX(uint64_t(int64_t(tM) + width));
+            if (markerInk(live, xTo) < 8)
+                fail("insert-space preview did not carry the voice marker past the gap");
+            if (markerInk(live, xM) >= markerInk(resting, xM))
+                fail("insert-space preview left the voice marker at the seam");
+            view.cancelRangeDrag();
+            if (lanesImage() != resting)
+                fail("cancelling the insert-space drag did not restore the lanes");
+            // Commit: the marker really moves, later track ends grow, undo
+            // puts it all back in one step.
+            if (!view.beginInsertDrag(double(tM), scope))
+                fail("insert-space: the second drag did not begin");
+            view.updateRangeDrag(cursor);
+            const int countBefore = doc.undoStack()->index();
+            view.commitRangeDrag();
+            DocLanePoint vp;
+            if (doc.undoStack()->index() != countBefore + 1)
+                fail("insert-space commit was not exactly one undo command");
+            if (doc.findLanePoint(laneTrack, DOC_CC_VOICE, tM, &vp) ||
+                !doc.findLanePoint(laneTrack, DOC_CC_VOICE, uint64_t(int64_t(tM) + width), &vp))
+                fail("insert-space commit did not shift the voice change by the gap");
+            doc.undoStack()->undo();
+            if (!doc.findLanePoint(laneTrack, DOC_CC_VOICE, tM, &vp))
+                fail("undoing the insert-space commit did not restore the voice change");
+            // A press with no travel commits nothing.
+            if (!view.beginInsertDrag(double(tM), scope))
+                fail("insert-space: the third drag did not begin");
+            view.commitRangeDrag();
+            if (doc.undoStack()->index() != countBefore)
+                fail("an insert-space press without travel pushed a command");
+            leaveLanes();
+            if (lanesImage() != resting)
+                fail("the insert-space round trip did not restore the lanes");
+        }
+
         // Region hygiene: a hover walk across rows, then leaving, restores
         // the resting pixels bit-for-bit — no readout trails — and clears
         // the node-hover mirror. Each step grabs (and discards) an image so
