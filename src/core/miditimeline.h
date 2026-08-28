@@ -114,4 +114,26 @@ class MidiTimeline
     // Tick <-> sample conversion through the tempo map (viewer/UI thread).
     uint64_t sampleForTick(uint64_t tick) const;
     double tickForSample(uint64_t samplePos) const;
+
+    // Time-signature segments: one per meter change (always at least the
+    // 4/4 default at tick 0), with the 0-based index of the bar each
+    // segment starts on. The ruler's grid and the beat companion both
+    // read bars from here so they agree on where downbeats fall.
+    struct TimeSigSegment {
+        uint64_t tick;
+        uint64_t beatTicks; // ticks per beat of this meter (denominator)
+        int beatsPerBar;    // numerator
+        int firstBar;       // 0-based cumulative bar index at `tick`
+    };
+    std::vector<TimeSigSegment> timeSigSegments() const;
+
+    // Bar position of a tick: `bar` is the 0-based cumulative bar count,
+    // fractional within the bar (2.5 = halfway through the third bar), in
+    // the meter that applies there.
+    struct BarPosition {
+        double bar;
+        int beatsPerBar;
+        uint64_t beatTicks;
+    };
+    BarPosition barPositionForTick(double tick) const;
 };

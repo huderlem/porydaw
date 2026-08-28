@@ -361,3 +361,41 @@ double MidiTimeline::tickForSample(uint64_t samplePos) const
     const double samplesPerTick = 60.0 / tp->bpm * sampleRate / double(ticksPerBeat);
     return double(tp->tick) + double(samplePos - tp->samplePos) / samplesPerTick;
 }
+
+std::vector<MidiTimeline::TimeSigSegment> MidiTimeline::timeSigSegments() const
+{
+    const uint32_t tpb = std::max<uint32_t>(ticksPerBeat, 1);
+    std::vector<TimeSigSegment> segs;
+    segs.push_back({0, tpb, 4, 0});
+    for (const TimeSigPoint &ts : timeSigs) {
+        uint64_t beatTicks = (uint64_t(tpb) * 4) >> std::min<int>(ts.denomPow2, 63);
+        if (beatTicks < 1)
+            beatTicks = 1;
+        const TimeSigSegment seg{ts.tick, beatTicks, ts.numerator ? ts.numerator : 4, 0};
+        if (ts.tick == segs.back().tick)
+            segs.back() = seg;
+        else
+            segs.push_back(seg);
+    }
+    for (size_t i = 1; i < segs.size(); i++) {
+        const TimeSigSegment &prev = segs[i - 1];
+        const uint64_t segTicks = segs[i].tick - prev.tick;
+        const uint64_t barTicks = prev.beatTicks * uint64_t(prev.beatsPerBar);
+        segs[i].firstBar = prev.firstBar + int((segTicks + barTicks - 1) / barTicks);
+    }
+    return segs;
+}
+
+MidiTimeline::BarPosition MidiTimeline::barPositionForTick(double tick) const
+{
+    const std::vector<TimeSigSegment> segs = timeSigSegments();
+    const TimeSigSegment *seg = &segs.front();
+    for (const TimeSigSegment &s : segs) {
+        if (double(s.tick) > tick)
+            break;
+        seg = &s;
+    }
+    const double barTicks = double(seg->beatTicks) * seg->beatsPerBar;
+    return {double(seg->firstBar) + (tick - double(seg->tick)) / barTicks, seg->beatsPerBar,
+            seg->beatTicks};
+}

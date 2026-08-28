@@ -10808,29 +10808,10 @@ void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
 {
     if (!m_timeline || tickEnd <= tickBegin)
         return;
-    const uint32_t tpb = m_timeline->ticksPerBeat;
-
-    struct Seg {
-        uint64_t tick;
-        uint64_t beatTicks;
-        int beatsPerBar;
-    };
-    std::vector<Seg> segs;
-    segs.push_back({0, tpb, 4});
-    for (const TimeSigPoint &ts : m_timeline->timeSigs) {
-        uint64_t beatTicks = (uint64_t(tpb) * 4) >> std::min<int>(ts.denomPow2, 63);
-        if (beatTicks < 1)
-            beatTicks = 1;
-        const Seg seg{ts.tick, beatTicks, ts.numerator ? ts.numerator : 4};
-        if (ts.tick == segs.back().tick)
-            segs.back() = seg;
-        else
-            segs.push_back(seg);
-    }
-
-    int bar = 1;
+    const std::vector<MidiTimeline::TimeSigSegment> segs = m_timeline->timeSigSegments();
     for (size_t i = 0; i < segs.size(); i++) {
-        const Seg &seg = segs[i];
+        const MidiTimeline::TimeSigSegment &seg = segs[i];
+        const int bar = seg.firstBar + 1;
         const uint64_t segEnd =
             i + 1 < segs.size() ? segs[i + 1].tick : std::max<uint64_t>(tickEnd, seg.tick);
         const uint64_t clampedEnd = std::min(segEnd, tickEnd);
@@ -10843,11 +10824,6 @@ void SongView::forEachGridLine(uint64_t tickBegin, uint64_t tickEnd,
                 fn(tick, k % seg.beatsPerBar == 0, bar + int(k / seg.beatsPerBar),
                    int(k % seg.beatsPerBar) + 1);
             }
-        }
-        if (i + 1 < segs.size()) {
-            const uint64_t segTicks = segs[i + 1].tick - seg.tick;
-            const uint64_t barTicks = seg.beatTicks * seg.beatsPerBar;
-            bar += int((segTicks + barTicks - 1) / barTicks);
         }
     }
 }

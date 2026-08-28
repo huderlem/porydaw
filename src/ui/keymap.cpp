@@ -60,6 +60,8 @@ const Def kDefs[] = {
      QT_TR_NOOP("Color Notes by Velocity"), QKeySequence::UnknownKey, ""},
     {"view.note_names", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Show Note Names"),
      QKeySequence::UnknownKey, ""},
+    {"view.companion", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Show Beat Companion"),
+     QKeySequence::UnknownKey, ""},
     // Tools
     {"tools.import_sample", Context::Global, QT_TR_NOOP("Tools"), QT_TR_NOOP("Import Sample"),
      QKeySequence::UnknownKey, ""},

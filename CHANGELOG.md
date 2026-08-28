@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added ability to create a time selection by left-click dragging on the ruler.
 - Added `Alt` + drag inside a time selection to move its contents horizontally, and `Ctrl+Alt` + drag to duplicate and move its contents horizontally.
 - Added `Shift + Alt` + drag to shift all contents to the right (can drag on either the ruler or piano roll area). Also `right-click -> shift right` on a time selection.
+- Added a dancing companion avatar. It moves and grooves to the beat of the song! You can toggle its visibility in `View`, drag it around, resize it, and choose a custom image.
 
 ## Changed
 - Unified settings into a main Settings window.

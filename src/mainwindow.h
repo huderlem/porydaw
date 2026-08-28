@@ -21,6 +21,7 @@ class QSettings;
 class QSpinBox;
 class QToolBar;
 class QToolButton;
+class CompanionWidget;
 class QTimer;
 class QWidget;
 class QUndoGroup;
@@ -259,6 +260,8 @@ class MainWindow : public QMainWindow
     SongSettings songSettingsFor(const SongSession &session) const;
     void refreshDerivedFonts();
     void refreshTransportIcons();
+    void syncCompanion(uint64_t playhead, bool playing);
+    void chooseCompanionImage();
     void updateTransportActions();
     // Points the transport toolbar's master-volume spinbox at the active
     // tab's cfg (disabled with no tab). Never emits valueChanged.
@@ -357,6 +360,9 @@ class MainWindow : public QMainWindow
     QLabel *m_tempoCaption = nullptr;
     QSpinBox *m_tempoSpin = nullptr;
     QToolButton *m_tempoWarning = nullptr;
+    CompanionWidget *m_companion = nullptr;
+    QAction *m_companionAction = nullptr;
+    uint64_t m_companionLastSample = UINT64_MAX;
     QAction *m_tempoWarningAction = nullptr; // the toolbar's wrapper; owns visibility
     QLabel *m_timeLabel = nullptr;
     QLabel *m_songLabel = nullptr;

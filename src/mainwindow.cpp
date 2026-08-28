@@ -17,6 +17,7 @@
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -28,6 +29,7 @@
 #include <QRegularExpressionValidator>
 #include <QSettings>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTabBar>
@@ -63,6 +65,7 @@
 #include "project/sidecar.h"
 #include "project/songregistry.h"
 #include "ui/audiosettingspage.h"
+#include "ui/companionwidget.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
 #include "ui/newsongwizard.h"
@@ -91,6 +94,10 @@ const QString kLastSongLabelKey = QStringLiteral("lastSongLabel");
 const QString kVelocityColorsKey = QStringLiteral("velocityNoteColors");
 const QString kNoteNamesKey = QStringLiteral("noteNames");
 const QString kVelocityLaneKey = QStringLiteral("velocityLane");
+const QString kCompanionKey = QStringLiteral("showCompanion");
+const QString kCompanionPlaceKey = QStringLiteral("companionPlacement");
+const QString kCompanionScaleKey = QStringLiteral("companionScale");
+const QString kCompanionImageKey = QStringLiteral("companionImage");
 const QString kAutomationLanesKey = QStringLiteral("automationLanes");
 const QString kSystemFontKey = QStringLiteral("systemFont");
 const QString kFollowPlayheadKey = QStringLiteral("followPlayhead");
@@ -600,6 +607,43 @@ void MainWindow::buildUi()
     m_tempoWarningAction->setObjectName(QStringLiteral("transportTempoWarningAction"));
     m_tempoWarningAction->setVisible(false);
 
+    // The beat companion: a little dancing logo floating over the window, sized
+    // like a toolbar button. It starts at the top-right (the transport bar's
+    // free end) and can be dragged anywhere; the spot persists as a fraction
+    // of the window so a resize keeps it on screen. Parented to the window
+    // itself (not a layout), and re-raised whenever a child is added so
+    // docks and the central widget never cover it.
+    {
+        const int cell =
+            transport->iconSize().height() + 2 * ::layout::space(::layout::Space::Half) + 2;
+        m_companion = new CompanionWidget(cell, this);
+        m_companion->setObjectName(QStringLiteral("beatCompanion"));
+        m_companion->setToolTip(tr("Your beat companion — drag to move, right-click to resize"));
+        QSettings settings;
+        m_companion->setScale(settings.value(kCompanionScaleKey, 100).toInt());
+        m_companion->setPlacement(settings.value(kCompanionPlaceKey, QPointF(1.0, 0.0)).toPointF());
+        connect(m_companion, &CompanionWidget::placementChanged, this, [](QPointF fraction) {
+            QSettings settings;
+            settings.setValue(kCompanionPlaceKey, fraction);
+        });
+        connect(m_companion, &CompanionWidget::scaleChanged, this, [](int percent) {
+            QSettings settings;
+            settings.setValue(kCompanionScaleKey, percent);
+        });
+        // A saved image that no longer loads is dropped quietly; the
+        // built-in sprite stands in.
+        const QString savedImage = settings.value(kCompanionImageKey).toString();
+        if (!savedImage.isEmpty() && !m_companion->setCustomImage(savedImage))
+            settings.remove(kCompanionImageKey);
+        connect(m_companion, &CompanionWidget::chooseImageRequested, this,
+                &MainWindow::chooseCompanionImage);
+        connect(m_companion, &CompanionWidget::defaultImageRequested, this, [this] {
+            m_companion->setCustomImage(QString());
+            QSettings settings;
+            settings.remove(kCompanionImageKey);
+        });
+    }
+
     // Dock titles and the tab strip share this metric-derived outer height so
     // neither clips when the platform font or small-icon metric changes.
     const auto chromeHeight =
@@ -836,6 +880,26 @@ void MainWindow::buildUi()
     // persisted preference like the rest of this group.
     viewMenu->addAction(m_followPlayheadAction);
 
+    // The floating beat companion, set apart at the end: it's a toy, not a
+    // view setting. App-wide and persisted; hiding it also stops its frame
+    // timer.
+    viewMenu->addSeparator();
+    m_companionAction = viewMenu->addAction(tr("Show Beat &Companion"));
+    m_companionAction->setCheckable(true);
+    keys.attach(QStringLiteral("view.companion"), m_companionAction);
+    {
+        QSettings settings;
+        m_companionAction->setChecked(settings.value(kCompanionKey, true).toBool());
+    }
+    m_companion->setVisible(m_companionAction->isChecked());
+    connect(m_companion, &CompanionWidget::hideRequested, m_companionAction,
+            [this] { m_companionAction->setChecked(false); });
+    connect(m_companionAction, &QAction::toggled, this, [this](bool on) {
+        QSettings settings;
+        settings.setValue(kCompanionKey, on);
+        m_companion->setVisible(on);
+    });
+
     // Song tabs: each open song lives in its own tab with its own view,
     // document, and undo stack.
     m_tabs = new QTabWidget(this);
@@ -951,8 +1015,11 @@ void MainWindow::updateWindowFrameTheme()
 void MainWindow::childEvent(QChildEvent *event)
 {
     QMainWindow::childEvent(event);
-    if (event->added())
+    if (event->added()) {
         QTimer::singleShot(0, this, &MainWindow::updateDockTabFonts);
+        if (m_companion && event->child() != m_companion)
+            m_companion->raise();
+    }
 }
 
 void MainWindow::changeEvent(QEvent *event)
@@ -3097,11 +3164,14 @@ void MainWindow::synchronizePlayhead()
     if (!songLoaded) {
         // This also runs synchronously from activateSession(nullptr).
         m_playheadTimer->stop();
+        m_companion->setPlaying(false);
         return;
     }
 
     const bool playheadTimerWasActive = m_playheadTimer->isActive();
-    m_active->view->setPlayheadSample(m_audio.playheadSamples(), playing);
+    const uint64_t playhead = m_audio.playheadSamples();
+    m_active->view->setPlayheadSample(playhead, playing);
+    syncCompanion(playhead, playing);
     if (playing) {
         if (!m_playheadTimer->isActive())
             m_playheadTimer->start();
@@ -3110,6 +3180,57 @@ void MainWindow::synchronizePlayhead()
         if (playheadTimerWasActive)
             updateTransportActions();
     }
+}
+
+void MainWindow::chooseCompanionImage()
+{
+    QSettings settings;
+    QString startDir = QFileInfo(settings.value(kCompanionImageKey).toString()).absolutePath();
+    if (startDir.isEmpty() || !QDir(startDir).exists())
+        startDir = QStandardPaths::writableLocation(QStandardPaths::PicturesLocation);
+    QStringList patterns;
+    for (const QByteArray &format : QImageReader::supportedImageFormats())
+        patterns << QStringLiteral("*.") + QString::fromLatin1(format);
+    const QString filter = tr("Images (%1)").arg(patterns.join(QLatin1Char(' ')));
+    const QString path =
+        QFileDialog::getOpenFileName(this, tr("Choose Companion Image"), startDir, filter);
+    if (path.isEmpty())
+        return;
+    if (!m_companion->setCustomImage(path)) {
+        QMessageBox::warning(
+            this, tr("Companion Image"),
+            tr("Couldn't read %1 as an image.").arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    settings.setValue(kCompanionImageKey, path);
+}
+
+void MainWindow::syncCompanion(uint64_t playhead, bool playing)
+{
+    m_companion->setPlaying(playing);
+    if (!playing)
+        return;
+    // A loop wrap (the playhead jumping backwards) earns a Spin. A user
+    // seek backwards lands here too, which is fine — it's a party trick,
+    // not a metric.
+    if (m_companionLastSample != UINT64_MAX && playhead < m_companionLastSample)
+        m_companion->cueSpin();
+    m_companionLastSample = playhead;
+
+    const MidiTimeline *timeline = m_audio.timeline();
+    const double tick = timeline->tickForSample(playhead);
+    double bpm = SongDocument::kTempoDefault;
+    for (const TempoPoint &p : timeline->tempoMap) {
+        if (double(p.tick) > tick)
+            break;
+        bpm = p.bpm;
+    }
+    // bpm counts quarter notes; the companion dances to the meter's beat.
+    const MidiTimeline::BarPosition pos = timeline->barPositionForTick(tick);
+    const double beatsPerMinute =
+        bpm * double(std::max<uint32_t>(timeline->ticksPerBeat, 1)) / double(pos.beatTicks);
+    m_companion->sync(pos.bar, pos.beatsPerBar, beatsPerMinute, m_audio.activePcmChannels(),
+                      m_audio.maxPcmChannels(), m_audio.activeCgbChannels());
 }
 
 void MainWindow::startPlayback(bool fromEditCursor)
@@ -3123,6 +3244,8 @@ void MainWindow::startPlayback(bool fromEditCursor)
         m_audio.seek(target);
     }
     m_audio.play();
+    // The companion greets every Play with a Spin on the first downbeat.
+    m_companion->cueSpin();
     updateTransportActions();
     synchronizePlayhead();
     // The seek lands within one audio period; show its target now rather

@@ -50,6 +50,8 @@ qt_add_library(porydaw_app STATIC
     src/songsession.h
     src/ui/layout.cpp
     src/ui/layout.h
+    src/ui/companionwidget.cpp
+    src/ui/companionwidget.h
     src/ui/typography.cpp
     src/ui/typography.h
     # Editable swatches and color policy stay separate from Qt runtime mapping;
