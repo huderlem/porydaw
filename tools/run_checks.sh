@@ -75,6 +75,10 @@ report() { # name exit-status
     if [ "$2" -ne 0 ]; then
         fails+=("$1")
         echo "FAIL: $1 (exit $2)"
+        # Harness assertions print "<name>: FAIL: <what>" wherever they fire;
+        # surface those first so a chatty log's tail can't hide them.
+        grep -n "FAIL:" "$LOG" | head -20
+        echo "--- last 40 lines ---"
         tail -40 "$LOG"
     else
         echo "ok: $1 — $(tail -1 "$LOG")"

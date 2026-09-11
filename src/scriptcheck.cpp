@@ -439,6 +439,18 @@ void runEditChecks(const Check &check, scripting::ScriptHost &host, SongSession 
     untouched("a refused edit touched the document");
     check(run("porydaw.edit.active") == QStringLiteral("false"), "edit.active true at rest");
 
+    // Lists the C++ side returns are real Arrays. Qt 6.5+ would hand
+    // QVariantList/QStringList over as sequence objects (Array.isArray()
+    // false, concat() nests them) if the prelude did not normalise them;
+    // the id sugar below depends on it, as do plugins.
+    check(run("Array.isArray(porydaw.song.tracks()) && Array.isArray(porydaw.song.notes())"
+              " && Array.isArray(porydaw.selection.notes())"
+              " && Array.isArray(porydaw.audio.engineLimits().mixRates)"
+              " && Array.isArray(porydaw.storage.keys())"
+              " && porydaw.song.tracks() instanceof Array"
+              " && [].concat(porydaw.song.tracks()).length === porydaw.song.tracks().length") ==
+              QStringLiteral("true"),
+          "API lists did not arrive as real JS Arrays");
     // Several edits, one entry; ids come back and re-resolve; the
     // transaction returns fn's value.
     check(run("var ids = porydaw.edit.transaction('T1', function () {"

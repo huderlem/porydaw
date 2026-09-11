@@ -29,7 +29,9 @@ struct Plugin;
 // Values cross as plain JS objects/arrays (QVariantMap/QVariantList), never
 // live handles; notes are identified by their NoteId token (a number).
 // prelude.js wraps these into the user-facing API (getters, on()/off(),
-// argument sugar) so this layer stays mechanical.
+// argument sugar) so this layer stays mechanical. It also turns the lists
+// back into real Arrays: from Qt 6.5 on QJSEngine exposes a QVariantList
+// or QStringList as a sequence object that fails Array.isArray().
 class ApiObject : public QObject
 {
     Q_OBJECT

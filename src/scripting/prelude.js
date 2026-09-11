@@ -43,6 +43,7 @@
         var l = listeners[event];
         if (!l || !l.length) return;
         l = l.slice();
+        payload = plain(payload);
         for (var i = 0; i < l.length; i++) {
             try { l[i](payload); } catch (e) { host.reportError(e); }
         }
@@ -57,11 +58,66 @@
         Object.keys(source).forEach(function (k) { target[k] = source[k]; });
         return target;
     }
+    // Qt 6.5+ hands a QVariantList/QStringList to scripts as a "sequence"
+    // object: indexable with a length and the Array methods, but not an
+    // Array (Array.isArray() is false, instanceof Array fails, concat()
+    // nests it). Qt 6.2 gave real arrays and the API promises them, so
+    // every value that crosses from C++ is normalised here. Typed arrays
+    // and QObject handles pass through.
+    //
+    // list(v) copies just the outer sequence and is the common case: most
+    // results are flat lists of scalar objects (notes, tracks, lane
+    // points) and walking their elements would cost as much again as the
+    // C++ call. plain(v) also descends into objects, for the few results
+    // that embed lists (raw event blobs, the time selection's lanes,
+    // engine limits, voicegroup symbols, form results, event payloads).
+    function isSequence(v) {
+        return typeof v === "object" && v !== null && !Array.isArray(v) &&
+            typeof v.length === "number" && !ArrayBuffer.isView(v) &&
+            (Object.prototype.toString.call(v) === "[object V4Sequence]" ||
+             typeof v.forEach === "function");
+    }
+    // A converted QVariantMap: a literal-shaped object. Qt 6.5+ gives it
+    // an empty prototype of its own under Object.prototype. QObject
+    // handles (docks, painters, widgets) never match.
+    function isPlainObject(v) {
+        var p = Object.getPrototypeOf(v);
+        if (p === null || p === Object.prototype) return true;
+        return Object.getOwnPropertyNames(p).length === 0 &&
+            Object.getPrototypeOf(p) === Object.prototype;
+    }
+    function list(v) {
+        return isSequence(v) ? Array.from(v) : v;
+    }
+    function plain(v) {
+        if (typeof v !== "object" || v === null) return v;
+        if (isSequence(v)) {
+            var out = new Array(v.length);
+            for (var i = 0; i < out.length; i++) out[i] = plain(v[i]);
+            return out;
+        }
+        if (Array.isArray(v)) {
+            for (var j = 0; j < v.length; j++)
+                if (typeof v[j] === "object") v[j] = plain(v[j]);
+            return v;
+        }
+        if (isPlainObject(v)) {
+            var keys = Object.keys(v);
+            for (var k = 0; k < keys.length; k++)
+                if (typeof v[keys[k]] === "object") v[keys[k]] = plain(v[keys[k]]);
+        }
+        return v;
+    }
+    // A list argument: an Array, or a sequence a script got from the API
+    // and passed straight back.
+    function isList(x) {
+        return Array.isArray(x) || isSequence(x);
+    }
     // Note arguments: one note or id, or an array of either.
     function toIds(x) {
         if (x === undefined || x === null) return [];
-        if (!Array.isArray(x)) x = [x];
-        return x.map(function (n) {
+        if (!isList(x)) x = [x];
+        return Array.prototype.map.call(x, function (n) {
             return typeof n === "object" && n !== null ? n.id : n;
         });
     }
@@ -74,9 +130,9 @@
     }
     function toNotes(x) {
         if (x === undefined || x === null) return [];
-        if (!Array.isArray(x)) x = [x];
+        if (!isList(x)) x = [x];
         var out = [];
-        x.forEach(function (n) {
+        Array.prototype.forEach.call(x, function (n) {
             if (typeof n === "object" && n !== null) { out.push(n); return; }
             var note = song.note(n);
             if (note) out.push(note);
@@ -132,13 +188,13 @@
         project: {
             get isOpen() { return project.isOpen; },
             get root() { return project.root; },
-            songs: function () { return project.songs(); },
+            songs: function () { return list(project.songs()); },
             // open(label, {newTab?}) → whether the song opened.
             open: function (label, opts) {
                 return project.open(String(label), !!(opts && opts.newTab));
             },
-            song: function (label) { return project.song(String(label)); },
-            registration: function (label) { return project.registration(String(label)); },
+            song: function (label) { return plain(project.song(String(label))); },
+            registration: function (label) { return plain(project.registration(String(label))); },
             // registerSong(label, {constant?, player?}) → the song's table id.
             registerSong: function (label, opts) {
                 opts = opts || {};
@@ -148,8 +204,8 @@
             },
             unregisterSong: function (label) { project.unregisterSong(String(label)); },
             reload: function () { project.reload(); },
-            musicPlayers: function () { return project.musicPlayers(); },
-            voicegroups: function () { return project.voicegroups(); },
+            musicPlayers: function () { return list(project.musicPlayers()); },
+            voicegroups: function () { return list(project.voicegroups()); },
             // createVoicegroup(name, {copyFrom?}) → the new voicegroup's -G arg.
             createVoicegroup: function (name, opts) {
                 return project.createVoicegroup(String(name),
@@ -179,23 +235,23 @@
                 return song.chunkEndTick(trackArg(chunk, "song.chunkEndTick"));
             },
             rawEvents: function (chunk, opts) {
-                return song.rawEvents(trackArg(chunk, "song.rawEvents"), opts || {});
+                return plain(song.rawEvents(trackArg(chunk, "song.rawEvents"), opts || {}));
             },
-            settings: function () { return song.settings(); },
+            settings: function () { return plain(song.settings()); },
             save: function () { return song.save(); },
-            loop: function () { return song.loop(); },
-            timeSigs: function () { return song.timeSigs(); },
-            tracks: function () { return song.tracks(); },
-            notes: function (opts) { return song.notes(opts || {}); },
+            loop: function () { return plain(song.loop()); },
+            timeSigs: function () { return list(song.timeSigs()); },
+            tracks: function () { return list(song.tracks()); },
+            notes: function (opts) { return list(song.notes(opts || {})); },
             note: function (id) { return song.note(id); },
-            lanePoints: function (track, cc, opts) { return song.lanePoints(track, cc, opts || {}); }
+            lanePoints: function (track, cc, opts) { return list(song.lanePoints(track, cc, opts || {})); }
         }, events("song")),
 
         selection: mix({
             get track() { return selection.track; },
             get trackMask() { return selection.trackMask; },
-            notes: function () { return selection.notes(); },
-            time: function () { return selection.time(); },
+            notes: function () { return list(selection.notes()); },
+            time: function () { return plain(selection.time()); },
             setNotes: function (notes) { selection.setNotes(toIds(notes)); },
             clear: function () { selection.clear(); },
             selectTrack: function (track) {
@@ -228,8 +284,8 @@
                 return result;
             },
             addNotes: function (track, notes) {
-                return edit.addNotes(trackArg(track, "edit.addNotes"),
-                                     Array.isArray(notes) ? notes : [notes]);
+                return list(edit.addNotes(trackArg(track, "edit.addNotes"),
+                                          isList(notes) ? notes : [notes]));
             },
             deleteNotes: function (notes) { return edit.deleteNotes(toIds(notes)); },
             moveNotes: function (notes, dTick, dKey) {
@@ -317,7 +373,7 @@
                                     trackArg(index, "edit.modifyRawEvent"), ev);
             },
             deleteRawEvents: function (chunk, indices) {
-                if (!Array.isArray(indices)) indices = [indices];
+                if (!isList(indices)) indices = [indices];
                 return edit.deleteRawEvents(trackArg(chunk, "edit.deleteRawEvents"), indices);
             },
             moveRawEvent: function (chunk, index, dest) {
@@ -338,7 +394,7 @@
         },
 
         view: {
-            visibleTicks: function () { return view.visibleTicks(); },
+            visibleTicks: function () { return plain(view.visibleTicks()); },
             revealTick: function (tick) { view.revealTick(tick); },
             revealRange: function (from, to) { view.revealRange(from, to); },
             revealNote: function (note) { return view.revealNote(toIds(note)[0]); },
@@ -358,7 +414,7 @@
         cursor: {
             get tick() { return cursor.tick; },
             snap: function (tick, mode) { return cursor.snap(tick, mode || "nearest"); },
-            grid: function (tick) { return cursor.grid(tick === undefined ? cursor.tick : tick); },
+            grid: function (tick) { return plain(cursor.grid(tick === undefined ? cursor.tick : tick)); },
             set: function (tick) { cursor.set(tick); }
         },
 
@@ -376,18 +432,18 @@
         audio: mix({
             get sampleRate() { return audio.sampleRate; },
             get windowFrames() { return audio.windowFrames; },
-            get peak() { return audio.peak(); },
-            get rms() { return audio.rms(); },
+            get peak() { return list(audio.peak()); },
+            get rms() { return list(audio.rms()); },
             pcm: function () { return new Float32Array(audio.pcm()); },
             spectrum: function (bins) { return new Float32Array(audio.spectrum(bins || 64)); },
-            channels: function () { return audio.channels(); },
+            channels: function () { return plain(audio.channels()); },
             // render(path, {sampleRate?, loopCount?, fadeout?, tail?}) → {path, seconds}
-            render: function (path, opts) { return audio.render(String(path), opts || {}); },
+            render: function (path, opts) { return plain(audio.render(String(path), opts || {})); },
             // The GBA engine settings (Settings → Audio):
             // {maxPcmChannels, pcmMixRate, analogFilter}; setEngine takes a
             // partial object. engineLimits() → {maxPcmChannels, mixRates}.
-            get engine() { return audio.engine(); },
-            engineLimits: function () { return audio.engineLimits(); },
+            get engine() { return plain(audio.engine()); },
+            engineLimits: function () { return plain(audio.engineLimits()); },
             setEngine: function (spec) {
                 if (spec === null || typeof spec !== "object" || Array.isArray(spec))
                     throw new TypeError("audio.setEngine: expected an object");
@@ -429,11 +485,14 @@
                     if (spec[k] !== undefined) opts[k] = spec[k];
                 });
                 if (opts.id !== undefined) opts.id = String(opts.id);
-                return ui.dock(opts, spec.build, spec.paint, spec.mouse);
+                var mouse = typeof spec.mouse === "function"
+                    ? function (ev) { return spec.mouse(plain(ev)); }
+                    : spec.mouse;
+                return ui.dock(opts, spec.build, spec.paint, mouse);
             },
-            theme: function (name) { return ui.theme(name === undefined ? "" : String(name)); },
+            theme: function (name) { return plain(ui.theme(name === undefined ? "" : String(name))); },
             loadImage: function (path) { return ui.loadImage(String(path)); },
-            imageSize: function (id) { return ui.imageSize(id); },
+            imageSize: function (id) { return plain(ui.imageSize(id)); },
             freeImage: function (id) { ui.freeImage(id); },
             // The plugin's submenu of the Plugins menu.
             menu: function () { return wrapMenu(ui.menu()); },
@@ -448,15 +507,15 @@
             dialog: {
                 alert: function (text, opts) { ui.alert(String(text), opts || {}); },
                 confirm: function (text, opts) { return ui.confirm(String(text), opts || {}); },
-                prompt: function (text, opts) { return ui.prompt(String(text), opts || {}); },
+                prompt: function (text, opts) { return plain(ui.prompt(String(text), opts || {})); },
                 form: function (spec) {
                     if (!spec || typeof spec !== "object")
                         throw new TypeError("ui.dialog.form: expected a spec object");
-                    return ui.form(spec);
+                    return plain(ui.form(spec));
                 },
-                openFile: function (opts) { return ui.openFile(opts || {}); },
-                saveFile: function (opts) { return ui.saveFile(opts || {}); },
-                chooseDir: function (opts) { return ui.chooseDir(opts || {}); }
+                openFile: function (opts) { return plain(ui.openFile(opts || {})); },
+                saveFile: function (opts) { return plain(ui.saveFile(opts || {})); },
+                chooseDir: function (opts) { return plain(ui.chooseDir(opts || {})); }
             }
         },
 
@@ -477,7 +536,7 @@
                 copy.set(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength));
                 io.writeBytes(String(path), copy.buffer);
             },
-            list: function (path) { return io.list(String(path)); },
+            list: function (path) { return list(io.list(String(path))); },
             mkdir: function (path) { io.mkdir(String(path)); },
             remove: function (path) { io.remove(String(path)); }
         },
@@ -490,25 +549,25 @@
             get loadName() { return voicegroup.loadName; },
             get dirty() { return voicegroup.dirty; },
             get monolithic() { return voicegroup.monolithic; },
-            voices: function () { return voicegroup.voices(); },
-            voice: function (slot) { return voicegroup.voice(trackArg(slot, "voicegroup.voice")); },
-            symbols: function () { return voicegroup.symbols(); },
+            voices: function () { return list(voicegroup.voices()); },
+            voice: function (slot) { return plain(voicegroup.voice(trackArg(slot, "voicegroup.voice"))); },
+            symbols: function () { return plain(voicegroup.symbols()); },
             typicalAdsr: function (type, symbol) {
-                return voicegroup.typicalAdsr(String(type), symbol === undefined ? "" : String(symbol));
+                return plain(voicegroup.typicalAdsr(String(type), symbol === undefined ? "" : String(symbol)));
             }
         },
 
         storage: {
-            get: function (key, fallback) { return storage.get(String(key), fallback); },
+            get: function (key, fallback) { return plain(storage.get(String(key), fallback)); },
             set: function (key, value) { storage.set(String(key), value); },
             remove: function (key) { storage.remove(String(key)); },
-            keys: function () { return storage.keys(); },
+            keys: function () { return list(storage.keys()); },
             // Per-song values, in the song's sidecar.
             song: {
-                get: function (key, fallback) { return storage.songGet(String(key), fallback); },
+                get: function (key, fallback) { return plain(storage.songGet(String(key), fallback)); },
                 set: function (key, value) { storage.songSet(String(key), value); },
                 remove: function (key) { storage.songRemove(String(key)); },
-                keys: function () { return storage.songKeys(); }
+                keys: function () { return list(storage.songKeys()); }
             }
         }
     };
