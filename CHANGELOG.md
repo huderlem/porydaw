@@ -5,9 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+Nothing, yet.
+
+## [1.2.0] - 2026-09-10
 
 ## Added
-- Added plugin support. Plugins are JavaScript scripts. See `docs/scripting/API.md`.
 - Added an Output level control (Settings → Audio) for porydaw's output volume.
 - Added ability to copy/paste notes and events between different songs. Before, each song had its own separate clipboard.
 - Added a Tempo input to the transport bar for the song's starting tempo. A warning appears next to it when the tempo changes later in the song. Click it to show the Tempo automation lane.
@@ -17,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `Alt` + drag inside a time selection to move its contents horizontally, and `Ctrl+Alt` + drag to duplicate and move its contents horizontally.
 - Added `Shift + Alt` + drag to shift all contents to the right (can drag on either the ruler or piano roll area). Also `right-click -> shift right` on a time selection.
 - Added a dancing companion avatar. It moves and grooves to the beat of the song! You can toggle its visibility in `View`, drag it around, resize it, and choose a custom image.
+- Added plugin support. Plugins are JavaScript scripts. See `docs/scripting/API.md`.
 
 ## Changed
 - Unified settings into a main Settings window.
@@ -59,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - 2026-08-01
 Initial release.
 
-[Unreleased]: https://github.com/huderlem/porydaw/compare/1.1.0...HEAD
+[Unreleased]: https://github.com/huderlem/porydaw/compare/1.2.0...HEAD
+[1.2.0]: https://github.com/huderlem/porydaw/compare/1.1.0...1.2.0
 [1.1.0]: https://github.com/huderlem/porydaw/compare/1.0.0...1.1.0
 [1.0.0]: https://github.com/huderlem/porydaw/releases/tag/1.0.0
