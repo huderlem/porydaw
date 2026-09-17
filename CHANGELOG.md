@@ -5,7 +5,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-Nothing, yet.
+
+## Added
+- Added `Merge...` to the track header's right-click menu. It merges the track into a chosen destination track and deletes it. You can choose to merge all events or only notes. This is handy for collapsing an imported MIDI file that has more tracks than the m4a engine allows.
+   - Added `porydaw.edit.mergeTrack(track, target, {notesOnly})` to the plugin API.
 
 ## [1.2.0] - 2026-09-10
 

@@ -217,6 +217,8 @@ class EditApi : public ApiObject
     Q_INVOKABLE int addTrack(int voice);
     Q_INVOKABLE int duplicateTrack(int track);
     Q_INVOKABLE void deleteTrack(int track);
+    // options: {notesOnly?: bool}. Returns whether the merge was pushed.
+    Q_INVOKABLE bool mergeTrack(int track, int target, const QVariantMap &options);
     Q_INVOKABLE bool moveTrack(int track, int target);
     Q_INVOKABLE void renameTrack(int track, const QString &name);
 

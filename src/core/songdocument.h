@@ -391,6 +391,24 @@ class SongDocument : public QObject
     // stripped; a winning loop marker inside a removed chunk is moved to
     // chunk 0 so the loop survives.
     void deleteTrack(int engineTrack);
+    // Fold one track into another, one undo entry: the source's channel
+    // events on its OWN channel (duplicateTrack's rule) land in the
+    // destination's chunk on the destination's channel — every terminated
+    // note and, unless notesOnly, its controllers, pitch bends, aftertouch
+    // and voice changes — and the source track is then deleted exactly as
+    // deleteTrack does (chunk 0 stripped, any other chunk removed with its
+    // seq globals rescued). Landing follows the paste rules: a merged note
+    // wins any same-key overlap on the destination (resolveNoteOverlaps),
+    // a merged lane point replaces the destination's point on that tick,
+    // and the destination keeps its own starting voice (the source's
+    // initial program change — every change on its first change's tick,
+    // as the header reads it — is that track's identity, not an event to
+    // carry). An unterminated or zero-length source note is dropped: in
+    // the destination the former would claim a later note's end and the
+    // latter would trim a note without sounding. The destination's end
+    // tick grows to the source's so the song keeps its length. Returns
+    // false when either slot is unmapped or the two are the same track.
+    bool mergeTrack(int sourceEngine, int destEngine, bool notesOnly);
     // Reorder: the track lands at the target track's engine slot. The
     // track's chunk moves, events untouched — AGB track order is chunk
     // order — and when the move displaces chunk 0, the seq globals (tempo,
@@ -533,6 +551,12 @@ class SongDocument : public QObject
     // the keep-alive re-seed below.
     void appendVoiceSeedOp(std::vector<EditOp> &ops, int smfTrack, uint8_t channel,
                            int voice) const;
+    // deleteTrack's op list (mergeTrack appends it after the destination's
+    // edits): chunk 0 is stripped of its channel events, any other chunk
+    // is removed with its time signatures and winning loop markers moved
+    // to chunk 0 first. Removing a chunk renumbers the ones after it, so
+    // callers put every op addressing another chunk BEFORE this list.
+    void appendDeleteTrackOps(std::vector<EditOp> &ops, int smfTrack) const;
     // A chunk is an engine track only while it holds a channel event
     // (rebuildTrackMap), so a musical edit that strips the last one would
     // silently delete the track. Appends, for every chunk whose channel

@@ -2399,6 +2399,12 @@ void SongDocument::deleteTrack(int engineTrack)
     if (smfTrack < 0)
         return;
     std::vector<EditOp> ops;
+    appendDeleteTrackOps(ops, smfTrack);
+    pushEdit(tr("delete track"), std::move(ops));
+}
+
+void SongDocument::appendDeleteTrackOps(std::vector<EditOp> &ops, int smfTrack) const
+{
     const auto &evs = m_smf.tracks[smfTrack].events;
     if (smfTrack == 0) {
         // Chunk 0 stays (it is the seq chunk): strip the track's channel
@@ -2440,7 +2446,104 @@ void SongDocument::deleteTrack(int engineTrack)
         remove.smfTrack = smfTrack;
         ops.push_back(remove);
     }
-    pushEdit(tr("delete track"), std::move(ops));
+}
+
+bool SongDocument::mergeTrack(int sourceEngine, int destEngine, bool notesOnly)
+{
+    const int srcChunk = smfTrackFor(sourceEngine);
+    const int dstChunk = smfTrackFor(destEngine);
+    if (srcChunk < 0 || dstChunk < 0 || srcChunk == dstChunk)
+        return false;
+    const uint8_t srcChannel = channelFor(sourceEngine);
+    const uint8_t dstChannel = channelFor(destEngine);
+    const SmfTrack &src = m_smf.tracks[size_t(srcChunk)];
+    const SmfTrack &dst = m_smf.tracks[size_t(dstChunk)];
+
+    // What carries over, by source index: the paired note events (by their
+    // events, not rebuilt, so a note end keeps its exact form — and a
+    // shared end is taken once), then the other own-channel events. The
+    // source's initial program change stays behind: it is the track's
+    // identity, and the destination keeps its own. "Initial" is every
+    // change on the first change's tick, as the header label and
+    // editTrackVoice read it — an imported track's first change need not
+    // sit at tick 0.
+    std::vector<bool> take(src.events.size(), false);
+    std::vector<PlannedNote> written;
+    for (const DocNote &note : notesForTrack(sourceEngine)) {
+        // A zero-length note (an import shape; every editor writes at
+        // least 1 tick) is inaudible, and carried raw its empty span would
+        // trim the destination's note on that key to its tick while the
+        // note-end hoist then leaves the arrival unterminated: drop it.
+        if (note.unterminated() || note.duration == 0 || note.channel != srcChannel)
+            continue;
+        take[note.onIndex] = true;
+        take[note.endIndex] = true;
+        written.push_back({destEngine, note.key, note.tick, note.tick + note.duration});
+    }
+    if (!notesOnly) {
+        int64_t identityTick = -1;
+        for (const SmfEvent &ev : src.events) {
+            if (ev.isChannel() && ev.channel() == srcChannel && ev.typeNibble() == 0xC) {
+                identityTick = int64_t(ev.tick);
+                break;
+            }
+        }
+        for (size_t i = 0; i < src.events.size(); i++) {
+            const SmfEvent &ev = src.events[i];
+            if (!ev.isChannel() || ev.channel() != srcChannel || ev.typeNibble() < 0xA)
+                continue;
+            if (ev.typeNibble() == 0xC && int64_t(ev.tick) == identityTick)
+                continue;
+            take[i] = true;
+        }
+    }
+
+    std::vector<std::vector<size_t>> removals(m_smf.tracks.size());
+    std::vector<EditOp> trims;
+    resolveNoteOverlaps(written, {}, removals, trims);
+    // A merged lane point replaces the destination's same-lane point on
+    // its tick (the paste rule: only the last same-tick point is audible,
+    // so the old one would be an inert ghost under the arrival).
+    for (size_t i = 0; i < src.events.size(); i++) {
+        if (!take[i] || src.events[i].typeNibble() < 0xA)
+            continue;
+        SmfEvent probe = src.events[i];
+        probe.status = uint8_t((probe.status & 0xF0) | dstChannel);
+        auto it = std::lower_bound(dst.events.begin(), dst.events.end(), probe.tick,
+                                   [](const SmfEvent &ev, uint64_t t) { return ev.tick < t; });
+        for (; it != dst.events.end() && it->tick == probe.tick; ++it) {
+            if (sameLane(*it, probe))
+                removals[size_t(dstChunk)].push_back(size_t(it - dst.events.begin()));
+        }
+    }
+
+    // Every op addressing the destination comes first: removing the source
+    // chunk renumbers the chunks after it.
+    std::vector<EditOp> ops;
+    for (size_t t = 0; t < m_smf.tracks.size(); t++)
+        appendRemoveOps(ops, int(t), std::move(removals[t]));
+    if (src.endTick > dst.endTick) {
+        EditOp end;
+        end.type = EditOp::SetTrackEnd;
+        end.smfTrack = dstChunk;
+        end.event.tick = src.endTick;
+        ops.push_back(end);
+    }
+    for (size_t i = 0; i < src.events.size(); i++) {
+        if (!take[i])
+            continue;
+        EditOp op;
+        op.type = EditOp::InsertEvent;
+        op.smfTrack = dstChunk;
+        op.event = src.events[i];
+        op.event.status = uint8_t((op.event.status & 0xF0) | dstChannel);
+        op.event.noteId = {}; // the source chunk goes away: applyOps mints fresh ids
+        ops.push_back(std::move(op));
+    }
+    ops.insert(ops.end(), trims.begin(), trims.end());
+    appendDeleteTrackOps(ops, srcChunk);
+    pushEdit(tr("merge track"), std::move(ops));
+    return true;
 }
 
 bool nameIsLoopMarker(const QString &name)

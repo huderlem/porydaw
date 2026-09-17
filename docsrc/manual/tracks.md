@@ -22,6 +22,17 @@ Ctrl/Shift selection; great for picking apart how a vanilla song works. -->
 saved into the song (unlike master volume); relationship to the volume/pan
 automation lanes. -->
 
+## Merging tracks
+
+Right-click a track header and choose `Merge...` to fold that track into
+another one. Pick the destination track, then choose whether to merge all
+events (notes, controllers, pitch bends, and voice changes) or notes only.
+The merged track is deleted afterwards. The destination keeps its own starting
+voice, and merged notes replace any destination notes they overlap.
+
+This is handy after importing a MIDI file with more tracks than the m4a
+engine's limit of 16 (or fewer, depending on the song's music player).
+
 ## Renaming tracks
 
 <!-- TODO: Track names, where they're stored, and that they're for your own

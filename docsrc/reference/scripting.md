@@ -200,6 +200,7 @@ var ids = porydaw.edit.transaction("Insert chord", function () {
 | `addTrack(voice)` | Adds a new track with the given `voice`. Returns the index of the created track. |
 | `duplicateTrack(i)` | Duplicates the given track |
 | `deleteTrack(i)` | Deletes the given track |
+| `mergeTrack(i, target, {notesOnly?})` | Merges track `i` into track `target`, then deletes track `i` |
 | `moveTrack(i, target)` | Moves the track to a different index |
 | `renameTrack(i, name)` | Renames the track |
 | `transposeSelection(dKey)` | Moves the selected notes up or down a set number of keys |

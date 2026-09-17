@@ -255,6 +255,7 @@ declare namespace porydaw {
         function addTrack(voice?: number): number;
         function duplicateTrack(track: number): number;
         function deleteTrack(track: number): void;
+        function mergeTrack(track: number, target: number, options?: { notesOnly?: boolean }): boolean;
         function moveTrack(track: number, target: number): boolean;
         function renameTrack(track: number, name: string): void;
         function transposeSelection(dKey: number): boolean;

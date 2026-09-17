@@ -750,6 +750,10 @@ void runEditChecks(const Check &check, scripting::ScriptHost &host, SongSession 
               "  e.renameTrack(t, 'Scripted');"
               "  if (!e.insertTimeRange(0, 96, {tracks: [0]})) throw new Error('insert');"
               "  if (!e.removeTimeRange(0, 96, {tracks: [0]})) throw new Error('remove');"
+              "  var m = e.addTrack(5); if (m < 0) throw new Error('addTrack2');"
+              "  e.addNotes(m, [{tick: 3, key: 61, len: 6, vel: 90}]);"
+              "  if (!e.mergeTrack(m, t, {notesOnly: true})) throw new Error('merge');"
+              "  if (porydaw.song.notes({track: t}).length !== 1) throw new Error('merged notes');"
               "  e.deleteTrack(t); }); 'ok'") == QStringLiteral("ok"),
           "the kitchen-sink transaction threw");
     check(run("var p10 = porydaw.song.lanePoints(0, 10, {from: 0, to: 193}); p10.length === 2 && "
@@ -776,6 +780,12 @@ void runEditChecks(const Check &check, scripting::ScriptHost &host, SongSession 
     untouched("a refused structural edit left an entry");
     // Argument hygiene: a missing track or a non-object note must throw,
     // not coerce to track 0 / an empty note.
+    check(run("porydaw.edit.transaction('Self', function () { porydaw.edit.mergeTrack(0, 0); })")
+                  .isNull() &&
+              hasMessage(messages, QStringLiteral("console"), 2,
+                         QStringLiteral("merged into itself")),
+          "edit.mergeTrack(0, 0) was not refused");
+    untouched("a refused self-merge left an entry");
     check(run("porydaw.edit.transaction('Undef', function () { porydaw.edit.deleteTrack(); })")
                   .isNull() &&
               hasMessage(messages, QStringLiteral("console"), 2,

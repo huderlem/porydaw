@@ -1,6 +1,7 @@
 #include "ui/theme/color_math.h"
 #include "ui/theme/themeruntime.h"
 #include <QApplication>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -18,6 +19,7 @@
 #include <QPixmap>
 #include <QPoint>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QRect>
 #include <QSettings>
 #include <QString>
@@ -6056,6 +6058,88 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             }
             view.setTrackMute(1, false);
         }
+    }
+
+    // Header-menu merge (two or more tracks): the modal picker — driven by
+    // a zero-timer poll like the voice picker above — merges track 1 into
+    // track 0 with every event, as ONE undo command. The source slot
+    // vanishes, its notes join the destination on the destination's
+    // channel, the per-track view state shifts down over the removed slot
+    // (a mute on the track after the source follows it), the destination
+    // is selected, and undo restores both tracks. Undone here so the
+    // command tally below is unchanged.
+    if (doc.engineTrackCount() >= 2) {
+        const int preCount = doc.undoStack()->count();
+        const int trackCount = doc.engineTrackCount();
+        const int selectedBefore = view.selectedTrack();
+        const auto destNotes = doc.notesForTrack(0);
+        std::vector<DocNote> sourceNotes;
+        for (const DocNote &n : doc.notesForTrack(1)) {
+            if (!n.unterminated() && n.channel == doc.channelFor(1))
+                sourceNotes.push_back(n);
+        }
+        const bool shiftProbe = trackCount >= 3;
+        if (shiftProbe)
+            view.setTrackMute(2, true);
+        QTimer poll;
+        poll.setInterval(0);
+        bool dialogSeen = false;
+        bool drove = false;
+        QObject::connect(&poll, &QTimer::timeout, [&] {
+            auto *dlg = view.findChild<QDialog *>(QStringLiteral("mergeTrackDialog"));
+            if (!dlg)
+                return;
+            dialogSeen = true;
+            auto *dest = dlg->findChild<QComboBox *>(QStringLiteral("mergeTrackDestination"));
+            auto *all = dlg->findChild<QRadioButton *>(QStringLiteral("mergeTrackAllEvents"));
+            if (dest && all) {
+                dest->setCurrentIndex(dest->findData(0));
+                all->setChecked(true);
+                drove = dest->currentData().toInt() == 0;
+            }
+            if (drove)
+                dlg->accept();
+            else
+                dlg->reject();
+        });
+        poll.start();
+        view.mergeTrack(1);
+        poll.stop();
+        if (!dialogSeen) {
+            fail("mergeTrack did not open the merge dialog");
+        } else if (!drove) {
+            fail("the merge dialog is missing its destination/scope controls");
+        } else {
+            if (doc.undoStack()->count() != preCount + 1)
+                fail("the merge was not one undo command");
+            if (doc.engineTrackCount() != trackCount - 1)
+                fail("the merge did not remove the source track");
+            const auto merged = doc.notesForTrack(0);
+            bool landed = true;
+            for (const DocNote &s : sourceNotes) {
+                bool found = false;
+                for (const DocNote &m : merged) {
+                    found = found || (m.tick == s.tick && m.key == s.key &&
+                                      m.duration == s.duration && m.channel == doc.channelFor(0));
+                }
+                landed = landed && found;
+            }
+            if (!landed)
+                fail("the merge did not land every source note on the destination");
+            if (view.selectedTrack() != 0)
+                fail("the merge did not select the destination track");
+            if (shiftProbe && (!view.trackMuted(1) || view.trackMuted(2)))
+                fail("the merge did not shift the mute flag over the removed slot");
+            doc.undoStack()->undo();
+            if (doc.engineTrackCount() != trackCount ||
+                doc.notesForTrack(0).size() != destNotes.size())
+                fail("undoing the merge did not restore both tracks");
+        }
+        if (shiftProbe) {
+            view.setTrackMute(1, false);
+            view.setTrackMute(2, false);
+        }
+        view.selectTrack(selectedBefore);
     }
 
     const auto screenshotTick =

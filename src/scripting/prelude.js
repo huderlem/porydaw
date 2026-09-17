@@ -348,6 +348,10 @@
                 return edit.duplicateTrack(trackArg(track, "edit.duplicateTrack"));
             },
             deleteTrack: function (track) { edit.deleteTrack(trackArg(track, "edit.deleteTrack")); },
+            mergeTrack: function (track, target, options) {
+                return edit.mergeTrack(trackArg(track, "edit.mergeTrack"),
+                                       trackArg(target, "edit.mergeTrack"), options || {});
+            },
             moveTrack: function (track, target) {
                 return edit.moveTrack(trackArg(track, "edit.moveTrack"),
                                       trackArg(target, "edit.moveTrack"));

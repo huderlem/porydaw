@@ -38,6 +38,7 @@
 #include <QPixmap>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -8160,6 +8161,8 @@ class TrackHeaderRow : public QWidget
         QAction *renameAction = menu.addAction(SongView::tr("Rename track..."));
         QAction *duplicateAction = menu.addAction(SongView::tr("Duplicate track"));
         duplicateAction->setEnabled(m_sv->document()->canAddTrack());
+        QAction *mergeAction = menu.addAction(SongView::tr("Merge..."));
+        mergeAction->setEnabled(m_sv->document()->engineTrackCount() >= 2);
         QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
         QAction *chosen = menu.exec(event->globalPos());
         // Queued: these edits rebuild the header panel, which deletes this
@@ -8176,6 +8179,9 @@ class TrackHeaderRow : public QWidget
         } else if (chosen == duplicateAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->duplicateTrack(t); }, Qt::QueuedConnection);
+        } else if (chosen == mergeAction) {
+            QMetaObject::invokeMethod(
+                m_sv, [sv = m_sv, t = m_track] { sv->mergeTrack(t); }, Qt::QueuedConnection);
         } else if (chosen == deleteAction) {
             QMetaObject::invokeMethod(
                 m_sv, [sv = m_sv, t = m_track] { sv->deleteTrack(t); }, Qt::QueuedConnection);
@@ -10823,6 +10829,13 @@ void SongView::deleteTrack(int track)
 {
     if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
         return;
+    shiftViewStateOverRemovedTrack(track);
+    m_document->deleteTrack(track); // rebuilds via documentChanged
+    announce(tr("Deleted track %1").arg(track + 1));
+}
+
+void SongView::shiftViewStateOverRemovedTrack(int track)
+{
     // Removing a chunk shifts every higher engine slot down by one; move
     // the per-track view state with it, before the document edit rebuilds
     // the headers and lanes.
@@ -10852,8 +10865,89 @@ void SongView::deleteTrack(int track)
     // selection rather than remap them.
     m_trackSelMask = 1u << m_selectedTrack;
     clearTimeSelection();
-    m_document->deleteTrack(track); // rebuilds via documentChanged
-    announce(tr("Deleted track %1").arg(track + 1));
+}
+
+bool SongView::askMergeTrack(int source, int *outDest, bool *outNotesOnly)
+{
+    SongDocument *doc = m_document;
+    const auto trackLabel = [doc](int t) {
+        const QString name = doc->trackName(t);
+        return name.isEmpty() ? tr("Track %1").arg(t + 1)
+                              : QStringLiteral("%1: %2").arg(t + 1).arg(name);
+    };
+    QDialog dlg(this);
+    dlg.setObjectName(QStringLiteral("mergeTrackDialog"));
+    dlg.setWindowTitle(tr("Merge Track"));
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->addWidget(new QLabel(tr("Merge \"%1\" into:").arg(trackLabel(source)), &dlg));
+    auto *dest = new QComboBox(&dlg);
+    dest->setObjectName(QStringLiteral("mergeTrackDestination"));
+    for (int t = 0; t < doc->engineTrackCount(); t++) {
+        if (t != source)
+            dest->addItem(trackLabel(t), t);
+    }
+    // The track above is the usual target; the one below when there is
+    // none above.
+    dest->setCurrentIndex(std::max(0, dest->findData(source - 1)));
+    layout->addWidget(dest);
+    auto *allEvents = new QRadioButton(tr("All events (notes, controllers, pitch bends, "
+                                          "voice changes)"),
+                                       &dlg);
+    allEvents->setObjectName(QStringLiteral("mergeTrackAllEvents"));
+    auto *notesOnly = new QRadioButton(tr("Notes only"), &dlg);
+    notesOnly->setObjectName(QStringLiteral("mergeTrackNotesOnly"));
+    // Notes only by default: collapsing an imported file's tracks is the
+    // usual reason to merge, and carrying the source's controllers would
+    // splat its volume/pan over the destination's.
+    notesOnly->setChecked(true);
+    layout->addWidget(notesOnly);
+    layout->addWidget(allEvents);
+    auto *note = new QLabel(tr("The merged track is deleted. The destination keeps its "
+                               "starting voice, and merged notes replace any notes they "
+                               "overlap."),
+                            &dlg);
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    buttons->button(QDialogButtonBox::Ok)->setText(tr("Merge"));
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dlg.exec() != QDialog::Accepted || dest->currentIndex() < 0)
+        return false;
+    *outDest = dest->currentData().toInt();
+    *outNotesOnly = notesOnly->isChecked();
+    return true;
+}
+
+void SongView::mergeTrack(int track)
+{
+    if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0 ||
+        m_document->engineTrackCount() < 2)
+        return;
+    int dest = -1;
+    bool notesOnly = false;
+    // The dialog's modal loop keeps timers running, so a plugin can edit
+    // the song while it is up; the numbers it offered are then stale.
+    const uint64_t revisionBefore = m_document->revision();
+    if (!askMergeTrack(track, &dest, &notesOnly))
+        return;
+    if (m_document->revision() != revisionBefore) {
+        announce(tr("The song changed while the Merge Track dialog was open; nothing merged"));
+        return;
+    }
+    if (dest < 0 || dest == track || m_document->smfTrackFor(dest) < 0)
+        return;
+    // The checks above are the document's own preconditions, so the edit
+    // cannot refuse; the view state shifts first, before the edit rebuilds
+    // the headers and lanes (deleteTrack's order).
+    shiftViewStateOverRemovedTrack(track);
+    if (!m_document->mergeTrack(track, dest, notesOnly))
+        return;
+    // The destination's number has shifted if it sat below the source.
+    const int destAfter = dest > track ? dest - 1 : dest;
+    selectTrack(destAfter);
+    announce(tr("Merged track %1 into track %2").arg(track + 1).arg(destAfter + 1));
 }
 
 void SongView::moveTrack(int from, int to)

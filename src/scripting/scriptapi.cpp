@@ -2963,6 +2963,23 @@ void EditApi::deleteTrack(int track)
     done();
 }
 
+bool EditApi::mergeTrack(int track, int target, const QVariantMap &options)
+{
+    SongDocument *d = begin();
+    if (!d)
+        return false;
+    bool merged = false;
+    if (checkTrack(d, track, "mergeTrack") && checkTrack(d, target, "mergeTrack")) {
+        if (track == target)
+            throwError(QStringLiteral("edit.mergeTrack: a track cannot be merged into itself"));
+        else
+            merged =
+                d->mergeTrack(track, target, options.value(QStringLiteral("notesOnly")).toBool());
+    }
+    done();
+    return merged;
+}
+
 bool EditApi::moveTrack(int track, int target)
 {
     SongDocument *d = begin();

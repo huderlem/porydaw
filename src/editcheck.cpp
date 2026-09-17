@@ -2,6 +2,7 @@
 #include <QString>
 #include <QTemporaryDir>
 #include <cstdio>
+#include <tuple>
 
 #include "core/miditimeline.h"
 #include "core/songdocument.h"
@@ -713,6 +714,227 @@ int documentContractFailures()
                 expect(activeGlobalsAreOriginal(),
                        "redoing duplicate deletion changed sequencer-global metadata");
             }
+        }
+        // Merging the seq chunk's track away strips its channel events in
+        // place (the chunk stays, its globals untouched) and lands the note
+        // on the backing track's channel — without the source's tick-0
+        // voice.
+        if (globalsDoc.engineTrackCount() == 2) {
+            const bool merged = globalsDoc.mergeTrack(0, 1, false);
+            const auto notes = globalsDoc.notesForTrack(0);
+            bool stripped = globalsDoc.smf().tracks.size() == 2;
+            for (const SmfEvent &ev : globalsDoc.smf().tracks[0].events)
+                stripped = stripped && !ev.isChannel();
+            const auto voices = globalsDoc.lanePoints(0, DOC_CC_VOICE);
+            expect(merged && stripped && globalsDoc.engineTrackCount() == 1 &&
+                       globalsDoc.channelFor(0) == 1 && notes.size() == 1 && notes[0].tick == 0 &&
+                       notes[0].key == 60 && notes[0].duration == 24 && notes[0].channel == 1 &&
+                       voices.size() == 1 && voices[0].value == 7 && activeGlobalsAreOriginal(),
+                   "merging the seq chunk's track did not strip it in place");
+            globalsDoc.undoStack()->undo();
+            expect(globalsDoc.engineTrackCount() == 2 && activeGlobalsAreOriginal() &&
+                       globalsDoc.notesForTrack(0).size() == 1,
+                   "undoing a seq-chunk merge did not restore the track");
+        }
+    }
+
+    // mergeTrack: the source's own-channel events land in the destination
+    // on ITS channel, one undo entry; the merged notes win same-key
+    // overlaps (head/tail trims, full covers), a merged lane point replaces
+    // the destination's point on that tick, the destination keeps its
+    // tick-0 voice, an unterminated source note-on is dropped, the seq
+    // globals of the removed chunk are rescued, the destination's end tick
+    // grows, and undo restores every byte. notesOnly leaves the source's
+    // controllers and voice changes behind.
+    if (ok) {
+        SmfFile merge;
+        merge.format = 1;
+        merge.division = 24;
+        SmfTrack conductorChunk;
+        conductorChunk.events.push_back(meta(0, 0x51, QByteArray("\x07\xA1\x20", 3)));
+        conductorChunk.endTick = 48;
+        merge.tracks.push_back(conductorChunk);
+        SmfTrack destChunk; // engine 0, channel 0
+        destChunk.events.push_back(chEvent(0xC0, 0, 6, 0));
+        destChunk.events.push_back(chEvent(0xB0, 0, 7, 100));
+        destChunk.events.push_back(chEvent(0x90, 0, 60, 100));
+        destChunk.events.push_back(chEvent(0x80, 12, 60, 0));
+        destChunk.events.push_back(chEvent(0x90, 12, 62, 100));
+        destChunk.events.push_back(chEvent(0x80, 24, 62, 0));
+        destChunk.events.push_back(chEvent(0x90, 30, 60, 100));
+        destChunk.events.push_back(chEvent(0x80, 36, 60, 0));
+        destChunk.endTick = 48;
+        merge.tracks.push_back(destChunk);
+        SmfTrack sourceChunk; // engine 1, channel 1
+        sourceChunk.events.push_back(chEvent(0xC1, 0, 7, 0));
+        sourceChunk.events.push_back(chEvent(0xB1, 0, 7, 50));
+        sourceChunk.events.push_back(chEvent(0xB1, 6, 10, 30));
+        sourceChunk.events.push_back(chEvent(0x91, 6, 60, 90));
+        sourceChunk.events.push_back(chEvent(0x91, 12, 60, 0));
+        sourceChunk.events.push_back(meta(12, 0x06, QByteArrayLiteral("[")));
+        sourceChunk.events.push_back(chEvent(0xC1, 24, 3, 0));
+        sourceChunk.events.push_back(meta(24, 0x58, QByteArray("\x03\x02\x18\x08", 4)));
+        sourceChunk.events.push_back(chEvent(0x91, 28, 60, 80));
+        sourceChunk.events.push_back(chEvent(0x81, 38, 60, 0));
+        sourceChunk.events.push_back(chEvent(0x91, 40, 65, 70)); // unterminated
+        sourceChunk.endTick = 96;
+        merge.tracks.push_back(sourceChunk);
+        const QString mergePath = tmp.path() + QStringLiteral("/merge.mid");
+        SongInfo mergeInfo = info;
+        mergeInfo.label = QStringLiteral("merge");
+        mergeInfo.midPath = mergePath;
+        SongDocument mergeDoc;
+        const bool loaded = merge.writeFile(mergePath, &error) && mergeDoc.load(mergeInfo, &error);
+        expect(loaded, "could not load the merge fixture");
+        if (!loaded)
+            return failures;
+        const std::vector<SmfTrack> pristine = mergeDoc.smf().tracks;
+        auto sameAsPristine = [&] {
+            const auto &tracks = mergeDoc.smf().tracks;
+            if (tracks.size() != pristine.size())
+                return false;
+            for (size_t t = 0; t < tracks.size(); t++) {
+                if (tracks[t].endTick != pristine[t].endTick ||
+                    tracks[t].events != pristine[t].events)
+                    return false;
+            }
+            return true;
+        };
+        auto hasNote = [&](uint64_t tick, uint8_t key, uint32_t duration, uint8_t velocity) {
+            for (const DocNote &n : mergeDoc.notesForTrack(0)) {
+                if (n.tick == tick && n.key == key && !n.unterminated() && n.duration == duration &&
+                    n.velocity == velocity && n.channel == 0)
+                    return true;
+            }
+            return false;
+        };
+        auto lane = [&](uint8_t cc) {
+            std::vector<std::pair<uint64_t, int>> out;
+            for (const DocLanePoint &p : mergeDoc.lanePoints(0, cc))
+                out.emplace_back(p.tick, p.value);
+            return out;
+        };
+        auto mergedNotesLanded = [&] {
+            return mergeDoc.engineTrackCount() == 1 && mergeDoc.smf().tracks.size() == 2 &&
+                   mergeDoc.channelFor(0) == 0 && mergeDoc.notesForTrack(0).size() == 4 &&
+                   hasNote(0, 60, 6, 100) && hasNote(6, 60, 6, 90) && hasNote(12, 62, 12, 100) &&
+                   hasNote(28, 60, 10, 80) && mergeDoc.smf().tracks[1].endTick == 96;
+        };
+        auto globalsRescued = [&] {
+            const auto sigs = mergeDoc.timeSigs();
+            return mergeDoc.loopTick(false) == 12 && sigs.size() == 1 && sigs[0].smfTrack == 0 &&
+                   sigs[0].tick == 24 && sigs[0].numerator == 3;
+        };
+        expect(!mergeDoc.mergeTrack(0, 0, false) && !mergeDoc.mergeTrack(1, 5, false) &&
+                   !mergeDoc.mergeTrack(-1, 0, false) && mergeDoc.undoStack()->count() == 0,
+               "an invalid merge pair was not refused");
+        const uint64_t revisionBefore = mergeDoc.revision();
+        expect(mergeDoc.mergeTrack(1, 0, false) && mergeDoc.undoStack()->count() == 1 &&
+                   mergeDoc.revision() == revisionBefore + 1,
+               "a full merge did not push exactly one command");
+        expect(mergedNotesLanded(), "a full merge did not land the notes on the destination");
+        expect(lane(7) == std::vector<std::pair<uint64_t, int>>{{0, 50}} &&
+                   lane(10) == std::vector<std::pair<uint64_t, int>>{{6, 30}} &&
+                   lane(DOC_CC_VOICE) == std::vector<std::pair<uint64_t, int>>{{0, 6}, {24, 3}},
+               "a full merge did not carry the lanes (replacing same-tick points, keeping the "
+               "destination's tick-0 voice)");
+        expect(globalsRescued(), "a full merge lost the removed chunk's seq globals");
+        expect(tracksSorted(mergeDoc.smf()), "events unsorted after mergeTrack");
+        mergeDoc.undoStack()->undo();
+        expect(sameAsPristine() && mergeDoc.engineTrackCount() == 2,
+               "undoing a full merge did not restore the bytes");
+        mergeDoc.undoStack()->redo();
+        expect(mergedNotesLanded() && globalsRescued(), "redoing a full merge diverged");
+        mergeDoc.undoStack()->undo();
+        expect(mergeDoc.mergeTrack(1, 0, true) && mergedNotesLanded() && globalsRescued(),
+               "a notes-only merge did not land the notes");
+        expect(lane(7) == std::vector<std::pair<uint64_t, int>>{{0, 100}} && lane(10).empty() &&
+                   lane(DOC_CC_VOICE) == std::vector<std::pair<uint64_t, int>>{{0, 6}},
+               "a notes-only merge carried controllers or voice changes");
+        mergeDoc.undoStack()->undo();
+        expect(sameAsPristine(), "undoing a notes-only merge did not restore the bytes");
+        // Merging DOWN into a later chunk: removing the source chunk
+        // renumbers the destination, which every earlier op must have
+        // addressed by its old index.
+        const bool mergedDown = mergeDoc.mergeTrack(0, 1, false);
+        const auto downNotes = mergeDoc.notesForTrack(0);
+        size_t terminated = 0;
+        for (const DocNote &n : downNotes)
+            terminated += n.unterminated() ? 0 : 1;
+        // The destination's own unterminated note-on (65@40) stays; the
+        // four terminated notes are the merged set with the overlaps
+        // resolved in the arrivals' favor.
+        expect(mergedDown && mergeDoc.engineTrackCount() == 1 &&
+                   mergeDoc.smf().tracks.size() == 2 && mergeDoc.channelFor(0) == 1 &&
+                   downNotes.size() == 5 && terminated == 4 && tracksSorted(mergeDoc.smf()),
+               "merging into a later chunk did not land on the renumbered destination");
+        mergeDoc.undoStack()->undo();
+        expect(sameAsPristine(), "undoing a merge into a later chunk did not restore the bytes");
+
+        // Import shapes: the source's first program change sits past tick
+        // 0 (it is still the track's identity, so it stays behind and the
+        // destination's voice holds), and a zero-length source note is
+        // dropped rather than carried as an empty span that would trim the
+        // destination's note on that key and orphan the arrival.
+        SmfFile shapes;
+        shapes.format = 1;
+        shapes.division = 24;
+        shapes.tracks.push_back(conductorChunk);
+        SmfTrack shapeDest; // engine 0, channel 0
+        shapeDest.events.push_back(chEvent(0xC0, 0, 6, 0));
+        shapeDest.events.push_back(chEvent(0x90, 0, 60, 100));
+        shapeDest.events.push_back(chEvent(0x80, 24, 60, 0));
+        shapeDest.endTick = 48;
+        shapes.tracks.push_back(shapeDest);
+        SmfTrack shapeSrc; // engine 1, channel 1
+        shapeSrc.events.push_back(meta(0, 0x03, QByteArrayLiteral("late")));
+        shapeSrc.events.push_back(chEvent(0xC1, 1, 7, 0));
+        shapeSrc.events.push_back(chEvent(0xC1, 1, 8, 0)); // same-tick duplicate: also identity
+        shapeSrc.events.push_back(chEvent(0x91, 12, 60, 90));
+        shapeSrc.events.push_back(chEvent(0x81, 12, 60, 0)); // zero-length
+        shapeSrc.events.push_back(chEvent(0x91, 30, 64, 90));
+        shapeSrc.events.push_back(chEvent(0x81, 36, 64, 0));
+        shapeSrc.events.push_back(chEvent(0xC1, 36, 3, 0)); // a later change: carried
+        shapeSrc.endTick = 48;
+        shapes.tracks.push_back(shapeSrc);
+        const QString shapesPath = tmp.path() + QStringLiteral("/merge-shapes.mid");
+        SongInfo shapesInfo = info;
+        shapesInfo.label = QStringLiteral("merge-shapes");
+        shapesInfo.midPath = shapesPath;
+        SongDocument shapesDoc;
+        const bool shapesLoaded =
+            shapes.writeFile(shapesPath, &error) && shapesDoc.load(shapesInfo, &error);
+        expect(shapesLoaded, "could not load the merge-shapes fixture");
+        if (shapesLoaded) {
+            const std::vector<SmfTrack> shapesPristine = shapesDoc.smf().tracks;
+            auto shapesVoice = [&] {
+                std::vector<std::pair<uint64_t, int>> out;
+                for (const DocLanePoint &p : shapesDoc.lanePoints(0, DOC_CC_VOICE))
+                    out.emplace_back(p.tick, p.value);
+                return out;
+            };
+            auto shapesNotes = [&] {
+                std::vector<std::tuple<uint64_t, uint8_t, uint32_t>> out;
+                for (const DocNote &n : shapesDoc.notesForTrack(0))
+                    out.emplace_back(n.tick, n.key, n.unterminated() ? UINT32_MAX : n.duration);
+                return out;
+            };
+            expect(shapesDoc.mergeTrack(1, 0, false) && shapesDoc.engineTrackCount() == 1 &&
+                       shapesVoice() == std::vector<std::pair<uint64_t, int>>{{0, 6}, {36, 3}},
+                   "a merge carried the source's past-tick-0 initial voice");
+            expect(shapesNotes() ==
+                           std::vector<std::tuple<uint64_t, uint8_t, uint32_t>>{{0, 60, 24},
+                                                                                {30, 64, 6}} &&
+                       tracksSorted(shapesDoc.smf()),
+                   "a zero-length source note was not dropped by the merge");
+            shapesDoc.undoStack()->undo();
+            const auto &restored = shapesDoc.smf().tracks;
+            bool bytesBack = restored.size() == shapesPristine.size();
+            for (size_t t = 0; bytesBack && t < restored.size(); t++) {
+                bytesBack = restored[t].endTick == shapesPristine[t].endTick &&
+                            restored[t].events == shapesPristine[t].events;
+            }
+            expect(bytesBack, "undoing the merge-shapes merge did not restore the bytes");
         }
     }
 

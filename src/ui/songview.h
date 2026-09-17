@@ -392,6 +392,14 @@ class SongView : public QWidget
     // Modal voicegroup-entry picker with press-and-hold audition. Returns
     // false on cancel; otherwise *outVoice is the chosen entry (0-127).
     bool pickVoice(const QString &title, int initialVoice, int *outVoice);
+    // Modal destination picker for mergeTrack. Returns false on cancel;
+    // otherwise *outDest is the chosen engine track and *outNotesOnly says
+    // whether only notes carry over.
+    bool askMergeTrack(int source, int *outDest, bool *outNotesOnly);
+    // Engine slot `track` is about to disappear (delete/merge): move the
+    // per-track view state (mute/solo masks, empty lanes, selection) down
+    // over it and collapse the track-addressed scope and time selection.
+    void shiftViewStateOverRemovedTrack(int track);
     // Track-header entry point: re-pick the voice governing the track (its
     // first program change), inserting one at tick 0 if the track has none.
     void editTrackVoice(int track);
@@ -408,6 +416,11 @@ class SongView : public QWidget
     void addTrack();
     void duplicateTrack(int track);
     void deleteTrack(int track);
+    // Merge: a modal dialog (destination track, all events or notes only)
+    // then SongDocument::mergeTrack; the source slot vanishes, so the
+    // per-track view state shifts as for deleteTrack and the destination
+    // is selected under its new number.
+    void mergeTrack(int track);
     void moveTrack(int from, int to);
     // Inline rename: opens a line editor on the track's header row
     // (double-click and the context menu land here). commitTrackRename
