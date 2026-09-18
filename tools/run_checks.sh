@@ -125,6 +125,7 @@ run rollcheck        base --rollcheck SCRATCH mus_abandoned_ship
 run velcheck         base --velcheck SCRATCH mus_abandoned_ship
 run loopcheck        -    --loopcheck
 run ignorecheck      -    --ignorecheck SCRATCH
+run bundlecheck      -    --bundlecheck SCRATCH
 run primecheck       -    --primecheck
 run smfcheck         -    --smfcheck
 run transportcheck   -    --transportcheck

@@ -128,6 +128,11 @@ qt_add_library(porydaw_app STATIC
     src/project/songsmk.h
     src/project/samplereg.cpp
     src/project/samplereg.h
+    src/project/bundlearchive.cpp
+    src/project/bundlearchive.h
+    src/project/songbundle.cpp
+    src/project/songbundle.h
+    src/project/miniz_impl.c
     src/project/sidecar.cpp
     src/project/sidecar.h
     src/project/voicegroupsource.cpp
@@ -202,7 +207,14 @@ target_include_directories(porydaw_app PUBLIC
     ${PORYAAAA_DIR}/third_party
     external/dr_libs
     external/stb
+    external/miniz
 )
+# miniz (song bundles): no stdio (all file I/O goes through Qt, miniz only
+# sees memory buffers), no time (entries carry fixed timestamps so identical
+# exports are byte-identical), no zlib-compatible names (Qt may link zlib).
+# PUBLIC so harnesses that include miniz.h see the same configuration.
+target_compile_definitions(porydaw_app PUBLIC
+    MINIZ_NO_STDIO MINIZ_NO_TIME MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
 # The project() version is the single source of truth (docs/RELEASING.md);
 # release CI refuses a tag that doesn't match it.
 target_compile_definitions(porydaw_app PUBLIC
@@ -267,6 +279,7 @@ qt_add_executable(porydaw
     src/audiocheck.cpp
     src/mkcheck.cpp
     src/ignorecheck.cpp
+    src/bundlecheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp
     src/settingscheck.cpp

@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17, not started.** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (song-bundle, uncommitted), Phase 1 next.** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -324,7 +324,8 @@ written.
 ## 5. Phases
 
 ### Phase 0 — Container + manifest + harness skeleton
-Status: **not started**
+Status: **LANDED 2026-09-17 on song-bundle, swept normal + ASAN** (also
+builds with PORYDAW_SCRIPTING=OFF). Uncommitted, staged.
 
 - Vendor miniz; add `src/project/bundlearchive.{h,cpp}`:
   `bool extractBundle(zipPath, destDir, error)`, `bool createBundle(srcDir,
@@ -339,6 +340,48 @@ Status: **not started**
 
 Acceptance: `--bundlecheck` PASS normal + ASAN; `clang-format` clean;
 OFF/Windows-irrelevant.
+
+Deviations (Phase 0):
+- Branch `song-bundle` was created from `porysong` (= `main` d46706c + the
+  plan-doc commit 0139a5d) rather than bare `main`, because this PLAN.md
+  only exists on that branch. `main` is an ancestor, so nothing else differs.
+- miniz 3.1.2 (release amalgamation) is vendored at `external/miniz/` with
+  its upstream `LICENSE` and an `external/miniz/LICENSES.md` notice that
+  mirrors `external/dr_libs/LICENSES.md`; there is no central third-party
+  notices file in the repo (`RELEASE-README.txt` carries none).
+- miniz configuration (`MINIZ_NO_STDIO`, `MINIZ_NO_TIME`,
+  `MINIZ_NO_ZLIB_COMPATIBLE_NAMES`) is set as **PUBLIC compile definitions
+  on `porydaw_app`** in CMake, not inside `miniz_impl.c`, so the harness
+  (which includes `miniz.h` to forge hostile zips) sees the same config;
+  `external/miniz` is on the PUBLIC include list for the same reason. All
+  file I/O goes through Qt; miniz only ever sees memory buffers (avoids
+  miniz's fopen on non-ASCII Windows paths).
+- "Fixed timestamps": rather than miniz's `MINIZ_NO_TIME` zero date (day 0 /
+  month 0, which some tools render as a blank date), `createBundle`
+  patches every local + central header to a real 1980-01-01 00:00:00 DOS
+  stamp after finalizing, so archives are deterministic **and** well-formed
+  (Python `zipfile` reads `(1980, 1, 1, 0, 0, 0)`).
+- Entry order is the byte order of the UTF-8 names (locale-independent);
+  empty directories are not recorded; deflate level 9.
+- `createBundle` also refuses a source tree without a root `porysong.json`
+  and enforces the same entry/size caps as extraction (a bundle we write
+  must be one we can read). Every file name is validated with the same
+  rules as extraction.
+- Extraction guards beyond §3.1: encrypted entries, unsupported compression
+  methods, duplicate (post-normalization) names, a name that is both a file
+  and a directory prefix, and an archive *file* larger than the cap plus
+  4 MiB of header slack (refused before reading). Directory entries are
+  validated but never materialized. All guards run before the destination
+  directory is created.
+- API beyond the spec (all in `BundleArchive`): `listBundle` (archive-order
+  entry names — Phase 1's "exact file list in the zip" assertion),
+  `extractBundleLimited` (explicit caps for the harness),
+  `validateEntryName`.
+- `BundleManifest::fromJson` additionally requires a non-empty
+  `song.label` and `song.voicegroup`; `constant`/`player` null ↔ empty
+  QString; every optional array may be omitted. `toJson` is
+  `QJsonDocument::Indented` with QJsonObject's sorted keys (deterministic).
+  `BundleManifest::write` creates the bundle root directory if missing.
 
 ### Phase 1 — Export
 Status: **not started**

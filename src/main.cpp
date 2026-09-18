@@ -78,6 +78,10 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot = QStrin
 // ignorecheck.cpp; sidecar-dir .gitignore check (self-contained, builds its
 // own scratch projects; the scratch dir must not exist).
 int runIgnoreCheck(const QString &scratchDir);
+// bundlecheck.cpp; song-bundle container + manifest check: zip round-trip,
+// extraction guards, manifest round-trip, format refusal (self-contained;
+// the scratch dir must not exist).
+int runBundleCheck(const QString &scratchDir);
 // keymapcheck.cpp; user-configurable shortcut check: registry table/matching/
 // persistence + offscreen shortcuts-page driving (self-contained, no
 // project needed; redirects QSettings itself).
@@ -192,6 +196,9 @@ int main(int argc, char *argv[])
     const int ignoreCheck = args.indexOf(QStringLiteral("--ignorecheck"));
     if (ignoreCheck >= 0 && ignoreCheck + 1 < args.size())
         return runIgnoreCheck(args[ignoreCheck + 1]);
+    const int bundleCheck = args.indexOf(QStringLiteral("--bundlecheck"));
+    if (bundleCheck >= 0 && bundleCheck + 1 < args.size())
+        return runBundleCheck(args[bundleCheck + 1]);
     if (args.contains(QStringLiteral("--transportcheck")))
         return runTransportCheck();
     if (args.contains(QStringLiteral("--audiocheck")))
