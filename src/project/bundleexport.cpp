@@ -40,6 +40,9 @@ namespace SongBundle {
 namespace {
 
 const char kDummyVoice[] = "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0";
+// Stands in for a line the project plays silent. Attack, decay and sustain
+// all 0: the engine's CGB envelope ends such a note as it starts.
+const char kSilentVoice[] = "\tvoice_square_1 60, 0, 0, 2, 0, 0, 0, 0";
 const char kSamplePrefix[] = "DirectSoundWaveData_";
 const char kWavePrefix[] = "ProgrammableWaveData_";
 
@@ -489,10 +492,11 @@ bool Exporter::stage(const QString &destDir, QString *error)
             // The loader never follows a keysplit / drumkit out of an
             // overflow region (the hardware doesn't substitute twice, and
             // include-order cycles would recurse forever). Appended to the
-            // group's own file the line WOULD be followed, so it becomes the
-            // dummy voice instead.
+            // group's own file the line WOULD be followed. In the project a
+            // key landing on it resolves to nothing (nested keysplit) and
+            // makes no sound, so it becomes the silent voice instead.
             if (contentOf(line.raw).startsWith("voice_keysplit")) {
-                bytes += kDummyVoice;
+                bytes += kSilentVoice;
                 bytes += line.raw.endsWith('\r') ? "\r\n" : "\n";
                 continue;
             }

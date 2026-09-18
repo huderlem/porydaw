@@ -785,14 +785,20 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         expect(!drums.contains("voice_keysplit"),
                tag + QStringLiteral(": an overflow-region drumkit line is not carried (the loader "
                                     "would follow it from the group's own file, here in a cycle)"));
-        // Key 4 is that line: keysplit-with-no-target in the project, the
-        // dummy voice in the bundle.
+        // Key 4 is that line: keysplit-with-no-target in the project (silent:
+        // the engine never resolves a nested keysplit), a voice whose
+        // envelope ends at note start in the bundle.
+        expect(drums.count("\tvoice_square_1 60, 0, 0, 2, 0, 0, 0, 0") == 1,
+               tag + QStringLiteral(": the overflow-region drumkit line became the silent voice"));
         expectSameVoices(tag, labelRoot, out, QStringLiteral("voicegroup100"), {0, 1}, 4);
         Loaded bundle(out, QStringLiteral("voicegroup100"));
         if (bundle.vg && bundle.vg->voices[1].subGroup) {
             const ToneData *sub = static_cast<const ToneData *>(bundle.vg->voices[1].subGroup);
             expect(sub[0].wav && sub[3].wav && sub[3].wav != sub[0].wav,
                    tag + QStringLiteral(": overflow voice sounds from the bundle"));
+            expect(!(sub[4].type & (VOICE_KEYSPLIT | VOICE_KEYSPLIT_ALL)) && sub[4].attack == 0 &&
+                       sub[4].decay == 0 && sub[4].sustain == 0,
+                   tag + QStringLiteral(": key 4 is silent in the bundle, as in the project"));
         } else {
             expect(false, tag + QStringLiteral(": bundle drumkit resolves"));
         }

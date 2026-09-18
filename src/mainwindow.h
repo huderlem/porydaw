@@ -288,14 +288,14 @@ class MainWindow : public QMainWindow
     // Returns whether any tone or name actually changed.
     bool applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg);
     // The descriptor a synth symbol stands for: pending first, then on-disk.
-    const VgSynthDesc *synthDescForSymbol(const QString &symbol);
+    const VgSynthDesc *synthDescForSymbol(const QString &root, const QString &symbol);
     void cleanupVgPreview();
     void updateVgDockTitle();
     void newVoicegroup();
     // Sidecar view state (SPEC §4.4): written whenever a session is let go
     // (tab close, project switch, app close). Cosmetic; silent on failure.
     void saveViewState(SongSession &session);
-    LoadedVoiceGroup *loadVoicegroupFor(const SongCfg &cfg, QString *tried);
+    LoadedVoiceGroup *loadVoicegroupFor(const QString &root, const SongCfg &cfg, QString *tried);
     // Starts (or resumes) playback; from Stopped, seeks to the edit cursor
     // first so playback begins there. fromEditCursor forces that seek even
     // out of Paused — the Space binding (Reaper-style restart), while the
@@ -338,14 +338,18 @@ class MainWindow : public QMainWindow
         QStringList drumkits;
         VgSynthCatalog synths;
         VgAdsrDefaults typicalAdsr;
+        QString root; // what `valid` data was scanned from
     };
-    const VgCatalog &vgCatalog();
+    // Root-scoped reads take the owning session's root (SongSession::root),
+    // never m_project's: a tab need not live under the open project.
+    const VgCatalog &vgCatalog(const QString &root);
+    QString activeRoot() const; // the active tab's root, else the project's
     void invalidateVgCatalog();
     // The committed data behind the picker's rows (loop badges and browse
     // audition): one voicegroup_load_samples batch over the whole catalog —
     // DirectSound samples, programmable waves, and keysplit instruments —
     // loaded on first use and freed with the catalog.
-    void ensureSampleSet();
+    void ensureSampleSet(const QString &root);
     const WaveData *sampleWaveFor(const QString &symbol);
     void auditionKeysplit(const QString &symbol);
     LoadedSampleSet *m_sampleSet = nullptr;

@@ -28,6 +28,7 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
+#include <QSet>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
@@ -337,7 +338,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             scripting::VoicegroupCatalog out;
             if (!m_project.isOpen())
                 return out;
-            const VgCatalog &c = vgCatalog();
+            const VgCatalog &c = vgCatalog(m_project.root());
             out.groupArgs = c.groupArgs;
             out.directSound = c.directSound;
             out.progWave = c.progWave;
@@ -348,8 +349,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             return out;
         };
         bindings.typicalAdsr = [this](VgMacro macro, const QString &symbol, VgAdsr *out) {
-            *out = m_project.isOpen() ? vgDefaultAdsr(vgCatalog().typicalAdsr, macro, symbol)
-                                      : vgDefaultAdsr(VgAdsrDefaults(), macro, symbol);
+            *out = m_project.isOpen()
+                       ? vgDefaultAdsr(vgCatalog(m_project.root()).typicalAdsr, macro, symbol)
+                       : vgDefaultAdsr(VgAdsrDefaults(), macro, symbol);
         };
         bindings.editVoice = [this](SongSession &session, int slot, const VgVoice &voice,
                                     QString *error) {
@@ -860,7 +862,7 @@ void MainWindow::buildUi()
                 return;
             }
             if (kind == VgAuditionKind::Wave) {
-                ensureSampleSet();
+                ensureSampleSet(activeRoot());
                 const uint32_t *pw = m_progWaves.value(symbol, nullptr);
                 if (pw)
                     m_audio.auditionWave(
@@ -1211,6 +1213,7 @@ SongSession *MainWindow::createSession()
 {
     auto owned = std::make_unique<SongSession>();
     SongSession *s = owned.get();
+    s->root = m_project.root();
     s->view = new SongView;
     s->view->setVelocityColorMode(m_velocityColorsAction->isChecked());
     s->view->setNoteNameMode(m_noteNamesAction->isChecked());
@@ -1446,7 +1449,7 @@ void MainWindow::maybeRefreshVoicegroup(SongSession &session)
     if (!onDisk.isValid() || onDisk == session.vgFileTime)
         return;
     QString tried;
-    LoadedVoiceGroup *vg = loadVoicegroupFor(session.doc.cfg(), &tried);
+    LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, session.doc.cfg(), &tried);
     if (!vg)
         return; // keep the previous sound
     session.view->setVoicegroup(nullptr);
@@ -1467,7 +1470,7 @@ void MainWindow::refreshSessionsAfterVgSave(const QString &filePath, SongSession
         if (session->vgSource->dirty())
             continue; // unsaved edits stay; last save wins, as documented
         QString tried;
-        LoadedVoiceGroup *vg = loadVoicegroupFor(session->doc.cfg(), &tried);
+        LoadedVoiceGroup *vg = loadVoicegroupFor(session->root, session->doc.cfg(), &tried);
         if (!vg)
             continue; // keep the previous sound
         const int keepSlot = session == m_active ? m_vgBrowser->currentSlot() : 0;
@@ -1718,12 +1721,13 @@ void MainWindow::songOpenInNewTab(int songId)
     loadSong(m_project.songs().at(songId), /*newTab=*/true);
 }
 
-LoadedVoiceGroup *MainWindow::loadVoicegroupFor(const SongCfg &cfg, QString *tried)
+LoadedVoiceGroup *MainWindow::loadVoicegroupFor(const QString &root, const SongCfg &cfg,
+                                                QString *tried)
 {
     const QStringList candidates = DecompProject::voicegroupCandidates(cfg);
     if (tried)
         *tried = candidates.join(QStringLiteral(", "));
-    const QByteArray rootUtf8 = m_project.root().toLocal8Bit();
+    const QByteArray rootUtf8 = root.toLocal8Bit();
     for (const QString &name : candidates) {
         LoadedVoiceGroup *vg =
             voicegroup_load(rootUtf8.constData(), name.toLocal8Bit().constData(), nullptr);
@@ -1763,7 +1767,7 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
     timer.start();
 
     QString tried;
-    LoadedVoiceGroup *vg = loadVoicegroupFor(song.cfg, &tried);
+    LoadedVoiceGroup *vg = loadVoicegroupFor(m_project.root(), song.cfg, &tried);
     if (!vg) {
         QApplication::restoreOverrideCursor();
         QMessageBox::warning(
@@ -1808,7 +1812,7 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
     session->view->setSong(session->timeline.get(), session->voicegroup);
     session->view->setDocument(&session->doc);
     SongView::ViewState viewState;
-    if (ViewSidecar::load(m_project.root(), song.label, &viewState))
+    if (ViewSidecar::load(session->root, song.label, &viewState))
         session->view->applyViewState(viewState);
 
     if (created) {
@@ -1856,7 +1860,7 @@ void MainWindow::onDocumentChanged(SongSession &session)
         // open one again.
         cleanupVgPreview();
         QString tried;
-        if (LoadedVoiceGroup *vg = loadVoicegroupFor(cfg, &tried)) {
+        if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, cfg, &tried)) {
             session.view->setVoicegroup(nullptr);
             if (active) {
                 m_vgBrowser->setVoicegroup(nullptr);
@@ -1951,7 +1955,7 @@ bool MainWindow::saveSession(SongSession &session)
                 newDefs.append(def);
         }
         if (!newDefs.isEmpty()) {
-            if (!VoicegroupSource::writeSynthDefinitions(m_project.root(), newDefs, &error)) {
+            if (!VoicegroupSource::writeSynthDefinitions(session.root, newDefs, &error)) {
                 QMessageBox::warning(this, tr("Save Voicegroup"), error);
                 return false;
             }
@@ -1978,7 +1982,7 @@ bool MainWindow::saveSession(SongSession &session)
         // replaces any preview-loaded state.
         const int slot = &session == m_active ? m_vgBrowser->currentSlot() : 0;
         QString tried;
-        if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.doc.cfg(), &tried))
+        if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, session.doc.cfg(), &tried))
             swapVoicegroup(session, vg, slot);
         updateVgDockTitle();
         // Only a real write may refresh the stamp: recording the mtime on a
@@ -2030,7 +2034,7 @@ void MainWindow::exportBundle()
 
     // Like Export WAV, the bundle carries the song as it is in memory:
     // unsaved note, voice and synth edits included.
-    SongBundle::Exporter exporter(m_project.root(), session->doc, session->vgSource.get());
+    SongBundle::Exporter exporter(session->root, session->doc, session->vgSource.get());
     if (session->songId >= 0 && session->songId < m_project.songs().size()) {
         const SongInfo &song = m_project.songs().at(session->songId);
         exporter.setRegistrationHints(song.constant, song.player);
@@ -2216,8 +2220,8 @@ void MainWindow::openSongSettings()
 {
     if (!m_active)
         return;
-    SongSettingsDialog dialog(m_active->doc.cfg(), m_active->doc.label(), vgCatalog().groupArgs,
-                              this);
+    SongSettingsDialog dialog(m_active->doc.cfg(), m_active->doc.label(),
+                              vgCatalog(m_active->root).groupArgs, this);
     if (dialog.exec() == QDialog::Accepted)
         m_active->doc.setCfg(dialog.cfg());
 }
@@ -2300,7 +2304,7 @@ void MainWindow::newSong()
 {
     if (!m_project.isOpen())
         return;
-    NewSongWizard wizard(&m_project, vgCatalog().groupArgs, this);
+    NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, this);
     if (wizard.exec() != QDialog::Accepted)
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
@@ -2326,7 +2330,8 @@ void MainWindow::importMidi()
         QMessageBox::warning(this, tr("Import MIDI"), error);
         return;
     }
-    NewSongWizard wizard(&m_project, std::move(smf), path, vgCatalog().groupArgs, this);
+    NewSongWizard wizard(&m_project, std::move(smf), path, vgCatalog(m_project.root()).groupArgs,
+                         this);
     if (wizard.exec() != QDialog::Accepted)
         return;
     finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
@@ -2414,7 +2419,7 @@ void MainWindow::importSampleForSlot(int slot)
     }
 
     const QString root = m_project.root();
-    const QStringList symbols = vgCatalog().directSound;
+    const QStringList symbols = vgCatalog(m_project.root()).directSound;
     // Browser-initiated: audition with the destination voice's envelope
     // when that slot already holds a DirectSound-family voice.
     AuditionSlots::Adsr destAdsr;
@@ -2478,7 +2483,7 @@ void MainWindow::importSampleForSlot(int slot)
             voice.key = 60;
             voice.pan = 0;
             const VgAdsr adsr =
-                vgDefaultAdsr(vgCatalog().typicalAdsr, voice.macro,
+                vgDefaultAdsr(vgCatalog(m_project.root()).typicalAdsr, voice.macro,
                               QStringLiteral("DirectSoundWaveData_") + dialog.sampleName());
             voice.attack = adsr.attack;
             voice.decay = adsr.decay;
@@ -2814,7 +2819,7 @@ bool MainWindow::createVoicegroupNamed(const QString &name, const QString &copyF
         *error = tr("%1 is not a valid voicegroup name").arg(name);
         return false;
     }
-    if (vgCatalog().groupArgs.contains(QStringLiteral("_") + name)) {
+    if (vgCatalog(m_project.root()).groupArgs.contains(QStringLiteral("_") + name)) {
         *error = tr("a voicegroup named %1 already exists").arg(name);
         return false;
     }
@@ -3022,7 +3027,7 @@ void MainWindow::updateVoicegroupBrowser()
                             : session->doc.cfg().voicegroupArg;
     m_vgBrowser->setVoicegroup(session->voicegroup);
     m_vgBrowser->setUsedVoices(session->view->usedVoices());
-    const VgCatalog &catalog = vgCatalog();
+    const VgCatalog &catalog = vgCatalog(session->root);
     m_vgBrowser->setVoicegroupChoices(catalog.groupArgs);
     m_vgBrowser->setCurrentVoicegroupArg(arg);
     m_vgBrowser->setSource(
@@ -3032,7 +3037,7 @@ void MainWindow::updateVoicegroupBrowser()
             // Mint a pending symbol for the descriptor — nothing is written;
             // the definition reaches disk when a voicegroup referencing it
             // saves. Value-equal definitions (on disk or pending) are reused.
-            const VgSynthCatalog &synths = vgCatalog().synths;
+            const VgSynthCatalog &synths = vgCatalog(activeRoot()).synths;
             QString symbol = synths.symbolFor(desc);
             if (!symbol.isEmpty())
                 return symbol;
@@ -3051,7 +3056,8 @@ void MainWindow::updateVoicegroupBrowser()
             // different bytes (or a plain sample) forces a suffix.
             symbol = vgSynthSymbolName(desc);
             const QString base = symbol;
-            for (int i = 2; synths.find(symbol) || vgCatalog().directSound.contains(symbol); i++)
+            for (int i = 2;
+                 synths.find(symbol) || vgCatalog(activeRoot()).directSound.contains(symbol); i++)
                 symbol = base + QStringLiteral("_%1").arg(i);
             m_pendingSynths.insert(symbol, desc);
             return symbol;
@@ -3059,10 +3065,19 @@ void MainWindow::updateVoicegroupBrowser()
     updateVgDockTitle();
 }
 
-const MainWindow::VgCatalog &MainWindow::vgCatalog()
+QString MainWindow::activeRoot() const
 {
+    return m_active ? m_active->root : m_project.root();
+}
+
+const MainWindow::VgCatalog &MainWindow::vgCatalog(const QString &root)
+{
+    // One cache, keyed by the root it was scanned from: a tab rooted
+    // elsewhere than the last caller rescans (and drops the sample batch).
+    if (m_vgCatalog.valid && m_vgCatalog.root != root)
+        invalidateVgCatalog();
     if (!m_vgCatalog.valid) {
-        const QString root = m_project.root();
+        m_vgCatalog.root = root;
         // One read of each voicegroup file and of the sound data files; the
         // per-dataset accessors would redo the same full scan per call.
         const VgCatalogScan scan = VoicegroupSource::catalogScan(root);
@@ -3092,11 +3107,15 @@ void MainWindow::invalidateVgCatalog()
     m_sampleSet = nullptr;
 }
 
-void MainWindow::ensureSampleSet()
+void MainWindow::ensureSampleSet(const QString &root)
 {
-    if (m_sampleSet || !m_project.isOpen())
+    if (root.isEmpty())
         return;
-    const VgCatalog &catalog = vgCatalog();
+    // Before the m_sampleSet test: a catalog scanned from another root is
+    // invalidated here, which frees the batch loaded from it.
+    const VgCatalog &catalog = vgCatalog(root);
+    if (m_sampleSet)
+        return;
     QList<QByteArray> storage;
     const auto utf8 = [&storage](const QString &s) {
         storage.append(s.toUtf8());
@@ -3111,10 +3130,9 @@ void MainWindow::ensureSampleSet()
         keysplits.push_back(utf8(pair.first));
         tables.push_back(utf8(pair.second));
     }
-    m_sampleSet =
-        voicegroup_load_samples(m_project.root().toLocal8Bit().constData(), samples.data(),
-                                int(samples.size()), waves.data(), int(waves.size()),
-                                keysplits.data(), tables.data(), int(keysplits.size()), nullptr);
+    m_sampleSet = voicegroup_load_samples(
+        root.toLocal8Bit().constData(), samples.data(), int(samples.size()), waves.data(),
+        int(waves.size()), keysplits.data(), tables.data(), int(keysplits.size()), nullptr);
     if (!m_sampleSet)
         return;
     for (int i = 0; i < catalog.directSound.size() && i < m_sampleSet->count; i++) {
@@ -3134,7 +3152,7 @@ void MainWindow::ensureSampleSet()
 
 const WaveData *MainWindow::sampleWaveFor(const QString &symbol)
 {
-    ensureSampleSet();
+    ensureSampleSet(activeRoot());
     return m_sampleWaves.value(symbol, nullptr);
 }
 
@@ -3143,7 +3161,7 @@ const WaveData *MainWindow::sampleWaveFor(const QString &symbol)
 // the same resolution the engine does per note (resolve_voice).
 void MainWindow::auditionKeysplit(const QString &symbol)
 {
-    ensureSampleSet();
+    ensureSampleSet(activeRoot());
     const auto it = m_keysplits.constFind(symbol);
     if (it == m_keysplits.constEnd())
         return;
@@ -3172,7 +3190,7 @@ void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)
 {
     session.vgSource = std::make_unique<VoicegroupSource>();
     QString error;
-    if (!session.vgSource->open(m_project.root(), cfg.voicegroupArg, &error)) {
+    if (!session.vgSource->open(session.root, cfg.voicegroupArg, &error)) {
         session.vgSource.reset();
         session.vgFileTime = QDateTime();
         statusBar()->showMessage(tr("Voicegroup editing unavailable: %1").arg(error), 8000);
@@ -3265,7 +3283,7 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
 
 void MainWindow::reloadVoicegroupPreview(SongSession &session, int keepSlot)
 {
-    const QString previewDir = m_project.root() + QStringLiteral("/.porydaw/vgpreview");
+    const QString previewDir = session.root + QStringLiteral("/.porydaw/vgpreview");
     QDir().mkpath(previewDir);
     {
         QFile out(previewDir + QLatin1Char('/') + session.vgSource->loadName() +
@@ -3284,7 +3302,7 @@ void MainWindow::reloadVoicegroupPreview(SongSession &session, int keepSlot)
     std::strncpy(config.voicegroupPaths[0], ".porydaw/vgpreview", VG_MAX_PATH_LEN - 1);
     config.voicegroupPathCount = 1;
     LoadedVoiceGroup *vg =
-        voicegroup_load(m_project.root().toLocal8Bit().constData(),
+        voicegroup_load(session.root.toLocal8Bit().constData(),
                         session.vgSource->loadName().toLocal8Bit().constData(), &config);
     if (!vg) {
         statusBar()->showMessage(
@@ -3294,12 +3312,12 @@ void MainWindow::reloadVoicegroupPreview(SongSession &session, int keepSlot)
     swapVoicegroup(session, vg, keepSlot);
 }
 
-const VgSynthDesc *MainWindow::synthDescForSymbol(const QString &symbol)
+const VgSynthDesc *MainWindow::synthDescForSymbol(const QString &root, const QString &symbol)
 {
     const auto pending = m_pendingSynths.constFind(symbol);
     if (pending != m_pendingSynths.constEnd())
         return &pending.value();
-    return vgCatalog().synths.find(symbol);
+    return vgCatalog(root).synths.find(symbol);
 }
 
 bool MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *vg)
@@ -3312,7 +3330,7 @@ bool MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *
         if (!v || (v->macro != VgMacro::DirectSound && v->macro != VgMacro::DirectSoundNoResample &&
                    v->macro != VgMacro::DirectSoundAlt))
             continue;
-        const VgSynthDesc *desc = synthDescForSymbol(v->symbol);
+        const VgSynthDesc *desc = synthDescForSymbol(session.root, v->symbol);
         if (!desc)
             continue;
         // A synth param edit rides the scalar path, so the reload that would
@@ -3381,9 +3399,16 @@ void MainWindow::swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int 
 
 void MainWindow::cleanupVgPreview()
 {
-    if (!m_project.isOpen())
-        return;
-    QDir(m_project.root() + QStringLiteral("/.porydaw/vgpreview")).removeRecursively();
+    // Previews are written under the root of the session that made them.
+    QSet<QString> roots;
+    if (m_project.isOpen())
+        roots.insert(m_project.root());
+    for (const auto &session : m_sessions) {
+        if (!session->root.isEmpty())
+            roots.insert(session->root);
+    }
+    for (const QString &root : roots)
+        QDir(root + QStringLiteral("/.porydaw/vgpreview")).removeRecursively();
 }
 
 void MainWindow::updateVgDockTitle()
@@ -3485,7 +3510,7 @@ void MainWindow::saveViewState(SongSession &session)
 {
     if (session.doc.label().isEmpty())
         return;
-    ViewSidecar::save(m_project.root(), session.doc.label(), session.view->viewState());
+    ViewSidecar::save(session.root, session.doc.label(), session.view->viewState());
 }
 
 void MainWindow::updateWindowTitle()
@@ -3958,7 +3983,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     // (wizard pages enumerate voicegroups/players). Registration itself is
     // write-through now, exercised by --onboardcheck against a scratch copy.
     {
-        NewSongWizard wizard(&m_project, vgCatalog().groupArgs, this);
+        NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, this);
         qInfo("selftest: New Song wizard constructed (Settings window built with the main window)");
     }
 

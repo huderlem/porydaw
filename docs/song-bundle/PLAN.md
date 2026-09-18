@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (song-bundle, staged), Phase 2 next.** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 in progress (root refactor landed 2026-09-18, staged).** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -419,7 +419,11 @@ Deviations (Phase 1):
     on it. So "emitted whole" means *own lines + that overflow region*: the
     bundle's sub-voicegroup file is padded out to 128 voices with the lines
     the loader would have reached, and their samples/waves are bundled.
-    `voice_keysplit*` lines in the overflow region become the dummy square:
+    `voice_keysplit*` lines in the overflow region become a **silent**
+    square (`voice_square_1 60, 0, 0, 2, 0, 0, 0, 0` — attack/decay/sustain
+    0, the engine ends the note as it starts; fixed 2026-09-18 after review:
+    the audible unused-slot dummy made a key beep that the project plays
+    silent, since `resolve_voice` returns NULL for a nested keysplit):
     the loader never follows them there, but WOULD from the group's own file
     (and an include-order cycle then recurses until the stack overflows —
     hit and fixed during this phase). Phase 3 consequence: such a padded
@@ -498,7 +502,10 @@ Deviations (Phase 1):
   (dialog + status message) is not driven offscreen.
 
 ### Phase 2 — Read-only bundle tab + instant listen
-Status: **not started**
+Status: **in progress** — `SongSession::root` refactor LANDED 2026-09-18 on
+song-bundle, swept normal + ASAN (staged, uncommitted; its own commit per
+§7). Remaining: everything else below (lock, banner, gating, no-project
+tolerance, `openBundle`, entry points, harness).
 
 - `SongSession::root` refactor: every `m_project.root()` read inside
   per-session paths (`loadVoicegroupFor`, `reloadVoicegroupPreview`,
@@ -520,6 +527,46 @@ Status: **not started**
   enabled, bundle tab survives `openProjectDir`? — **No**: decide and
   assert that `openProjectDir` keeps bundle tabs (they are project-
   independent). Drop-event and CLI-arg paths exercised offscreen.
+
+Deviations (Phase 2, root refactor):
+- `SongSession::root` is set in `createSession()` from `m_project.root()`.
+  Converted to the session's root: `loadVoicegroupFor` (now takes `root`
+  first; `loadSong` passes `m_project.root()` because the voicegroup loads
+  before the session exists), `openVoicegroupSource`,
+  `reloadVoicegroupPreview`, `ViewSidecar::load/save` (`loadSong`,
+  `saveViewState`), `saveSession`'s `writeSynthDefinitions`, the bundle
+  exporter's project root, `synthDescForSymbol(root, symbol)`.
+- **The voicegroup catalog + sample batch stay one MainWindow-wide cache,
+  now keyed by root** (`vgCatalog(root)`, `ensureSampleSet(root)`,
+  `VgCatalog::root`): a call with a different root invalidates and rescans
+  (which also frees the sample batch loaded from the old root). Session
+  paths pass the session's root (`updateVoicegroupBrowser`, Song Settings,
+  synth lookups); browser-signal paths that carry no session (picker
+  sample/wave/keysplit audition, the synth-mint lambda) use the new
+  `activeRoot()` (active tab's root, else the project's); project-scoped
+  callers (New Song wizard, scripting catalog/typicalAdsr, sample import,
+  `createVoicegroupNamed`) pass `m_project.root()` explicitly. Cost to know
+  about: alternating between a bundle tab and a project tab rescans the
+  catalog on each switch. Not made per-session (would be a redesign).
+- `cleanupVgPreview()` removes `.porydaw/vgpreview` under the project root
+  **and** every open session's root (previews are written under the
+  session root). A locked bundle tab never writes one, so this is only
+  belt-and-braces for the temp dir.
+- **Deliberately left on `m_project.root()`** (project-scoped writers a
+  bundle tab must have disabled, not re-rooted): sample import / Edit
+  sample (`importSampleForSlot`, `editSampleForSlot`), register /
+  unregister / delete song, `createVoicegroupNamed`, New Song. Also left:
+  the scripting side (`scriptapi.cpp` `storage.song` sidecar paths at
+  `ViewSidecar::pathFor(p->root(), …)` and `Sidecar::ensureDir(p->root())`)
+  — it has no session root plumbing; the rest of Phase 2 must either gate
+  those for bundle sessions or route the session root through
+  `HostBindings`.
+- `loadSong`'s replace-in-place path does not re-assign `session->root`
+  (a project session's root cannot differ today). `openBundle` must never
+  reuse a project session in place, or must set `root` itself.
+- Harness: two assertions added to `--vgsavecheck` (session root == project
+  root; voicegroup source opened beneath it). No bundle behaviour yet, so
+  no new `--bundlecheck` section in this slice.
 
 ### Phase 3 — Import
 Status: **not started**

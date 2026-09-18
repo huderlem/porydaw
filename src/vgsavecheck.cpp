@@ -93,6 +93,12 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         return ok;
     };
 
+    // Per-session paths resolve under the tab's own root; a project tab's
+    // is the project's, and the voicegroup source was opened beneath it.
+    check(tab->root == m_project.root(), "session root is the project root");
+    check(tab->vgSource->filePath().startsWith(tab->root + QLatin1Char('/')),
+          "voicegroup source opened under the session root");
+
     // A DirectSound-family voice to edit (scalar fields + a sample symbol).
     int dsSlot = -1;
     for (int i = 0; i < VOICEGROUP_SIZE && dsSlot < 0; i++) {
@@ -175,7 +181,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         SongCfg probe = tab->doc.cfg();
         probe.voicegroupArg = arg;
         QString tried;
-        if (LoadedVoiceGroup *vg = loadVoicegroupFor(probe, &tried)) {
+        if (LoadedVoiceGroup *vg = loadVoicegroupFor(m_project.root(), probe, &tried)) {
             voicegroup_free(vg);
             otherArg = arg;
             break;
@@ -736,7 +742,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 // Wave voices share the picker: switching the Type swaps the
                 // list to the project's programmable waves, and highlighting
                 // one auditions it as a CGB wave.
-                if (vgCatalog().progWave.isEmpty()) {
+                if (vgCatalog(m_project.root()).progWave.isEmpty()) {
                     std::printf("vgsavecheck: note: no programmable waves, "
                                 "wave picker section skipped\n");
                 } else {
@@ -767,7 +773,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                         }
                         for (QTreeWidgetItemIterator it(list); *it; ++it) {
                             const QString s = (*it)->data(0, Qt::UserRole).toString();
-                            check(s.isEmpty() || vgCatalog().progWave.contains(s),
+                            check(s.isEmpty() || vgCatalog(m_project.root()).progWave.contains(s),
                                   "wave picker lists a non-wave symbol");
                             // Waves show the verbatim symbol (samples strip
                             // their shared prefix; waves don't).

@@ -36,6 +36,11 @@ struct SynthToneBuf {
 };
 
 struct SongSession {
+    // Where this tab's song lives: every per-session read (voicegroup load
+    // and source, preview files, view sidecar, synth and sample lookups)
+    // resolves under this, not under MainWindow's project — set from the
+    // project root at creation.
+    QString root;
     SongDocument doc;
     std::unique_ptr<VoicegroupSource> vgSource;
     std::unique_ptr<MidiTimeline> timeline;
