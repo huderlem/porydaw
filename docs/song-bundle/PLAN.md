@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (song-bundle, uncommitted), Phase 1 next.** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (song-bundle, staged), Phase 2 next.** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -384,7 +384,8 @@ Deviations (Phase 0):
   `BundleManifest::write` creates the bundle root directory if missing.
 
 ### Phase 1 — Export
-Status: **not started**
+Status: **LANDED 2026-09-18 on song-bundle, swept normal + ASAN.**
+Uncommitted, staged.
 
 - `SongBundle::Exporter`: input (project root, `SongSession&`); computes
   the used-program set from the document, walks the voicegroup (parse via
@@ -405,6 +406,96 @@ Status: **not started**
   `voicegroup_load(extractedRoot, vg, nullptr)` yields non-NULL `wav`/
   `subGroup`/`keySplitTable`/`wavePointer` for every used slot. Also:
   re-export → byte-identical zip.
+
+Deviations (Phase 1):
+- **Loader facts §2 did not record (verified in `voicegroup_loader.c`), and
+  what export does about them:**
+  - *Sub-voicegroup contiguity* (`load_sub_voicegroup` / `contiguousFill`,
+    `:2089-2166`, `:2259-2279`): a sub-voicegroup shorter than 128 voices
+    keeps filling from whatever is assembled after it — the rest of a
+    monolithic file, or the next files in `sound/voice_groups.inc` include
+    order — until a `voice_group` header. Macro-style projects (modern
+    pokeemerald) never continue; label-style ones do, and old drumsets rely
+    on it. So "emitted whole" means *own lines + that overflow region*: the
+    bundle's sub-voicegroup file is padded out to 128 voices with the lines
+    the loader would have reached, and their samples/waves are bundled.
+    `voice_keysplit*` lines in the overflow region become the dummy square:
+    the loader never follows them there, but WOULD from the group's own file
+    (and an include-order cycle then recurses until the stack overflows —
+    hit and fixed during this phase). Phase 3 consequence: such a padded
+    sub-voicegroup never content-matches the target's original, so it is
+    always "create".
+  - *`cry` / `cry_reverse` voices read the raw `.incbin` path only*
+    (`load_wave_data`, no `.bin`→`.wav` mapping, `:2556-2605`), i.e. the
+    `.bin` build artifact. Export copies that `.bin` verbatim as
+    `sound/direct_sound_samples/<name>.bin` and refuses (unresolved) when
+    the project isn't built. A symbol used by both a `cry` and a
+    `voice_directsound` line carries both files. stock pokeemerald
+    voicegroups contain no `cry` lines (cries play through
+    `cry_tables.inc`), so this is an edge, exercised by the fixture only.
+  - Sub-voicegroup files are found by the loader as
+    `sound/voicegroups/<symbol minus "voicegroup_">.inc` (probe step 1), so
+    that is the bundle file name (`route101_drumset.inc`, `voicegroup005.inc`)
+    — not the project's `drumsets/route101.inc`, which would collide with
+    the top-level `route101.inc` in a flat directory. The top-level file is
+    the first `DecompProject::voicegroupCandidates` name.
+- **Layout addition:** programmable-wave data files are bundled as
+  `sound/programmable_wave_samples/<name>.pcm` (`<name>` = symbol minus
+  `ProgrammableWaveData_`); §3.2 listed the `.inc` but not where its
+  `.incbin` targets live.
+- **`requires.extensions`:** there is no project-capability "lane gating"
+  in porydaw to reuse (§3.3/§3.5 assumed one; CC 0x05/0x17/0x19 are merely
+  classified `Advanced` in `ui/m4asemantics.cpp`). `usedExtensions()` lists
+  the engine's opt-in commands the MIDI emits — `PORTAMENTO` (CC 5), `PWMC`
+  (CC 0x17), `PWMS` (CC 0x19), the opt-in set of `kCcDefaults` in
+  `core/timelineplayer.cpp`. **Phase 3's "existing lane gating then shows
+  them grayed" does not exist either** — the import warning stands alone.
+- **`flags` / `midi.cfg`:** the `-G` value keeps mid2agb's real form
+  (`-G_route101`; the §3.3 example's `-G voicegroup_route101` is not what
+  mid2agb or `parseMidiCfg` accept). Flags are
+  `SongRegistry::mergeCfgFlags(doc.cfg())`, so unsaved Song Settings export.
+  `manifest.voicegroup` is the full symbol (`voicegroup_route101`).
+- **`layout`:** no layout concept exists in the code; written as
+  `pokefirered` when the top-level voicegroup is a monolithic section,
+  else `pokeemerald`. Informational only.
+- **Exporter input** is `(projectRoot, const SongDocument&, const
+  VoicegroupSource*)` + `setRegistrationHints` + `setPendingSynths`, not a
+  `SongSession&` (`songsession.h` drags `ui/songview.h` into `project/`, and
+  the harness needs no MainWindow). Lives in `src/project/bundleexport.{h,cpp}`;
+  `stage(dir)` writes the folder form, `exportTo(zip)` = stage + zip.
+  Minted-but-unsaved Golden Sun synths (`MainWindow::m_pendingSynths`) are
+  honoured, like unsaved voice edits.
+- **Voicegroup walk:** new read-only `VoicegroupSource::parseSource(bytes,
+  sectionLabel)` exposes the existing `parse()` line classification
+  (`VgSourceLine`: raw, kind, slot, voice, cry symbol); the exporter walks
+  `renderPreview()` bytes with it. No change to open/edit/save behaviour.
+- **Trimming:** only slots that have a source line are rewritten; a
+  voicegroup shorter than 128 lines (or with a starting-note header) is not
+  padded. A used program with no line / a Broken line is copied as-is (the
+  project plays it silent too) — only *symbols* that fail to resolve refuse.
+- **Resolution scope (v1):** symbols must be defined in
+  `sound/direct_sound_data.inc`, `sound/direct_sound_synth_data.inc`,
+  `sound/programmable_wave_data.inc`, `sound/keysplit_tables.inc`. The
+  loader's deep-scan fallbacks for nonstandard forks (`<dir>/<symbol>.wav`,
+  keysplit data probed in other dirs, config overrides) are not mirrored;
+  such symbols refuse as unresolved. A sample committed only as raw `.bin`
+  is carried as `.bin`. Bundle file-name clashes (two symbols → one
+  case-folded name) refuse.
+- Keysplit tables are copied as source text (declaring line through the
+  last data line, comments inside kept, trailing blank/comment/`.align`
+  lines dropped), in the project's own macro form. Synth definitions are
+  re-rendered canonically (`set_synth_pulse|saw|triangle`), which the
+  loader accepts regardless of the project's macro names.
+- **Harness:** fixtures are built in `src/bundleexportcheck.cpp`
+  (`buildWavProject` writes placeholder `.wav`s the loader can't read, so
+  nothing was shareable). Beyond the spec: project-vs-bundle
+  `voicegroup_load` equality on every used slot (sub-voicegroups included),
+  unsaved-edit + pending-synth export, all refusals, per-file and monolithic
+  label-style overflow projects, a second used DirectSound program (1) next
+  to the implicit program 0, and — when `PORYDAW_SAMPLE_CORPUS` is set, as
+  the sweep does — every 8th playable song of the real tree (60 songs of
+  pokeemerald) exported and load-compared. The File-menu action itself
+  (dialog + status message) is not driven offscreen.
 
 ### Phase 2 — Read-only bundle tab + instant listen
 Status: **not started**

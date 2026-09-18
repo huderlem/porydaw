@@ -63,6 +63,7 @@
 #include "audio/sf2reader.h"
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
+#include "project/bundleexport.h"
 #include "project/samplereg.h"
 #include "project/sidecar.h"
 #include "project/songregistry.h"
@@ -464,6 +465,10 @@ void MainWindow::buildUi()
     m_exportWavAction = fileMenu->addAction(tr("Export &WAV..."), this, &MainWindow::exportWav);
     keys.attach(QStringLiteral("file.export_wav"), m_exportWavAction);
     m_exportWavAction->setEnabled(false);
+    m_exportBundleAction =
+        fileMenu->addAction(tr("Export Song &Bundle..."), this, &MainWindow::exportBundle);
+    keys.attach(QStringLiteral("file.export_bundle"), m_exportBundleAction);
+    m_exportBundleAction->setEnabled(false);
     fileMenu->addSeparator();
     QAction *quitAction = fileMenu->addAction(tr("&Quit"), this, &QWidget::close);
     keys.attach(QStringLiteral("file.quit"), quitAction);
@@ -1339,6 +1344,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     const bool loaded = session != nullptr;
     m_saveAction->setEnabled(loaded);
     m_exportWavAction->setEnabled(loaded);
+    m_exportBundleAction->setEnabled(loaded);
     m_settingsAction->setEnabled(loaded);
     m_closeTabAction->setEnabled(loaded);
     m_eventListAction->setEnabled(loaded);
@@ -2000,6 +2006,45 @@ bool MainWindow::saveSession(SongSession &session)
     if (&session == m_active)
         updateWindowTitle();
     return true;
+}
+
+void MainWindow::exportBundle()
+{
+    SongSession *session = m_active;
+    if (!session)
+        return;
+
+    QSettings appSettings;
+    const QString startDir =
+        appSettings.value(QStringLiteral("lastBundleDir"), QFileInfo(session->doc.midPath()).path())
+            .toString();
+    QString path = QFileDialog::getSaveFileName(this, tr("Export Song Bundle"),
+                                                startDir + QLatin1Char('/') + session->doc.label() +
+                                                    QStringLiteral(".porysong"),
+                                                tr("Song bundles (*.porysong)"));
+    if (path.isEmpty())
+        return;
+    if (QFileInfo(path).suffix().isEmpty())
+        path += QStringLiteral(".porysong");
+    appSettings.setValue(QStringLiteral("lastBundleDir"), QFileInfo(path).path());
+
+    // Like Export WAV, the bundle carries the song as it is in memory:
+    // unsaved note, voice and synth edits included.
+    SongBundle::Exporter exporter(m_project.root(), session->doc, session->vgSource.get());
+    if (session->songId >= 0 && session->songId < m_project.songs().size()) {
+        const SongInfo &song = m_project.songs().at(session->songId);
+        exporter.setRegistrationHints(song.constant, song.player);
+    }
+    exporter.setPendingSynths(m_pendingSynths);
+    QString error;
+    if (!exporter.exportTo(path, &error)) {
+        QMessageBox::warning(this, tr("Export Song Bundle"), error);
+        return;
+    }
+    statusBar()->showMessage(
+        tr("Exported %1 (%n sample(s))", nullptr, int(exporter.manifest().samples.size()))
+            .arg(QDir::toNativeSeparators(path)),
+        8000);
 }
 
 void MainWindow::exportWav()

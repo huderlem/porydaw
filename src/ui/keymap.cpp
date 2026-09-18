@@ -58,6 +58,8 @@ const Def kDefs[] = {
      QKeySequence::Close, ""},
     {"file.export_wav", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Export WAV"),
      QKeySequence::UnknownKey, ""},
+    {"file.export_bundle", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Export Song Bundle"),
+     QKeySequence::UnknownKey, ""},
     {"file.quit", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Quit"), QKeySequence::Quit, ""},
     // Edit
     {"edit.undo", Context::Global, QT_TR_NOOP("Edit"), QT_TR_NOOP("Undo"), QKeySequence::Undo, ""},

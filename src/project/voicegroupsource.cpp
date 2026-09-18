@@ -967,6 +967,37 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
     return true;
 }
 
+VgParsedSource VoicegroupSource::parseSource(const QByteArray &content, const QString &sectionLabel)
+{
+    VoicegroupSource source;
+    source.m_sectionLabel = sectionLabel;
+    VgParsedSource parsed;
+    if (!source.parse(content, nullptr))
+        return parsed; // section label not found: no lines
+    parsed.sectionBegin = source.m_sectionBegin;
+    parsed.sectionEnd = source.m_sectionEnd;
+    parsed.lines.reserve(source.m_lines.size());
+    for (const Line &line : source.m_lines) {
+        VgSourceLine out;
+        out.raw = line.raw;
+        out.kind = line.kind;
+        out.slot = line.slot;
+        out.voice = line.voice;
+        if (line.kind == VgLineKind::ReadOnlyVoice) {
+            // The loader's sscanf("%s") after the macro word: the first
+            // whitespace-delimited token.
+            int start = 0, end = 0;
+            contentBounds(line.raw, &start, &end);
+            const QList<QByteArray> tokens =
+                line.raw.mid(start, end - start).simplified().split(' ');
+            if (tokens.size() >= 2)
+                out.crySymbol = QString::fromUtf8(tokens.at(1));
+        }
+        parsed.lines.append(out);
+    }
+    return parsed;
+}
+
 VgLineKind VoicegroupSource::kindAt(int slot) const
 {
     if (slot < 0 || slot >= VOICEGROUP_SIZE || m_slotToLine[slot] < 0)

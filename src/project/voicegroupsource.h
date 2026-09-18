@@ -175,6 +175,21 @@ enum class VgLineKind {
     Broken,        // recognized macro prefix but unparseable args — verbatim
 };
 
+// One line of voicegroup source as parseSource() classifies it.
+struct VgSourceLine {
+    QByteArray raw; // no '\n', trailing '\r' kept
+    VgLineKind kind = VgLineKind::Other;
+    int slot = -1;     // voice lines only (Editable / ReadOnlyVoice / Broken)
+    VgVoice voice;     // valid when kind == Editable
+    QString crySymbol; // ReadOnlyVoice: the cry sample symbol
+};
+
+struct VgParsedSource {
+    QVector<VgSourceLine> lines;
+    int sectionBegin = 0; // line index of the label line (0 for per-file)
+    int sectionEnd = 0;   // exclusive; lines.size() for per-file
+};
+
 // Source-of-truth model for one voicegroup: the .inc file's lines with the
 // loader's slot accounting, byte-conservative editing of the editable voice
 // lines, and re-rendering for save or for pre-save audition.
@@ -212,6 +227,14 @@ class VoicegroupSource
     // The edited source as a standalone parseable file: the whole buffer for
     // a per-file voicegroup, the section slice for a monolithic one.
     QByteArray renderPreview() const;
+
+    // Classifies standalone voicegroup bytes (a whole per-file voicegroup, a
+    // renderPreview() slice, or — with sectionLabel — one section of a
+    // monolithic file) with the same slot accounting open() uses. Lines
+    // outside the section come back as Other. Read-only: for consumers that
+    // walk the source text, like the song-bundle exporter.
+    static VgParsedSource parseSource(const QByteArray &content,
+                                      const QString &sectionLabel = QString());
 
     // Pushes the slot's scalar fields into a loaded ToneData using the C
     // loader's packing, for live audition without a reload. Returns false

@@ -134,6 +134,7 @@ class MainWindow : public QMainWindow
     void songOpenInNewTab(int songId);
     void saveSong();
     void exportWav();
+    void exportBundle();
     void openSongSettings();
     void openSettings();
     void newSong();
@@ -396,6 +397,7 @@ class MainWindow : public QMainWindow
     QAction *m_followPlayheadAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_exportWavAction = nullptr;
+    QAction *m_exportBundleAction = nullptr;
     QAction *m_settingsAction = nullptr;
     QAction *m_eventListAction = nullptr;
     QAction *m_velocityColorsAction = nullptr;

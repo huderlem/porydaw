@@ -79,8 +79,10 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot = QStrin
 // own scratch projects; the scratch dir must not exist).
 int runIgnoreCheck(const QString &scratchDir);
 // bundlecheck.cpp; song-bundle container + manifest check: zip round-trip,
-// extraction guards, manifest round-trip, format refusal (self-contained;
-// the scratch dir must not exist).
+// extraction guards, manifest round-trip, format refusal, and the export
+// sections of bundleexportcheck.cpp (scratch projects exported and re-loaded
+// through voicegroup_load; PORYDAW_SAMPLE_CORPUS, when set, adds real songs).
+// Self-contained; the scratch dir must not exist.
 int runBundleCheck(const QString &scratchDir);
 // keymapcheck.cpp; user-configurable shortcut check: registry table/matching/
 // persistence + offscreen shortcuts-page driving (self-contained, no

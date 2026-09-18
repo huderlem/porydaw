@@ -21,8 +21,11 @@
 // trailing dot/space, over-long UTF-8 names, corrupt payload — each refusal
 // leaves the destination untouched), manifest round-trip (every field, null hints,
 // omitted optional sections), and format refusal (newer format, missing
-// format, malformed JSON, non-object root). scratchDir must not already
-// exist.
+// format, malformed JSON, non-object root), then the Phase 1 export sections
+// (bundleexportcheck.cpp). scratchDir must not already exist.
+
+// bundleexportcheck.cpp: the Phase 1 export sections.
+void runBundleExportSections(const QString &scratchDir, int *failures);
 
 namespace {
 
@@ -519,6 +522,8 @@ int runBundleCheck(const QString &scratchDir)
                    error.contains("Update porydaw"),
                "read refuses format 99 and tells the user to update");
     }
+
+    runBundleExportSections(scratchDir, &failures);
 
     std::printf("bundlecheck: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

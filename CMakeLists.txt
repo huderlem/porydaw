@@ -130,6 +130,8 @@ qt_add_library(porydaw_app STATIC
     src/project/samplereg.h
     src/project/bundlearchive.cpp
     src/project/bundlearchive.h
+    src/project/bundleexport.cpp
+    src/project/bundleexport.h
     src/project/songbundle.cpp
     src/project/songbundle.h
     src/project/miniz_impl.c
@@ -280,6 +282,7 @@ qt_add_executable(porydaw
     src/mkcheck.cpp
     src/ignorecheck.cpp
     src/bundlecheck.cpp
+    src/bundleexportcheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp
     src/settingscheck.cpp
