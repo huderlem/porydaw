@@ -27,6 +27,8 @@
 // bundleexportcheck.cpp: the Phase 1 export sections.
 void runBundleExportSections(const QString &scratchDir, int *failures);
 // bundletabcheck.cpp; returns the number of failed expectations.
+void runBundleImportSections(const QString &scratchDir, int *failures);
+int runBundleImportTabSections(const QString &bundleZip, const QString &scratchDir);
 int runBundleTabSections(const QString &bundleZip, const QString &fixtureProject,
                          const QString &scratchDir);
 
@@ -531,6 +533,11 @@ int runBundleCheck(const QString &scratchDir)
     // MainWindow tab (bundletabcheck.cpp).
     failures += runBundleTabSections(scratchDir + QStringLiteral("/export_a.porysong"),
                                      scratchDir + QStringLiteral("/export_macro"), scratchDir);
+    // Phase 3: the same bundle imported into scratch projects (plan → apply),
+    // then through a MainWindow into an editable tab (bundleimportcheck.cpp).
+    runBundleImportSections(scratchDir, &failures);
+    failures +=
+        runBundleImportTabSections(scratchDir + QStringLiteral("/export_a.porysong"), scratchDir);
 
     std::printf("bundlecheck: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

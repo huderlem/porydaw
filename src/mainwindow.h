@@ -38,6 +38,9 @@ class ThemeController;
 namespace scripting {
 class ScriptHost;
 } // namespace scripting
+namespace SongBundle {
+struct ImportPlan;
+} // namespace SongBundle
 class SettingsDialog;
 
 class MainWindow : public QMainWindow
@@ -136,6 +139,12 @@ class MainWindow : public QMainWindow
     // Returns the number of failed expectations.
     int runBundleTabCheck(const QString &bundleZip, const QString &projectRoot,
                           const QString &scratchDir);
+    // Import check (part of --bundlecheck; bundleimportcheck.cpp): opens
+    // bundleZip, renders it, imports it into projectRoot through
+    // applyBundleImport, and compares the imported song's tab and render
+    // with the bundle's. QSettings must be redirected.
+    int runBundleImportTabCheck(const QString &bundleZip, const QString &projectRoot,
+                                const QString &scratchDir);
 
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
@@ -250,6 +259,9 @@ class MainWindow : public QMainWindow
     // follows m_project.isOpen().
     void refreshBundleBanners();
     void importBundle(SongSession &session);
+    // Applies an accepted import plan to the open project, reloads it, and
+    // opens the imported song in a new editable tab (the bundle tab stays).
+    bool applyBundleImport(const SongBundle::ImportPlan &plan, QString *error);
     // Creates an empty session with a wired-up view; not yet in the tab bar.
     SongSession *createSession();
     // Removes the session's tab (re-activating a neighbor via currentChanged)

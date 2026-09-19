@@ -1457,42 +1457,6 @@ bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QStrin
                                         const QString &copyFromFile,
                                         const QString &copySectionLabel, QString *error)
 {
-    const QDir dir(projectRoot + QStringLiteral("/sound/voicegroups"));
-    if (!dir.exists()) {
-        if (error)
-            *error = QStringLiteral("sound/voicegroups/ does not exist in this project.");
-        return false;
-    }
-    const QString targetPath = dir.filePath(name + QStringLiteral(".inc"));
-    if (QFile::exists(targetPath)) {
-        if (error)
-            *error = QStringLiteral("%1 already exists.").arg(targetPath);
-        return false;
-    }
-
-    // Match the siblings' header style and line endings.
-    bool labelStyle = false;
-    bool alignBeforeLabel = false;
-    bool crlf = false;
-    const QStringList siblings = dir.entryList({QStringLiteral("*.inc")}, QDir::Files, QDir::Name);
-    if (!siblings.isEmpty()) {
-        const QByteArray bytes = readAllBytes(dir.filePath(siblings.first()));
-        crlf = bytes.contains("\r\n");
-        bool unusedNewline = false;
-        for (const QByteArray &raw : splitLines(bytes, &unusedNewline)) {
-            const QByteArray text = raw.trimmed();
-            if (text.startsWith(".align"))
-                alignBeforeLabel = true;
-            static const QRegularExpression labelRe(QStringLiteral(R"(^(voicegroup\w+)::)"));
-            if (labelRe.match(QString::fromUtf8(text)).hasMatch()) {
-                labelStyle = true;
-                break;
-            }
-            if (text.startsWith("voice_group "))
-                break;
-        }
-    }
-
     QList<QByteArray> body;
     if (!copyFromFile.isEmpty()) {
         bool ok = false;
@@ -1536,12 +1500,60 @@ bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QStrin
         for (int i = 0; i < VOICEGROUP_SIZE; i++)
             body.append(QByteArrayLiteral("\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0"));
     }
+    return createVoicegroupFromLines(projectRoot, name, body, 0, error);
+}
+
+bool VoicegroupSource::createVoicegroupFromLines(const QString &projectRoot, const QString &name,
+                                                 const QList<QByteArray> &body, int startingNote,
+                                                 QString *error)
+{
+    const QDir dir(projectRoot + QStringLiteral("/sound/voicegroups"));
+    if (!dir.exists()) {
+        if (error)
+            *error = QStringLiteral("sound/voicegroups/ does not exist in this project.");
+        return false;
+    }
+    const QString targetPath = dir.filePath(name + QStringLiteral(".inc"));
+    if (QFile::exists(targetPath)) {
+        if (error)
+            *error = QStringLiteral("%1 already exists.").arg(targetPath);
+        return false;
+    }
+
+    // Match the siblings' header style and line endings.
+    bool labelStyle = false;
+    bool alignBeforeLabel = false;
+    bool crlf = false;
+    const QStringList siblings = dir.entryList({QStringLiteral("*.inc")}, QDir::Files, QDir::Name);
+    if (!siblings.isEmpty()) {
+        const QByteArray bytes = readAllBytes(dir.filePath(siblings.first()));
+        crlf = bytes.contains("\r\n");
+        bool unusedNewline = false;
+        for (const QByteArray &raw : splitLines(bytes, &unusedNewline)) {
+            const QByteArray text = raw.trimmed();
+            if (text.startsWith(".align"))
+                alignBeforeLabel = true;
+            static const QRegularExpression labelRe(QStringLiteral(R"(^(voicegroup\w+)::)"));
+            if (labelRe.match(QString::fromUtf8(text)).hasMatch()) {
+                labelStyle = true;
+                break;
+            }
+            if (text.startsWith("voice_group "))
+                break;
+        }
+    }
 
     QList<QByteArray> lines;
     if (labelStyle) {
         if (alignBeforeLabel)
             lines.append(QByteArrayLiteral("\t.align 2"));
         lines.append(QStringLiteral("voicegroup_%1::").arg(name).toUtf8());
+        // A plain label can't sit before its data the way the macro's
+        // starting note does; the keys below it become real (dummy) voices.
+        for (int i = 0; i < startingNote; i++)
+            lines.append(QByteArrayLiteral("\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0"));
+    } else if (startingNote > 0) {
+        lines.append(QStringLiteral("voice_group %1, %2").arg(name).arg(startingNote).toUtf8());
     } else {
         lines.append(QStringLiteral("voice_group %1").arg(name).toUtf8());
     }

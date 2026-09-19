@@ -247,8 +247,7 @@ bool plainIdentifier(const QString &s)
 // this is no stricter: every quoted string on a line naming either directive.
 bool sourcesStayInside(const QString &bundleRoot, QString *error)
 {
-    static const QRegularExpression directive(
-        QStringLiteral("\\.(?:incbin|include)"));
+    static const QRegularExpression directive(QStringLiteral("\\.(?:incbin|include)"));
     static const QRegularExpression quoted(QStringLiteral("\"([^\"]*)\""));
     QDirIterator it(bundleRoot, {QStringLiteral("*.inc"), QStringLiteral("*.s")}, QDir::Files,
                     QDirIterator::Subdirectories);

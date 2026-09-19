@@ -72,10 +72,12 @@
 #include "core/miditimeline.h"
 #include "project/bundlearchive.h"
 #include "project/bundleexport.h"
+#include "project/bundleimport.h"
 #include "project/samplereg.h"
 #include "project/sidecar.h"
 #include "project/songregistry.h"
 #include "ui/audiosettingspage.h"
+#include "ui/bundleimportdialog.h"
 #include "ui/companionwidget.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
@@ -2052,9 +2054,41 @@ void MainWindow::importBundle(SongSession &session)
 {
     if (!session.bundle || !m_project.isOpen())
         return;
-    // docs/song-bundle/PLAN.md Phase 3 (plan → apply) lands here.
-    QMessageBox::information(this, tr("Import Song Bundle"),
-                             tr("Importing a song bundle into a project is not available yet."));
+    QStringList players;
+    for (const MusicPlayer &player : m_project.musicPlayers())
+        players.append(player.name);
+    BundleImportDialog dialog(session.root, m_project.root(), players, this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    QString error;
+    if (!applyBundleImport(dialog.plan(), &error))
+        QMessageBox::warning(this, tr("Import Song Bundle"), error);
+}
+
+bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *error)
+{
+    if (!m_project.isOpen() ||
+        QDir(plan.projectRoot).absolutePath() != QDir(m_project.root()).absolutePath()) {
+        if (error)
+            *error = tr("The import was planned for a different project.");
+        return false;
+    }
+    QStringList written;
+    const bool ok = SongBundle::applyImportPlan(plan, error, &written);
+    if (!ok && written.isEmpty())
+        return false;
+    // Whatever landed is part of the project now: new songs, voicegroups and
+    // samples must show up (a half-applied import leaves them selectable).
+    reloadProject();
+    if (!ok)
+        return false;
+    statusBar()->showMessage(
+        tr("Imported %1 as %2 (voicegroup %3)")
+            .arg(plan.manifest.label, plan.label, plan.voicegroup.projectSymbol),
+        8000);
+    // The imported song opens in its own editable tab; the bundle tab stays.
+    loadSongByLabel(plan.label, /*newTab=*/true);
+    return true;
 }
 
 void MainWindow::openBundleDialog()

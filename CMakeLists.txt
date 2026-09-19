@@ -132,6 +132,10 @@ qt_add_library(porydaw_app STATIC
     src/project/bundlearchive.h
     src/project/bundleexport.cpp
     src/project/bundleexport.h
+    src/project/bundleimport.cpp
+    src/project/bundleimport.h
+    src/project/bundlesources.cpp
+    src/project/bundlesources.h
     src/project/songbundle.cpp
     src/project/songbundle.h
     src/project/miniz_impl.c
@@ -167,6 +171,8 @@ qt_add_library(porydaw_app STATIC
     src/ui/appearancesettingspage.h
     src/ui/settingsdialog.cpp
     src/ui/settingsdialog.h
+    src/ui/bundleimportdialog.cpp
+    src/ui/bundleimportdialog.h
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
     src/ui/polyphonypanel.cpp
@@ -282,7 +288,9 @@ qt_add_executable(porydaw
     src/mkcheck.cpp
     src/ignorecheck.cpp
     src/bundlecheck.cpp
+    src/bundlecheckfixtures.h
     src/bundleexportcheck.cpp
+    src/bundleimportcheck.cpp
     src/bundletabcheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp

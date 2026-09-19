@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <functional>
 
+#include "bundlecheckfixtures.h"
 #include "core/smf.h"
 #include "core/songdocument.h"
 #include "project/bundlearchive.h"
@@ -429,6 +430,31 @@ bool buildLabelProject(const QString &root, bool monolithic)
 }
 
 } // namespace
+
+namespace bundlefixtures {
+
+bool buildMacroProject(const QString &root)
+{
+    return ::buildMacroProject(root);
+}
+
+QByteArray fixtureWav(int seed)
+{
+    return ::fixtureWav(seed);
+}
+
+QStringList describeSlots(const QString &root, const QString &loadName, const QList<int> &slotList)
+{
+    QStringList out;
+    const Loaded loaded(root, loadName);
+    if (!loaded.vg)
+        return out;
+    for (int slot : slotList)
+        out.append(describeVoice(loaded.vg->voices[slot]));
+    return out;
+}
+
+} // namespace bundlefixtures
 
 void runBundleExportSections(const QString &scratchDir, int *failures)
 {

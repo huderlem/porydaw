@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (root refactor committed 816e771, rest staged).** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (committed 816e771 + fadb8a2), Phase 3 landed 2026-09-18 (staged).** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -647,7 +647,8 @@ Deviations (Phase 2, bundle tab):
   The Open Song Bundle… dialog itself is not driven.
 
 ### Phase 3 — Import
-Status: **not started**
+Status: **LANDED 2026-09-18 on song-bundle, swept normal + ASAN.**
+Uncommitted, staged.
 
 Carry-over from Phase 2 (read before starting):
 - **Go through `SongBundle::readSong`** (or apply the same checks) before
@@ -696,8 +697,132 @@ Carry-over from Phase 2 (read before starting):
   case re-runs `voicegroup_load` on the *project* afterwards and asserts
   the imported voicegroup resolves fully.
 
+Deviations (Phase 3):
+- **API shape:** `ImportPlan makeImportPlan(bundleRoot, projectRoot,
+  ImportOptions = {})` — no `error` out-parameter; everything that stops an
+  import (bad bundle, unusable project, clashes with user-chosen names) lands
+  in `ImportPlan::refusals`, things the user should merely know in
+  `ImportPlan::warnings`. `ImportOptions {label, constant, player}` are the
+  dialog's overrides: empty = the plan chooses (manifest hint, `_2`… past a
+  clash); a given label/constant that clashes **refuses** rather than being
+  silently suffixed. `applyImportPlan(plan, error, written*)`. Lives in
+  `src/project/bundleimport.{h,cpp}`; dialog in `src/ui/bundleimportdialog`.
+  The "dry-run" of §3.4 **is** the plan: it holds the final bytes of every
+  voicegroup and table, and apply only writes them. There is no
+  `voicegroup_load` round-trip inside the plan (§3.4 step 4) — the harness
+  does that after apply on every case instead.
+- **Sample reuse is by symbol, not by directory walk.** §3.4 step 1 said
+  "hash every `sound/direct_sound_samples/*`"; a reusable sample needs a
+  project *symbol*, so the map is built from the project's `.incbin`s
+  (`direct_sound_data.inc` + `direct_sound_synth_data.inc`): for each symbol
+  the `.wav` the loader decodes and the raw `.incbin` file. Only files whose
+  size equals a bundle sample's are ever hashed; hashes are cached in memory
+  keyed by path + mtime + size (`clearImportHashCache()` for tests). A file
+  with the right bytes but no symbol is not reused (it just blocks the name).
+  A symbol the bundle carries as both `.wav` and `.bin` (cry + directsound
+  use) is reused only when both match one project symbol.
+- **Raw `.bin` samples are added, with a warning** (the Phase 1 cry edge):
+  copied to `sound/direct_sound_samples/<name>.bin` and registered with an
+  own `.incbin` block (the registrar only takes `.wav`). The warning says a
+  `.gitignore` / `make clean` may treat the file as a build artifact. When the
+  symbol also has a `.wav`, `registerSample` writes the entry and the `.bin`
+  is simply placed next to it.
+- **Added samples follow the registrar's grammar:** symbol
+  `DirectSoundWaveData_<[a-z0-9_]+>`. A bundle symbol outside it (`Cry_Testmon`)
+  is a *Rename* (`DirectSoundWaveData_cry_testmon`) even without a clash.
+  Same for voicegroups (`createVoicegroup` always declares
+  `voicegroup_<name>`, so label-style `voicegroup005` becomes
+  `voicegroup_005`), programmable waves (`ProgrammableWaveData_<name>`, file
+  `sound/programmable_wave_samples/<name>.pcm`), and keysplit tables in a
+  macro-form project (the `keysplit` macro forces `keysplit_<label>`).
+- **Synths:** an equal descriptor under *any* project symbol is reused
+  (`VgSynthCatalog::symbolFor`); a same-named different one renames `_2`.
+  Refusal (naming the voices) only when something must be added and the
+  project has no `set_synth_*` macros. `writeSynthDefinitions` still needs an
+  `.include "sound/direct_sound_data.inc"` anchor in the project to wire the
+  synth file into the build; without one it fails **mid-apply** (after
+  samples/waves) — not pre-checked by the plan.
+- **Keysplit tables** are compared as assembled bytes (`Sources::
+  KeysplitTable`: offset + byte per key) so the pokeemerald macro form and the
+  pokefirered `.set/.byte` form compare equal, and are **re-rendered** in the
+  project's form (its first parseable table; with no table file,
+  `asm/macros/*.inc` defining `.macro keysplit` decides). Comments inside a
+  bundle's table are therefore not carried. A table in neither form refuses.
+  A missing `sound/keysplit_tables.inc` is created with a *warning* that the
+  build must include it (§3.4 said refuse-unless-loader-finds-it; the loader
+  always reads that path, so it always would).
+- **Programmable waves:** a project without
+  `sound/programmable_wave_data.inc` refuses when a wave must be added.
+- **Sub-voicegroups** are compared on (slot, normalized voice line) pairs
+  after renames, against every single-declaration file under
+  `sound/voicegroups/` (not just `catalogScan`'s keysplit/drumkit targets).
+  They resolve in dependency order; a group in a reference cycle or naming
+  itself is always created. The macro header's starting note is kept
+  (`voice_group x, 36`) via new `VoicegroupSource::createVoicegroupFromLines`
+  (`createVoicegroup` now delegates to it; behaviour unchanged). **In a
+  label-style project** the starting note becomes that many dummy voices, and
+  a created sub-voicegroup shorter than 128 lines runs on into whatever the
+  hub includes next (the ROM-contiguity fact from Phase 1): keys the source
+  project played silent can sound there. Not padded — flagged for the user.
+- **Monolithic targets refuse** (no `sound/voicegroups/`), per §2.
+- **Untrusted content beyond `readSong`** (new, not in the plan): mid2agb
+  flags must each match `-[A-Za-z][A-Za-z0-9_]*` (they end up on a make
+  command line); voice lines containing `"` or `;` refuse (a second
+  directive); any non-voice, non-comment line after a voicegroup's
+  declaration is dropped, never copied; tables are re-rendered from numbers;
+  file names are re-derived identifiers.
+- **Extension warning (§3.5):** with no capability model in porydaw (Phase 1
+  deviation), "the project supports X" = `sound/MPlayDef.s` has
+  `.equ <MNEMONIC>,` (what huderlem/pokeemerald `m4a_extensions` defines).
+  The warning lists each mnemonic with its MIDI track numbers; nothing is
+  grayed afterwards. The plan recomputes the extensions from the `.mid`, it
+  does not trust `requires`. `requires.synth` is likewise recomputed.
+- **Song:** label clash = a project song with that label (case-insensitive)
+  or an existing `.mid`/`.s`; constant clash = a project song's constant or a
+  `#define` in `include/constants/songs.h`. A renamed label derives its
+  constant from the new label; the manifest's constant hint is only used
+  with the manifest's own label. Player: override → manifest hint if the
+  project has it → `MUSIC_PLAYER_BGM` → the project's first player. A failed
+  `registerSong` saves the registration meta so File → Register Song can
+  retry (same as New Song).
+- **Dialog:** no separate "Register dialog" — the three fields live in the
+  import dialog. It re-plans when a field is committed and again on Import
+  (planning scans the project's voicegroups, so not per keystroke); Import is
+  disabled while the plan refuses. `MainWindow::applyBundleImport(plan)` is
+  the non-interactive half (apply → `reloadProject` → open the song in a new
+  tab); after a *partial* apply the project is reloaded too.
+- **Shared parsing** moved out of `bundleexport.cpp` into
+  `src/project/bundlesources.{h,cpp}` (`contentOf`, `collectIncbins`,
+  `collectKeysplitTables`, + the table parser/renderer); export behaviour is
+  unchanged (Phase 1 sections + corpus pass).
+- **Harness** (`src/bundleimportcheck.cpp`, fixtures shared through
+  `src/bundlecheckfixtures.h`): cases (a)–(g) as specified, with (f) folded
+  into (a)'s project (plus the no-warning counter-case). Beyond the spec:
+  table form round-trips, re-import-is-all-reuse, content-reuse under a
+  different name, `.set`-form (CRLF) and label-style targets, dialog
+  overrides, damaged / hostile / incomplete bundles, hostile flags and voice
+  lines, and — with `PORYDAW_SAMPLE_CORPUS` — every 4th corpus bundle the
+  export sections staged is *planned* (never applied) back into the real
+  tree and must come out all-reuse (15 pokeemerald songs). (a)'s "plays
+  identically" is the MainWindow section: bundle tab render vs imported tab
+  render, byte-identical WAVs. (g) is skipped (with a printed line) when
+  file permissions don't bind the user (root). `PORYDAW_BUNDLE_IMPORT_SHOT=
+  <png>` saves the dialog. The dialog's exec() loop itself is not driven.
+- A pre-existing clang-format violation in Phase 2's `songbundle.cpp` was
+  fixed (one statement re-wrapped).
+
 ### Phase 4 — Reach + docs
 Status: **not started**
+
+Carry-over from Phase 3 (read before starting):
+- Scripting `importBundle(path, {label, constant, player})` maps directly
+  onto `SongBundle::ImportOptions`; go through
+  `MainWindow::applyBundleImport` so the project reloads and the tab opens.
+  A `.porysong` path needs extracting first (`BundleArchive::extractBundle`
+  into a temp dir) — only `openBundle` does that today.
+- The manual page must explain: what gets reused vs renamed, the raw-`.bin`
+  warning, the extension warning, the label-style contiguity caveat, and
+  that monolithic-voicegroup and legacy-aif projects refuse.
 
 - Scripting: `porydaw.project.exportBundle(label, path)` /
   `importBundle(path, {label, constant, player})` via `HostBindings`; update

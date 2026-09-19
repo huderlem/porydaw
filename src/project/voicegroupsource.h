@@ -281,6 +281,13 @@ class VoicegroupSource
     static bool createVoicegroup(const QString &projectRoot, const QString &name,
                                  const QString &copyFromFile, const QString &copySectionLabel,
                                  QString *error);
+    // The same writer over voice lines the caller already holds (no line
+    // endings; the song-bundle importer's renamed copies). startingNote > 0
+    // is the macro header's second argument — the first line is that key's
+    // voice; a label-style project gets dummy voices for the keys below it.
+    static bool createVoicegroupFromLines(const QString &projectRoot, const QString &name,
+                                          const QList<QByteArray> &body, int startingNote,
+                                          QString *error);
     // Appends .include "sound/voicegroups/<name>.inc" after the last .include
     // in sound/voice_groups.inc (byte-conservative; no-op if the hub file
     // doesn't exist — the loader and browser discover the file regardless).

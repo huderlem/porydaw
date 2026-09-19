@@ -12,6 +12,7 @@
 #include "core/smf.h"
 #include "core/songdocument.h"
 #include "project/bundlearchive.h"
+#include "project/bundlesources.h"
 #include "project/samplereg.h"
 #include "project/songregistry.h"
 
@@ -36,6 +37,8 @@
 //    whatever is assembled after it (contiguousFill); see continuationLines.
 
 namespace SongBundle {
+
+using namespace Sources;
 
 namespace {
 
@@ -69,89 +72,6 @@ bool writeBytes(const QString &path, const QByteArray &bytes, QString *error)
         return false;
     }
     return true;
-}
-
-// The loader's strip_comment + rtrim + ltrim over one line.
-QByteArray contentOf(QByteArray line)
-{
-    const int at = line.indexOf('@');
-    if (at >= 0)
-        line.truncate(at);
-    const int slashes = line.indexOf("//");
-    if (slashes >= 0)
-        line.truncate(slashes);
-    return line.trimmed();
-}
-
-// Label -> .incbin path, first definition wins (symbol_map_find). Labels
-// consumed by a set_synth_* macro are not samples and are skipped: a new
-// label simply replaces a pending one, as in parse_direct_sound_data_file.
-void collectIncbins(const QByteArray &content, QHash<QString, QString> *map)
-{
-    static const QRegularExpression labelRe(QStringLiteral(R"(^(\w+):)"));
-    QString pending;
-    for (const QByteArray &raw : content.split('\n')) {
-        const QByteArray text = contentOf(raw);
-        const QRegularExpressionMatch label = labelRe.match(QString::fromUtf8(text));
-        if (label.hasMatch()) {
-            pending = label.captured(1);
-            continue;
-        }
-        if (pending.isEmpty())
-            continue;
-        if (text.contains(".incbin")) {
-            const int q1 = text.indexOf('"');
-            const int q2 = q1 < 0 ? -1 : text.indexOf('"', q1 + 1);
-            if (q2 > q1 && !map->contains(pending))
-                map->insert(pending, QString::fromUtf8(text.mid(q1 + 1, q2 - q1 - 1)));
-            pending.clear();
-        } else if (text.startsWith("set_synth_")) {
-            pending.clear();
-        }
-    }
-}
-
-// The source text of each keysplit table in a keysplit_tables.inc, keyed by
-// the symbol voice_keysplit lines use. A table runs from its declaring line
-// to the next declaration, minus trailing blank / comment-only / .align
-// lines (which belong to whatever follows). First definition wins.
-QHash<QString, QList<QByteArray>> collectKeysplitTables(const QByteArray &content)
-{
-    static const QRegularExpression macroRe(QStringLiteral(R"(^keysplit\s+([^,\s]+))"));
-    static const QRegularExpression setRe(QStringLiteral(R"(^\.set\s+([^,\s]+)\s*,\s*\.\s*-)"));
-    QHash<QString, QList<QByteArray>> tables;
-    QString current;
-    QList<QByteArray> block;
-    const auto flush = [&] {
-        while (!block.isEmpty()) {
-            const QByteArray text = contentOf(block.last());
-            if (!text.isEmpty() && !text.startsWith(".align"))
-                break;
-            block.removeLast();
-        }
-        if (!current.isEmpty() && !tables.contains(current))
-            tables.insert(current, block);
-        block.clear();
-    };
-    for (QByteArray raw : content.split('\n')) {
-        if (raw.endsWith('\r'))
-            raw.chop(1);
-        const QString text = QString::fromUtf8(contentOf(raw));
-        QRegularExpressionMatch m = macroRe.match(text);
-        QString declared;
-        if (m.hasMatch())
-            declared = QStringLiteral("keysplit_") + m.captured(1);
-        else if ((m = setRe.match(text)).hasMatch())
-            declared = m.captured(1);
-        if (!declared.isEmpty()) {
-            flush();
-            current = declared;
-        }
-        if (!current.isEmpty())
-            block.append(raw);
-    }
-    flush();
-    return tables;
 }
 
 // What the loader's deferred scan of sound/ (discover_scan_tree, which runs
