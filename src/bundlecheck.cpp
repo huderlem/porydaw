@@ -26,6 +26,9 @@
 
 // bundleexportcheck.cpp: the Phase 1 export sections.
 void runBundleExportSections(const QString &scratchDir, int *failures);
+// bundletabcheck.cpp; returns the number of failed expectations.
+int runBundleTabSections(const QString &bundleZip, const QString &fixtureProject,
+                         const QString &scratchDir);
 
 namespace {
 
@@ -524,6 +527,10 @@ int runBundleCheck(const QString &scratchDir)
     }
 
     runBundleExportSections(scratchDir, &failures);
+    // Phase 2: the bundle the export sections wrote, opened in a read-only
+    // MainWindow tab (bundletabcheck.cpp).
+    failures += runBundleTabSections(scratchDir + QStringLiteral("/export_a.porysong"),
+                                     scratchDir + QStringLiteral("/export_macro"), scratchDir);
 
     std::printf("bundlecheck: %s\n", failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;

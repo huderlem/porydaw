@@ -43,9 +43,15 @@
 
 #include <QChildEvent>
 #include <QCloseEvent>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QFrame>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
+#include <QMimeData>
+#include <QTemporaryDir>
+#include <QUrl>
 
 #ifdef Q_OS_WIN
 #ifndef WIN32_LEAN_AND_MEAN
@@ -64,6 +70,7 @@
 #include "audio/sf2reader.h"
 #include "audio/wavexport.h"
 #include "core/miditimeline.h"
+#include "project/bundlearchive.h"
 #include "project/bundleexport.h"
 #include "project/samplereg.h"
 #include "project/sidecar.h"
@@ -253,6 +260,7 @@ class VoiceEditCommand : public QUndoCommand
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
+    setAcceptDrops(true); // song bundles (dragEnterEvent/dropEvent)
     setWindowTitle(QStringLiteral("porydaw"));
     resize(::layout::fontPx(92), ::layout::fontPx(57));
     m_engineSettings = EngineSettings::load();
@@ -444,6 +452,9 @@ void MainWindow::buildUi()
     QAction *openAction =
         fileMenu->addAction(tr("&Open Project..."), this, &MainWindow::openProject);
     keys.attach(QStringLiteral("file.open_project"), openAction);
+    QAction *openBundleAction =
+        fileMenu->addAction(tr("Open Song B&undle..."), this, &MainWindow::openBundleDialog);
+    keys.attach(QStringLiteral("file.open_bundle"), openBundleAction);
     m_newSongAction = fileMenu->addAction(tr("&New Song..."), this, &MainWindow::newSong);
     keys.attach(QStringLiteral("file.new_song"), m_newSongAction);
     m_newSongAction->setEnabled(false);
@@ -1202,8 +1213,19 @@ SongSession *MainWindow::sessionForWidget(QWidget *widget) const
 
 SongSession *MainWindow::sessionForLabel(const QString &label) const
 {
+    // Project songs only: a bundle tab may carry the same label as a song
+    // of the open project and is a different song.
     for (const auto &session : m_sessions) {
-        if (session->doc.label() == label)
+        if (!session->bundle && session->doc.label() == label)
+            return session.get();
+    }
+    return nullptr;
+}
+
+SongSession *MainWindow::sessionForBundlePath(const QString &canonicalPath) const
+{
+    for (const auto &session : m_sessions) {
+        if (session->bundle && session->bundlePath == canonicalPath)
             return session.get();
     }
     return nullptr;
@@ -1326,8 +1348,17 @@ void MainWindow::teardownSessions()
     // One engine/dock detach up front; the guarded currentChanged handler
     // then lets the tabs vanish without rebinding each doomed neighbor.
     activateSession(nullptr, /*force=*/true);
-    while (!m_sessions.empty())
-        destroySession(m_sessions.back().get());
+    // Bundle tabs belong to no project and survive the switch.
+    for (;;) {
+        SongSession *doomed = nullptr;
+        for (auto it = m_sessions.rbegin(); it != m_sessions.rend() && !doomed; ++it) {
+            if (!(*it)->bundle)
+                doomed = it->get();
+        }
+        if (!doomed)
+            break;
+        destroySession(doomed);
+    }
     m_tearingDown = false;
 }
 
@@ -1345,10 +1376,13 @@ void MainWindow::activateSession(SongSession *session, bool force)
     syncTempoControl();
 
     const bool loaded = session != nullptr;
-    m_saveAction->setEnabled(loaded);
+    // A bundle tab is read-only: listening (transport, Export WAV) stays,
+    // everything that writes the song goes. The document lock backs this.
+    const bool editable = loaded && !session->bundle;
+    m_saveAction->setEnabled(editable);
     m_exportWavAction->setEnabled(loaded);
-    m_exportBundleAction->setEnabled(loaded);
-    m_settingsAction->setEnabled(loaded);
+    m_exportBundleAction->setEnabled(editable);
+    m_settingsAction->setEnabled(editable);
     m_closeTabAction->setEnabled(loaded);
     m_eventListAction->setEnabled(loaded);
     {
@@ -1493,7 +1527,8 @@ void MainWindow::persistOpenTabs()
     QSettings settings;
     QStringList labels;
     for (int i = 0; i < m_tabs->count(); i++) {
-        if (SongSession *s = sessionForWidget(m_tabs->widget(i)))
+        SongSession *s = sessionForWidget(m_tabs->widget(i));
+        if (s && !s->bundle) // bundle tabs are never restored
             labels << s->doc.label();
     }
     if (labels.isEmpty()) {
@@ -1502,13 +1537,16 @@ void MainWindow::persistOpenTabs()
         return;
     }
     settings.setValue(kLastOpenSongsKey, labels);
-    settings.setValue(kLastSongLabelKey, m_active ? m_active->doc.label() : labels.first());
+    settings.setValue(kLastSongLabelKey,
+                      m_active && !m_active->bundle ? m_active->doc.label() : labels.first());
 }
 
 void MainWindow::refreshSessionSongIds()
 {
     for (const auto &session : m_sessions) {
         session->songId = -1;
+        if (session->bundle)
+            continue; // not a project song, whatever its label
         for (const SongInfo &song : m_project.songs()) {
             if (song.label == session->doc.label()) {
                 session->songId = song.id;
@@ -1525,6 +1563,10 @@ void MainWindow::updateTabTitle(SongSession &session)
     const int index = m_tabs->indexOf(session.view);
     if (index < 0)
         return;
+    if (session.bundle) {
+        m_tabs->setTabText(index, bundleTabTitle(session.doc.label()));
+        return;
+    }
     m_tabs->setTabText(index, session.isDirty() ? session.doc.label() + QLatin1Char('*')
                                                 : session.doc.label());
 }
@@ -1680,6 +1722,12 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     teardownSessions();
     invalidateVgCatalog();
     m_pendingSynths.clear(); // unsaved synth definitions die with the project
+    // Surviving bundle tabs: currentChanged was suppressed during the
+    // teardown, so re-bind the one left showing, and their Import buttons
+    // now have a project to import into.
+    if (m_tabs->count() > 0)
+        activateSession(sessionForWidget(m_tabs->currentWidget()), /*force=*/true);
+    refreshBundleBanners();
 
     m_newSongAction->setEnabled(true);
     m_importAction->setEnabled(true);
@@ -1753,7 +1801,9 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
         }
     }
 
-    const bool created = newTab || !m_active;
+    // A bundle tab is never replaced in place: its session is rooted in the
+    // bundle, and it should outlive browsing the project.
+    const bool created = newTab || !m_active || m_active->bundle;
     SongSession *session = created ? nullptr : m_active;
     if (session) {
         if (!maybeSaveSession(*session))
@@ -1846,6 +1896,225 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
     updateTransportActions();
 }
 
+bool MainWindow::isBundlePath(const QString &path)
+{
+    const QFileInfo info(path);
+    if (info.isDir())
+        return SongBundle::isBundleDir(info.absoluteFilePath());
+    return info.isFile() &&
+           info.suffix().compare(QLatin1String("porysong"), Qt::CaseInsensitive) == 0;
+}
+
+QString MainWindow::bundleTabTitle(const QString &label)
+{
+    return tr("[bundle] %1").arg(label);
+}
+
+bool MainWindow::openBundle(const QString &path, QString *errorOut)
+{
+    const auto fail = [&](const QString &message) {
+        if (errorOut)
+            *errorOut = message;
+        else
+            QMessageBox::warning(this, tr("Open Song Bundle"), message);
+        return false;
+    };
+    if (!m_audioOk)
+        return fail(tr("No audio device is available."));
+    const QFileInfo info(path);
+    if (!info.exists())
+        return fail(tr("%1 does not exist.").arg(QDir::toNativeSeparators(path)));
+    // One tab per bundle: opening it again focuses the tab it already has.
+    const QString canonical = info.canonicalFilePath();
+    if (SongSession *open = sessionForBundlePath(canonical)) {
+        m_tabs->setCurrentWidget(open->view);
+        return true;
+    }
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    struct CursorGuard {
+        ~CursorGuard() { QApplication::restoreOverrideCursor(); }
+    } cursorGuard;
+    QElapsedTimer timer;
+    timer.start();
+
+    // A .porysong is extracted to a temp dir the session owns (stance 7:
+    // opening writes nothing anywhere else); a bundle folder is read where
+    // it is — the tab writes nothing under its root.
+    std::unique_ptr<QTemporaryDir> tempDir;
+    QString root;
+    QString error;
+    if (info.isDir()) {
+        root = canonical;
+    } else {
+        tempDir =
+            std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/porysong-XXXXXX"));
+        if (!tempDir->isValid())
+            return fail(tr("Could not create a temporary folder for the bundle."));
+        root = tempDir->filePath(QStringLiteral("bundle"));
+        if (!BundleArchive::extractBundle(canonical, root, &error))
+            return fail(error);
+    }
+    BundleManifest manifest;
+    SongInfo song;
+    if (!SongBundle::readSong(root, &manifest, &song, &error))
+        return fail(error);
+
+    QString tried;
+    LoadedVoiceGroup *vg = loadVoicegroupFor(root, song.cfg, &tried);
+    if (!vg) {
+        return fail(tr("Could not load the bundle's voicegroup for %1 (tried: %2).")
+                        .arg(song.label, tried));
+    }
+
+    // Always its own tab: a bundle never replaces a project song in place.
+    SongSession *session = createSession();
+    session->root = root;
+    session->bundle = true;
+    session->bundlePath = canonical;
+    session->bundleDir = std::move(tempDir);
+    session->manifest = manifest;
+    if (!session->doc.load(song, &error)) {
+        voicegroup_free(vg);
+        destroySession(session); // not in the tab bar yet
+        return fail(error);
+    }
+    session->doc.setLocked(true);
+
+    session->voicegroup = vg;
+    session->timeline = session->doc.buildTimeline(m_audio.sampleRate());
+    // The source is opened so the (view-only) dock shows each voice's
+    // values; the lock keeps every edit out.
+    openVoicegroupSource(*session, song.cfg);
+    session->appliedVoicegroupArg = song.cfg.voicegroupArg;
+    session->appliedVolume = song.cfg.masterVolume;
+    session->appliedReverb = song.cfg.reverb;
+    session->view->setSong(session->timeline.get(), session->voicegroup);
+    session->view->setDocument(&session->doc);
+    session->view->setTopBanner(createBundleBanner(*session));
+    refreshBundleBanners();
+
+    const int index = m_tabs->addTab(session->view, bundleTabTitle(song.label));
+    m_tabs->setTabToolTip(index, QDir::toNativeSeparators(canonical));
+    if (!m_restoringSession) {
+        // The first tab activates inside addTab; later ones here.
+        m_tabs->setCurrentIndex(index);
+        if (m_active != session)
+            activateSession(session);
+    }
+    statusBar()->showMessage(
+        tr("Opened song bundle %1 in %2 ms — read-only").arg(info.fileName()).arg(timer.elapsed()),
+        8000);
+    updateTransportActions();
+    return true;
+}
+
+QWidget *MainWindow::createBundleBanner(SongSession &session)
+{
+    auto *banner = new QFrame;
+    banner->setObjectName(QStringLiteral("bundleBanner"));
+    banner->setFrameShape(QFrame::StyledPanel);
+    banner->setAutoFillBackground(true);
+    banner->setBackgroundRole(QPalette::AlternateBase);
+    auto *row = new QHBoxLayout(banner);
+    row->setContentsMargins(8, 4, 8, 4);
+    auto *text = new QLabel(
+        tr("Song bundle %1 — read-only.").arg(QFileInfo(session.bundlePath).fileName()), banner);
+    text->setObjectName(QStringLiteral("bundleBannerText"));
+    row->addWidget(text);
+    row->addStretch(1);
+    auto *import = new QPushButton(tr("Import into project…"), banner);
+    import->setObjectName(QStringLiteral("bundleImportButton"));
+    // No keyboard focus: Space must keep toggling playback in the tab.
+    import->setFocusPolicy(Qt::NoFocus);
+    SongSession *s = &session;
+    connect(import, &QPushButton::clicked, this, [this, s] { importBundle(*s); });
+    row->addWidget(import);
+    session.bundleImportButton = import;
+    return banner;
+}
+
+void MainWindow::refreshBundleBanners()
+{
+    const bool open = m_project.isOpen();
+    for (const auto &session : m_sessions) {
+        if (!session->bundleImportButton)
+            continue;
+        session->bundleImportButton->setEnabled(open);
+        session->bundleImportButton->setToolTip(
+            open ? tr("Copy this song, its voicegroup and its samples into %1.")
+                       .arg(QDir(m_project.root()).dirName())
+                 : tr("Open a decomp project first"));
+    }
+}
+
+void MainWindow::importBundle(SongSession &session)
+{
+    if (!session.bundle || !m_project.isOpen())
+        return;
+    // docs/song-bundle/PLAN.md Phase 3 (plan → apply) lands here.
+    QMessageBox::information(this, tr("Import Song Bundle"),
+                             tr("Importing a song bundle into a project is not available yet."));
+}
+
+void MainWindow::openBundleDialog()
+{
+    QSettings settings;
+    const QString startDir =
+        settings.value(QStringLiteral("lastBundleDir"), QDir::homePath()).toString();
+    const QString path = QFileDialog::getOpenFileName(this, tr("Open Song Bundle"), startDir,
+                                                      tr("Song bundles (*.porysong)"));
+    if (path.isEmpty())
+        return;
+    settings.setValue(QStringLiteral("lastBundleDir"), QFileInfo(path).path());
+    openBundle(path);
+}
+
+int MainWindow::openCommandLinePaths(const QStringList &arguments)
+{
+    int opened = 0;
+    for (const QString &arg : arguments) {
+        if (arg.startsWith(QLatin1Char('-')) || !isBundlePath(arg))
+            continue;
+        if (openBundle(arg))
+            opened++;
+    }
+    return opened;
+}
+
+static QStringList droppedBundlePaths(const QMimeData *mime)
+{
+    QStringList paths;
+    if (!mime || !mime->hasUrls())
+        return paths;
+    const QList<QUrl> urls = mime->urls();
+    for (const QUrl &url : urls) {
+        if (url.isLocalFile() && MainWindow::isBundlePath(url.toLocalFile()))
+            paths << url.toLocalFile();
+    }
+    return paths;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent *event)
+{
+    if (!droppedBundlePaths(event->mimeData()).isEmpty())
+        event->acceptProposedAction();
+}
+
+void MainWindow::dropEvent(QDropEvent *event)
+{
+    const QStringList paths = droppedBundlePaths(event->mimeData());
+    if (paths.isEmpty())
+        return;
+    event->acceptProposedAction();
+    // After the drop returns: a failure's message box must not run inside
+    // the source application's drag.
+    QTimer::singleShot(0, this, [this, paths] {
+        for (const QString &path : paths)
+            openBundle(path);
+    });
+}
+
 void MainWindow::onDocumentChanged(SongSession &session)
 {
     if (!m_audioOk)
@@ -1929,7 +2198,7 @@ void MainWindow::saveSong()
 
 bool MainWindow::saveSession(SongSession &session)
 {
-    if (session.doc.midPath().isEmpty())
+    if (session.doc.midPath().isEmpty() || session.bundle)
         return false;
 
     // The voicegroup first: the document save below marks the undo stack
@@ -2015,7 +2284,7 @@ bool MainWindow::saveSession(SongSession &session)
 void MainWindow::exportBundle()
 {
     SongSession *session = m_active;
-    if (!session)
+    if (!session || session->bundle)
         return;
 
     QSettings appSettings;
@@ -2218,7 +2487,7 @@ bool MainWindow::renderActiveSongWav(const QString &path, const WavExportOptions
 
 void MainWindow::openSongSettings()
 {
-    if (!m_active)
+    if (!m_active || m_active->bundle)
         return;
     SongSettingsDialog dialog(m_active->doc.cfg(), m_active->doc.label(),
                               vgCatalog(m_active->root).groupArgs, this);
@@ -2345,7 +2614,9 @@ void MainWindow::importSample()
 
 void MainWindow::importSampleForSlot(int slot)
 {
-    if (!m_project.isOpen())
+    // A bundle tab's voices can't take the new sample (slot >= 0 is the
+    // dock's "New sample…"); Tools → Import Sample stays project-scoped.
+    if (!m_project.isOpen() || (slot >= 0 && m_active && m_active->bundle))
         return;
     // Refuse before the file dialog: a legacy-aif or unwired project can't
     // take samples no matter which file is picked.
@@ -2502,7 +2773,7 @@ void MainWindow::importSampleForSlot(int slot)
 
 void MainWindow::editSampleForSlot(int slot)
 {
-    if (!m_project.isOpen() || !m_active || !m_active->vgSource)
+    if (!m_project.isOpen() || !m_active || !m_active->vgSource || m_active->bundle)
         return;
     const QString prefix = QStringLiteral("DirectSoundWaveData_");
     const VgVoice *voice = m_active->vgSource->voiceAt(slot);
@@ -2722,7 +2993,7 @@ void MainWindow::refreshRegisterAction()
     bool complete = true;
     if (m_active && m_active->songId >= 0 && m_active->songId < m_project.songs().size())
         complete = m_project.songs().at(m_active->songId).registrationGaps.isEmpty();
-    m_registerAction->setEnabled(m_active && !complete);
+    m_registerAction->setEnabled(m_active && !m_active->bundle && !complete);
 }
 
 bool MainWindow::registerSongByLabel(const QString &label, const QString &constant,
@@ -2844,6 +3115,10 @@ bool MainWindow::createVoicegroupNamed(const QString &name, const QString &copyF
 
 bool MainWindow::pushVoiceEdit(SongSession &session, int slot, const VgVoice &voice, QString *error)
 {
+    if (session.doc.isLocked()) {
+        *error = tr("the song is read-only (a song bundle)");
+        return false;
+    }
     if (!session.vgSource) {
         *error = tr("the song's voicegroup source is not open for editing");
         return false;
@@ -3025,6 +3300,7 @@ void MainWindow::updateVoicegroupBrowser()
     const QString arg = session->doc.cfg().voicegroupArg.isEmpty()
                             ? QStringLiteral("_dummy")
                             : session->doc.cfg().voicegroupArg;
+    m_vgBrowser->setViewOnly(session->bundle);
     m_vgBrowser->setVoicegroup(session->voicegroup);
     m_vgBrowser->setUsedVoices(session->view->usedVoices());
     const VgCatalog &catalog = vgCatalog(session->root);
@@ -3202,7 +3478,7 @@ void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)
 void MainWindow::onVoiceEditRequested(int slot, const VgVoice &voice, bool structural)
 {
     SongSession *session = m_active;
-    if (!session || !session->vgSource)
+    if (!session || !session->vgSource || session->bundle)
         return;
     const VgVoice *before = session->vgSource->voiceAt(slot);
     if (!before || *before == voice)
@@ -3419,7 +3695,7 @@ void MainWindow::updateVgDockTitle()
 
 void MainWindow::newVoicegroup()
 {
-    if (!m_project.isOpen())
+    if (!m_project.isOpen() || (m_active && m_active->bundle))
         return;
     if (!QDir(m_project.root() + QStringLiteral("/sound/voicegroups")).exists()) {
         QMessageBox::information(this, tr("New Voicegroup"),
@@ -3508,7 +3784,9 @@ bool MainWindow::maybeSaveSession(SongSession &session)
 
 void MainWindow::saveViewState(SongSession &session)
 {
-    if (session.doc.label().isEmpty())
+    // Nothing is written for a bundle tab: its root is a throwaway
+    // extraction dir, or a bundle folder that opening must not touch.
+    if (session.doc.label().isEmpty() || session.bundle)
         return;
     ViewSidecar::save(session.root, session.doc.label(), session.view->viewState());
 }
@@ -3516,7 +3794,11 @@ void MainWindow::saveViewState(SongSession &session)
 void MainWindow::updateWindowTitle()
 {
     const QString project = m_project.isOpen() ? QDir(m_project.root()).dirName() : QString();
-    if (m_active) {
+    if (m_active && m_active->bundle) {
+        setWindowTitle(QStringLiteral("%1 — %2 — porydaw")
+                           .arg(m_active->doc.label(), QFileInfo(m_active->bundlePath).fileName()));
+        setWindowModified(false);
+    } else if (m_active) {
         setWindowTitle(QStringLiteral("%1[*] — %2 — porydaw").arg(m_active->doc.label(), project));
         setWindowModified(m_active->isDirty());
     } else {
@@ -3777,8 +4059,9 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 void MainWindow::syncMasterVolumeControl()
 {
     const bool loaded = m_active != nullptr;
-    m_masterVolCaption->setEnabled(loaded);
-    m_masterVolSpin->setEnabled(loaded);
+    const bool editable = loaded && !m_active->bundle;
+    m_masterVolCaption->setEnabled(editable);
+    m_masterVolSpin->setEnabled(editable);
     QSignalBlocker blocker(m_masterVolSpin);
     m_masterVolSpin->setValue(loaded ? m_active->doc.cfg().masterVolume : SongCfg().masterVolume);
 }
@@ -3786,8 +4069,9 @@ void MainWindow::syncMasterVolumeControl()
 void MainWindow::syncTempoControl()
 {
     const bool loaded = m_active != nullptr;
-    m_tempoCaption->setEnabled(loaded);
-    m_tempoSpin->setEnabled(loaded);
+    const bool editable = loaded && !m_active->bundle;
+    m_tempoCaption->setEnabled(editable);
+    m_tempoSpin->setEnabled(editable);
     {
         QSignalBlocker blocker(m_tempoSpin);
         m_tempoSpin->setValue(loaded ? m_active->doc.startTempo() : SongDocument::kTempoDefault);

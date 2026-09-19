@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 in progress (root refactor landed 2026-09-18, staged).** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (root refactor committed 816e771, rest staged).** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -502,10 +502,9 @@ Deviations (Phase 1):
   (dialog + status message) is not driven offscreen.
 
 ### Phase 2 — Read-only bundle tab + instant listen
-Status: **in progress** — `SongSession::root` refactor LANDED 2026-09-18 on
-song-bundle, swept normal + ASAN (staged, uncommitted; its own commit per
-§7). Remaining: everything else below (lock, banner, gating, no-project
-tolerance, `openBundle`, entry points, harness).
+Status: **LANDED 2026-09-18 on song-bundle, swept normal + ASAN.** Root
+refactor committed 816e771; the rest (lock, banner, gating, no-project
+tolerance, `openBundle`, entry points, harness) staged, uncommitted.
 
 - `SongSession::root` refactor: every `m_project.root()` read inside
   per-session paths (`loadVoicegroupFor`, `reloadVoicegroupPreview`,
@@ -568,8 +567,109 @@ Deviations (Phase 2, root refactor):
   root; voicegroup source opened beneath it). No bundle behaviour yet, so
   no new `--bundlecheck` section in this slice.
 
+Deviations (Phase 2, bundle tab):
+- **`openProjectDir` keeps bundle tabs** (§6 default, now asserted):
+  `teardownSessions` destroys only project sessions; `openProjectDir` then
+  force-re-activates the surviving current tab (currentChanged is
+  suppressed during teardown) and refreshes every Import button.
+- **Tab title is the plain prefix `[bundle] <label>`**, not `📦`: whether
+  the emoji renders depends on a system fallback font that can't be checked
+  offscreen, so the safe option §3.6 allowed was taken. Tooltip = the bundle's path; window title = `<label> — <file>`.
+- **Banner lives inside `SongView`** (`SongView::setTopBanner`, a strip
+  above the ruler), because every harness and `sessionForWidget` identify a
+  tab page as `session->view`; wrapping the page would have touched them
+  all. The button is `SongSession::bundleImportButton` (objectNames
+  `bundleBanner` / `bundleBannerText` / `bundleImportButton`).
+- **The Import button is a stub**: enabled iff a project is open (tooltip
+  "Open a decomp project first" otherwise); clicking shows "not available
+  yet". `MainWindow::importBundle(SongSession&)` is where Phase 3 lands.
+- **Lock:** `SongDocument::setLocked` — `pushCommand` deletes the command
+  unapplied (every command mutates only in `redo()`, verified: the only
+  `m_undoStack.push` sites are `pushCommand` and the edit-group
+  `DiscardRedoCommand`), `isDirty()` is false, `save()` refuses,
+  `canAddTrack()` is false. No debug assert was added ("assert no caller
+  depends on the push"): callers that read a result already handle the
+  refused case (`addTrack` → -1); SongView gestures on a bundle tab simply
+  do nothing. **SongView itself has no read-only mode** — drags still show
+  their live preview and then snap back. Cosmetic; not in the spec.
+- **Gating beyond §3.6:** Export Song Bundle is also disabled on a bundle
+  tab (you already have the file; re-export from a bundle root is
+  untested), the toolbar Volume/Tempo spinners are disabled (they are cfg /
+  tempo edits), `VoicegroupBrowser::setViewOnly` disables the selector,
+  New…, and the whole voice editor (so the sample picker's browse audition
+  is off too; pressing voice rows still auditions). `pushVoiceEdit`,
+  `onVoiceEditRequested`, `saveSession`, `openSongSettings`,
+  `exportBundle`, `newVoicegroup`, `editSampleForSlot`,
+  `importSampleForSlot(slot>=0)` each re-check `session.bundle`/lock.
+  No view sidecar is read or written for a bundle tab.
+- **Scripting:** `ScriptHost::beginTransaction` refuses a locked document
+  ("the song is read-only (a song bundle)…"), which covers every `edit.*`
+  call (all go through a transaction). `storage.song.*` refuses on a locked
+  document — this is how the root-refactor's open item (scriptapi sidecar
+  paths on `p->root()`) was settled: gated, not routed. `song.save` fails
+  through `saveSession`. Not covered by a `--scriptcheck` case (needs a
+  fixture plugin + bundle; Phase 4 touches scriptcheck anyway).
+- **Same label in bundle and project:** `sessionForLabel` skips bundle
+  sessions (bundles are found by `sessionForBundlePath`, canonical path),
+  `refreshSessionSongIds` leaves a bundle's `songId` at -1, `loadSong`
+  never replaces a bundle tab in place (it opens a new tab instead),
+  `persistOpenTabs` skips bundle tabs and never records one as the last
+  song.
+- **Untrusted input:** new `SongBundle::readSong(root, manifest*, SongInfo*,
+  error)` (in `project/songbundle`, harness-testable) refuses a label or
+  `-G` value that isn't `[A-Za-z0-9_]+`, and any `.incbin`/`.include` target
+  in the bundle's `*.inc`/`*.s` that fails `BundleArchive::validateEntryName`
+  (absolute, `..`, …) — the loader opens those verbatim relative to root, so
+  without this a bundle could make porydaw read files outside its temp dir.
+  Phase 3 must call `readSong` (or the same checks) before planning.
+- **cfg:** `DecompProject::parseMidiCfgLine` + `cfgFromFlags` are now public
+  statics (factored out of `parseMidiCfg`, behaviour unchanged). The bundle's
+  own `midi.cfg` line wins; the manifest's `flags` string is the fallback.
+  Track budget is left at the document default (no music player table in a
+  bundle).
+- **Folder bundles** open in place (root = the folder, `bundleDir` null,
+  nothing written under it); `.porysong` files extract to
+  `<tmp>/porysong-XXXXXX/bundle`, removed when the session dies.
+- **CLI:** `MainWindow::openCommandLinePaths(args)` opens every positional
+  argument that `isBundlePath` (existing `*.porysong` file or bundle folder);
+  anything else — including a mistyped path — is silently ignored. Called
+  inside `showCoveredWhileRestoring` right after `restoreSession`.
+- **Drop:** the open is deferred with a 0 ms timer so a failure's message
+  box never runs inside the source application's drag.
+- **Harness** (`src/bundletabcheck.cpp`, run by `runBundleCheck` after the
+  export sections against `export_a.porysong` + a copy of the macro fixture
+  project given a `song_table.inc`/`midi.cfg`): "non-silent output on used
+  programs" is asserted as *transport advances* + *an offline `exportWav`
+  render of the bundle tab peaks > 500* (whole song, not per program — the
+  per-slot resolution is already Phase 1's load-equality assertion). The
+  CLI path is exercised through `openCommandLinePaths`, not by spawning the
+  binary. `PORYDAW_BUNDLE_SHOT=<png>` saves the window for visual review.
+  The Open Song Bundle… dialog itself is not driven.
+
 ### Phase 3 — Import
 Status: **not started**
+
+Carry-over from Phase 2 (read before starting):
+- **Go through `SongBundle::readSong`** (or apply the same checks) before
+  planning anything from a bundle root: it is what refuses a non-identifier
+  label / `-G` value and any `.incbin`/`.include` path that escapes the
+  root. `makeImportPlan(bundleRoot, …)` must not trust a root that has not
+  passed it.
+- The Import button is a stub: `MainWindow::importBundle(SongSession&)`
+  (shows "not available yet") is the entry point to replace. The session
+  carries the parsed `manifest`, `root` (extracted bundle) and `bundlePath`.
+- `vgCatalog(root)` returns a reference into ONE MainWindow-wide cache keyed
+  by root. Import works with two roots (bundle + project): never hold the
+  returned reference across a call made for the other root, and expect a
+  rescan on every bundle-tab ↔ project-tab switch.
+- `SongView` has no read-only mode: on a bundle tab, note/lane drags show
+  their live preview and then snap back (the lock drops the command).
+  Cosmetic; fix only if the user asks.
+- Positional CLI paths that are not an existing `.porysong` file or bundle
+  folder (including mistyped ones) are silently ignored by
+  `openCommandLinePaths`.
+- The scripting gate on locked documents (`beginTransaction`,
+  `storage.song.*`) has no `--scriptcheck` case yet; Phase 4 owns that.
 
 - `SongBundle::ImportPlan makeImportPlan(bundleRoot, projectRoot, error)`
   (§3.4) and `bool applyImportPlan(plan, error)`. New writers:

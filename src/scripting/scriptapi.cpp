@@ -1791,6 +1791,13 @@ bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api) c
                        .arg(QLatin1String(api)));
         return false;
     }
+    if (d->isLocked()) {
+        // A song-bundle tab does not live under the open project: its label
+        // must not reach (or clobber) a project song's sidecar.
+        throwError(QStringLiteral("storage.song.%1: the song is a read-only song bundle")
+                       .arg(QLatin1String(api)));
+        return false;
+    }
     *path = ViewSidecar::pathFor(p->root(), d->label());
     QJsonObject root;
     QFile file(*path);
@@ -2437,8 +2444,9 @@ bool ProjectApi::open(const QString &label, bool newTab)
     if (!m_host.bindings().openSong)
         return false;
     // Already the active song: nothing to do (loadSong would reload it
-    // from disk, asking about unsaved edits).
-    if (!newTab && doc() && doc()->label() == label)
+    // from disk, asking about unsaved edits). A read-only bundle tab can
+    // share the label without being the project's song.
+    if (!newTab && doc() && !doc()->isLocked() && doc()->label() == label)
         return true;
     // Replacing a dirty tab asks the user first: that wait is theirs.
     WatchdogPause pause(m_host);

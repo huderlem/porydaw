@@ -114,6 +114,29 @@ class MainWindow : public QMainWindow
     // redirected.
     bool runPolyGateCheck();
 
+    // Opens a song bundle (a .porysong file, or a folder holding a
+    // porysong.json) in a read-only tab — with or without a project open
+    // (docs/song-bundle/PLAN.md §3.6). A bundle that is already open is
+    // focused instead. Failures show a message box, or land in *error when
+    // one is given (harnesses, batch opens).
+    bool openBundle(const QString &path, QString *error = nullptr);
+    // The command line's positional arguments: every one that names a song
+    // bundle is opened (after restoreSession, so it ends up in front).
+    // Returns how many opened.
+    int openCommandLinePaths(const QStringList &arguments);
+    // Whether path is something openBundle takes: a *.porysong file or a
+    // bundle folder.
+    static bool isBundlePath(const QString &path);
+
+    // Read-only bundle tab check (part of --bundlecheck; bundletabcheck.cpp):
+    // opens bundleZip with no project open (plays, renders non-silent, the
+    // document is locked, write actions are gated), through the drop-event
+    // and command-line paths, then opens projectRoot and checks the bundle
+    // tab survives with Import enabled. QSettings must be redirected.
+    // Returns the number of failed expectations.
+    int runBundleTabCheck(const QString &bundleZip, const QString &projectRoot,
+                          const QString &scratchDir);
+
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
     // harnesses never inherit (or overwrite) the user's session.
@@ -123,6 +146,9 @@ class MainWindow : public QMainWindow
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
     void childEvent(QChildEvent *event) override;
+    // Song bundles dropped on the window open like File → Open Song Bundle.
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
     // Installed on the master-volume spinbox (and its line edit): refuses
     // the Space ShortcutOverride so play/pause keeps working while the
     // field is focused.
@@ -135,6 +161,7 @@ class MainWindow : public QMainWindow
     void saveSong();
     void exportWav();
     void exportBundle();
+    void openBundleDialog();
     void openSongSettings();
     void openSettings();
     void newSong();
@@ -212,7 +239,17 @@ class MainWindow : public QMainWindow
     // --- tab/session plumbing ---
     SongSession *activeSession() const { return m_active; }
     SongSession *sessionForWidget(QWidget *widget) const;
+    // Project-song tabs only; a bundle tab is found by its file instead.
     SongSession *sessionForLabel(const QString &label) const;
+    SongSession *sessionForBundlePath(const QString &canonicalPath) const;
+    static QString bundleTabTitle(const QString &label);
+    // The strip above a bundle tab's ruler: what it is, and the Import
+    // button (SongSession::bundleImportButton).
+    QWidget *createBundleBanner(SongSession &session);
+    // Import needs a project to import into: every bundle tab's button
+    // follows m_project.isOpen().
+    void refreshBundleBanners();
+    void importBundle(SongSession &session);
     // Creates an empty session with a wired-up view; not yet in the tab bar.
     SongSession *createSession();
     // Removes the session's tab (re-activating a neighbor via currentChanged)

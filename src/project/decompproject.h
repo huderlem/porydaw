@@ -85,6 +85,13 @@ class DecompProject
     static QStringList voicegroupCandidates(const SongInfo &song);
     static QStringList voicegroupCandidates(const SongCfg &cfg);
 
+    // One midi.cfg line ("mus_x.mid: -E -R50 -G_x -V080", comments allowed)
+    // into its song label and parsed flags; false for a line that names no
+    // song. Shared with the song-bundle reader, whose midi.cfg is one line.
+    static bool parseMidiCfgLine(const QString &line, QString *label, SongCfg *cfg);
+    // mid2agb option letters are case-insensitive (-v080 == -V080).
+    static SongCfg cfgFromFlags(const QStringList &flags);
+
     // Refreshes a song's cached cfg after porydaw writes its flags back.
     void setSongCfg(int id, const SongCfg &cfg);
 

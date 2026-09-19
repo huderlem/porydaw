@@ -1,12 +1,14 @@
 #include "songbundle.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QRegularExpression>
 #include <QSaveFile>
 
 #include "bundlearchive.h"
@@ -229,6 +231,104 @@ QString manifestPath(const QString &bundleRoot)
 bool isBundleDir(const QString &root)
 {
     return QFileInfo(manifestPath(root)).isFile();
+}
+
+namespace {
+
+bool plainIdentifier(const QString &s)
+{
+    static const QRegularExpression re(QStringLiteral("^[A-Za-z0-9_]+$"));
+    return re.match(s).hasMatch();
+}
+
+// Every .incbin/.include target in the bundle's assembler sources must stay
+// under the root: the loader opens them verbatim relative to it. The loader
+// finds a directive with strstr and takes the line's first quoted string, so
+// this is no stricter: every quoted string on a line naming either directive.
+bool sourcesStayInside(const QString &bundleRoot, QString *error)
+{
+    static const QRegularExpression directive(
+        QStringLiteral("\\.(?:incbin|include)"));
+    static const QRegularExpression quoted(QStringLiteral("\"([^\"]*)\""));
+    QDirIterator it(bundleRoot, {QStringLiteral("*.inc"), QStringLiteral("*.s")}, QDir::Files,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        const QString path = it.next();
+        QFile in(path);
+        if (!in.open(QIODevice::ReadOnly))
+            continue;
+        const QString text = QString::fromUtf8(in.readAll());
+        static const QRegularExpression lineBreak(QStringLiteral("[\r\n]"));
+        for (const QString &line : text.split(lineBreak, Qt::SkipEmptyParts)) {
+            if (!directive.match(line).hasMatch())
+                continue;
+            auto matches = quoted.globalMatch(line);
+            while (matches.hasNext()) {
+                const QString target = matches.next().captured(1);
+                QString normalized, reason;
+                if (!BundleArchive::validateEntryName(target, &normalized, &reason)) {
+                    setError(error,
+                             QStringLiteral("Song bundle refused: %1 references \"%2\" (%3)")
+                                 .arg(QDir(bundleRoot).relativeFilePath(path), target, reason));
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool readSong(const QString &bundleRoot, BundleManifest *manifest, SongInfo *song, QString *error)
+{
+    if (!BundleManifest::read(bundleRoot, manifest, error))
+        return false;
+    if (!plainIdentifier(manifest->label)) {
+        setError(error, QStringLiteral("Song bundle refused: \"%1\" is not a valid song label")
+                            .arg(manifest->label));
+        return false;
+    }
+    if (!sourcesStayInside(bundleRoot, error))
+        return false;
+
+    const QString midiDir = bundleRoot + QStringLiteral("/sound/songs/midi/");
+    SongInfo info;
+    info.label = manifest->label;
+    info.constant = manifest->constant;
+    info.player = manifest->player;
+    info.midPath = midiDir + manifest->label + QStringLiteral(".mid");
+    info.hasMid = QFileInfo(info.midPath).isFile();
+    info.registered = false;
+    if (!info.hasMid) {
+        setError(error, QStringLiteral("Song bundle is incomplete: no sound/songs/midi/%1.mid")
+                            .arg(manifest->label));
+        return false;
+    }
+
+    QFile cfgFile(midiDir + QStringLiteral("midi.cfg"));
+    if (cfgFile.open(QIODevice::ReadOnly)) {
+        const QStringList lines = QString::fromUtf8(cfgFile.readAll()).split(QLatin1Char('\n'));
+        for (const QString &line : lines) {
+            QString label;
+            SongCfg cfg;
+            if (DecompProject::parseMidiCfgLine(line, &label, &cfg) && label == info.label) {
+                info.cfg = cfg;
+                info.hasCfg = true;
+            }
+        }
+    }
+    if (!info.hasCfg) {
+        info.cfg = DecompProject::cfgFromFlags(
+            manifest->flags.split(QLatin1Char(' '), Qt::SkipEmptyParts));
+    }
+    if (!info.cfg.voicegroupArg.isEmpty() && !plainIdentifier(info.cfg.voicegroupArg)) {
+        setError(error, QStringLiteral("Song bundle refused: \"-G%1\" is not a valid voicegroup")
+                            .arg(info.cfg.voicegroupArg));
+        return false;
+    }
+    *song = info;
+    return true;
 }
 
 } // namespace SongBundle

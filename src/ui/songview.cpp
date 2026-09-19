@@ -8164,6 +8164,11 @@ class TrackHeaderRow : public QWidget
         QAction *mergeAction = menu.addAction(SongView::tr("Merge..."));
         mergeAction->setEnabled(m_sv->document()->engineTrackCount() >= 2);
         QAction *deleteAction = menu.addAction(SongView::tr("Delete track"));
+        if (m_sv->document()->isLocked()) {
+            // A read-only tab: only "Show voice" is not an edit.
+            for (QAction *edit : {voiceAction, renameAction, mergeAction, deleteAction})
+                edit->setEnabled(false);
+        }
         QAction *chosen = menu.exec(event->globalPos());
         // Queued: these edits rebuild the header panel, which deletes this
         // row out from under its own event handler. (Rename just opens the
@@ -8473,6 +8478,15 @@ songview::TimelineSurfaces SongView::timelineSurfaces() noexcept
         {*m_ruler, kGutterW}, {*m_roll, kKeyboardW}, {*m_velocityLane, kGutterW},
         {*m_lanes, kGutterW}, {*m_strip, kGutterW},
     };
+}
+
+void SongView::setTopBanner(QWidget *banner)
+{
+    auto *vbox = qobject_cast<QVBoxLayout *>(layout());
+    if (!vbox || !banner)
+        return;
+    banner->setParent(this);
+    vbox->insertWidget(0, banner);
 }
 
 SongView::SongView(QWidget *parent) : QWidget(parent)
@@ -10829,6 +10843,10 @@ void SongView::deleteTrack(int track)
 {
     if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0)
         return;
+    // A locked document drops the edit; the view state must not shift
+    // over a track that stays.
+    if (m_document->isLocked())
+        return;
     shiftViewStateOverRemovedTrack(track);
     m_document->deleteTrack(track); // rebuilds via documentChanged
     announce(tr("Deleted track %1").arg(track + 1));
@@ -10923,7 +10941,7 @@ bool SongView::askMergeTrack(int source, int *outDest, bool *outNotesOnly)
 void SongView::mergeTrack(int track)
 {
     if (!m_document || track < 0 || track > 15 || m_document->smfTrackFor(track) < 0 ||
-        m_document->engineTrackCount() < 2)
+        m_document->engineTrackCount() < 2 || m_document->isLocked())
         return;
     int dest = -1;
     bool notesOnly = false;
@@ -10952,7 +10970,7 @@ void SongView::mergeTrack(int track)
 
 void SongView::moveTrack(int from, int to)
 {
-    if (!m_document)
+    if (!m_document || m_document->isLocked())
         return;
     // The document decides validity; the per-track view state follows in
     // onTrackMoved, which the reorder op signals through — undo and redo

@@ -2,12 +2,16 @@
 
 #include <QDateTime>
 #include <QString>
+#include <QTemporaryDir>
+
+class QAbstractButton;
 
 #include <map>
 #include <memory>
 
 #include "core/miditimeline.h"
 #include "core/songdocument.h"
+#include "project/songbundle.h"
 #include "project/voicegroupsource.h"
 #include "ui/songview.h"
 
@@ -39,8 +43,18 @@ struct SongSession {
     // Where this tab's song lives: every per-session read (voicegroup load
     // and source, preview files, view sidecar, synth and sample lookups)
     // resolves under this, not under MainWindow's project — set from the
-    // project root at creation.
+    // project root at creation, or the extraction dir for a bundle tab.
     QString root;
+    // A song-bundle tab (docs/song-bundle/PLAN.md §3.6): a read-only song
+    // opened from a .porysong file or bundle folder. Its document is locked,
+    // it belongs to no project (songId stays -1, it survives project
+    // switches, it is never persisted), and root is bundleDir's path — or
+    // the folder itself for a folder bundle, where bundleDir is null.
+    bool bundle = false;
+    QString bundlePath; // canonical path of the opened file/folder
+    std::unique_ptr<QTemporaryDir> bundleDir;
+    BundleManifest manifest;
+    QAbstractButton *bundleImportButton = nullptr; // in the view's banner
     SongDocument doc;
     std::unique_ptr<VoicegroupSource> vgSource;
     std::unique_ptr<MidiTimeline> timeline;
@@ -64,7 +78,7 @@ struct SongSession {
     // The tab's unsaved-changes state: song and voicegroup edits are one
     // document to the user, so every dirty check (tab title, window title,
     // close prompts) must combine both.
-    bool isDirty() const { return doc.isDirty() || (vgSource && vgSource->dirty()); }
+    bool isDirty() const { return !bundle && (doc.isDirty() || (vgSource && vgSource->dirty())); }
 
     ~SongSession()
     {

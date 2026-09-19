@@ -651,6 +651,12 @@ bool ScriptHost::beginTransaction(Plugin &plugin, const QString &name, QString *
         *error = tr("no song is loaded");
         return false;
     }
+    if (doc->isLocked()) {
+        // A song-bundle tab: the document drops every command, so refuse
+        // up front rather than let edit.* calls silently do nothing.
+        *error = tr("the song is read-only (a song bundle); import it into a project to edit");
+        return false;
+    }
     tx = EditTransaction();
     tx.owner = &plugin;
     tx.doc = doc;

@@ -264,7 +264,12 @@ int main(int argc, char *argv[])
     }
 
     MainWindow window;
-    ui::showCoveredWhileRestoring(window, [&window] { window.restoreSession(); });
+    ui::showCoveredWhileRestoring(window, [&window, &args] {
+        window.restoreSession();
+        // `porydaw song.porysong`: positional song bundles open after the
+        // restored tabs, so the bundle is what the user lands on.
+        window.openCommandLinePaths(args.mid(1));
+    });
 #ifdef PORYDAW_SCRIPTING
     // Interactive launches only: harnesses never run the user's plugins.
     window.loadPlugins();

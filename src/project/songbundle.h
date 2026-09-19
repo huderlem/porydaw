@@ -4,6 +4,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "decompproject.h"
+
 // The porysong.json manifest at the root of a song bundle (§3.3 of
 // docs/song-bundle/PLAN.md). A bundle is a directory (or a zip of one, see
 // BundleArchive) that mirrors a decomp project's sound/ tree; the manifest
@@ -68,5 +70,16 @@ QString manifestPath(const QString &bundleRoot);
 // True when root holds a porysong.json (the only thing that makes a
 // directory a bundle; the manifest's validity is a separate read).
 bool isBundleDir(const QString &root);
+
+// Reads a bundle root (an extracted .porysong or a bundle folder) into what
+// a tab needs to open it: the manifest, plus a SongInfo synthesized from the
+// bundle's own midi.cfg line (the manifest's flag string when that line is
+// missing). The song belongs to no project: id -1, unregistered.
+//
+// A bundle is untrusted input that the voicegroup loader will path-probe,
+// so this refuses anything that could reach outside the root: a label or -G
+// value that isn't a plain identifier, and any .incbin/.include in the
+// bundle's sources whose path is absolute or has a ".." segment.
+bool readSong(const QString &bundleRoot, BundleManifest *manifest, SongInfo *song, QString *error);
 
 } // namespace SongBundle

@@ -359,6 +359,11 @@ bool SongDocument::load(const SongInfo &song, QString *error)
 
 bool SongDocument::save(QString *error)
 {
+    if (m_locked) {
+        if (error)
+            *error = tr("This song is read-only.");
+        return false;
+    }
     if (!m_smf.writeFile(m_midPath, error))
         return false;
 
@@ -2328,7 +2333,7 @@ int SongDocument::freeChannel() const
 
 bool SongDocument::canAddTrack() const
 {
-    if (m_smf.tracks.empty())
+    if (m_smf.tracks.empty() || m_locked)
         return false;
     if (engineTrackCount() >= 16)
         return false;
@@ -2895,6 +2900,12 @@ class DiscardRedoCommand : public QUndoCommand
 
 void SongDocument::pushCommand(QUndoCommand *command)
 {
+    if (m_locked) {
+        // Never applied: commands mutate only in redo(), which the stack
+        // runs on push.
+        delete command;
+        return;
+    }
     if (m_editGroupDepth > 0 && !m_editGroupMacroOpen) {
         m_editGroupMacroOpen = true;
         m_undoStack.beginMacro(m_editGroupText);

@@ -67,6 +67,13 @@ class VoicegroupBrowser : public QWidget
                    const QHash<QString, VgSynthDesc> &pendingSynths = {},
                    std::function<QString(const VgSynthDesc &)> mintSynth = {});
 
+    // View-only mode (a read-only song-bundle tab): the voice list and its
+    // press-and-hold audition keep working, while the voicegroup selector,
+    // New…, and the whole voice editor are disabled — the editor still shows
+    // the selected voice's values. Survives setVoicegroup/setSource.
+    void setViewOnly(bool viewOnly);
+    bool viewOnly() const { return m_viewOnly; }
+
     // Loop badge / detail metadata for the sample picker's rows, resolved by
     // the owner from the project's committed sample files.
     void setSampleInfoProvider(std::function<SamplePickInfo(const QString &)> fn);
@@ -159,6 +166,7 @@ class VoicegroupBrowser : public QWidget
     // source object changes (a different voicegroup/song was loaded).
     QHash<int, QHash<int, VgAdsr>> m_adsrHistory;
     bool m_updating = false;
+    bool m_viewOnly = false;
 
     QWidget *m_editor = nullptr;
     QLabel *m_notice = nullptr;

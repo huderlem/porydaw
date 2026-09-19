@@ -110,7 +110,13 @@ class SongDocument : public QObject
     const SmfFile &smf() const { return m_smf; }
     const SongCfg &cfg() const { return m_cfg; }
     QUndoStack *undoStack() { return &m_undoStack; }
-    bool isDirty() const { return !m_undoStack.isClean(); }
+    bool isDirty() const { return !m_locked && !m_undoStack.isClean(); }
+    // A locked document is read-only (a song-bundle tab): every mutation
+    // funnels through pushCommand, which drops the command unapplied, so
+    // nothing changes, nothing is undoable, and it is never dirty. save()
+    // refuses. UI gating sits on top of this, never instead of it.
+    void setLocked(bool locked) { m_locked = locked; }
+    bool isLocked() const { return m_locked; }
     // Bumped once per published mutation (edit, undo, redo, load), so a
     // caller can detect that state resolved earlier — DocNote indices, a
     // pending batch write — may be stale.
@@ -637,6 +643,7 @@ class SongDocument : public QObject
     bool m_hadCfgLine = false;
     QUndoStack m_undoStack;
     uint64_t m_revision = 0;
+    bool m_locked = false;
     int m_editGroupDepth = 0;
     bool m_pushing = false;
     bool m_editGroupDiscard = false;

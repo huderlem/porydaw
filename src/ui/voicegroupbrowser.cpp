@@ -422,6 +422,14 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent) : QWidget(parent)
     populateEditor();
 }
 
+void VoicegroupBrowser::setViewOnly(bool viewOnly)
+{
+    m_viewOnly = viewOnly;
+    m_editor->setEnabled(!viewOnly);
+    m_newButton->setEnabled(!viewOnly);
+    m_vgCombo->setEnabled(m_vg != nullptr && !viewOnly);
+}
+
 void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg)
 {
     releaseVoice();
@@ -429,7 +437,7 @@ void VoicegroupBrowser::setVoicegroup(const LoadedVoiceGroup *vg)
     if (!vg)
         m_source = nullptr; // a cleared voicegroup invalidates the source too
     m_tree->clear();
-    m_vgCombo->setEnabled(vg != nullptr);
+    m_vgCombo->setEnabled(vg != nullptr && !m_viewOnly);
     m_vgCombo->lineEdit()->setPlaceholderText(vg ? QStringLiteral("dummy") : tr("No song loaded"));
     if (!vg) {
         m_updating = true;

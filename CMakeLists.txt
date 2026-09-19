@@ -283,6 +283,7 @@ qt_add_executable(porydaw
     src/ignorecheck.cpp
     src/bundlecheck.cpp
     src/bundleexportcheck.cpp
+    src/bundletabcheck.cpp
     src/samplecheck.cpp
     src/sessioncheck.cpp
     src/settingscheck.cpp

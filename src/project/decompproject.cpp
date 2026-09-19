@@ -176,7 +176,7 @@ void DecompProject::discoverUnregisteredSongs()
 }
 
 // mid2agb parses option letters case-insensitively (-v080 == -V080).
-static SongCfg cfgFromFlags(const QStringList &flags)
+SongCfg DecompProject::cfgFromFlags(const QStringList &flags)
 {
     SongCfg cfg;
     cfg.rawFlags = flags;
@@ -214,30 +214,38 @@ static SongCfg cfgFromFlags(const QStringList &flags)
     return cfg;
 }
 
+bool DecompProject::parseMidiCfgLine(const QString &rawLine, QString *label, SongCfg *cfg)
+{
+    // e.g. "mus_abandoned_ship.mid: -E -R50 -G_abandoned_ship -V080"
+    QString line = rawLine.trimmed();
+    const int hash = line.indexOf(QLatin1Char('#'));
+    if (hash >= 0)
+        line = line.left(hash).trimmed();
+    const int colon = line.indexOf(QLatin1Char(':'));
+    if (colon <= 0)
+        return false;
+
+    QString name = line.left(colon).trimmed();
+    if (name.endsWith(QStringLiteral(".mid"), Qt::CaseInsensitive))
+        name.chop(4);
+    *label = name;
+    *cfg = cfgFromFlags(line.mid(colon + 1).split(QLatin1Char(' '), Qt::SkipEmptyParts));
+    return true;
+}
+
 bool DecompProject::parseMidiCfg()
 {
     QFile file(m_root + QStringLiteral("/sound/songs/midi/midi.cfg"));
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
         return false;
 
-    // e.g. "mus_abandoned_ship.mid: -E -R50 -G_abandoned_ship -V080"
     QHash<QString, SongCfg> byLabel;
     QTextStream in(&file);
     while (!in.atEnd()) {
-        QString line = in.readLine().trimmed();
-        const int hash = line.indexOf(QLatin1Char('#'));
-        if (hash >= 0)
-            line = line.left(hash).trimmed();
-        const int colon = line.indexOf(QLatin1Char(':'));
-        if (colon <= 0)
-            continue;
-
-        QString name = line.left(colon).trimmed();
-        if (name.endsWith(QStringLiteral(".mid"), Qt::CaseInsensitive))
-            name.chop(4);
-
-        byLabel.insert(
-            name, cfgFromFlags(line.mid(colon + 1).split(QLatin1Char(' '), Qt::SkipEmptyParts)));
+        QString name;
+        SongCfg cfg;
+        if (parseMidiCfgLine(in.readLine(), &name, &cfg))
+            byLabel.insert(name, cfg);
     }
 
     for (SongInfo &song : m_songs) {

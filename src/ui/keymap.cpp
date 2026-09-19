@@ -46,6 +46,8 @@ const Def kDefs[] = {
     // File
     {"file.open_project", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Open Project"),
      QKeySequence::Open, ""},
+    {"file.open_bundle", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Open Song Bundle"),
+     QKeySequence::UnknownKey, ""},
     {"file.new_song", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("New Song"),
      QKeySequence::New, ""},
     {"file.import_midi", Context::Global, QT_TR_NOOP("File"), QT_TR_NOOP("Import MIDI"),
