@@ -344,6 +344,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                                            QString *error) {
             return createVoicegroupNamed(name, copyFromArg, error);
         };
+        bindings.exportBundle = [this](const QString &label, const QString &path, int *samples,
+                                       QString *error) {
+            return exportBundleByLabel(label, path, samples, error);
+        };
+        bindings.importBundle = [this](const QString &path,
+                                       const scripting::BundleImportRequest &request,
+                                       scripting::BundleImportResult *result, QString *error) {
+            SongBundle::ImportPlan plan;
+            if (!importBundleFile(path, {request.label, request.constant, request.player}, &plan,
+                                  error))
+                return false;
+            result->label = plan.label;
+            result->constant = plan.constant;
+            result->player = plan.player;
+            result->voicegroupArg = DecompProject::cfgFromFlags(plan.flags).voicegroupArg;
+            result->warnings = plan.warnings;
+            return true;
+        };
         bindings.voicegroupCatalog = [this]() {
             scripting::VoicegroupCatalog out;
             if (!m_project.isOpen())
@@ -1912,6 +1930,23 @@ QString MainWindow::bundleTabTitle(const QString &label)
     return tr("[bundle] %1").arg(label);
 }
 
+bool MainWindow::resolveBundleRoot(const QFileInfo &info, std::unique_ptr<QTemporaryDir> *tempDir,
+                                   QString *root, QString *error)
+{
+    if (info.isDir()) {
+        *root = info.canonicalFilePath();
+        return true;
+    }
+    *tempDir =
+        std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/porysong-XXXXXX"));
+    if (!(*tempDir)->isValid()) {
+        *error = tr("Could not create a temporary folder for the bundle.");
+        return false;
+    }
+    *root = (*tempDir)->filePath(QStringLiteral("bundle"));
+    return BundleArchive::extractBundle(info.canonicalFilePath(), *root, error);
+}
+
 bool MainWindow::openBundle(const QString &path, QString *errorOut)
 {
     const auto fail = [&](const QString &message) {
@@ -1946,17 +1981,8 @@ bool MainWindow::openBundle(const QString &path, QString *errorOut)
     std::unique_ptr<QTemporaryDir> tempDir;
     QString root;
     QString error;
-    if (info.isDir()) {
-        root = canonical;
-    } else {
-        tempDir =
-            std::make_unique<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/porysong-XXXXXX"));
-        if (!tempDir->isValid())
-            return fail(tr("Could not create a temporary folder for the bundle."));
-        root = tempDir->filePath(QStringLiteral("bundle"));
-        if (!BundleArchive::extractBundle(canonical, root, &error))
-            return fail(error);
-    }
+    if (!resolveBundleRoot(info, &tempDir, &root, &error))
+        return fail(error);
     BundleManifest manifest;
     SongInfo song;
     if (!SongBundle::readSong(root, &manifest, &song, &error))
@@ -2079,7 +2105,18 @@ bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *
         return false;
     // Whatever landed is part of the project now: new songs, voicegroups and
     // samples must show up (a half-applied import leaves them selectable).
-    reloadProject();
+    // A failed reload is the caller's to report (a plugin call must not
+    // block on a dialog), and the import has not succeeded without it: the
+    // project model would not contain the song.
+    QString reloadError;
+    if (!reloadProject(&reloadError)) {
+        if (error) {
+            *error = ok ? tr("The files were imported, but the project did not reload: %1")
+                              .arg(reloadError)
+                        : tr("%1 The project did not reload either: %2").arg(*error, reloadError);
+        }
+        return false;
+    }
     if (!ok)
         return false;
     statusBar()->showMessage(
@@ -2088,6 +2125,42 @@ bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *
         8000);
     // The imported song opens in its own editable tab; the bundle tab stays.
     loadSongByLabel(plan.label, /*newTab=*/true);
+    return true;
+}
+
+bool MainWindow::importBundleFile(const QString &path, const SongBundle::ImportOptions &options,
+                                  SongBundle::ImportPlan *applied, QString *error)
+{
+    if (!m_project.isOpen()) {
+        *error = tr("no project is open");
+        return false;
+    }
+    const QFileInfo info(path);
+    if (!info.exists()) {
+        *error = tr("%1 does not exist").arg(QDir::toNativeSeparators(path));
+        return false;
+    }
+    if (!isBundlePath(path)) {
+        *error = tr("%1 is not a song bundle (.porysong file or bundle folder)")
+                     .arg(QDir::toNativeSeparators(path));
+        return false;
+    }
+    // Like openBundle, but the temp extraction of a .porysong lives only
+    // for this call.
+    std::unique_ptr<QTemporaryDir> tempDir;
+    QString root;
+    if (!resolveBundleRoot(info, &tempDir, &root, error))
+        return false;
+    // makeImportPlan validates the root through SongBundle::readSong.
+    const SongBundle::ImportPlan plan = SongBundle::makeImportPlan(root, m_project.root(), options);
+    if (!plan.ok()) {
+        *error = plan.refusals.join(QLatin1Char(' '));
+        return false;
+    }
+    if (!applyBundleImport(plan, error))
+        return false;
+    if (applied)
+        *applied = plan;
     return true;
 }
 
@@ -2337,21 +2410,63 @@ void MainWindow::exportBundle()
 
     // Like Export WAV, the bundle carries the song as it is in memory:
     // unsaved note, voice and synth edits included.
-    SongBundle::Exporter exporter(session->root, session->doc, session->vgSource.get());
-    if (session->songId >= 0 && session->songId < m_project.songs().size()) {
-        const SongInfo &song = m_project.songs().at(session->songId);
-        exporter.setRegistrationHints(song.constant, song.player);
-    }
-    exporter.setPendingSynths(m_pendingSynths);
+    int samples = 0;
     QString error;
-    if (!exporter.exportTo(path, &error)) {
+    if (!exportBundleByLabel(session->doc.label(), path, &samples, &error)) {
         QMessageBox::warning(this, tr("Export Song Bundle"), error);
         return;
     }
     statusBar()->showMessage(
-        tr("Exported %1 (%n sample(s))", nullptr, int(exporter.manifest().samples.size()))
-            .arg(QDir::toNativeSeparators(path)),
+        tr("Exported %1 (%n sample(s))", nullptr, samples).arg(QDir::toNativeSeparators(path)),
         8000);
+}
+
+bool MainWindow::exportBundleByLabel(const QString &label, const QString &path, int *samples,
+                                     QString *error)
+{
+    if (!m_project.isOpen()) {
+        *error = tr("no project is open");
+        return false;
+    }
+    // The first match, like loadSongByLabel.
+    const SongInfo *info = nullptr;
+    for (const SongInfo &song : m_project.songs()) {
+        if (song.label == label && song.isPlayable()) {
+            info = &song;
+            break;
+        }
+    }
+    // An open tab exports as it is in memory (unsaved edits included, even
+    // when a reload has since lost the song); any other song is read from
+    // disk for the length of this call.
+    const SongSession *open = sessionForLabel(label);
+    if (!info && !open) {
+        *error = tr("no song named %1 (with a .mid) in the project").arg(label);
+        return false;
+    }
+    SongDocument diskDoc;
+    VoicegroupSource diskVg;
+    const SongDocument *doc = nullptr;
+    const VoicegroupSource *vg = nullptr;
+    if (open) {
+        doc = &open->doc;
+        vg = open->vgSource.get();
+    } else {
+        if (!diskDoc.load(*info, error) ||
+            !diskVg.open(m_project.root(), info->cfg.voicegroupArg, error))
+            return false;
+        doc = &diskDoc;
+        vg = &diskVg;
+    }
+    SongBundle::Exporter exporter(m_project.root(), *doc, vg);
+    if (info)
+        exporter.setRegistrationHints(info->constant, info->player);
+    exporter.setPendingSynths(m_pendingSynths);
+    if (!exporter.exportTo(path, error))
+        return false;
+    if (samples)
+        *samples = int(exporter.manifest().samples.size());
+    return true;
 }
 
 void MainWindow::exportWav()

@@ -62,6 +62,21 @@ struct VoicegroupCatalog {
     QList<QPair<QString, QString>> keysplits; // sub-voicegroup, keysplit table
 };
 
+// porydaw.project.importBundle's overrides (SongBundle::ImportOptions) and
+// what the import registered.
+struct BundleImportRequest {
+    QString label;
+    QString constant;
+    QString player;
+};
+struct BundleImportResult {
+    QString label;
+    QString constant;
+    QString player;
+    QString voicegroupArg; // the imported voicegroup's -G arg
+    QStringList warnings;
+};
+
 // What the host borrows from the main window (docs/scripting/PLAN.md §3).
 // Callbacks rather than a MainWindow pointer keep src/scripting/ free of
 // the shell; every callback tolerates "no song loaded".
@@ -109,6 +124,18 @@ struct HostBindings {
     // when empty, and refreshes the catalog.
     std::function<bool(const QString &name, const QString &copyFromArg, QString *error)>
         createVoicegroup;
+    // Writes a project song as a .porysong song bundle (File → Export Song
+    // Bundle without its dialog): an open tab exports as it is in memory,
+    // any other song from disk. *samples receives the bundled sample count.
+    std::function<bool(const QString &label, const QString &path, int *samples, QString *error)>
+        exportBundle;
+    // Imports a song bundle (.porysong file or bundle folder) into the open
+    // project — the bundle tab's Import button without its dialog — and
+    // opens the imported song in a new tab. Empty request fields let the
+    // import choose; *result receives what was registered.
+    std::function<bool(const QString &path, const BundleImportRequest &request,
+                       BundleImportResult *result, QString *error)>
+        importBundle;
     // The window's cached voicegroup catalog (one scan per project).
     std::function<VoicegroupCatalog()> voicegroupCatalog;
     // The project-typical envelope for a voice type and instrument symbol

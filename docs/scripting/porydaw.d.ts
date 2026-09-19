@@ -74,6 +74,13 @@ declare namespace porydaw {
         function voicegroups(): { arg: string; name: string }[];
         /** Creates sound/voicegroups/<name>.inc (a copy of `copyFrom`'s voicegroup by arg, or the dummy template); returns the new -G arg. */
         function createVoicegroup(name: string, opts?: { copyFrom?: string }): string;
+        /** File → Export Song Bundle without its dialog: a song open in a tab exports with its unsaved edits, any other from disk. `path` follows the io sandbox; a name without a suffix gets `.porysong`, any other suffix throws. */
+        function exportBundle(label: string, path: string): { path: string; samples: number };
+        /** Imports a .porysong (or bundle folder) into the project and opens the song in a new tab. Throws when the import refuses. Reloads the project; not undoable. */
+        function importBundle(
+            path: string,
+            opts?: { label?: string; constant?: string; player?: string }
+        ): { label: string; constant: string; player: string; voicegroup: string; warnings: string[] };
     }
 
     // ---- song (read-only) ----

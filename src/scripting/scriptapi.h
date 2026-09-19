@@ -517,6 +517,15 @@ class ProjectApi : public ApiObject
     // Creates sound/voicegroups/<name>.inc (a copy of copyFromArg's
     // voicegroup, or the dummy template) → its -G arg.
     Q_INVOKABLE QString createVoicegroup(const QString &name, const QString &copyFromArg);
+    // Writes the song as a .porysong song bundle at a sandboxed path →
+    // {path, samples}, or null after throwing.
+    Q_INVOKABLE QVariant exportBundle(const QString &label, const QString &path);
+    // Imports a song bundle (.porysong or bundle folder, sandboxed path)
+    // into the project and opens the song in a new tab → {label, constant,
+    // player, voicegroup, warnings}, or null after throwing. Empty
+    // label/constant/player let the import choose. Reloads the project.
+    Q_INVOKABLE QVariant importBundle(const QString &path, const QString &label,
+                                      const QString &constant, const QString &player);
 
   private:
     // Registration-affecting calls share the dialog rules (not inside a

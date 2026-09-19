@@ -2830,6 +2830,190 @@ void runAdapterChecks(const Check &check, scripting::ScriptHost &host, SongSessi
     undo.setClean();
 }
 
+// Takes an imported song back out of the scratch project (its .mid, flags,
+// registration, view sidecar and its own voicegroup — never keepArg's), so
+// a run leaves the project as it found it and a re-run on the same scratch
+// starts clean.
+void removeImportedSong(scripting::ScriptHost &host, const QString &projectRoot,
+                        const QString &label, const QString &keepArg)
+{
+    const QString arg = host.evalConsole(
+        QStringLiteral("(porydaw.project.song('%1') || {settings: {voicegroup: ''}})"
+                       ".settings.voicegroup")
+            .arg(label));
+    // Closing the import's tab saved its view state; an earlier run (before
+    // this cleanup knew about it) may have left one without the song.
+    SongRegistry::removeSongSidecar(projectRoot, label);
+    if (host.evalConsole(QStringLiteral("porydaw.project.song('%1') !== null").arg(label)) !=
+        QStringLiteral("true"))
+        return;
+    host.evalConsole(QStringLiteral("porydaw.project.unregisterSong('%1')").arg(label));
+    QString cleanupError;
+    const QString midiDir = projectRoot + QStringLiteral("/sound/songs/midi");
+    QFile::remove(midiDir + QLatin1Char('/') + label + QStringLiteral(".mid"));
+    SongRegistry::removeSongFlags(midiDir, label, &cleanupError);
+    if (arg.startsWith(QLatin1Char('_')) && arg != keepArg) {
+        VoicegroupSource::removeIncludeLine(projectRoot, arg.mid(1), &cleanupError);
+        VoicegroupSource::deleteVoicegroup(projectRoot, arg.mid(1), &cleanupError);
+    }
+    host.evalConsole(QStringLiteral("porydaw.project.reload()"));
+}
+
+// porydaw.project.exportBundle / importBundle against the scratch project,
+// and the read-only gates a bundle tab puts on the editing API.
+void runBundleChecks(const Check &check, scripting::ScriptHost &host, MainWindow &window,
+                     QList<Message> &messages, const QString &projectRoot, const QString &songLabel,
+                     bool audioOk)
+{
+    const auto run = [&](const QString &code) { return host.evalConsole(code); };
+    const auto errorLogged = [&](const char *fragment) {
+        return hasMessage(messages, QStringLiteral("console"), 2, QLatin1String(fragment));
+    };
+    // The console has no plugin folder: its sandbox is the project.
+    const QString bundlePath = projectRoot + QStringLiteral("/plugin_bundle_test.porysong");
+    QFile::remove(bundlePath);
+    const QString importLabel = songLabel + QStringLiteral("_plugin");
+    // A previous run on this scratch may have left the import behind.
+    removeImportedSong(host, projectRoot, importLabel,
+                       run(QStringLiteral("porydaw.song.settings().voicegroup")));
+
+    // A refusal: the call throws (null result) and logs this fragment. The
+    // log is cumulative, so it is cleared first — an earlier check's message
+    // must not satisfy this one.
+    const auto refused = [&](const QString &code, const char *fragment) {
+        messages.clear();
+        return run(code).isNull() && errorLogged(fragment);
+    };
+
+    // --- exportBundle ---
+    check(refused(QStringLiteral("porydaw.project.exportBundle('nope_zzz_not_a_song', '%1')")
+                      .arg(bundlePath),
+                  "no song named") &&
+              !QFile::exists(bundlePath),
+          "exportBundle of an unknown label did not throw");
+    QTemporaryDir outside;
+    const QString outsideBundle = outside.filePath(QStringLiteral("x.porysong"));
+    check(refused(QStringLiteral("porydaw.project.exportBundle('%1', '%2')")
+                      .arg(songLabel, outsideBundle),
+                  "is outside the plugin folder") &&
+              !QFile::exists(outsideBundle),
+          "exportBundle wrote outside the sandbox");
+    check(refused(QStringLiteral("porydaw.edit.transaction('B', function () { "
+                                 "porydaw.project.exportBundle('%1', '%2'); })")
+                      .arg(songLabel, bundlePath),
+                  "inside a transaction") &&
+              !QFile::exists(bundlePath),
+          "exportBundle inside a transaction was allowed");
+    // Any suffix but .porysong is refused (a project file stays what it is);
+    // a bare name gets the suffix, like the menu action.
+    const QString notBundle = projectRoot + QStringLiteral("/plugin_bundle_test.mid");
+    check(refused(
+              QStringLiteral("porydaw.project.exportBundle('%1', '%2')").arg(songLabel, notBundle),
+              "is not a .porysong path") &&
+              !QFile::exists(notBundle),
+          "exportBundle wrote a bundle under another suffix");
+    check(run(QStringLiteral("porydaw.project.exportBundle('%1', '%2').path")
+                  .arg(songLabel, bundlePath.chopped(9))) == bundlePath &&
+              MainWindow::isBundlePath(bundlePath),
+          "exportBundle did not add the .porysong suffix to a bare name");
+    QFile::remove(bundlePath);
+    check(run(QStringLiteral("var X = porydaw.project.exportBundle('%1', '%2'); "
+                             "X.path === '%2' && X.samples >= 0")
+                  .arg(songLabel, bundlePath)) == QStringLiteral("true") &&
+              MainWindow::isBundlePath(bundlePath),
+          "project.exportBundle did not write the bundle of the open song");
+    // A real bundle outside the sandbox: only the sandbox can refuse it.
+    check(QFile::copy(bundlePath, outsideBundle) &&
+              refused(QStringLiteral("porydaw.project.importBundle('%1')").arg(outsideBundle),
+                      "is outside the plugin folder") &&
+              run(QStringLiteral("porydaw.project.song('%1')").arg(importLabel)) ==
+                  QStringLiteral("null"),
+          "importBundle read outside the sandbox");
+    // A song that is not open in any tab exports from disk.
+    const QString otherPath = projectRoot + QStringLiteral("/plugin_bundle_other.porysong");
+    QFile::remove(otherPath);
+    const QString otherLabel = run(
+        QStringLiteral(
+            "(porydaw.project.songs().filter(function (s) { return s.hasMid && s.label !== '%1' && "
+            "s.settings.voicegroup === porydaw.song.settings().voicegroup; })[0] || {label: ''})"
+            ".label")
+            .arg(songLabel));
+    if (!otherLabel.isEmpty()) {
+        check(run(QStringLiteral("porydaw.project.exportBundle('%1', '%2').path")
+                      .arg(otherLabel, otherPath)) == otherPath &&
+                  MainWindow::isBundlePath(otherPath),
+              "project.exportBundle did not export a song that is not open");
+        QFile::remove(otherPath);
+    }
+
+    // --- importBundle ---
+    check(refused(QStringLiteral("porydaw.project.importBundle('%1/sound/song_table.inc')")
+                      .arg(projectRoot),
+                  "is not a song bundle"),
+          "importBundle accepted a file that is not a bundle");
+    check(
+        refused(
+            QStringLiteral("porydaw.project.importBundle('%1/nope_zzz.porysong')").arg(projectRoot),
+            "does not exist"),
+        "importBundle of a missing file did not say it is missing");
+    check(refused(QStringLiteral("porydaw.project.importBundle('%1', {label: '%2'})")
+                      .arg(bundlePath, songLabel),
+                  "already has a song"),
+          "importBundle with a clashing label did not refuse");
+    check(refused(QStringLiteral("porydaw.project.importBundle('%1', {player: 'MUSIC_PLAYER_ZZZ'})")
+                      .arg(bundlePath),
+                  "no music player named"),
+          "importBundle accepted an unknown music player");
+    check(run(QStringLiteral("porydaw.project.song('%1_plugin')").arg(songLabel)) ==
+              QStringLiteral("null"),
+          "a refused import left a song behind");
+    // Into its own source project: everything is reused, the song and its
+    // trimmed voicegroup land under new names, and the song opens in a tab.
+    check(run(QStringLiteral(
+                  "var I = porydaw.project.importBundle('%1', {label: '%2', constant: null}); "
+                  "var S = porydaw.project.song('%2'); "
+                  "I.label === '%2' && Array.isArray(I.warnings) && S !== null && S.registered && "
+                  "S.constant === I.constant && S.player === I.player && "
+                  "S.settings.voicegroup === I.voicegroup && "
+                  "porydaw.project.registration('%2').complete && "
+                  "porydaw.project.voicegroups().some(function (g) { return g.arg === "
+                  "I.voicegroup; })")
+                  .arg(bundlePath, importLabel)) == QStringLiteral("true"),
+          "project.importBundle did not register the song with its voicegroup");
+    if (audioOk) {
+        check(run(QStringLiteral("porydaw.song.label")) == importLabel &&
+                  run(QStringLiteral("porydaw.song.settings().voicegroup === I.voicegroup")) ==
+                      QStringLiteral("true"),
+              "the imported song did not open in its own tab");
+    }
+
+    // --- a bundle tab is read-only to plugins ---
+    QString openError;
+    if (audioOk && check(window.openBundle(bundlePath, &openError), "the bundle did not open")) {
+        check(run(QStringLiteral("porydaw.song.label")) == songLabel,
+              "the bundle tab is not what the API sees");
+        check(run(QStringLiteral("porydaw.edit.transaction('L', function () { "
+                                 "porydaw.edit.setSettings({reverb: 1}); })"))
+                      .isNull() &&
+                  errorLogged("the song is read-only (a song bundle)"),
+              "edit.transaction on a bundle tab was allowed");
+        check(run(QStringLiteral("porydaw.storage.song.set('k', 1)")).isNull() &&
+                  errorLogged("storage.song.set: the song is a read-only song bundle") &&
+                  run(QStringLiteral("porydaw.storage.song.get('k', 7)")).isNull(),
+              "storage.song on a bundle tab was allowed");
+        check(run(QStringLiteral("porydaw.song.save()")).isNull() &&
+                  errorLogged("song.save: the song could not be saved"),
+              "song.save() on a bundle tab did not fail");
+        // The project song of the same label is still reachable by label.
+        check(run(QStringLiteral("porydaw.project.exportBundle('%1', '%2').path")
+                      .arg(songLabel, bundlePath)) == bundlePath,
+              "exportBundle by label failed while the bundle tab was active");
+    } else if (!openError.isEmpty()) {
+        std::fprintf(stderr, "scriptcheck: openBundle: %s\n", qUtf8Printable(openError));
+    }
+    QFile::remove(bundlePath);
+}
+
 int runTapCheck()
 {
     int failures = 0;
@@ -3361,6 +3545,26 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
         runRealtimeChecks(check, host, *this, messages, m_audioOk);
         runReachChecks(check, host, *this, *m_active, messages, pluginsDir, projectRoot, songLabel);
         runAdapterChecks(check, host, *m_active, messages, projectRoot, songLabel, m_audioOk);
+        {
+            // The import and the bundle tab each open a tab of their own;
+            // the rest of the run stays on the song it started with.
+            SongSession *original = m_active;
+            QList<QWidget *> before;
+            for (int i = 0; i < m_tabs->count(); ++i)
+                before.append(m_tabs->widget(i));
+            runBundleChecks(check, host, *this, messages, projectRoot, songLabel, m_audioOk);
+            for (int i = m_tabs->count() - 1; i >= 0; --i) {
+                if (!before.contains(m_tabs->widget(i)))
+                    closeTab(i);
+            }
+            m_tabs->setCurrentWidget(original->view);
+            check(m_active == original, "closing the import's tabs lost the original song");
+            removeImportedSong(host, projectRoot, songLabel + QStringLiteral("_plugin"),
+                               original->doc.cfg().voicegroupArg);
+            check(!QFile::exists(projectRoot + QStringLiteral("/.porydaw/") + songLabel +
+                                 QStringLiteral("_plugin.json")),
+                  "the import's view sidecar outlived the cleanup");
+        }
         runEngineSettingsChecks(check, host, *this, messages);
         // Switching to no song drops the API's view.
         activateSession(nullptr);

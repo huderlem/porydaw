@@ -15,9 +15,11 @@
 class QAction;
 class QChildEvent;
 class QDockWidget;
+class QFileInfo;
 struct WavExportOptions;
 class QLabel;
 class QTabWidget;
+class QTemporaryDir;
 class QSettings;
 class QSpinBox;
 class QToolBar;
@@ -39,6 +41,7 @@ namespace scripting {
 class ScriptHost;
 } // namespace scripting
 namespace SongBundle {
+struct ImportOptions;
 struct ImportPlan;
 } // namespace SongBundle
 class SettingsDialog;
@@ -262,6 +265,21 @@ class MainWindow : public QMainWindow
     // Applies an accepted import plan to the open project, reloads it, and
     // opens the imported song in a new editable tab (the bundle tab stays).
     bool applyBundleImport(const SongBundle::ImportPlan &plan, QString *error);
+    // The folder a bundle is read from: a bundle folder itself, or a fresh
+    // extraction of a .porysong under *tempDir (allocated only then), which
+    // the caller keeps alive for as long as it reads the root.
+    bool resolveBundleRoot(const QFileInfo &info, std::unique_ptr<QTemporaryDir> *tempDir,
+                           QString *root, QString *error);
+    // The dialog-free halves shared with the plugin host. Export: a project
+    // song by label — an open tab as it is in memory (unsaved edits
+    // included), any other song from disk. Import: plans the bundle at path
+    // (.porysong file or bundle folder) against the open project with the
+    // given overrides and applies it; a refusing plan fails with its
+    // refusals. *applied receives the plan that ran (its warnings included).
+    bool exportBundleByLabel(const QString &label, const QString &path, int *samples,
+                             QString *error);
+    bool importBundleFile(const QString &path, const SongBundle::ImportOptions &options,
+                          SongBundle::ImportPlan *applied, QString *error);
     // Creates an empty session with a wired-up view; not yet in the tab bar.
     SongSession *createSession();
     // Removes the session's tab (re-activating a neighbor via currentChanged)

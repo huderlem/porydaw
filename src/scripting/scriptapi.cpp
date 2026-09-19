@@ -2329,6 +2329,71 @@ QString ProjectApi::createVoicegroup(const QString &name, const QString &copyFro
     return QStringLiteral("_") + name;
 }
 
+QVariant ProjectApi::exportBundle(const QString &label, const QString &path)
+{
+    if (!writeAllowed("exportBundle"))
+        return jsNull();
+    // Like the menu action, a bare name gets the suffix; any other suffix is
+    // refused, so the result always reads back through importBundle and a
+    // stray path cannot replace a project file with a zip.
+    QString bundlePath = path;
+    const QString suffix = QFileInfo(bundlePath).suffix();
+    if (suffix.isEmpty() && !bundlePath.isEmpty()) {
+        bundlePath += QStringLiteral(".porysong");
+    } else if (suffix.compare(QLatin1String("porysong"), Qt::CaseInsensitive) != 0) {
+        throwError(QStringLiteral("project.exportBundle: %1 is not a .porysong path").arg(path));
+        return jsNull();
+    }
+    QString error;
+    const QString target = sandboxPath(m_plugin, m_host, bundlePath, &error);
+    if (target.isEmpty()) {
+        throwError(QStringLiteral("project.exportBundle: ") + error);
+        return jsNull();
+    }
+    if (!m_host.bindings().exportBundle) {
+        throwError(QStringLiteral("project.exportBundle: not available"));
+        return jsNull();
+    }
+    QDir().mkpath(QFileInfo(target).absolutePath());
+    int samples = 0;
+    WatchdogPause pause(m_host);
+    if (!m_host.bindings().exportBundle(label, target, &samples, &error)) {
+        throwError(QStringLiteral("project.exportBundle: ") + error);
+        return jsNull();
+    }
+    return QVariantMap{{QStringLiteral("path"), target}, {QStringLiteral("samples"), samples}};
+}
+
+QVariant ProjectApi::importBundle(const QString &path, const QString &label,
+                                  const QString &constant, const QString &player)
+{
+    if (!writeAllowed("importBundle"))
+        return jsNull();
+    QString error;
+    const QString source = sandboxPath(m_plugin, m_host, path, &error);
+    if (source.isEmpty()) {
+        throwError(QStringLiteral("project.importBundle: ") + error);
+        return jsNull();
+    }
+    if (!m_host.bindings().importBundle) {
+        throwError(QStringLiteral("project.importBundle: not available"));
+        return jsNull();
+    }
+    BundleImportResult result;
+    // Opening the imported song may ask about nothing (it is a new tab),
+    // but planning hashes samples and apply rewrites project files.
+    WatchdogPause pause(m_host);
+    if (!m_host.bindings().importBundle(source, {label, constant, player}, &result, &error)) {
+        throwError(QStringLiteral("project.importBundle: ") + error);
+        return jsNull();
+    }
+    return QVariantMap{{QStringLiteral("label"), result.label},
+                       {QStringLiteral("constant"), result.constant},
+                       {QStringLiteral("player"), result.player},
+                       {QStringLiteral("voicegroup"), result.voicegroupArg},
+                       {QStringLiteral("warnings"), result.warnings}};
+}
+
 // ---- VoicegroupApi ----
 
 namespace {

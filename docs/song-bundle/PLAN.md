@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (committed 816e771 + fadb8a2), Phase 3 landed 2026-09-18 (staged).** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (committed 816e771 + fadb8a2), Phase 3 landed 2026-09-18 (committed 446a1e8), Phase 4 landed 2026-09-19 (staged).** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -812,7 +812,10 @@ Deviations (Phase 3):
   fixed (one statement re-wrapped).
 
 ### Phase 4 — Reach + docs
-Status: **not started**
+Status: **LANDED 2026-09-19 on song-bundle, swept normal + ASAN** (also
+builds with PORYDAW_SCRIPTING=OFF; `mkdocs build --strict` and
+`gen_scripting_docs.py --check` clean). Uncommitted, staged. The two
+"Optional" items were not done (see Deviations).
 
 Carry-over from Phase 3 (read before starting):
 - Scripting `importBundle(path, {label, constant, player})` maps directly
@@ -833,6 +836,56 @@ Carry-over from Phase 3 (read before starting):
   Open/Export Song Bundle; Import).
 - Optional: OS file associations (Windows installer, macOS
   `Info.plist`/`QFileOpenEvent`); `.porysong` in the README feature list.
+
+Deviations (Phase 4):
+- **Optional items skipped:** no OS file associations (Windows installer /
+  macOS `Info.plist` + `QFileOpenEvent`) — they can't be verified on this
+  Linux/WSL machine and the release artifacts are untested until a tag; and
+  no README entry, because the README has no feature list to add one to.
+- **API shape:** `exportBundle(label, path)` → `{path, samples}`;
+  `importBundle(path, {label?, constant?, player?})` → `{label, constant,
+  player, voicegroup, warnings}` (`voicegroup` = the imported `-G` arg). Both
+  follow the project-write rules (`writeAllowed`: project open, not inside a
+  transaction / `song.changed` listener / paint callback) and the
+  **`porydaw.io` sandbox** for `path` (plugin folder, project, user-picked
+  paths) — the spec did not say; `audio.render` set the precedent. A refusing
+  plan throws with the refusals joined; warnings are returned, never thrown.
+- **`exportBundle` of a song that is not open** loads a throwaway
+  `SongDocument` + `VoicegroupSource` from disk for the call
+  (`MainWindow::exportBundleByLabel`); a song open in a project tab exports
+  its in-memory state (unsaved note/voice edits + pending synths), like the
+  menu action. A bundle tab with the same label is never the source
+  (`sessionForLabel` skips bundle sessions). The menu action was left as it
+  was rather than re-routed through the new helper.
+- **`importBundle`** goes through new `MainWindow::importBundleFile(path,
+  ImportOptions, ImportPlan *applied, error)`: a `.porysong` is extracted to
+  a `QTemporaryDir` that lives only for the call (no bundle tab is opened),
+  a bundle folder is planned in place, then `applyBundleImport` (reload +
+  open the song in a new tab). `HostBindings` carries its own
+  `BundleImportRequest`/`BundleImportResult` structs so `src/scripting/`
+  does not include `project/bundleimport.h`.
+- **`--scriptcheck`** (`runBundleChecks`, after the adapter checks): export
+  refusals (unknown label, outside the sandbox, inside a transaction), export
+  of the open song and of a not-open song sharing its voicegroup, import
+  refusals (not a bundle, outside the sandbox, clashing label, unknown
+  player), a real import into the scratch project (registered, registration
+  complete, voicegroup listed, opens in its own tab), and the Phase 2
+  carry-over: on a bundle tab `edit.transaction`, `storage.song.*` and
+  `song.save()` all throw. The section closes the tabs it opened and removes
+  the imported song + voicegroup again, so the scratch ends byte-identical to
+  its source (verified with `diff -r`) and a re-run on the same scratch
+  passes. The bundle-tab half is skipped without an audio device
+  (`openBundle` needs one).
+- **Manual page** is written in full (most sibling manual pages are still
+  TODO stubs the user fills in) because the carry-over list required specific
+  content; nav entry sits after "Exporting Audio".
+
+Known, not addressed (out of this phase's scope):
+- Plugins that read `storage.song` when the active song changes (the shipped
+  `scale-guide` and `scale-snap` examples do) log a "read-only song bundle"
+  error to the Script Console each time a bundle tab is activated. Phase 2
+  chose to refuse reads as well as writes; returning the fallback for reads
+  on a locked document would silence it. Needs a user decision.
 
 ## 6. Open items an implementing agent must not decide alone
 

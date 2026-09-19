@@ -210,6 +210,19 @@
             createVoicegroup: function (name, opts) {
                 return project.createVoicegroup(String(name),
                                                 opts && opts.copyFrom ? String(opts.copyFrom) : "");
+            },
+            // exportBundle(label, path) → {path, samples}.
+            exportBundle: function (label, path) {
+                return plain(project.exportBundle(String(label), String(path)));
+            },
+            // importBundle(path, {label?, constant?, player?}) →
+            // {label, constant, player, voicegroup, warnings}.
+            importBundle: function (path, opts) {
+                opts = opts || {};
+                return plain(project.importBundle(String(path),
+                                                  opts.label == null ? "" : String(opts.label),
+                                                  opts.constant == null ? "" : String(opts.constant),
+                                                  opts.player == null ? "" : String(opts.player)));
             }
         },
 
