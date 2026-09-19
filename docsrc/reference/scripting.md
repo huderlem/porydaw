@@ -96,6 +96,7 @@ export function deactivate() {}
 | Member | |
 |---|---|
 | `loaded` | whether any song is currently loaded |
+| `readOnly` | whether the song is a read-only song bundle tab: edits, `save()` and `storage.song` writes throw |
 | `revision` | increments on every edit/undo/redo to the song |
 | `label` | the song's name/label |
 | `midPath` | the filepath to the song's midi file |
@@ -468,7 +469,8 @@ The `register` spec:
 `porydaw.storage.song` has the same four calls for values that belong to the
 **song**: they live in the song's sidecar (`<project>/.porydaw/<song>.json`,
 under `plugins` → the plugin id), next to the view state, and are written
-immediately.
+immediately. A read-only song bundle tab has no sidecar: there `get` returns
+`fallback`, `keys()` is empty, and `set` / `remove` throw.
 
 | Member | |
 |---|---|

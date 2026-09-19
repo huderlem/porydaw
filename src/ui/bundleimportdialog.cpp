@@ -121,6 +121,9 @@ void BundleImportDialog::replan()
     if (m_constantEdited)
         options.constant = m_constant->text().trimmed();
     m_plan = SongBundle::makeImportPlan(m_bundleRoot, m_projectRoot, options);
+    // A cleared label means "pick one": show what the plan picked, as a
+    // placeholder (this also runs on focus loss, mid-retype).
+    m_label->setPlaceholderText(options.label.isEmpty() ? m_plan.label : QString());
     if (!m_constantEdited && !m_plan.constant.isEmpty())
         m_constant->setText(m_plan.constant);
 

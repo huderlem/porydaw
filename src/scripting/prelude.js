@@ -233,6 +233,7 @@
             CC: { MOD: 1, VOLUME: 7, PAN: 10, BEND_RANGE: 20, LFO_SPEED: 21,
                   BEND: 0xFF, TEMPO: 0xFE, VOICE: 0xFD },
             get loaded() { return song.loaded; },
+            get readOnly() { return song.readOnly; },
             get revision() { return song.revision; },
             get label() { return song.label; },
             get midPath() { return song.midPath; },

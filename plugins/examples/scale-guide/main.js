@@ -28,7 +28,7 @@ function load() {
 }
 
 function save() {
-    if (!porydaw.song.loaded || !porydaw.project.isOpen) return;
+    if (!porydaw.song.loaded || porydaw.song.readOnly || !porydaw.project.isOpen) return;
     porydaw.storage.song.set("root", state.root);
     porydaw.storage.song.set("scale", state.scale);
     porydaw.storage.song.set("show", state.show);

@@ -80,6 +80,7 @@ class SongApi : public ApiObject
 {
     Q_OBJECT
     Q_PROPERTY(bool loaded READ loaded)
+    Q_PROPERTY(bool readOnly READ readOnly)
     Q_PROPERTY(double revision READ revision)
     Q_PROPERTY(QString label READ label)
     Q_PROPERTY(QString midPath READ midPath)
@@ -93,6 +94,8 @@ class SongApi : public ApiObject
   public:
     using ApiObject::ApiObject;
     bool loaded() const;
+    // A song bundle tab: edits, song.save() and storage.song writes throw.
+    bool readOnly() const;
     // SMF chunks (MTrk), the raw-event address space: tracks() reports
     // each engine track's chunk, and chunkTrack maps back (-1 = a chunk
     // with no channel events, e.g. the seq/tempo chunk).
@@ -475,8 +478,9 @@ class StorageApi : public ApiObject
 
   private:
     // The sidecar's "plugins"/<id> object for the active song; false
-    // (after throwing) without one.
-    bool songStore(QJsonObject *store, QString *path, const char *api) const;
+    // without one, after throwing — except a read (!forWrite) on a
+    // read-only song bundle tab, which is false without a throw.
+    bool songStore(QJsonObject *store, QString *path, const char *api, bool forWrite) const;
     void writeSongStore(const QString &path, const QJsonObject &store);
 };
 

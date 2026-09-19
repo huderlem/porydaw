@@ -750,7 +750,11 @@ bool Exporter::exportTo(const QString &zipPath, QString *error)
         return false;
     }
     const QString stageDir = staging.filePath(QStringLiteral("bundle"));
-    return stage(stageDir, error) && BundleArchive::createBundle(stageDir, zipPath, error);
+    if (!stage(stageDir, error))
+        return false;
+    // Only once the song staged: a refused export leaves no folder.
+    QDir().mkpath(QFileInfo(zipPath).absolutePath());
+    return BundleArchive::createBundle(stageDir, zipPath, error);
 }
 
 } // namespace SongBundle

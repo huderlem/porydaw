@@ -393,16 +393,34 @@ QString extensionUse(const SmfFile &smf, const QString &mnemonic)
     static const QHash<QString, int> kCc = {{QStringLiteral("PORTAMENTO"), 0x05},
                                             {QStringLiteral("PWMC"), 0x17},
                                             {QStringLiteral("PWMS"), 0x19}};
+    // Numbered like the track headers: only chunks with channel events take
+    // a slot (SongDocument's track map), counted from 1; chunks past the
+    // engine's 16 tracks have no header.
+    const int cc = kCc.value(mnemonic, -1);
     QStringList tracks;
+    int slot = 0;
     for (size_t t = 0; t < smf.tracks.size(); t++) {
+        bool hasChannel = false;
+        bool uses = false;
         for (const SmfEvent &ev : smf.tracks[t].events) {
-            if (ev.isChannel() && ev.typeNibble() == 0xB && ev.data0 == kCc.value(mnemonic, -1)) {
-                tracks.append(QString::number(t));
+            if (!ev.isChannel())
+                continue;
+            hasChannel = true;
+            if (ev.typeNibble() == 0xB && ev.data0 == cc) {
+                uses = true;
                 break;
             }
         }
+        if (!hasChannel)
+            continue;
+        if (++slot > 16)
+            break;
+        if (uses)
+            tracks.append(QString::number(slot));
     }
-    return QStringLiteral("%1 (MIDI track%2 %3)")
+    if (tracks.isEmpty())
+        return mnemonic;
+    return QStringLiteral("%1 (track%2 %3)")
         .arg(mnemonic, tracks.size() == 1 ? QString() : QStringLiteral("s"),
              tracks.join(QStringLiteral(", ")));
 }

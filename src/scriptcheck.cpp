@@ -2891,6 +2891,21 @@ void runBundleChecks(const Check &check, scripting::ScriptHost &host, MainWindow
                   "no song named") &&
               !QFile::exists(bundlePath),
           "exportBundle of an unknown label did not throw");
+    // The destination folder is made on the way to a bundle, not before a
+    // refusal.
+    const QString nestedDir = projectRoot + QStringLiteral("/plugin_bundle_dir");
+    const QString nestedBundle = nestedDir + QStringLiteral("/deep/x.porysong");
+    QDir(nestedDir).removeRecursively();
+    check(refused(QStringLiteral("porydaw.project.exportBundle('nope_zzz_not_a_song', '%1')")
+                      .arg(nestedBundle),
+                  "no song named") &&
+              !QFileInfo::exists(nestedDir),
+          "a refused exportBundle left its destination folder behind");
+    check(run(QStringLiteral("porydaw.project.exportBundle('%1', '%2').path")
+                  .arg(songLabel, nestedBundle)) == nestedBundle &&
+              MainWindow::isBundlePath(nestedBundle),
+          "exportBundle did not create the destination folder");
+    QDir(nestedDir).removeRecursively();
     QTemporaryDir outside;
     const QString outsideBundle = outside.filePath(QStringLiteral("x.porysong"));
     check(refused(QStringLiteral("porydaw.project.exportBundle('%1', '%2')")
@@ -2988,9 +3003,29 @@ void runBundleChecks(const Check &check, scripting::ScriptHost &host, MainWindow
     }
 
     // --- a bundle tab is read-only to plugins ---
+    // The project song of the bundle's label carries a key, so a bundle-tab
+    // read that reached its sidecar would show.
+    const QString labelSidecar = ViewSidecar::pathFor(projectRoot, songLabel);
+    const auto setSidecarKey = [&](bool present) {
+        QJsonObject root = readJson(labelSidecar);
+        QJsonObject plugins = root.value(QLatin1String("plugins")).toObject();
+        if (present)
+            plugins.insert(QStringLiteral("console"), QJsonObject{{QStringLiteral("k"), 1}});
+        else
+            plugins.remove(QStringLiteral("console"));
+        if (plugins.isEmpty())
+            root.remove(QLatin1String("plugins"));
+        else
+            root.insert(QLatin1String("plugins"), plugins);
+        QFile out(labelSidecar);
+        return out.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+               out.write(QJsonDocument(root).toJson()) > 0;
+    };
+    check(setSidecarKey(true), "could not seed the project song's sidecar");
     QString openError;
     if (audioOk && check(window.openBundle(bundlePath, &openError), "the bundle did not open")) {
-        check(run(QStringLiteral("porydaw.song.label")) == songLabel,
+        check(run(QStringLiteral("porydaw.song.label")) == songLabel &&
+                  run(QStringLiteral("porydaw.song.readOnly")) == QStringLiteral("true"),
               "the bundle tab is not what the API sees");
         check(run(QStringLiteral("porydaw.edit.transaction('L', function () { "
                                  "porydaw.edit.setSettings({reverb: 1}); })"))
@@ -2999,8 +3034,15 @@ void runBundleChecks(const Check &check, scripting::ScriptHost &host, MainWindow
               "edit.transaction on a bundle tab was allowed");
         check(run(QStringLiteral("porydaw.storage.song.set('k', 1)")).isNull() &&
                   errorLogged("storage.song.set: the song is a read-only song bundle") &&
-                  run(QStringLiteral("porydaw.storage.song.get('k', 7)")).isNull(),
-              "storage.song on a bundle tab was allowed");
+                  run(QStringLiteral("porydaw.storage.song.remove('k')")).isNull() &&
+                  errorLogged("storage.song.remove: the song is a read-only song bundle"),
+              "storage.song writes on a bundle tab were allowed");
+        // Reads see an empty store instead of throwing.
+        messages.clear();
+        check(run(QStringLiteral("porydaw.storage.song.get('k', 7) + "
+                                 "porydaw.storage.song.keys().length")) == QStringLiteral("7") &&
+                  !errorLogged("storage.song"),
+              "storage.song reads on a bundle tab did not fall back");
         check(run(QStringLiteral("porydaw.song.save()")).isNull() &&
                   errorLogged("song.save: the song could not be saved"),
               "song.save() on a bundle tab did not fail");
@@ -3011,6 +3053,7 @@ void runBundleChecks(const Check &check, scripting::ScriptHost &host, MainWindow
     } else if (!openError.isEmpty()) {
         std::fprintf(stderr, "scriptcheck: openBundle: %s\n", qUtf8Printable(openError));
     }
+    setSidecarKey(false);
     QFile::remove(bundlePath);
 }
 

@@ -85,4 +85,4 @@ In projects whose voicegroups are plain labels (`voicegroup005::`) rather than t
 
 ## Bundles and plugins
 
-Plugins can export and import bundles with `porydaw.project.exportBundle(label, path)` and `porydaw.project.importBundle(path, {label, constant, player})`; see the [Scripting API](../reference/scripting.md). While a bundle tab is active, the editing API (`porydaw.edit`, `porydaw.song.save()`, `porydaw.storage.song`) refuses, because the song is read-only.
+Plugins can export and import bundles with `porydaw.project.exportBundle(label, path)` and `porydaw.project.importBundle(path, {label, constant, player})`; see the [Scripting API](../reference/scripting.md). While a bundle tab is active, the editing API (`porydaw.edit`, `porydaw.song.save()`, writes to `porydaw.storage.song`) refuses, because the song is read-only; `porydaw.storage.song` reads return the fallback.

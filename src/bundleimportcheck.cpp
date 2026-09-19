@@ -283,7 +283,7 @@ void runBundleImportSections(const QString &scratchDir, int *failures)
                    .arg(plan.label, plan.constant, plan.player, plan.flags.join(QLatin1Char(' '))));
         // (f) no sound/MPlayDef.s defining PORTAMENTO: a warning, not a gate.
         expect(!plan.warnings.isEmpty() && plan.warnings.first().contains("PORTAMENTO") &&
-                   plan.warnings.first().contains("MIDI track 1"),
+                   plan.warnings.first().contains("(track 1)"),
                QStringLiteral("(f) stock engine: the warning lists PORTAMENTO and its track: ") +
                    plan.warnings.join(QStringLiteral(" | ")));
         expect(plan.warnings.join(QLatin1Char(' ')).contains("cry_testmon.bin"),

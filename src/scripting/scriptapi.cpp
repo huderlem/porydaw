@@ -1204,6 +1204,12 @@ bool SongApi::loaded() const
     return doc() != nullptr;
 }
 
+bool SongApi::readOnly() const
+{
+    const SongDocument *d = doc();
+    return d && d->isLocked();
+}
+
 double SongApi::revision() const
 {
     const SongDocument *d = doc();
@@ -1782,7 +1788,7 @@ QStringList StorageApi::keys() const
     return settings.childKeys();
 }
 
-bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api) const
+bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api, bool forWrite) const
 {
     const DecompProject *p = m_host.bindings().project;
     const SongDocument *d = doc();
@@ -1793,9 +1799,12 @@ bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api) c
     }
     if (d->isLocked()) {
         // A song-bundle tab does not live under the open project: its label
-        // must not reach (or clobber) a project song's sidecar.
-        throwError(QStringLiteral("storage.song.%1: the song is a read-only song bundle")
-                       .arg(QLatin1String(api)));
+        // must not reach (or clobber) a project song's sidecar. Reads see
+        // an empty store, so a plugin that restores per-song state when the
+        // active song changes needs no special case; writes throw.
+        if (forWrite)
+            throwError(QStringLiteral("storage.song.%1: the song is a read-only song bundle")
+                           .arg(QLatin1String(api)));
         return false;
     }
     *path = ViewSidecar::pathFor(p->root(), d->label());
@@ -1845,7 +1854,7 @@ QJSValue StorageApi::songGet(const QString &key, const QJSValue &fallback) const
 {
     QJsonObject store;
     QString path;
-    if (!songStore(&store, &path, "get") || !store.contains(key))
+    if (!songStore(&store, &path, "get", false) || !store.contains(key))
         return fallback;
     QJSEngine *e = engine();
     return e ? e->toScriptValue(store.value(key).toVariant()) : fallback;
@@ -1859,7 +1868,7 @@ void StorageApi::songSet(const QString &key, const QJSValue &value)
     }
     QJsonObject store;
     QString path;
-    if (!songStore(&store, &path, "set"))
+    if (!songStore(&store, &path, "set", true))
         return;
     store.insert(key, QJsonValue::fromVariant(value.toVariant()));
     writeSongStore(path, store);
@@ -1869,7 +1878,7 @@ void StorageApi::songRemove(const QString &key)
 {
     QJsonObject store;
     QString path;
-    if (!songStore(&store, &path, "remove") || !store.contains(key))
+    if (!songStore(&store, &path, "remove", true) || !store.contains(key))
         return;
     store.remove(key);
     writeSongStore(path, store);
@@ -1879,7 +1888,7 @@ QStringList StorageApi::songKeys() const
 {
     QJsonObject store;
     QString path;
-    if (!songStore(&store, &path, "keys"))
+    if (!songStore(&store, &path, "keys", false))
         return {};
     return store.keys();
 }
@@ -2354,7 +2363,6 @@ QVariant ProjectApi::exportBundle(const QString &label, const QString &path)
         throwError(QStringLiteral("project.exportBundle: not available"));
         return jsNull();
     }
-    QDir().mkpath(QFileInfo(target).absolutePath());
     int samples = 0;
     WatchdogPause pause(m_host);
     if (!m_host.bindings().exportBundle(label, target, &samples, &error)) {

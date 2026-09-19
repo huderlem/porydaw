@@ -1,6 +1,6 @@
 # Song Bundles (`.porysong`) — Implementation Plan
 
-Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (committed 816e771 + fadb8a2), Phase 3 landed 2026-09-18 (committed 446a1e8), Phase 4 landed 2026-09-19 (staged).** Phases are ordered; each is
+Status: **decided 2026-09-17; Phase 0 landed 2026-09-17 (committed 1d2da1f), Phase 1 landed 2026-09-18 (committed 4b65f6a), Phase 2 landed 2026-09-18 (committed 816e771 + fadb8a2), Phase 3 landed 2026-09-18 (committed 446a1e8), Phase 4 landed 2026-09-19 (committed 8f5c132); post-landing decisions settled 2026-09-19 (see end of Phase 4).** Phases are ordered; each is
 independently landable on branch `song-bundle`, adds a `--bundlecheck`
 section, and ends with its acceptance checklist ticked. Facts about the
 codebase below were verified against `main` tip `d46706c` on 2026-09-17
@@ -880,12 +880,22 @@ Deviations (Phase 4):
   TODO stubs the user fills in) because the carry-over list required specific
   content; nav entry sits after "Exporting Audio".
 
-Known, not addressed (out of this phase's scope):
-- Plugins that read `storage.song` when the active song changes (the shipped
-  `scale-guide` and `scale-snap` examples do) log a "read-only song bundle"
-  error to the Script Console each time a bundle tab is activated. Phase 2
-  chose to refuse reads as well as writes; returning the fallback for reads
-  on a locked document would silence it. Needs a user decision.
+Post-landing decisions (user, 2026-09-19; swept normal + ASAN):
+- **`storage.song` on a bundle tab:** reads (`get`, `keys`) see an empty
+  store (`get` returns the fallback) instead of throwing; writes (`set`,
+  `remove`) still throw. Silences `scale-guide` / `scale-snap` on bundle-tab
+  activation. `--scriptcheck` covers both halves.
+- **`importBundle` always opens a tab:** left as is; an `open: false` option
+  can be added later without breaking callers.
+- **OS file associations:** deferred to a follow-up alongside a release tag,
+  when the Windows/macOS artifacts can be tested.
+- Small fixes: the extension warning numbers tracks like the track headers
+  ("(track 1)": chunks with channel events, from 1, none past the engine's
+  16); the import dialog shows the auto-picked label as a placeholder when
+  the field is cleared; `Exporter::exportTo` creates the destination folder
+  only after the song staged, so no refused export leaves a folder behind.
+- `porydaw.song.readOnly` (true on a bundle tab) lets a plugin skip its
+  `storage.song` writes; `scale-guide` / `scale-snap` use it in `save()`.
 
 ## 6. Open items an implementing agent must not decide alone
 
