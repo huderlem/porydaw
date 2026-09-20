@@ -468,6 +468,17 @@ QString tooltipStyleSheet(const Theme &theme)
         .arg(colorName(theme, Role::tooltip_outline));
 }
 
+QString bundleBannerStyleSheet(const Theme &theme)
+{
+    // The read-only song-bundle banner wears the accent selection pair so it
+    // stands out from the chrome around it; the pair is already resolved for
+    // text contrast. Its Import button keeps the ordinary button colors.
+    return QStringLiteral("QFrame#bundleBanner{background-color:%1;}"
+                          "QLabel#bundleBannerText{background-color:transparent;color:%2;}")
+        .arg(colorName(theme, Role::selection_background))
+        .arg(colorName(theme, Role::selection_text));
+}
+
 QString groupBoxStyleSheet(const Theme &theme)
 {
     return QStringLiteral("QGroupBox{background-color:transparent;color:%1;"
@@ -568,9 +579,9 @@ QString colorStyleSheet(const Theme &theme)
            tabStyleSheet(theme) + buttonStyleSheet(theme) + trackControlStyleSheet(theme) +
            inputStyleSheet(theme) + spinBoxStyleSheet(theme) + comboStyleSheet(theme) +
            pickerPopupStyleSheet(theme) + indicatorStyleSheet(theme) + menuBarStyleSheet(theme) +
-           menuStyleSheet(theme) + tooltipStyleSheet(theme) + groupBoxStyleSheet(theme) +
-           itemViewStyleSheet(theme) + headerStyleSheet(theme) + scrollbarStyleSheet(theme) +
-           splitterStyleSheet(theme);
+           menuStyleSheet(theme) + tooltipStyleSheet(theme) + bundleBannerStyleSheet(theme) +
+           groupBoxStyleSheet(theme) + itemViewStyleSheet(theme) + headerStyleSheet(theme) +
+           scrollbarStyleSheet(theme) + splitterStyleSheet(theme);
 }
 
 bool onlyGridLineColorChanged(const Theme &before, const Theme &after)

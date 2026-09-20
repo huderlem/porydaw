@@ -2065,7 +2065,7 @@ bool MainWindow::openBundle(const QString &path, QString *errorOut)
             activateSession(session);
     }
     statusBar()->showMessage(
-        tr("Opened song bundle %1 in %2 ms — read-only").arg(info.fileName()).arg(timer.elapsed()),
+        tr("Opened song bundle %1 in %2 ms").arg(info.fileName()).arg(timer.elapsed()),
         8000);
     updateTransportActions();
     return true;
@@ -2075,13 +2075,12 @@ QWidget *MainWindow::createBundleBanner(SongSession &session)
 {
     auto *banner = new QFrame;
     banner->setObjectName(QStringLiteral("bundleBanner"));
-    banner->setFrameShape(QFrame::StyledPanel);
-    banner->setAutoFillBackground(true);
-    banner->setBackgroundRole(QPalette::AlternateBase);
+    // Colored by the theme stylesheet (bundleBannerStyleSheet).
+    banner->setFrameShape(QFrame::NoFrame);
     auto *row = new QHBoxLayout(banner);
     row->setContentsMargins(8, 4, 8, 4);
     auto *text = new QLabel(
-        tr("Song bundle %1 — read-only.").arg(QFileInfo(session.bundlePath).fileName()), banner);
+        tr("Song bundle %1. Viewing in read-only mode.").arg(QFileInfo(session.bundlePath).fileName()), banner);
     text->setObjectName(QStringLiteral("bundleBannerText"));
     row->addWidget(text);
     row->addStretch(1);
