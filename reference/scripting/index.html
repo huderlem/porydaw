@@ -1,0 +1,3093 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://huderlem.github.io/porydaw/reference/scripting/">
+      
+      
+        <link rel="prev" href="../../manual/project-files/">
+      
+      
+        <link rel="next" href="../faq/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../img/porydaw.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Scripting API - Porydaw Documentation</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#scripting-api" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Porydaw Documentation" class="md-header__button md-logo" aria-label="Porydaw Documentation" data-md-component="logo">
+      
+  <img src="../../img/porydaw.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Porydaw Documentation
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Scripting API
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/huderlem/porydaw" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    huderlem/porydaw
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Porydaw Documentation" class="md-nav__button md-logo" aria-label="Porydaw Documentation" data-md-component="logo">
+      
+  <img src="../../img/porydaw.png" alt="logo">
+
+    </a>
+    Porydaw Documentation
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/huderlem/porydaw" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    huderlem/porydaw
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/daw-basics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Music & DAW Basics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    User Manual
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    User Manual
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/main-window/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The Main Window
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/playback/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Playing Songs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/piano-roll/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editing Notes in the Piano Roll
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/tracks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Working with Tracks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/automation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Automation (Volume, Pan, Tempo & More)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/voicegroups/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Instruments & Voicegroups
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/sample-studio/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Importing Custom Samples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/new-song/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Creating a New Song
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/midi-import/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Importing MIDI Files
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/song-settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Song Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/polyphony/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Polyphony & GBA Sound Limits
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/event-list/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    The MIDI Event List
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/export-audio/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Exporting Audio
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/song-bundles/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sharing Songs with Song Bundles
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/settings/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Settings
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/appearance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Themes & Appearance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/shortcuts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Keyboard Shortcuts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/plugins/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plugins
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/writing-plugins/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Writing Your First Plugin
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../manual/project-files/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Files Porydaw Reads & Writes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripting API
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Scripting API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#plugin-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugin layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#porydaw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="porydaw">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#porydawproject" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.project
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawsong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.song
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawselection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.selection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawcursor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.cursor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.view
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawedit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.edit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawtransport" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.transport
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawaudio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.audio
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawui" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.ui
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="porydaw.ui">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#porydawuidockspec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.ui.dock(spec)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#canvas-painting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canvas painting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#menus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Menus
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#piano-roll-overlays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Piano Roll Overlays
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dialogs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dialogs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawvoicegroup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.voicegroup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.io
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.actions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawstorage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reacting-to-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reacting to edits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ & Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../related-projects/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Related Projects
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/huderlem/porydaw/blob/main/CHANGELOG.md" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#plugin-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Plugin layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#porydaw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="porydaw">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#porydawproject" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.project
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawsong" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.song
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawselection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.selection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawcursor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.cursor
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.view
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawedit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.edit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawtransport" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.transport
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawaudio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.audio
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawui" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.ui
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="porydaw.ui">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#porydawuidockspec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.ui.dock(spec)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#canvas-painting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canvas painting
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#menus" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Menus
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#piano-roll-overlays" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Piano Roll Overlays
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dialogs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dialogs
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawvoicegroup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.voicegroup
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawio" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.io
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawactions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.actions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#porydawstorage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        porydaw.storage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reacting-to-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reacting to edits
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/huderlem/porydaw/edit/main/docsrc/reference/scripting.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<!-- GENERATED FILE: do not edit. Source: docs/scripting/API.md;
+     regenerate with tools/gen_scripting_docs.py. -->
+
+<h1 id="scripting-api">Scripting API<a class="headerlink" href="#scripting-api" title="Permanent link">&para;</a></h1>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>This page is for people writing their own plugins. For installing plugins and
+porydaw's examples, see <a href="../../manual/plugins/">Plugins</a>. </p>
+</div>
+<p>Plugins are written in JavaScript. Everything runs on the UI thread.</p>
+<p><code>docs/scripting/porydaw.d.ts</code> declares types for the entire scripting API. For editors that support TypeScript declarations, add <code>/// &lt;reference path="…/porydaw.d.ts" /&gt;</code> or
+point <code>jsconfig.json</code> at it to get autocomplete.</p>
+<h2 id="plugin-layout">Plugin layout<a class="headerlink" href="#plugin-layout" title="Permanent link">&para;</a></h2>
+<p>Installing, enabling and reloading plugins is covered in the manual's
+<a href="../../manual/plugins/">Plugins</a> page. A plugin is one folder in the
+plugins folder:</p>
+<div class="highlight"><pre><span></span><code>plugins/
+  select-same-pitch/
+    plugin.json
+    main.js
+</code></pre></div>
+<p><code>plugin.json</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span><span class="w"> </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"select-same-pitch"</span><span class="p">,</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Select Same Pitch"</span><span class="p">,</span><span class="w"> </span><span class="nt">"version"</span><span class="p">:</span><span class="w"> </span><span class="s2">"1.0.0"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"api"</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">"main"</span><span class="p">:</span><span class="w"> </span><span class="s2">"main.js"</span><span class="p">,</span><span class="w"> </span><span class="nt">"description"</span><span class="p">:</span><span class="w"> </span><span class="s2">"…"</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<ul>
+<li><code>id</code>: lowercase letters, digits, <code>-</code>, <code>_</code>; must exactly match the folder name.</li>
+<li><code>api</code>: the API major version this plugin was written for. Porydaw will refuse to load any non-matching plugin api version.</li>
+<li><code>main</code> (default <code>main.js</code>): an ES module exporting <code>activate(ctx)</code> and,
+  optionally, <code>deactivate()</code>.</li>
+</ul>
+<p>Editing any <code>.js</code>/<code>plugin.json</code> file in the folder causes porydaw to automatically reload the plugin.</p>
+<p><code>main.js</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="k">export</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">activate</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">  </span><span class="c1">// ctx = {id, name, version, dir}</span>
+<span class="w">    </span><span class="nx">porydaw</span><span class="p">.</span><span class="nx">actions</span><span class="p">.</span><span class="nx">register</span><span class="p">({</span>
+<span class="w">        </span><span class="nx">id</span><span class="o">:</span><span class="w"> </span><span class="s2">"select"</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="o">:</span><span class="w"> </span><span class="s2">"Select notes of the same pitch"</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">context</span><span class="o">:</span><span class="w"> </span><span class="s2">"roll"</span><span class="p">,</span><span class="w"> </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="s2">"Ctrl+Shift+A"</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">run</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">          </span><span class="c1">// Code goes here.</span>
+<span class="w">          </span><span class="c1">// Use API calls like porydaw.selection, porydaw.edit, ...</span>
+<span class="w">        </span><span class="p">}</span>
+<span class="w">    </span><span class="p">});</span>
+<span class="p">}</span>
+<span class="k">export</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">deactivate</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<h2 id="porydaw"><code>porydaw</code><a class="headerlink" href="#porydaw" title="Permanent link">&para;</a></h2>
+<p><code>porydaw</code> is the top-level global object exposed to the scripting API.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>porydaw.version</code></td>
+<td>porydaw's version string</td>
+</tr>
+<tr>
+<td><code>porydaw.api.version</code> / <code>.major</code></td>
+<td>API version (<code>"1.0.0"</code>, <code>1</code>)</td>
+</tr>
+<tr>
+<td><code>porydaw.plugin</code></td>
+<td><code>{id, name, version, dir}</code> of the plugin</td>
+</tr>
+<tr>
+<td><code>porydaw.log(...)</code>, <code>.warn(...)</code>, <code>.error(...)</code></td>
+<td>Script Console lines (objects are JSON-stringified). <code>console.log</code> etc. alias these.</td>
+</tr>
+<tr>
+<td><code>porydaw.ui.statusMessage(text)</code></td>
+<td>Status-bar message</td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawproject"><code>porydaw.project</code><a class="headerlink" href="#porydawproject" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.project</code> exposes and operates on the currently-opened decomp project.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>isOpen</code>, <code>root</code></td>
+<td>whether a project is open, and its folder</td>
+</tr>
+<tr>
+<td><code>songs()</code></td>
+<td><code>[{id, label, constant, player, midPath, hasMid, registered, registrationGaps, settings}]</code>, every song of the project.</td>
+</tr>
+<tr>
+<td><code>song(label)</code></td>
+<td>one entry of <code>songs()</code>, or <code>null</code></td>
+</tr>
+<tr>
+<td><code>open(label, {newTab?})</code></td>
+<td>opens the song in the active tab (or a new tab)</td>
+</tr>
+<tr>
+<td><code>registration(label)</code></td>
+<td><code>{complete, inSongTable, inSongsH, inLdScript, inCharmap, inDebugMenu, gaps}</code></td>
+</tr>
+<tr>
+<td><code>registerSong(label, {constant?, player?})</code></td>
+<td>same as <code>File → Register Songs</code></td>
+</tr>
+<tr>
+<td><code>unregisterSong(label)</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>reload()</code></td>
+<td>re-reads the project's music data</td>
+</tr>
+<tr>
+<td><code>musicPlayers()</code></td>
+<td><code>[{name, number, trackCount}]</code></td>
+</tr>
+<tr>
+<td><code>voicegroups()</code></td>
+<td><code>[{arg, name}]</code>, every voicegroup, as its <code>-G</code> arg (<code>"_abandoned_ship"</code>) and display name (<code>"abandoned_ship"</code>)</td>
+</tr>
+<tr>
+<td><code>createVoicegroup(name, {copyFrom?})</code></td>
+<td>writes <code>sound/voicegroups/&lt;name&gt;.inc</code> (can be copied from an existing voicegroup)</td>
+</tr>
+<tr>
+<td><code>exportBundle(label, path)</code></td>
+<td>writes the song as a <code>.porysong</code> song bundle (same as <code>File → Export Song Bundle</code>).</td>
+</tr>
+<tr>
+<td><code>importBundle(path, {label?, constant?, player?})</code></td>
+<td>imports a <code>.porysong</code> file (or bundle folder) into the project and opens the song in a new tab, like the bundle tab's <code>Import into project…</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawsong"><code>porydaw.song</code><a class="headerlink" href="#porydawsong" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.song</code> exposes a read-only view of the currently-active song tab. (See <code>porydaw.edit</code> for modifying the song.)</p>
+<p>"Ticks" are the smallest resolution of time in porydaw (<code>ticksPerBeat</code> per quarter note). Note ids are unique to each note and valid for the entire life of the song document.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>loaded</code></td>
+<td>whether any song is currently loaded</td>
+</tr>
+<tr>
+<td><code>readOnly</code></td>
+<td>whether the song is a read-only song bundle</td>
+</tr>
+<tr>
+<td><code>revision</code></td>
+<td>increments on every edit/undo/redo to the song</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>the song's name/label</td>
+</tr>
+<tr>
+<td><code>midPath</code></td>
+<td>the filepath to the song's midi file</td>
+</tr>
+<tr>
+<td><code>ticksPerBeat</code></td>
+<td>number of ticks per beat</td>
+</tr>
+<tr>
+<td><code>ticksPerClock</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>startTempo</code></td>
+<td>tempo at the start of the song (beats per minute)</td>
+</tr>
+<tr>
+<td><code>trackCount</code></td>
+<td>number of tracks</td>
+</tr>
+<tr>
+<td><code>trackBudget</code></td>
+<td>maximum number of playable tracks</td>
+</tr>
+<tr>
+<td><code>endTick</code></td>
+<td>the end-of-song tick, everything in the song lives at ticks before this</td>
+</tr>
+<tr>
+<td><code>settings()</code></td>
+<td>the song's <code>midi.cfg</code> settings: <code>{voicegroup, voicegroupName, masterVolume, reverb, priority, exactGate, extendedClocks, noCompression, flags}</code> — <code>voicegroup</code> is the <code>-G</code> arg, <code>reverb</code> is <code>null</code> while the <code>-R</code> flag is absent (the build then uses 50), <code>flags</code> the raw flag list</td>
+</tr>
+<tr>
+<td><code>save()</code></td>
+<td>same as <code>File → Save</code></td>
+</tr>
+<tr>
+<td><code>loop()</code></td>
+<td>gets the loop region. <code>{start, end}</code> or <code>null</code></td>
+</tr>
+<tr>
+<td><code>timeSigs()</code></td>
+<td>gets the time signature events <code>[{tick, numerator, denominator}]</code></td>
+</tr>
+<tr>
+<td><code>tracks()</code></td>
+<td>gets the current state of the tracks <code>[{index, name, chunk, channel, muted, soloed, voice}]</code>. <code>chunk</code> is the track's SMF chunk index.</td>
+</tr>
+<tr>
+<td><code>notes({track?, from?, to?, selectedOnly?})</code></td>
+<td>gets a list of notes from the song. This is pretty flexible beacuse you get get the notes from a single or multiple tracks, optionally in a range, and optionally only the selected notes. <code>[{id, track, tick, key, len, vel}]</code>. <code>from</code>/<code>to</code> are ticks.</td>
+</tr>
+<tr>
+<td><code>note(id)</code></td>
+<td>get a note by id. Returns <code>null</code> if not found.</td>
+</tr>
+<tr>
+<td><code>lanePoints(track, cc, {from?, to?})</code></td>
+<td>Get a track's automation lane events. <code>[{tick, value}]</code>; <code>cc</code> is 0–127 or <code>song.CC.BEND</code> / <code>.TEMPO</code> / <code>.VOICE</code> / <code>.MOD</code> / <code>.VOLUME</code> / <code>.PAN</code> / <code>.BEND_RANGE</code> / <code>.LFO_SPEED</code></td>
+</tr>
+<tr>
+<td><code>CC</code></td>
+<td>lane constants: the controllers porydaw draws as automation lanes, <code>MOD</code> (1), <code>VOLUME</code> (7), <code>PAN</code> (10), <code>BEND_RANGE</code> (20), <code>LFO_SPEED</code> (21), plus the pseudo-CCs for event-backed lanes, <code>BEND</code> (pitch bend), <code>TEMPO</code> (song-level, <code>track: -1</code>), <code>VOICE</code> (program changes). Anywhere a <code>cc</code> is accepted</td>
+</tr>
+<tr>
+<td><code>on("changed", fn({revision, origin}))</code></td>
+<td>event handler that's called whenever the song changed from an edit. <code>origin</code> is <code>"user"</code>, <code>"script"</code> or <code>"history"</code> (Edit → Undo/Redo). <code>revision</code> is the song's revision as the event reaches you. To make song edits in response to this event, you should read <a href="#reacting-to-edits">Reacting to edits</a> first!</td>
+</tr>
+<tr>
+<td><code>on("activated", fn({label} \| null))</code></td>
+<td>the active song tab changed</td>
+</tr>
+<tr>
+<td><code>chunkCount</code>, <code>chunkTrack(chunk)</code>, <code>chunkEndTick(chunk)</code></td>
+<td>the file's MTrk chunks: the engine track a chunk is (-1 for the seq/tempo chunk and other trackless chunks) and its end-of-track tick</td>
+</tr>
+<tr>
+<td><code>rawEvents(chunk, {from?, to?})</code></td>
+<td>the chunk's MIDI events as they are in the file: <code>[{index, tick, status, type, channel, data0, data1, metaType, blob, text}]</code>. <code>type</code> is <code>noteOn</code>, <code>noteOff</code> (a note-on with velocity 0 too), <code>cc</code>, <code>program</code>, <code>bend</code>, <code>aftertouch</code>, <code>pressure</code>, <code>meta</code> or <code>sysex</code>; <code>blob</code> (bytes) and <code>text</code> (text metas 1–7) only for metas/sysex. <code>index</code> is the position in the chunk right now — it shifts with every edit</td>
+</tr>
+</tbody>
+</table>
+<p>Every <code>on()</code> returns a function that unsubscribes the listener. Calling <code>porydaw.song.off(event, fn)</code> also works.</p>
+<h3 id="porydawselection"><code>porydaw.selection</code><a class="headerlink" href="#porydawselection" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.selection</code> exposes functionality related to the different kind sof selections.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>track</code></td>
+<td>the selected track</td>
+</tr>
+<tr>
+<td><code>trackMask</code></td>
+<td>the multi-track selection as a bitmask</td>
+</tr>
+<tr>
+<td><code>notes()</code></td>
+<td>the selected notes, same shape as <code>porydaw.song.notes</code></td>
+</tr>
+<tr>
+<td><code>setNotes(idsOrNotes)</code></td>
+<td>replaces the note selection with the given notes</td>
+</tr>
+<tr>
+<td><code>clear()</code></td>
+<td>clears the selection</td>
+</tr>
+<tr>
+<td><code>selectTrack(i)</code></td>
+<td>selects a track</td>
+</tr>
+<tr>
+<td><code>time()</code></td>
+<td>the time selection: <code>{start, end, scope: "tracks"\|"lanes", lanes: [{track, cc}]}</code>, or <code>null</code></td>
+</tr>
+<tr>
+<td><code>setTime({start, end, scope?, lanes?})</code></td>
+<td>sets the time selection; <code>scope</code> is <code>"tracks"</code> (covers the header-selected tracks) or <code>"lanes"</code> with <code>lanes: [{track, cc}]</code> (<code>cc</code> may be <code>song.CC.TEMPO</code> with <code>track: -1</code>)</td>
+</tr>
+<tr>
+<td><code>clearTime()</code></td>
+<td>clears the time selection</td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawcursor"><code>porydaw.cursor</code><a class="headerlink" href="#porydawcursor" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.cursor</code> exposes functionality for the edit cursor and the piano roll's snap grid.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tick</code></td>
+<td>the edit cursor's tick position</td>
+</tr>
+<tr>
+<td><code>set(tick)</code></td>
+<td>moves the cursor (seeks while playing/paused)</td>
+</tr>
+<tr>
+<td><code>snap(tick, "nearest"\|"down"\|"up")</code></td>
+<td>gets the resulting tick after snapping it to the grid</td>
+</tr>
+<tr>
+<td><code>grid(tick?)</code></td>
+<td>the grid cell at <code>tick</code>. Returns <code>{start, next, beatTicks, feel, minDenom}</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawview"><code>porydaw.view</code><a class="headerlink" href="#porydawview" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.view</code> exposes functionality for the piano roll's camera and lane visibility.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>visibleTicks()</code></td>
+<td><code>{from, to}</code>, or <code>null</code></td>
+</tr>
+<tr>
+<td><code>revealTick(tick)</code>, <code>revealRange(from, to)</code>, <code>revealKey(key)</code></td>
+<td>scroll so the tick, span or key row is on screen</td>
+</tr>
+<tr>
+<td><code>revealNote(idOrNote)</code></td>
+<td>scrolls to the given note</td>
+</tr>
+<tr>
+<td><code>velocityLane</code>, <code>automationLanes</code>, <code>tempoLane</code>, <code>eventList</code></td>
+<td>read/write booleans, whether each panel is currently being shown</td>
+</tr>
+<tr>
+<td><code>pxPerBeat</code></td>
+<td>pixel width per beat</td>
+</tr>
+<tr>
+<td><code>keyHeight</code></td>
+<td>pixel height of each key row</td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawedit"><code>porydaw.edit</code><a class="headerlink" href="#porydawedit" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.edit</code> is how you actually make edits to the song.</p>
+<p>Every mutation happens inside a <strong>transaction</strong>:</p>
+<div class="highlight"><pre><span></span><code><span class="kd">var</span><span class="w"> </span><span class="nx">ids</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">porydaw</span><span class="p">.</span><span class="nx">edit</span><span class="p">.</span><span class="nx">transaction</span><span class="p">(</span><span class="s2">"Insert chord"</span><span class="p">,</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">ids</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">porydaw</span><span class="p">.</span><span class="nx">edit</span><span class="p">.</span><span class="nx">addNotes</span><span class="p">(</span><span class="nx">track</span><span class="p">,</span><span class="w"> </span><span class="p">[{</span><span class="nx">tick</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="mf">60</span><span class="p">,</span><span class="w"> </span><span class="nx">len</span><span class="o">:</span><span class="w"> </span><span class="mf">24</span><span class="p">,</span><span class="w"> </span><span class="nx">vel</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">},</span>
+<span class="w">                                            </span><span class="p">{</span><span class="nx">tick</span><span class="o">:</span><span class="w"> </span><span class="mf">0</span><span class="p">,</span><span class="w"> </span><span class="nx">key</span><span class="o">:</span><span class="w"> </span><span class="mf">64</span><span class="p">,</span><span class="w"> </span><span class="nx">len</span><span class="o">:</span><span class="w"> </span><span class="mf">24</span><span class="p">,</span><span class="w"> </span><span class="nx">vel</span><span class="o">:</span><span class="w"> </span><span class="mf">100</span><span class="p">}]);</span>
+<span class="w">    </span><span class="nx">porydaw</span><span class="p">.</span><span class="nx">edit</span><span class="p">.</span><span class="nx">moveNotes</span><span class="p">(</span><span class="nx">ids</span><span class="p">,</span><span class="w"> </span><span class="mf">48</span><span class="p">,</span><span class="w"> </span><span class="mf">0</span><span class="p">);</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">ids</span><span class="p">;</span>
+<span class="p">});</span>
+</code></pre></div>
+<ul>
+<li>One transaction results in <strong>one entry in Edit → Undo</strong>.</li>
+<li>Calling any edit outside a transaction throws an error.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>addNotes(track, [{tick, key, len, vel}])</code></td>
+<td>Adds a list of new notes to the track. Returns the resulting note ids, in order.</td>
+</tr>
+<tr>
+<td><code>deleteNotes(notes)</code></td>
+<td>Deletes the given note(s).</td>
+</tr>
+<tr>
+<td><code>moveNotes(notes, dTick, dKey)</code></td>
+<td>Moves the note(s) by delta ticks and delta keys.</td>
+</tr>
+<tr>
+<td><code>resizeNotes(notes, dLen, {fromLeft?})</code></td>
+<td>Resizes note(s). <code>dLen</code> is the change in length; <code>fromLeft</code> moves the start of the note instead of the end</td>
+</tr>
+<tr>
+<td><code>setVelocity(notes, vel)</code> / <code>setVelocity(notes, fn(note) → vel)</code></td>
+<td>Sets the velocity of the given note(s).</td>
+</tr>
+<tr>
+<td><code>nudgeVelocity(notes, delta)</code></td>
+<td>Changes the velocity of the note(s) by a delta.</td>
+</tr>
+<tr>
+<td><code>addLanePoint(track, cc, tick, value)</code></td>
+<td>Sets a CC value at the specified tick position. It replaces a point already at that tick. (To edit tempo: use -1 for <code>track</code>)</td>
+</tr>
+<tr>
+<td><code>writeLanePoints(track, cc, from, to, [{tick, value}])</code></td>
+<td>Replaces every CC point of the automation lane in <code>[from, to]</code> with the list (doesn't work with the Voice lane)</td>
+</tr>
+<tr>
+<td><code>moveLanePoints(track, cc, [{tick, newTick?, newValue?}])</code></td>
+<td>Moves the list of CC points, each to a new tick and value</td>
+</tr>
+<tr>
+<td><code>deleteLanePoints(track, cc, [ticks])</code></td>
+<td>Deletes the list of CC points</td>
+</tr>
+<tr>
+<td><code>setSettings({...})</code></td>
+<td>Partial update of <code>song.settings()</code></td>
+</tr>
+<tr>
+<td><code>setVoice(slot, {...})</code></td>
+<td>Partial update of one voice in the song's voicegroup (<code>porydaw.voicegroup</code> below)</td>
+</tr>
+<tr>
+<td><code>setStartTempo(bpm)</code></td>
+<td>Sets the tempo at the start of the song (beats per minute)</td>
+</tr>
+<tr>
+<td><code>setLoop(start, end)</code></td>
+<td>Sets the loop markers. (<code>null</code> means "remove the marker")</td>
+</tr>
+<tr>
+<td><code>setTimeSig(tick, numerator, denominator)</code></td>
+<td>Sets the time signature at the given tick</td>
+</tr>
+<tr>
+<td><code>deleteTimeSig(tick)</code></td>
+<td>Deletes the time signature at the given tick</td>
+</tr>
+<tr>
+<td><code>removeTimeRange(start, end, scope)</code></td>
+<td>Ripple deletion of a range (anything after the range gets automatically shifted forward). <code>scope</code> is <code>{tracks: [i], lanes: [{track, cc}]}</code> or <code>{wholeSong: true}</code></td>
+</tr>
+<tr>
+<td><code>insertTimeRange(at, span, scope)</code></td>
+<td>Inserts a blank span of time (pushes the existing content to the right). <code>scope</code> is <code>{tracks: [i], lanes: [{track, cc}]}</code> or <code>{wholeSong: true}</code></td>
+</tr>
+<tr>
+<td><code>addTrack(voice)</code></td>
+<td>Adds a new track with the given <code>voice</code>. Returns the index of the created track.</td>
+</tr>
+<tr>
+<td><code>duplicateTrack(i)</code></td>
+<td>Duplicates the given track</td>
+</tr>
+<tr>
+<td><code>deleteTrack(i)</code></td>
+<td>Deletes the given track</td>
+</tr>
+<tr>
+<td><code>mergeTrack(i, target, {notesOnly?})</code></td>
+<td>Merges track <code>i</code> into track <code>target</code>, then deletes track <code>i</code></td>
+</tr>
+<tr>
+<td><code>moveTrack(i, target)</code></td>
+<td>Moves the track to a different index</td>
+</tr>
+<tr>
+<td><code>renameTrack(i, name)</code></td>
+<td>Renames the track</td>
+</tr>
+<tr>
+<td><code>transposeSelection(dKey)</code></td>
+<td>Moves the selected notes up or down a set number of keys</td>
+</tr>
+<tr>
+<td><code>nudgeSelection("left"\|"right")</code></td>
+<td>Nudes the selected notes right or left, identical to using the keyboard Left/Right arrow keys</td>
+</tr>
+<tr>
+<td><code>moveRange(start, end, scope, dTick)</code></td>
+<td>Moves all notes and events in the given range by <code>dTick</code> ticks</td>
+</tr>
+<tr>
+<td><code>duplicateRange(start, end, scope, dTick)</code></td>
+<td>Duplicate all notes and events in the given range <code>dTick</code> ticks from <code>start</code></td>
+</tr>
+<tr>
+<td><code>insertRawEvent(chunk, event)</code>, <code>modifyRawEvent(chunk, index, event)</code>, <code>deleteRawEvents(chunk, [indices])</code>, <code>moveRawEvent(chunk, index, destIndex)</code>, <code>setChunkEndTick(chunk, tick)</code></td>
+<td>You probably don't want these because it's editing the raw MIDI itself!  Raw SMF edits in <code>song.rawEvents</code>' address space. <code>event</code> is <code>{tick, status}</code> or <code>{tick, type, channel?}</code> plus <code>data0</code>/<code>data1</code> (channel events), <code>metaType</code> and <code>blob</code> or <code>text</code> (metas), <code>blob</code> (sysex). Bytes are clamped, nothing is validated semantically. An orphan note-on is yours to make. Inserts land at the tick's canonical position; a modify that changes the tick re-inserts, so re-read indices afterwards. <code>moveRawEvent</code> reorders within one tick (clamped to what the file's ordering rules allow; → whether it moved).</td>
+</tr>
+</tbody>
+</table>
+<p>The example <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/note-tools"><code>plugins/examples/note-tools</code></a> plugin (Legato, Insert chord,
+Humanize, Strum, Quantize) demonstrate good usage of <code>porydaw.edit</code> patterns.</p>
+<h3 id="porydawtransport"><code>porydaw.transport</code><a class="headerlink" href="#porydawtransport" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.transport</code> interacts with playback state. Includes the play/pause/stop state, the playhead, and realtime events that follow it.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>state</code></td>
+<td><code>"stopped"</code>, <code>"paused"</code> or <code>"playing"</code></td>
+</tr>
+<tr>
+<td><code>playheadTick</code></td>
+<td>Where playback currently is</td>
+</tr>
+<tr>
+<td><code>sampleRate</code></td>
+<td>The audio device's rate</td>
+</tr>
+<tr>
+<td><code>loopEnabled</code></td>
+<td>Whether looping is on</td>
+</tr>
+<tr>
+<td><code>play()</code>, <code>pause()</code>, <code>stop()</code></td>
+<td>The transport buttons</td>
+</tr>
+<tr>
+<td><code>seek(tick)</code></td>
+<td>Moves the playhead to the given <code>tick</code></td>
+</tr>
+<tr>
+<td><code>on("state", fn({state}))</code></td>
+<td>Callback invoked whenenever the transport state changes</td>
+</tr>
+<tr>
+<td><code>on("tick", fn({state, tick, playing}))</code></td>
+<td>Callback invoked every frame (~60fps), not literally every tick</td>
+</tr>
+<tr>
+<td><code>on("beat", fn({bar, beat, beatsPerBar, beatTicks, tick, bpm}))</code></td>
+<td>Callback invoked whenever the playhead enters a new beat of the song's meter (<code>bar</code> and <code>beat</code> are 0-based)</td>
+</tr>
+</tbody>
+</table>
+<p>Every <code>on()</code> returns a function that unsubscribes the listener.</p>
+<h3 id="porydawaudio"><code>porydaw.audio</code><a class="headerlink" href="#porydawaudio" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.audio</code> exposes the final stereo mix as the device hears it. It also provides a WAV render, and the GBA engine settings from Settings → Audio.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>sampleRate</code></td>
+<td>The device's sample rate</td>
+</tr>
+<tr>
+<td><code>windowFrames</code></td>
+<td>The sample analysis window (2048 frames)</td>
+</tr>
+<tr>
+<td><code>peak</code>, <code>rms</code></td>
+<td>The most recent frame's left/right peak and root-mean-squared volumes</td>
+</tr>
+<tr>
+<td><code>pcm()</code></td>
+<td><code>Float32Array</code> of the newest <code>windowFrames</code> pcm frames, interleaved L/R, oldest first</td>
+</tr>
+<tr>
+<td><code>spectrum(bins = 64)</code></td>
+<td><code>Float32Array</code> of <code>bins</code> bands, linear in frequency from 0 to <code>sampleRate / 2</code>, each 0..1 (1 = a full-scale sine there); a Hann-windowed FFT of the window's mono mix</td>
+</tr>
+<tr>
+<td><code>channels()</code></td>
+<td>The current state of the m4a engine's channel pools</td>
+</tr>
+<tr>
+<td><code>on("frame", fn(frame))</code></td>
+<td>Callback invoked for every audio frame, with <code>{peak: [l, r], rms: [l, r], frames, sampleRate, playing}</code>. <code>peak</code>/<code>rms</code>. <code>frames</code> is how many there were.</td>
+</tr>
+<tr>
+<td><code>render(path, {sampleRate?, loopCount?, fadeout?, tail?})</code></td>
+<td>Renders the active song to a WAV file the same way <code>File → Export WAV</code> does.</td>
+</tr>
+<tr>
+<td><code>engine</code></td>
+<td>The current global m4a engine settings. <code>{maxPcmChannels, pcmMixRate, analogFilter}</code></td>
+</tr>
+<tr>
+<td><code>engineLimits()</code></td>
+<td><code>{maxPcmChannels, mixRates}</code>. The m4a polyphony ceiling and the selectable sample rates</td>
+</tr>
+<tr>
+<td><code>setEngine({maxPcmChannels?, pcmMixRate?, analogFilter?})</code></td>
+<td>Partial update the m4a engine settings</td>
+</tr>
+<tr>
+<td><code>on("engine", fn(settings))</code></td>
+<td>Callback invoked when any of the m4a engine settings are changed</td>
+</tr>
+</tbody>
+</table>
+<p>See these example plugins for reference: <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/vu-meter"><code>plugins/examples/vu-meter</code></a>, <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/spectrum"><code>plugins/examples/spectrum</code></a>,
+<a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/dancer"><code>plugins/examples/dancer</code></a> (beats), <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/song-report"><code>plugins/examples/song-report</code></a> (render).</p>
+<h3 id="porydawui"><code>porydaw.ui</code><a class="headerlink" href="#porydawui" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.ui</code> exposes porydaw's window, status bar, theme colors, images for canvases, and the visual things a plugin can add, like docks, menus, roll overlays and dialogs.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>statusMessage(text)</code></td>
+<td>Shows a status-bar message</td>
+</tr>
+<tr>
+<td><code>theme(role?)</code></td>
+<td>Gets the color of one theme role</td>
+</tr>
+<tr>
+<td><code>loadImage(path)</code></td>
+<td>Decodes an image file (PNG, JPEG, …). Returns an image id for use with <code>g.image()</code></td>
+</tr>
+<tr>
+<td><code>imageSize(id)</code></td>
+<td>Gets the size of an image. <code>{width, height}</code>, or <code>null</code></td>
+</tr>
+<tr>
+<td><code>freeImage(id)</code></td>
+<td>Releases the image</td>
+</tr>
+<tr>
+<td><code>dock(spec)</code></td>
+<td>Creates a dock panel. Returns the dock handle</td>
+</tr>
+<tr>
+<td><code>menu()</code></td>
+<td>Gets the plugin's submenu in the <strong>Plugins</strong> menu</td>
+</tr>
+<tr>
+<td><code>contextMenu("notes" \| "range")</code></td>
+<td>Gets the plugin's entries in the piano roll's context menus (when right-clicking on notes or range)</td>
+</tr>
+<tr>
+<td><code>overlay({id, paint(g, v)})</code></td>
+<td>Creates an overlay drawing that is painted on top of the piano roll</td>
+</tr>
+<tr>
+<td><code>dialog.alert</code>, <code>.confirm</code>, <code>.prompt</code>, <code>.form</code>, <code>.openFile</code>, <code>.saveFile</code>, <code>.chooseDir</code></td>
+<td>Shows a modal dialog</td>
+</tr>
+</tbody>
+</table>
+<p>Theme roles:</p>
+<table>
+<thead>
+<tr>
+<th>Group</th>
+<th>Roles</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Window</td>
+<td><code>window_background</code>, <code>window_text</code>, <code>secondary_text</code>, <code>disabled_text</code>, <code>selection_background</code>, <code>selection_text</code>, <code>link_text</code>, <code>palette_outline</code></td>
+</tr>
+<tr>
+<td>Lists and headers</td>
+<td><code>item_background</code>, <code>item_text</code>, <code>item_alternate_background</code>, <code>header_background</code>, <code>header_text</code></td>
+</tr>
+<tr>
+<td>Buttons and tooltips</td>
+<td><code>button_background</code>, <code>button_text</code>, <code>tooltip_background</code>, <code>tooltip_text</code></td>
+</tr>
+<tr>
+<td>Polyphony panel</td>
+<td><code>polyphony_cell_active_background</code>, <code>polyphony_cell_releasing_background</code>, <code>polyphony_cell_free_background</code>, <code>polyphony_cell_shadow_background</code>, <code>polyphony_flash_background</code></td>
+</tr>
+<tr>
+<td>Piano roll</td>
+<td><code>song_view_piano_roll_background</code>, <code>song_view_grid</code>, <code>song_view_separator</code>, <code>song_view_primary_text</code>, <code>song_view_secondary_text</code>, <code>song_view_selection_fill</code>, <code>song_view_selection_edge</code>, <code>song_view_playhead</code>, <code>song_view_edit_cursor</code>, <code>song_view_loop_marker</code>, <code>song_view_automation_default_curve</code>, <code>song_view_automation_tempo_curve</code></td>
+</tr>
+<tr>
+<td>Sample editor</td>
+<td><code>sample_waveform_ink</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="porydawuidockspec"><code>porydaw.ui.dock(spec)</code><a class="headerlink" href="#porydawuidockspec" title="Permanent link">&para;</a></h4>
+<p>A panel next to Songs / Voicegroup / Polyphony. <code>spec</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>The id of the dock panel. Allows letters, digits, <code>_</code>, <code>-</code>. The window remembers the dock's placement per <code>plugin.&lt;pluginId&gt;.&lt;id&gt;</code>, and whether the user closed it.</td>
+</tr>
+<tr>
+<td><code>title</code></td>
+<td>The dock panel's title</td>
+</tr>
+<tr>
+<td><code>area</code></td>
+<td><code>"right"</code> (default), <code>"left"</code>, <code>"top"</code>, <code>"bottom"</code>. The initial placement.</td>
+</tr>
+<tr>
+<td><code>minWidth</code>, <code>minHeight</code></td>
+<td>Minimum body size (defaults 120 × 60)</td>
+</tr>
+<tr>
+<td><code>paint(g)</code></td>
+<td>If <code>paint(g)</code> is provided, the dock panel is one canvas painted by this function (see below)</td>
+</tr>
+<tr>
+<td><code>build(root)</code></td>
+<td>If <code>build(root)</code> is provided, the dock panel display widgets inside of it, built on <code>root</code>, which is a column container (see below)</td>
+</tr>
+</tbody>
+</table>
+<p>The dock handle: <code>id</code>, <code>title</code> (read/write), <code>visible</code> (read/write),
+<code>open</code> (false after <code>close()</code>), <code>show()</code>, <code>hide()</code>, <code>raise()</code>, <code>close()</code>,
+<code>root</code> (the column), <code>canvas</code> (the shorthand canvas, else <code>null</code>). Docks are
+closed automatically on unload/reload; call <code>close()</code> from <code>deactivate()</code>
+anyway so a plugin that stays loaded can tidy up.</p>
+<p>Containers (<code>root</code>, <code>addRow()</code>, <code>addColumn()</code>) build children in order:</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th>Widget / handle</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>addLabel(text)</code></td>
+<td>label; <code>text</code></td>
+</tr>
+<tr>
+<td><code>addButton(text, onClick())</code></td>
+<td>button; <code>text</code>, <code>enabled</code></td>
+</tr>
+<tr>
+<td><code>addCheckbox(text, checked, onChange(on))</code></td>
+<td>checkbox; <code>checked</code></td>
+</tr>
+<tr>
+<td><code>addSlider(min, max, value, onChange(v), {vertical?})</code></td>
+<td>integer slider; <code>value</code></td>
+</tr>
+<tr>
+<td><code>addCombo(items, index, onChange(i))</code></td>
+<td>drop-down; <code>index</code>, <code>text</code>, <code>setItems(items)</code></td>
+</tr>
+<tr>
+<td><code>addCanvas({minWidth?, minHeight?}, paint(g), mouse(ev)?)</code></td>
+<td>canvas; <code>repaint()</code>, <code>width</code>, <code>height</code></td>
+</tr>
+<tr>
+<td><code>addRow()</code>, <code>addColumn()</code></td>
+<td>nested containers</td>
+</tr>
+<tr>
+<td><code>addStretch()</code>, <code>addSpacing(px)</code></td>
+<td>layout filler</td>
+</tr>
+</tbody>
+</table>
+<p>Every handle also has <code>kind</code>, <code>visible</code>, <code>enabled</code>, <code>setMinimumSize(w, h)</code>,
+<code>setToolTip(text)</code>. Callbacks (<code>onChange</code> etc.) don't fire for changes the
+script makes itself. Plugin widgets never take keyboard focus, so the roll's
+shortcuts keep working with a panel open.</p>
+<h4 id="canvas-painting">Canvas painting<a class="headerlink" href="#canvas-painting" title="Permanent link">&para;</a></h4>
+<p><code>paint(g)</code> runs on the UI thread whenever the canvas repaints, which is after
+<code>repaint()</code>, on resize, and on theme-change. Coordinates are device-independent pixels from the canvas's top-left (<code>g.width</code>, <code>g.height</code>, <code>g.dpr</code>). Colors are CSS strings (<code>"#f80"</code>, <code>"#ff8800"</code>, <code>"#ff880080"</code>, <code>"rgb(255,136,0)"</code>, <code>"rgba(255,136,0,0.5)"</code>, names) or <code>[r, g, b, a?]</code> arrays.</p>
+<table>
+<thead>
+<tr>
+<th><code>g.</code></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>clear(color)</code></td>
+<td>fill everything (ignores transforms)</td>
+</tr>
+<tr>
+<td><code>fillRect(x, y, w, h, color)</code>, <code>strokeRect(x, y, w, h, color, lineWidth)</code>, <code>fillRoundRect(x, y, w, h, radius, color)</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>line(x1, y1, x2, y2, color, lineWidth)</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>fillCircle(cx, cy, r, color)</code>, <code>strokeCircle(cx, cy, r, color, lineWidth)</code>, <code>fillEllipse(x, y, w, h, color)</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>fillPolygon(points, color)</code>, <code>strokePolyline(points, color, lineWidth, close)</code></td>
+<td><code>points</code>: <code>[x0, y0, x1, y1, …]</code> or <code>[{x, y}, …]</code></td>
+</tr>
+<tr>
+<td><code>text(x, y, str, color, {size?, bold?, align?, baseline?})</code></td>
+<td><code>size</code> multiplies the UI font (1 = as is); <code>align</code> <code>"left"|"center"|"right"</code>; <code>baseline</code> <code>"alphabetic"</code> (default, y is the baseline) <code>|"top"|"middle"|"bottom"</code></td>
+</tr>
+<tr>
+<td><code>measureText(str, opts)</code></td>
+<td><code>{width, height, ascent, descent}</code></td>
+</tr>
+<tr>
+<td><code>image(id, dx, dy, dw, dh, sx, sy, sw, sh)</code></td>
+<td>a <code>ui.loadImage</code> image id; <code>sx, sy, sw, sh</code> selects a source rectangle from within the image (useful for sprite sheets)</td>
+</tr>
+<tr>
+<td><code>save()</code>, <code>restore()</code>, <code>translate(dx, dy)</code>, <code>rotate(degrees)</code>, <code>scale(sx, sy)</code>, <code>opacity(0..1)</code>, <code>clip(x, y, w, h)</code>, <code>antialias(on)</code></td>
+<td>painter state; unbalanced saves are restored for you</td>
+</tr>
+</tbody>
+</table>
+<p><code>mouse(ev)</code> receives <code>{type, x, y, button, left, right, middle, deltaX?, deltaY}</code> with <code>type</code>
+one of <code>press</code>, <code>move</code>, <code>release</code>, <code>doubleclick</code>, <code>leave</code>, or <code>wheel</code>.</p>
+<h4 id="menus">Menus<a class="headerlink" href="#menus" title="Permanent link">&para;</a></h4>
+<p><code>porydaw.ui.menu()</code> is the plugin's own submenu in the <strong>Plugins</strong> file menu. <code>porydaw.ui.contextMenu("notes" | "range")</code> creates a new context menu whose items are appended to the piano roll's note right-click context menu or the time-selection right-click context menu. Both return a menu handle, with the following members:</p>
+<table>
+<thead>
+<tr>
+<th>Menu Handle Members</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>addItem({label, run(checked), shouldShow()?, action?, checkable?, checked?, enabled?, tooltip?})</code></td>
+<td>Creates a new menu item. <code>shouldShow</code> is queried every time the menu opens, return False to prevent the item from showing. <code>action</code> links the item to a command created via <code>actions.register</code> (specify its <code>id</code>).</td>
+</tr>
+<tr>
+<td><code>addSeparator()</code></td>
+<td>Appends a horizontal separator bar</td>
+</tr>
+<tr>
+<td><code>addMenu(label)</code></td>
+<td>Creates a nested menu item (can't use in context menus)</td>
+</tr>
+<tr>
+<td><code>clear()</code></td>
+<td>removes every entry from the menu</td>
+</tr>
+<tr>
+<td><code>label</code></td>
+<td>Human-friendly name for the menu</td>
+</tr>
+<tr>
+<td><code>enabled</code></td>
+<td>Whether the menu is enabled. (When disabled, it's greyed out).</td>
+</tr>
+<tr>
+<td><code>visible</code></td>
+<td>Whether the menu is visible</td>
+</tr>
+</tbody>
+</table>
+<p>See the example plugin <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/range-tools"><code>plugins/examples/range-tools</code></a> for working examples of menu items.</p>
+<h4 id="piano-roll-overlays">Piano Roll Overlays<a class="headerlink" href="#piano-roll-overlays" title="Permanent link">&para;</a></h4>
+<p><code>porydaw.ui.overlay({id, paint(g, v)})</code> creates a drawing overlay that is painted on
+top of the active song's note area. <code>paint</code> runs whenever the roll repaints
+(scroll, zoom, edits, <code>repaint()</code>), with the canvas painter <code>g</code> (documented above) and the piano roll geometry <code>v</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Overlay Handle Members</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>The overlay's id</td>
+</tr>
+<tr>
+<td><code>visible</code></td>
+<td>Whether the overlay paints (read/write)</td>
+</tr>
+<tr>
+<td><code>active</code></td>
+<td>Whether the overlay is still attached to the roll (readonly)</td>
+</tr>
+<tr>
+<td><code>repaint()</code></td>
+<td>Asks the piano roll to repaint</td>
+</tr>
+<tr>
+<td><code>remove()</code></td>
+<td>Removes the overlay (and sets <code>active = false</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>The roll geometry:</p>
+<table>
+<thead>
+<tr>
+<th><code>v.</code></th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>width</code>, <code>height</code></td>
+<td>The note area's size. (0, 0) is the top-left corner</td>
+</tr>
+<tr>
+<td><code>from</code>, <code>to</code></td>
+<td>The visible tick span</td>
+</tr>
+<tr>
+<td><code>x(tick)</code>, <code>tick(x)</code></td>
+<td>Convert between horizontal pixel and tick positions</td>
+</tr>
+<tr>
+<td><code>keyTop(key)</code>, <code>keyBottom(key)</code>, <code>key(y)</code></td>
+<td>Convert between vertical pixel and piano key positions</td>
+</tr>
+<tr>
+<td><code>keyHeight</code></td>
+<td>Vertical pixel height of a single piano key row</td>
+</tr>
+<tr>
+<td><code>pxPerBeat</code></td>
+<td>Horizontal pixel width of a single beat</td>
+</tr>
+<tr>
+<td><code>track</code></td>
+<td>The selected track</td>
+</tr>
+</tbody>
+</table>
+<p>Keep paints cheap because they re-run as fast as the user scrolls. See the example plugin <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/scale-guide"><code>plugins/examples/scale-guide</code></a> for a working example of an overlay.</p>
+<h4 id="dialogs">Dialogs<a class="headerlink" href="#dialogs" title="Permanent link">&para;</a></h4>
+<p><code>porydaw.ui.dialog</code> shows modal dialogs, which the user can interact with.</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dialog.alert(text, {title?, detail?, ok?})</code></td>
+<td>Shows a simple message</td>
+</tr>
+<tr>
+<td><code>dialog.confirm(text, {title?, detail?, ok?, cancel?})</code></td>
+<td>Asks a yes/no question. Returns <code>true</code> if the user presses the ok button</td>
+</tr>
+<tr>
+<td><code>dialog.prompt(text, {title?, value?, ok?, cancel?})</code></td>
+<td>Asks for one line of text. Returns the string, or <code>null</code> when canceled.</td>
+</tr>
+<tr>
+<td><code>dialog.form({title?, text?, ok?, cancel?, fields})</code></td>
+<td>Asks for several values. <code>fields: [{key, label?, type: "text"\|"number"\|"checkbox"\|"combo", value?, min?, max?, step?, decimals?, items?, placeholder?}]</code>. Returns <code>{key: value}</code> (<code>combo</code> gives the index) or <code>null</code> when canceled.</td>
+</tr>
+<tr>
+<td><code>dialog.openFile({title?, dir?, filter?})</code></td>
+<td>File picker. Returns the chosen filepath or <code>null</code>.</td>
+</tr>
+<tr>
+<td><code>dialog.saveFile({title?, dir?, filter?, name?})</code></td>
+<td>File save. Returns the chosen filepath or <code>null</code>.</td>
+</tr>
+<tr>
+<td><code>dialog.chooseDir({title?, dir?})</code></td>
+<td>Folder picker. Returns the the chosen directory path or <code>null</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>See the example plugins <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/song-report"><code>plugins/examples/song-report</code></a> and <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/range-tools"><code>plugins/examples/range-tools</code></a> for working examples of dialogs.</p>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>Dialogs are NOT allowed inside an edit transaction and from paint callbacks.</p>
+</div>
+<h3 id="porydawvoicegroup"><code>porydaw.voicegroup</code><a class="headerlink" href="#porydawvoicegroup" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.voicegroup</code> exposes a readonly view of the current song's voicegroup. (To edit, use <code>porydaw.edit.setVoice()</code>, described above.)</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>isOpen</code>, <code>arg</code>, <code>name</code>, <code>file</code>, <code>loadName</code>, <code>dirty</code></td>
+<td>the <code>-G</code> arg and display name (from the song's settings), the file path, the name the engine loads it by, whether unsaved voice edits exist</td>
+</tr>
+<tr>
+<td><code>voices()</code></td>
+<td>Gets all 128 voice slots. Each is <code>{slot, kind}</code></td>
+</tr>
+<tr>
+<td><code>voice(slot)</code></td>
+<td>Gets one voice</td>
+</tr>
+<tr>
+<td><code>symbols()</code></td>
+<td>Gets the project's instrument symbols: <code>{directSound, progWave, drumkits, synths, keysplits: [{voicegroup, table}]}</code></td>
+</tr>
+<tr>
+<td><code>typicalAdsr(type, symbol?)</code></td>
+<td>Gets the default <code>{attack, decay, sustain, release}</code> ADSR for the specified voice kind</td>
+</tr>
+</tbody>
+</table>
+<p>See example plugin <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/project-tools"><code>plugins/examples/project-tools</code></a> for a working example of <code>porydaw.voicegroup</code> interaction.</p>
+<h3 id="porydawio"><code>porydaw.io</code><a class="headerlink" href="#porydawio" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.io</code> reads and writes files. It's sandboxed, so a path must be inside the plugin's folder (relative paths count from there), the open project, or something the user picked through <code>ui.dialog.openFile/saveFile/chooseDir</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>pluginDir</code>, <code>projectRoot</code></td>
+<td>The two folders a relative path can resolve against</td>
+</tr>
+<tr>
+<td><code>resolve(path)</code></td>
+<td>Gets an absolute path, or throws error if it's outside of the sandbox</td>
+</tr>
+<tr>
+<td><code>exists(path)</code></td>
+<td>Checks if path exists</td>
+</tr>
+<tr>
+<td><code>isDir(path)</code></td>
+<td>Checks if path is a folder</td>
+</tr>
+<tr>
+<td><code>readText(path)</code> / <code>writeText(path, text)</code></td>
+<td>Reads/writes UTF-8 text. Any necessary parent folders are created on write</td>
+</tr>
+<tr>
+<td><code>readBytes(path)</code> / <code>writeBytes(path, bytes)</code></td>
+<td>Reads/writes a file as <code>Uint8Array</code> (or <code>ArrayBuffer</code> to write)</td>
+</tr>
+<tr>
+<td><code>list(dir)</code></td>
+<td>Gets the contents of a folder. Each item is <code>[{name, dir, size}]</code></td>
+</tr>
+<tr>
+<td><code>mkdir(path)</code></td>
+<td>Creates the folder (and its parents, if needed)</td>
+</tr>
+<tr>
+<td><code>remove(path)</code></td>
+<td>Deletes a file (files only)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="porydawactions"><code>porydaw.actions</code><a class="headerlink" href="#porydawactions" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.actions</code> registers commands that show up in <code>Settings → Keyboard Shortcuts</code>, so users can bind and rebind them like any built-in command. Registered commands are also what a menu item's <code>action</code> links to.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>register({id, name, context?, default?, run})</code></td>
+<td>Registers a command. Returns the full <code>id</code> of the created command</td>
+</tr>
+<tr>
+<td><code>unregister(fullId)</code></td>
+<td>Removes a command by <code>id</code></td>
+</tr>
+</tbody>
+</table>
+<p>The <code>register</code> spec:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>The command's id, unique within the plugin</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>The display name, shown in <code>Settings → Keyboard Shortcuts</code></td>
+</tr>
+<tr>
+<td><code>context</code></td>
+<td><code>"global"</code> (window-wide), <code>"roll"</code>, <code>"velocity"</code>, or <code>"range"</code> (only while a time selection is active)</td>
+</tr>
+<tr>
+<td><code>default</code></td>
+<td>a portable key sequence (<code>"Ctrl+Shift+A"</code>)</td>
+</tr>
+<tr>
+<td><code>run()</code></td>
+<td>called when the command is triggered</td>
+</tr>
+</tbody>
+</table>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p>A <code>default</code> keybind that collides with an existing binding in an overlapping context is dropped with a warning, and the command will be unbound to any shortcut. The user can still manually set the keybind, though.</p>
+</div>
+<h3 id="porydawstorage"><code>porydaw.storage</code><a class="headerlink" href="#porydawstorage" title="Permanent link">&para;</a></h3>
+<p><code>porydaw.storage</code> is a per-plugin key/value store of JSON-serializable values, persisted in porydaw's settings.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get(key, fallback)</code></td>
+<td>the stored value, or <code>fallback</code> when the key is absent</td>
+</tr>
+<tr>
+<td><code>set(key, value)</code></td>
+<td>stores a JSON-serializable value</td>
+</tr>
+<tr>
+<td><code>remove(key)</code></td>
+<td>removes the key</td>
+</tr>
+<tr>
+<td><code>keys()</code></td>
+<td>every key the plugin has stored</td>
+</tr>
+</tbody>
+</table>
+<p><code>porydaw.storage.song</code> has the same four calls for values that belong to the
+<strong>song</strong>: they live in the song's sidecar (<code>&lt;project&gt;/.porydaw/&lt;song&gt;.json</code>,
+under <code>plugins</code> → the plugin id), next to the view state, and are written
+immediately.</p>
+<table>
+<thead>
+<tr>
+<th>Member</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>song.get(key, fallback)</code>, <code>song.set(key, value)</code>, <code>song.remove(key)</code>, <code>song.keys()</code></td>
+<td>the same store, scoped to the active song</td>
+</tr>
+</tbody>
+</table>
+<p>See the example plugin <a href="https://github.com/huderlem/porydaw/blob/main/plugins/examples/scale-guide"><code>plugins/examples/scale-guide</code></a>, which remembers each song's scale
+via <code>porydaw.storage</code>.</p>
+<h2 id="reacting-to-edits">Reacting to edits<a class="headerlink" href="#reacting-to-edits" title="Permanent link">&para;</a></h2>
+<p>A <code>song.changed</code> listener that edits the song in response to what the user did (e.g. snapping freshly painted notes to a scale) should start with:</p>
+<div class="highlight"><pre><span></span><code><span class="nx">porydaw</span><span class="p">.</span><span class="nx">song</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s2">"changed"</span><span class="p">,</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">e</span><span class="p">.</span><span class="nx">origin</span><span class="w"> </span><span class="o">!==</span><span class="w"> </span><span class="s2">"user"</span><span class="p">)</span><span class="w"> </span><span class="k">return</span><span class="p">;</span>
+<span class="w">    </span><span class="nx">porydaw</span><span class="p">.</span><span class="nx">edit</span><span class="p">.</span><span class="nx">transaction</span><span class="p">(</span><span class="s2">"Snap to scale"</span><span class="p">,</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="cm">/* … */</span><span class="w"> </span><span class="p">});</span>
+<span class="p">});</span>
+</code></pre></div>
+<p>Without guarding on <code>e.origin</code>, the script could enter an infinite loop, where it keeps making edits in response to its <em>own</em> edits.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../../manual/project-files/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Files Porydaw Reads &amp; Writes">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Files Porydaw Reads & Writes
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../faq/" class="md-footer__link md-footer__link--next" aria-label="Next: FAQ &amp; Troubleshooting">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                FAQ & Troubleshooting
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"/></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.footer", "content.action.edit", "search.suggest"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

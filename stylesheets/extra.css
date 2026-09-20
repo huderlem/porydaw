@@ -1,0 +1,26 @@
+/* Porydaw brand colors, sampled from the Porygon-note logo:
+   pink #f88098 / #f86080, cyan #80f8f8 / teal #58c8c0.
+   Light-mode link/accent shades are darkened versions of the same hues so
+   text stays readable on white (WCAG AA); dark mode can use the logo
+   colors directly. */
+
+/* The header bar is a dark neutral rather than a brand color: the logo
+   contains both brand hues, so a colored bar would swallow half of it,
+   and the pinks fail WCAG contrast under white header text. */
+:root {
+  --md-primary-fg-color: #262b36;
+  --md-primary-fg-color--light: #3a4150;
+  --md-primary-fg-color--dark: #1b1f27;
+  --md-accent-fg-color: #008f8f;
+  --md-accent-fg-color--transparent: rgba(0, 143, 143, 0.1);
+}
+
+[data-md-color-scheme="default"] {
+  --md-typeset-a-color: #c73558;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-typeset-a-color: #f890a8;
+  --md-accent-fg-color: #80f8f8;
+  --md-accent-fg-color--transparent: rgba(128, 248, 248, 0.1);
+}
