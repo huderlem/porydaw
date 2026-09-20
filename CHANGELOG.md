@@ -8,12 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Added
 - Added `Merge...` to the track header's right-click menu. It merges the track into a chosen destination track and deletes it. You can choose to merge all events or only notes. This is handy for collapsing an imported MIDI file that has more tracks than the m4a engine allows.
-   - Added `porydaw.edit.mergeTrack(track, target, {notesOnly})` to the plugin API.
-- Added song bundles (`.porysong`): a single shareable file holding a song's MIDI, its voicegroup and every sample it uses.
-   - `File -> Export Song Bundle...` writes the active song as a bundle.
-   - `File -> Open Song Bundle...` opens a bundle in a read-only tab for listening. No decomp project needs to be open. You can also drag a `.porysong` file onto the window, or pass it on the command line.
-   - `Import into project...` in a bundle tab copies the song, its voicegroup and its samples into the open project and registers it. Samples and instruments the project already has are reused rather than duplicated.
-   - Added `porydaw.project.exportBundle(label, path)` and `porydaw.project.importBundle(path, {label, constant, player})` to the plugin API.
+- Added `.porysong` standalone song bundles, which are a single shareable file holding a song's MIDI, its voicegroup and every sample it uses.
+   - `File -> Export Song Bundle...` to create a `.porydaw` file
+   - `File -> Open Song Bundle...` to open and preview a `.porydaw` file in a readonly tab.
+   - Press the `Import into project...` button in the preview tab to easily add the song to your decomp project.
 
 ## Fixed
 - Fix issue where keysplits whose filename mismatched the actual macro would be ignored and silent during playback.
