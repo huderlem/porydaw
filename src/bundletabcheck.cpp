@@ -5,6 +5,7 @@
 #include <QDirIterator>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -313,11 +314,19 @@ int MainWindow::runBundleTabCheck(const QString &bundleZip, const QString &fixtu
               QStringLiteral("the engine holds the bundle's timeline"));
         QApplication::processEvents();
         startPlayback();
-        waitMs(700);
+        // Poll instead of one fixed sleep: a loaded ASAN runner can take longer
+        // than that before the device thread renders its first block.
+        const uint64_t wanted = uint64_t(m_audio.sampleRate() / 8);
+        QElapsedTimer playTimer;
+        playTimer.start();
+        while (m_audio.playheadSamples() <= wanted && playTimer.elapsed() < 10000)
+            waitMs(50);
         const uint64_t played = m_audio.playheadSamples();
-        check(m_audio.transport() == Transport::Playing &&
-                  played > uint64_t(m_audio.sampleRate() / 8),
-              QStringLiteral("transport plays: playhead at %1 samples").arg(played));
+        check(m_audio.transport() == Transport::Playing && played > wanted,
+              QStringLiteral("transport plays: playhead at %1 samples after %2 ms (playing=%3)")
+                  .arg(played)
+                  .arg(playTimer.elapsed())
+                  .arg(m_audio.transport() == Transport::Playing));
         stopPlayback();
 
         WavExportOptions opts;
