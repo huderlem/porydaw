@@ -65,7 +65,7 @@ Importing a bundle back into the project it came from therefore reuses every sam
 
 Warnings don't stop the import. They tell you about something to check afterwards.
 
-- **Engine extensions.** The song uses m4a engine extensions (for example portamento, `PORTAMENTO`, or the pulse-width commands `PWMC`/`PWMS`) that your project's sound engine doesn't define. The song imports and Porydaw plays it in full, but in-game those commands won't do anything until your project's engine supports them. The warning lists the commands and the tracks that use them.
+- **Engine extensions.** The song uses m4a engine extensions (portamento, `PORTAMENTO`, or the pulse-width commands `PWMC` and `PWMS`) that your project's sound engine doesn't define. The song imports and Porydaw plays it in full, but in-game those commands won't do anything until your project's engine supports them. The warning lists the commands and the tracks that use them.
 - **Raw `.bin` samples.** A few voices (`cry` voices) play a raw `.bin` sample rather than a `.wav`. The import copies that `.bin` into `sound/direct_sound_samples/`. Many projects treat `.bin` files there as build leftovers: check that your `.gitignore` and `make clean` won't delete it.
 - **A new `keysplit_tables.inc`.** If your project has no `sound/keysplit_tables.inc`, the import creates one, and you need to make sure your build includes it.
 

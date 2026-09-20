@@ -76,7 +76,7 @@ declare namespace porydaw {
         function createVoicegroup(name: string, opts?: { copyFrom?: string }): string;
         /** File → Export Song Bundle without its dialog: a song open in a tab exports with its unsaved edits, any other from disk. `path` follows the io sandbox; a name without a suffix gets `.porysong`, any other suffix throws. */
         function exportBundle(label: string, path: string): { path: string; samples: number };
-        /** Imports a .porysong (or bundle folder) into the project and opens the song in a new tab. Throws when the import refuses. Reloads the project; not undoable. */
+        /** Imports a .porysong (or bundle folder) into the project and opens the song in a new tab. Omitted options are chosen by the import (`<label>_2` when the label is taken); a given label or constant that is taken throws, as does anything else the import dialog would refuse. Reloads the project; not undoable. */
         function importBundle(
             path: string,
             opts?: { label?: string; constant?: string; player?: string }
@@ -155,6 +155,8 @@ declare namespace porydaw {
             BEND: number; TEMPO: number; VOICE: number;
         };
         const loaded: boolean;
+        /** True in a read-only song bundle tab: edits, `save()` and `storage.song` writes throw. */
+        const readOnly: boolean;
         const revision: number;
         const label: string;
         const midPath: string;
@@ -616,7 +618,7 @@ declare namespace porydaw {
         function set(key: string, value: any): void;
         function remove(key: string): void;
         function keys(): string[];
-        /** Per-song values, kept in the song's sidecar. */
+        /** Per-song values, kept in the song's sidecar. A read-only song bundle tab has no sidecar: `get` returns `fallback`, `keys()` is empty, and `set` / `remove` throw. */
         namespace song {
             function get<T>(key: string, fallback?: T): T;
             function set(key: string, value: any): void;
