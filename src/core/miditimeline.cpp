@@ -1,8 +1,12 @@
 #include "miditimeline.h"
 
-#include <algorithm>
-
 #include "smf.h"
+
+extern "C" {
+#include "m4a_engine.h"
+}
+#include <algorithm>
+#include <map>
 
 namespace {
 
@@ -63,6 +67,72 @@ uint64_t tickToSample(uint64_t tick, const std::vector<TempoChange> &tempos, uin
     return static_cast<uint64_t>(samples + 0.5);
 }
 
+// The extended command each CC 0x1D/0x1F fires, keyed by (chunk, event
+// index); CCs that fire nothing mid2agb emits are absent. Mirrors mid2agb:
+// CC 0x1E stashes the selector, and the stash (agb.cpp's s_extendedCommand)
+// is never reset between tracks, so a track that fires without selecting
+// inherits the last selector of the track printed before it. Tracks print in
+// chunk order, one per MIDI channel within a chunk, and only for channels
+// that play a note of nonzero length — other channels' selectors never reach
+// the stash.
+//
+// This assumes a select and its fire share a tick, the shape every known
+// song uses. Apart, mid2agb goes its own way in two cases not modeled here:
+// a measure it folds into a PATT call is not printed again (selects inside
+// never reach the stash, fires replay what the first occurrence compiled
+// to), and it prints no wait after a select, so one that is last on its
+// clock shifts the rest of its track early.
+std::map<std::pair<int, size_t>, uint8_t> resolveXcmds(const SmfFile &smf)
+{
+    std::map<std::pair<int, size_t>, uint8_t> resolved;
+    int selector = 0;
+    for (int t = 0; t < int(smf.tracks.size()); t++) {
+        const std::vector<SmfEvent> &evs = smf.tracks[t].events;
+        bool hasXcmd = false;
+        for (const SmfEvent &ev : evs)
+            if (ev.isChannel() && ev.typeNibble() == 0xB && ev.data0 >= 0x1D && ev.data0 <= 0x1F)
+                hasXcmd = true;
+        if (!hasXcmd)
+            continue;
+
+        // mid2agb's FindNoteEnd: a note runs to the first note-off (or
+        // velocity-0 note-on) of its key after it, or fails the build.
+        bool hasNotes[16] = {};
+        std::map<int, uint64_t> open; // (channel, key) -> earliest open note-on
+        for (const SmfEvent &ev : evs) {
+            if (!ev.isChannel() || (ev.typeNibble() != 0x8 && ev.typeNibble() != 0x9))
+                continue;
+            const int channel = ev.status & 0x0F;
+            const int slot = (channel << 7) | (ev.data0 & 0x7F);
+            if (ev.typeNibble() == 0x9 && ev.data1 > 0) {
+                open.insert({slot, ev.tick});
+            } else {
+                const auto on = open.find(slot);
+                if (on != open.end()) {
+                    hasNotes[channel] |= ev.tick > on->second;
+                    open.erase(on);
+                }
+            }
+        }
+
+        for (int channel = 0; channel < 16; channel++) {
+            if (!hasNotes[channel])
+                continue;
+            for (size_t i = 0; i < evs.size(); i++) {
+                const SmfEvent &ev = evs[i];
+                if (!ev.isChannel() || ev.typeNibble() != 0xB || (ev.status & 0x0F) != channel)
+                    continue;
+                if (ev.data0 == 0x1E)
+                    selector = ev.data1;
+                else if ((ev.data0 == 0x1D || ev.data0 == 0x1F) &&
+                         (selector == M4A_XCMD_IECV || selector == M4A_XCMD_IECL))
+                    resolved[{t, i}] = uint8_t(selector);
+            }
+        }
+    }
+    return resolved;
+}
+
 TimelineEvent makeTempoEvent(uint64_t samplePos, uint64_t tick, double bpm)
 {
     int b = static_cast<int>(bpm + 0.5);
@@ -101,6 +171,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::vector<QString> trackNames(numTracks);
     uint64_t loopStartTick = UINT64_MAX;
     uint64_t loopEndTick = UINT64_MAX;
+    const std::map<std::pair<int, size_t>, uint8_t> xcmds = resolveXcmds(smf);
 
     for (int t = 0; t < numTracks; t++) {
         // Channel Prefix scoping (SmfChannelPrefix, the shared rule):
@@ -108,7 +179,8 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
         // those, but a foreign format-1 file may still carry prefixed
         // 0x03s, and they are never the chunk's name.
         SmfChannelPrefix prefix;
-        for (const SmfEvent &sev : smf.tracks[t].events) {
+        for (size_t i = 0; i < smf.tracks[t].events.size(); i++) {
+            const SmfEvent &sev = smf.tracks[t].events[i];
             const uint64_t tick = sev.tick;
             prefix.observe(sev);
 
@@ -139,9 +211,15 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                                              .arg(sev.data0)
                                              .arg(sev.data1)});
                     break;
-                case 0xB:
+                case 0xB: {
                     push(0xB);
+                    const auto xcmd = xcmds.find({t, i});
+                    if (xcmd != xcmds.end()) {
+                        push(TIMELINE_EVT_XCMD);
+                        rawEvents.back().data0 = xcmd->second;
+                    }
                     break;
+                }
                 case 0xC:
                     push(0xC);
                     break;

@@ -30,7 +30,8 @@ SongViewModel buildSongViewModel(const MidiTimeline &tl)
     // instead of being papered over).
     std::array<std::vector<size_t>, 16 * 128> open;
 
-    for (const TimelineEvent &ev : tl.events) {
+    for (size_t i = 0; i < tl.events.size(); i++) {
+        const TimelineEvent &ev = tl.events[i];
         switch (ev.type) {
         case 0x9: { // note on
             ViewNote note;
@@ -69,6 +70,15 @@ SongViewModel buildSongViewModel(const MidiTimeline &tl)
             if (info.eventClass == M4aEventClass::AudibleLane) {
                 laneFor(model, ev.track, ev.data0, info.lane, QString::fromLatin1(info.display))
                     .points.push_back({ev.tick, int(ev.data1)});
+            } else if (ev.data0 == 0x1D || ev.data0 == 0x1F) {
+                // What the firing CC compiles to rides right behind it.
+                const TimelineEvent *xcmd =
+                    i + 1 < tl.events.size() && tl.events[i + 1].type == TIMELINE_EVT_XCMD &&
+                            tl.events[i + 1].track == ev.track && tl.events[i + 1].tick == ev.tick
+                        ? &tl.events[i + 1]
+                        : nullptr;
+                model.strip.push_back(
+                    {ev.tick, ev.track, m4aXcmdLabel(xcmd ? xcmd->data0 : -1, ev.data1)});
             } else {
                 model.strip.push_back({ev.tick, ev.track, m4aAdvancedCcLabel(ev.data0, ev.data1)});
             }
@@ -86,6 +96,8 @@ SongViewModel buildSongViewModel(const MidiTimeline &tl)
         }
         case TIMELINE_EVT_TEMPO:
             break; // synthetic; the tempo lane is built from tl.tempoMap below
+        case TIMELINE_EVT_XCMD:
+            break; // synthetic; shown through the CC it rides behind (above)
         default:
             model.strip.push_back(
                 {ev.tick, ev.track,

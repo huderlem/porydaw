@@ -140,7 +140,7 @@ mapping (from `tools/mid2agb/agb.cpp`):
 | CC 24 | `TUNE` | Fine-tune lane |
 | CC 20 | `BENDR` | Bend-range lane |
 | CC 21 / 22 / 26 | `LFOS` / `MODT` / `LFODL` | LFO speed / type / delay lanes |
-| CC 29 / 30 / 31 | `XCMD` (pseudo-echo vol/len) | Pseudo-echo lanes |
+| CC 29 / 30 / 31 | `XCMD` (pseudo-echo vol/len) | Advanced view only (played) |
 | Pitch bend | `BEND c_v±` | Pitch-bend lane |
 | Tempo meta | `TEMPO` | Tempo track |
 | Marker `[` `]` | `GOTO` loop | Loop region overlay in the timeline |
@@ -148,9 +148,25 @@ mapping (from `tools/mid2agb/agb.cpp`):
 Dedicated automation lanes are offered only for parameters the embedded poryaaaa
 engine actually renders — porydaw targets the engine as it exists, not the full m4a
 command set. CCs the engine currently treats as no-ops (e.g. `TUNE`, `MODT`,
-`LFODL`) and pseudo-echo `XCMD`s get no audible lane; they are still preserved
+`LFODL`) get no audible lane; they are still preserved
 byte-for-byte on round-trip and visible in the advanced/"other events" view. If
 poryaaaa gains support for one later, porydaw simply enables its lane.
+
+Pseudo-echo `XCMD`s are the exception in the other direction: played, but
+lane-less. CC 30 selects the command and CC 29/31 fires it, and mid2agb pairs
+the two while it compiles — the selector is compile-time state that never
+rewinds at a loop, and it leaks from one printed track into the next. So
+`MidiTimeline::build` does the same pairing up front and playback dispatches
+the resolved `xIECV` / `xIECL`, never the raw CCs. The strip names what each
+firing CC compiled to.
+
+The pairing assumes a select and its fire sit on the same tick, which is how
+every known song writes them. Apart, mid2agb has two quirks porydaw does not
+model: a measure folded into a `PATT` call is not printed again (a select
+inside it never updates the selector; a fire inside it replays what the first
+occurrence compiled to), and no wait is printed after a select, so one that
+is the last event on its clock makes the rest of its track play early
+in-game.
 
 ### 4.3 WYHIWYG: simulating mid2agb on playback
 

@@ -6,7 +6,8 @@
 // The m4a semantic layer (SPEC.md §4.2): MIDI events are presented in mid2agb
 // terms. CC numbers follow tools/mid2agb/agb.cpp exactly; whether a CC gets an
 // audible automation lane follows what the embedded poryaaaa engine renders
-// (m4a_engine_cc) — engine no-ops surface in the "other events" strip instead.
+// (m4a_engine_cc) — engine no-ops surface in the "other events" strip instead,
+// as do the XCMD CCs: played, but lane-less by design.
 
 // A drawable automation lane. Values are the lane identity used by the viewer;
 // CC-backed lanes exist per (track, cc), Bend/Tempo are dedicated event types.
@@ -49,8 +50,13 @@ QString m4aFormatCcValue(uint8_t cc, uint8_t value);
 QString m4aFormatBend(int bend14);
 
 // Human label for an advanced/no-op CC event in the other-events strip,
-// e.g. "MEMACC op 17 = 3" or "XCMD xIECV = 4".
+// e.g. "MEMACC op 17".
 QString m4aAdvancedCcLabel(uint8_t cc, uint8_t value);
+
+// Strip label for a firing XCMD CC (0x1D / 0x1F), by the command mid2agb
+// compiles it to: a gXcmdTable index ("XCMD xIECV = 40"), or -1 when it
+// compiles to nothing.
+QString m4aXcmdLabel(int command, uint8_t value);
 
 // Voice-type label for a ToneData.type byte ("Sample", "Square 1",
 // "Drumkit", ...). Keysplit voices read as "Sample".

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - `File -> Export Song Bundle...` to create a `.porydaw` file
    - `File -> Open Song Bundle...` to open and preview a `.porydaw` file in a readonly tab.
    - Press the `Import into project...` button in the preview tab to easily add the song to your decomp project.
+- Added playback support for the pseudo-echo effect (`XCMD xIECV` / `xIECL`, MIDI CC 30 followed by CC 29 or 31).
 
 ## Fixed
 - Fix issue where keysplits whose filename mismatched the actual macro would be ignored and silent during playback.

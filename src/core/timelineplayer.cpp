@@ -25,7 +25,13 @@ void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, u
         }
         break;
     case 0xB:
-        m4a_engine_cc(engine, ev.track, ev.data0, ev.data1);
+        // The raw XCMD CCs are viewer data: the timeline carries each firing
+        // one's resolved command right behind it (TIMELINE_EVT_XCMD).
+        if (ev.data0 < 0x1D || ev.data0 > 0x1F)
+            m4a_engine_cc(engine, ev.track, ev.data0, ev.data1);
+        break;
+    case TIMELINE_EVT_XCMD:
+        m4a_engine_xcmd(engine, ev.track, ev.data0, ev.data1);
         break;
     case 0xC:
         m4a_engine_program_change(engine, ev.track, ev.data0);
@@ -40,6 +46,7 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
 {
     // Most recent state-bearing event per slot at or before pos.
     const TimelineEvent *cc[16][128] = {};
+    const TimelineEvent *xcmd[16][2] = {}; // xIECV, xIECL
     const TimelineEvent *bend[16] = {};
     const TimelineEvent *program[16] = {};
     const TimelineEvent *tempo = nullptr;
@@ -50,6 +57,9 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         switch (ev.type) {
         case 0xB:
             cc[ev.track][ev.data0 & 0x7F] = &ev;
+            break;
+        case TIMELINE_EVT_XCMD:
+            xcmd[ev.track][ev.data0 == M4A_XCMD_IECL] = &ev;
             break;
         case 0xC:
             program[ev.track] = &ev;
@@ -89,6 +99,13 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         for (const auto &d : kCcDefaults)
             if (!cc[track][d.cc])
                 m4a_engine_cc(engine, track, d.cc, d.value);
+        // Pseudo-echo is off (0 / 0) until a song sets it.
+        for (int n = 0; n < 2; n++) {
+            if (xcmd[track][n])
+                dispatchEvent(engine, *xcmd[track][n], 0);
+            else
+                m4a_engine_xcmd(engine, track, n ? M4A_XCMD_IECL : M4A_XCMD_IECV, 0);
+        }
         if (bend[track])
             dispatchEvent(engine, *bend[track], 0);
         else

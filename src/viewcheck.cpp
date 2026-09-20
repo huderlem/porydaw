@@ -55,9 +55,11 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
         // consumed note-off counts once even when it ends several notes
         // (mid2agb pairing: every note-on takes the first same-key end
         // after it, without consuming it).
-        const size_t tempoEvents =
+        // Synthetic events count as presented: tempo is drawn from the
+        // tempo map, and a resolved XCMD stands behind a CC in the strip.
+        const size_t syntheticEvents =
             size_t(std::count_if(tl->events.begin(), tl->events.end(), [](const TimelineEvent &ev) {
-                return ev.type == TIMELINE_EVT_TEMPO;
+                return ev.type == TIMELINE_EVT_TEMPO || ev.type == TIMELINE_EVT_XCMD;
             }));
         size_t lanePoints = 0;
         for (const AutoLane &lane : model.lanes)
@@ -68,7 +70,7 @@ int runViewCheck(const QString &projectRoot, const QString &screenshotSong,
                                  [](const TimelineEvent &ev) { return ev.type == 0x8; }));
         const size_t pairedOffs = offEvents - model.orphanNoteOffs;
         const size_t bucketSum = model.notes.size() + pairedOffs + lanePoints +
-                                 model.voices.size() + tempoEvents + stripFromEvents;
+                                 model.voices.size() + syntheticEvents + stripFromEvents;
         if (bucketSum != tl->events.size()) {
             std::fprintf(stderr,
                          "viewcheck: FAIL %s: %zu events but %zu presented "

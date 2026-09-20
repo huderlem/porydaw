@@ -51,6 +51,9 @@ int runLoopCheck();
 int runPolyCheck(const QString &screenshotPath = QString());
 // primecheck.cpp; audition voice-priming check (self-contained, no project needed).
 int runPrimeCheck();
+// xcmdcheck.cpp; pseudo-echo XCMD playback check (self-contained; an optional
+// directory of .mid + mid2agb -N .s pairs adds a corpus comparison).
+int runXcmdCheck(const QString &corpusDir);
 // smfcheck.cpp; SMF parse-validation + note-pairing check (self-contained,
 // no project needed).
 int runSmfCheck();
@@ -193,6 +196,12 @@ int main(int argc, char *argv[])
     }
     if (args.contains(QStringLiteral("--primecheck")))
         return runPrimeCheck();
+    const int xcmdCheck = args.indexOf(QStringLiteral("--xcmdcheck"));
+    if (xcmdCheck >= 0) {
+        const bool hasCorpus =
+            xcmdCheck + 1 < args.size() && !args[xcmdCheck + 1].startsWith(QStringLiteral("--"));
+        return runXcmdCheck(hasCorpus ? args[xcmdCheck + 1] : QString());
+    }
     if (args.contains(QStringLiteral("--smfcheck")))
         return runSmfCheck();
     const int ignoreCheck = args.indexOf(QStringLiteral("--ignorecheck"));

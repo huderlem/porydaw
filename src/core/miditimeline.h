@@ -13,6 +13,13 @@
 // A tempo event carries the target BPM as a 14-bit value across data0 (low
 // 7 bits) and data1 (high 7 bits).
 constexpr uint8_t TIMELINE_EVT_TEMPO = 0x1;
+// A resolved extended command, also synthetic: data0 is the command's
+// gXcmdTable index (M4A_XCMD_IECV / M4A_XCMD_IECL), data1 its value. mid2agb
+// pairs a CC 0x1D/0x1F with the CC 0x1E selector while it compiles, so the
+// game only ever sees the finished XCMD; build() does the same pairing and
+// emits one of these right after each firing CC. The raw CCs stay in the
+// timeline for the viewer, and playback skips them.
+constexpr uint8_t TIMELINE_EVT_XCMD = 0x2;
 
 struct TimelineEvent {
     uint64_t samplePos;

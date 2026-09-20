@@ -127,6 +127,7 @@ run loopcheck        -    --loopcheck
 run ignorecheck      -    --ignorecheck SCRATCH
 run bundlecheck      -    --bundlecheck SCRATCH
 run primecheck       -    --primecheck
+run xcmdcheck        -    --xcmdcheck
 run smfcheck         -    --smfcheck
 run transportcheck   -    --transportcheck
 run audiocheck       -    --audiocheck

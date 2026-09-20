@@ -106,6 +106,10 @@ QString m4aAdvancedCcLabel(uint8_t cc, uint8_t value)
     const M4aCcInfo info = m4aClassifyCc(cc);
     if (qstrcmp(info.name, "CC") == 0)
         return QStringLiteral("CC %1 = %2 (no m4a meaning)").arg(cc).arg(value);
+    if (cc == 0x1E && (value == 8 || value == 9))
+        return QStringLiteral("XCMD op %1 (%2)")
+            .arg(value)
+            .arg(value == 8 ? QLatin1String("xIECV") : QLatin1String("xIECL"));
     return QStringLiteral("%1 %2").arg(QLatin1String(info.name), m4aFormatCcValue(cc, value));
 }
 
@@ -140,4 +144,17 @@ QString midiKeyName(int key)
 QString midiTimeSigLabel(int numerator, int denomPow2)
 {
     return QStringLiteral("%1/%2").arg(numerator).arg(1 << std::min(denomPow2, 6));
+}
+
+QString m4aXcmdLabel(int command, uint8_t value)
+{
+    switch (command) {
+    case 8:
+        return QStringLiteral("XCMD xIECV = %1 (pseudo-echo volume)").arg(value);
+    case 9:
+        return QStringLiteral("XCMD xIECL = %1 (pseudo-echo length)").arg(value);
+    default:
+        return QStringLiteral("XCMD %1 (ignored: mid2agb has no xIECV / xIECL op selected here)")
+            .arg(value);
+    }
 }
