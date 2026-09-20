@@ -260,7 +260,8 @@ resolves, in this order, because later stages need earlier renames:
    derivation New Song uses) so the user can override. Write `.mid`,
    `writeSongFlags` (with `-G` = final voicegroup name), `registerSong`.
    Then `loadSongByLabel(label, newTab=true)` opens the imported song in a
-   normal editable tab; the bundle tab stays open.
+   normal editable tab; the bundle tab closes and a message
+   confirms the import.
 
 The plan is applied **only after every stage succeeds in dry-run**;
 application order is 1→7 so a failure midway leaves a project that still

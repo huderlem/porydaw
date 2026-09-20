@@ -2056,7 +2056,19 @@ QWidget *MainWindow::createBundleBanner(SongSession &session)
     // No keyboard focus: Space must keep toggling playback in the tab.
     import->setFocusPolicy(Qt::NoFocus);
     SongSession *s = &session;
-    connect(import, &QPushButton::clicked, this, [this, s] { importBundle(*s); });
+    // Queued: a successful import closes this tab, and the button with it,
+    // which must not happen inside its own click.
+    connect(
+        import, &QPushButton::clicked, this,
+        [this, s] {
+            for (const auto &session : m_sessions) {
+                if (session.get() == s) {
+                    importBundle(*s);
+                    return;
+                }
+            }
+        },
+        Qt::QueuedConnection);
     row->addWidget(import);
     session.bundleImportButton = import;
     return banner;
@@ -2087,11 +2099,17 @@ void MainWindow::importBundle(SongSession &session)
     if (dialog.exec() != QDialog::Accepted)
         return;
     QString error;
-    if (!applyBundleImport(dialog.plan(), &error))
+    if (!applyBundleImport(dialog.plan(), &error, &session)) {
         QMessageBox::warning(this, tr("Import Song Bundle"), error);
+        return;
+    }
+    // session may be gone by now (applyBundleImport closed its tab).
+    QMessageBox::information(this, tr("Import Song Bundle"),
+                             tr("The song was successfully imported and saved to the project!"));
 }
 
-bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *error)
+bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *error,
+                                   SongSession *bundleTab)
 {
     if (!m_project.isOpen() ||
         QDir(plan.projectRoot).absolutePath() != QDir(m_project.root()).absolutePath()) {
@@ -2123,8 +2141,15 @@ bool MainWindow::applyBundleImport(const SongBundle::ImportPlan &plan, QString *
         tr("Imported %1 as %2 (voicegroup %3)")
             .arg(plan.manifest.label, plan.label, plan.voicegroup.projectSymbol),
         8000);
-    // The imported song opens in its own editable tab; the bundle tab stays.
+    // The imported song opens in its own editable tab, which replaces the
+    // bundle tab it was imported from: two tabs for one song only confuse.
+    // The bundle tab stays if the song did not open, so something is left.
     loadSongByLabel(plan.label, /*newTab=*/true);
+    if (bundleTab && m_active && m_active != bundleTab && !m_active->bundle &&
+        m_active->doc.label() == plan.label) {
+        destroySession(bundleTab);
+        persistOpenTabs();
+    }
     return true;
 }
 

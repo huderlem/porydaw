@@ -42,7 +42,7 @@ Bundle tabs stay open when you switch projects, and they aren't reopened the nex
 2. Open the bundle, then press **Import into project…** in the tab's banner.
 3. Review the summary. Change the song's **label**, **constant** and **music player** if you like, then press **Import**.
 
-Porydaw copies the song into the project, registers it like **New Song** does, and opens it in a normal, editable tab. The bundle tab stays open.
+Porydaw copies the song into the project, registers it like **New Song** does, and opens it in a normal, editable tab. The read-only bundle tab closes, and a message confirms that the song was imported.
 
 !!! warning "Import writes immediately"
     Like a sample import, a bundle import writes straight into your project and is **not undoable**. Commit your project to git first, then review the diff afterwards.

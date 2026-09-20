@@ -263,8 +263,10 @@ class MainWindow : public QMainWindow
     void refreshBundleBanners();
     void importBundle(SongSession &session);
     // Applies an accepted import plan to the open project, reloads it, and
-    // opens the imported song in a new editable tab (the bundle tab stays).
-    bool applyBundleImport(const SongBundle::ImportPlan &plan, QString *error);
+    // opens the imported song in a new editable tab. bundleTab, the tab the
+    // import came from (none for a plugin's import), closes once it has.
+    bool applyBundleImport(const SongBundle::ImportPlan &plan, QString *error,
+                           SongSession *bundleTab = nullptr);
     // The folder a bundle is read from: a bundle folder itself, or a fresh
     // extraction of a .porysong under *tempDir (allocated only then), which
     // the caller keeps alive for as long as it reads the root.

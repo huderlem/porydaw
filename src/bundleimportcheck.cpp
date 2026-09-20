@@ -837,14 +837,19 @@ int MainWindow::runBundleImportTabCheck(const QString &bundleZip, const QString 
         imported->doc.undoStack()->undo();
     }
 
-    // Importing again from the same tab: all reuse, _2 names, a third tab.
+    // Importing again from the same tab, the way its Import button does: all
+    // reuse, _2 names, and the imported song's tab replaces the bundle tab.
     BundleImportDialog again(tab->root, m_project.root(), players, this);
     check(again.plan().ok() && again.plan().label == QStringLiteral("mus_bundle_2") &&
               BundleImportDialog::summaryText(again.plan()).contains("Samples: 0 new, 7 reused"),
           QStringLiteral("a second import reuses what the first one added"));
-    check(applyBundleImport(again.plan(), &error) && m_tabs->count() == 3 && m_active &&
+    check(applyBundleImport(again.plan(), &error, tab) && m_tabs->count() == 2 && m_active &&
               m_active->doc.label() == QStringLiteral("mus_bundle_2"),
           QStringLiteral("the second import opens mus_bundle_2: ") + error);
+    bool bundleTabLeft = false;
+    for (const auto &session : m_sessions)
+        bundleTabLeft = bundleTabLeft || session->bundle;
+    check(!bundleTabLeft, QStringLiteral("an import from the bundle tab closes that tab"));
 
     while (m_tabs->count() > 0)
         closeTab(m_tabs->count() - 1);
