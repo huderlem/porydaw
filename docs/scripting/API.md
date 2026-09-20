@@ -77,8 +77,8 @@ export function deactivate() {}
 | `musicPlayers()` | `[{name, number, trackCount}]` |
 | `voicegroups()` | `[{arg, name}]`, every voicegroup, as its `-G` arg (`"_abandoned_ship"`) and display name (`"abandoned_ship"`) |
 | `createVoicegroup(name, {copyFrom?})` | writes `sound/voicegroups/<name>.inc` (can be copied from an existing voicegroup) |
-| `exportBundle(label, path)` | writes the song as a `.porysong` song bundle (same as `File → Export Song Bundle`). A song open in a tab exports with its unsaved edits, any other song from disk. `path` follows the `porydaw.io` sandbox; a name without a suffix gets `.porysong`, any other suffix throws. Returns `{path, samples}` (`path` is the file written) |
-| `importBundle(path, {label?, constant?, player?})` | imports a `.porysong` file (or bundle folder) into the project and opens the song in a new tab, like the bundle tab's `Import into project…`. Omitted options are chosen by the import (`<label>_2` when the label is taken); a given label or constant that is taken throws, as does anything else the import dialog would refuse. Reloads the project, and is not undoable. Returns `{label, constant, player, voicegroup, warnings}` |
+| `exportBundle(label, path)` | writes the song as a `.porysong` song bundle (same as `File → Export Song Bundle`). |
+| `importBundle(path, {label?, constant?, player?})` | imports a `.porysong` file (or bundle folder) into the project and opens the song in a new tab, like the bundle tab's `Import into project…`. |
 
 ### `porydaw.song`
 
@@ -89,7 +89,7 @@ export function deactivate() {}
 | Member | |
 |---|---|
 | `loaded` | whether any song is currently loaded |
-| `readOnly` | whether the song is a read-only song bundle tab: edits, `save()` and `storage.song` writes throw |
+| `readOnly` | whether the song is a read-only song bundle |
 | `revision` | increments on every edit/undo/redo to the song |
 | `label` | the song's name/label |
 | `midPath` | the filepath to the song's midi file |
@@ -462,8 +462,7 @@ The `register` spec:
 `porydaw.storage.song` has the same four calls for values that belong to the
 **song**: they live in the song's sidecar (`<project>/.porydaw/<song>.json`,
 under `plugins` → the plugin id), next to the view state, and are written
-immediately. A read-only song bundle tab has no sidecar: there `get` returns
-`fallback`, `keys()` is empty, and `set` / `remove` throw.
+immediately.
 
 | Member | |
 |---|---|

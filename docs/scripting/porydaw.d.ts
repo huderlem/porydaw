@@ -155,7 +155,7 @@ declare namespace porydaw {
             BEND: number; TEMPO: number; VOICE: number;
         };
         const loaded: boolean;
-        /** True in a read-only song bundle tab: edits, `save()` and `storage.song` writes throw. */
+        /** True in a read-only song bundle tab **/
         const readOnly: boolean;
         const revision: number;
         const label: string;
@@ -618,7 +618,7 @@ declare namespace porydaw {
         function set(key: string, value: any): void;
         function remove(key: string): void;
         function keys(): string[];
-        /** Per-song values, kept in the song's sidecar. A read-only song bundle tab has no sidecar: `get` returns `fallback`, `keys()` is empty, and `set` / `remove` throw. */
+        /** Per-song values, kept in the song's sidecar. */
         namespace song {
             function get<T>(key: string, fallback?: T): T;
             function set(key: string, value: any): void;
