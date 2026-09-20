@@ -669,6 +669,32 @@ void runBundleImportSections(const QString &scratchDir, int *failures)
                QStringLiteral("a voice line carrying a second directive refuses: ") +
                    describePlan(plan));
 
+        // The same from a symbol argument and from a cry line, which only the
+        // parser's plain-symbol rule catches.
+        const QString inSymbol = path("smuggled_symbol_bundle");
+        copyTree(bundle, inSymbol);
+        drums = readFile(inSymbol + QStringLiteral("/sound/voicegroups/test_drumset.inc"));
+        drums.replace("DirectSoundWaveData_kick,",
+                      "DirectSoundWaveData_kick ; .incbin \"src/secret.c\",");
+        writeFile(inSymbol + QStringLiteral("/sound/voicegroups/test_drumset.inc"), drums);
+        plan = SongBundle::makeImportPlan(inSymbol, root);
+        expect(!plan.ok() &&
+                   plan.refusals.join(QLatin1Char(' ')).contains("voicegroup_test_drumset"),
+               QStringLiteral("a second directive inside a symbol argument refuses: ") +
+                   describePlan(plan));
+
+        const QString inCry = path("smuggled_cry_bundle");
+        copyTree(bundle, inCry);
+        QByteArray topGroup =
+            readFile(inCry + QStringLiteral("/sound/voicegroups/bundle_song.inc"));
+        topGroup.replace("\tcry Cry_Testmon", "\tcry Cry_Testmon ; .incbin \"src/secret.c\"");
+        writeFile(inCry + QStringLiteral("/sound/voicegroups/bundle_song.inc"), topGroup);
+        plan = SongBundle::makeImportPlan(inCry, root);
+        expect(!plan.ok() &&
+                   plan.refusals.join(QLatin1Char(' ')).contains("voicegroup_bundle_song"),
+               QStringLiteral("a cry line carrying a second directive refuses: ") +
+                   describePlan(plan));
+
         const QString broken = path("broken_bundle");
         copyTree(bundle, broken);
         drums = readFile(broken + QStringLiteral("/sound/voicegroups/test_drumset.inc"));

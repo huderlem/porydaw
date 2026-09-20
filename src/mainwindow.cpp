@@ -15,6 +15,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontDatabase>
 #include <QFontMetrics>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -112,6 +113,39 @@ const QString kLastSongLabelKey = QStringLiteral("lastSongLabel");
 const QString kVelocityColorsKey = QStringLiteral("velocityNoteColors");
 const QString kNoteNamesKey = QStringLiteral("noteNames");
 const QString kVelocityLaneKey = QStringLiteral("velocityLane");
+// A warning box for an error whose first line is the explanation and whose
+// other lines list what it is about: unindented lines name a place, indented
+// ones quote source text (set in a fixed font, unwrapped). The error itself
+// stays plain text because scripts and the harnesses read it too.
+void showListedWarning(QWidget *parent, const QString &title, const QString &error)
+{
+    const qsizetype split = error.indexOf(QLatin1Char('\n'));
+    if (split < 0) {
+        QMessageBox::warning(parent, title, error);
+        return;
+    }
+    const QString fixed = QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
+    QString list;
+    for (const QString &line : error.mid(split + 1).split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        if (line.startsWith(QLatin1Char(' ')))
+            list += QStringLiteral("<div style=\"margin-left:16px; "
+                                   "font-family:'%1'; white-space:pre\">%2</div>")
+                        .arg(fixed, line.trimmed().toHtmlEscaped());
+        else {
+            // Bold up to a parenthesised aside, so a long one stays readable.
+            const qsizetype aside = line.indexOf(QStringLiteral(" ("));
+            const QString name = aside < 0 ? line : line.left(aside);
+            list += QStringLiteral("<div style=\"margin-top:8px\"><b>%1</b>%2</div>")
+                        .arg(name.toHtmlEscaped(),
+                             aside < 0 ? QString() : line.mid(aside).toHtmlEscaped());
+        }
+    }
+    QMessageBox box(QMessageBox::Warning, title, error.left(split), QMessageBox::Ok, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setInformativeText(list);
+    box.exec();
+}
+
 // Records a plugin dock's close button (see MainWindow::addPluginDock).
 class PluginDockCloseRecorder : public QObject
 {
@@ -2438,7 +2472,7 @@ void MainWindow::exportBundle()
     int samples = 0;
     QString error;
     if (!exportBundleByLabel(session->doc.label(), path, &samples, &error)) {
-        QMessageBox::warning(this, tr("Export Song Bundle"), error);
+        showListedWarning(this, tr("Export Song Bundle"), error);
         return;
     }
     statusBar()->showMessage(

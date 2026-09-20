@@ -359,6 +359,21 @@ bool Exporter::stage(const QString &destDir, QString *error)
     const QSet<int> used = usedPrograms(m_doc.smf());
     References refs;
     QByteArray topBytes;
+    // Voice lines the bundle would carry that import refuses. collectLine
+    // can't see their samples, even where the loader's laxer sscanf still
+    // plays the line.
+    QStringList unportable;
+    // where: the slot as the song sees it, which for an overflow line is not
+    // the line's own (that one counts from the group it was read out of).
+    const auto collectVoice = [&](const QString &where, const VgSourceLine &line, bool recurse) {
+        if (line.kind == VgLineKind::Broken)
+            unportable.append(QStringLiteral("%1:\n    %2")
+                                  .arg(where, QString::fromUtf8(contentOf(line.raw)).trimmed()));
+        collectLine(line, recurse, &refs);
+    };
+    const auto voiceAt = [](const QString &symbol, int slot) {
+        return QStringLiteral("%1, voice %2").arg(symbol).arg(slot);
+    };
     for (const VgSourceLine &line :
          VoicegroupSource::parseSource(m_vgSource->renderPreview()).lines) {
         if (isVoiceLine(line) && !used.contains(line.slot)) {
@@ -368,7 +383,7 @@ bool Exporter::stage(const QString &destDir, QString *error)
         } else {
             topBytes += line.raw;
             if (isVoiceLine(line))
-                collectLine(line, /*recurse=*/true, &refs);
+                collectVoice(voiceAt(vgSymbol, line.slot), line, /*recurse=*/true);
         }
         topBytes += '\n';
     }
@@ -406,9 +421,11 @@ bool Exporter::stage(const QString &destDir, QString *error)
             if (!isVoiceLine(line))
                 continue;
             endSlot = std::max(endSlot, line.slot + 1);
-            collectLine(line, /*recurse=*/true, &refs);
+            collectVoice(voiceAt(symbol, line.slot), line, /*recurse=*/true);
         }
+        int overflowSlot = endSlot - 1;
         for (const VgSourceLine &line : continuationLines(m_root, sub, endSlot)) {
+            overflowSlot++;
             // The loader never follows a keysplit / drumkit out of an
             // overflow region (the hardware doesn't substitute twice, and
             // include-order cycles would recurse forever). Appended to the
@@ -421,7 +438,11 @@ bool Exporter::stage(const QString &destDir, QString *error)
                 continue;
             }
             bytes += line.raw + '\n';
-            collectLine(line, /*recurse=*/false, &refs);
+            collectVoice(QStringLiteral("%1 (read past the group's end: voice %2 of a "
+                                        "voicegroup after it)")
+                             .arg(voiceAt(symbol, overflowSlot))
+                             .arg(line.slot),
+                         line, /*recurse=*/false);
         }
         if (!addGroupFile(symbol, bytes))
             return fail(
@@ -430,6 +451,11 @@ bool Exporter::stage(const QString &destDir, QString *error)
                     .arg(groupFileFolded.value(fileNameFor(symbol).toCaseFolded()), symbol));
         bundledSubGroups.append(symbol);
     }
+    if (!unportable.isEmpty())
+        return fail(QStringLiteral("Porydaw couldn't parse these voice lines, so the samples "
+                                   "they use can't be collected. Check each for a missing "
+                                   "comma or a stray argument:\n%1")
+                        .arg(unportable.join(QLatin1Char('\n'))));
 
     // ---- DirectSound samples, synths and cries ----
     QHash<QString, QString> incbins;

@@ -728,6 +728,17 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         QFile::rename(snd + QStringLiteral("voicegroups/drumsets/test.bak"),
                       snd + QStringLiteral("voicegroups/drumsets/test.inc"));
 
+        // A voice line gas assembles (macro arguments may be space-separated)
+        // but the loader can't read: import would refuse it, so export does.
+        const QString stringsInc = snd + QStringLiteral("voicegroups/keysplits/strings.inc");
+        const QByteArray stringsBefore = readFileBytes(stringsInc);
+        QByteArray noComma = stringsBefore;
+        noComma.replace("DirectSoundWaveData_strings_hi,", "DirectSoundWaveData_strings_hi");
+        writeFile(stringsInc, noComma);
+        refuses("unreadable", {QStringLiteral("voicegroup_strings_keysplit, voice 1"),
+                               QStringLiteral("DirectSoundWaveData_strings_hi 255")});
+        writeFile(stringsInc, stringsBefore);
+
         SongBundle::Exporter restored(root, song.doc, &song.vg);
         restored.setRegistrationHints(QStringLiteral("MUS_BUNDLE"), QStringLiteral("MUS_PLAYER"));
         error.clear();
@@ -828,6 +839,23 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         } else {
             expect(false, tag + QStringLiteral(": bundle drumkit resolves"));
         }
+
+        // An unreadable overflow line is named by the slot the drumset sees
+        // it at, not only by its slot in the group it was read out of.
+        const QString overflowInc =
+            labelRoot + (monolithic ? QStringLiteral("/sound/voice_groups.inc")
+                                    : QStringLiteral("/sound/voicegroups/voicegroup102.inc"));
+        QByteArray noComma = readFileBytes(overflowInc);
+        noComma.replace("DirectSoundWaveData_overflow,", "DirectSoundWaveData_overflow");
+        writeFile(overflowInc, noComma);
+        SongBundle::Exporter broken(labelRoot, song.doc, &song.vg);
+        error.clear();
+        expect(!broken.stage(path(monolithic ? "mono_broken" : "labels_broken"), &error) &&
+                   error.contains(QStringLiteral("voicegroup101, voice 3 (")) &&
+                   error.contains(QStringLiteral("voice 0 of a voicegroup after it")) &&
+                   error.contains(QStringLiteral("\n    voice_directsound 60, 0, "
+                                                 "DirectSoundWaveData_overflow 255")),
+               tag + QStringLiteral(": broken overflow line names its slot, got: ") + error);
     }
 
     // ---- real project corpus (optional) -------------------------------------------

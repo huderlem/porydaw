@@ -130,8 +130,7 @@ struct GroupSource {
     QList<QByteArray> body;     // lines after the declaration, '\r' dropped
     QList<VgSourceLine> voices; // the voice lines, in slot order
     int startingNote = 0;
-    // A voice line carries more than a macro and its arguments, or its
-    // arguments don't parse (so its symbols can't be resolved or renamed).
+    // A voice line is VgLineKind::Broken.
     bool suspect = false;
 };
 
@@ -174,10 +173,11 @@ bool readGroup(const QByteArray &bytes, GroupSource *out)
         const QByteArray content = contentOf(raw);
         if (line.slot < 0 && !content.isEmpty())
             continue;
-        // A voice line is a macro word and plain arguments. Quotes or a
-        // statement separator would smuggle a second directive into the
-        // project's sources.
-        if (content.contains('"') || content.contains(';') || line.kind == VgLineKind::Broken)
+        // A voice line the parser can't read is one the loader leaves
+        // silent, and its symbols can't be resolved or renamed. That also
+        // covers a quote or statement separator, which would smuggle a second
+        // directive into the project's sources.
+        if (line.kind == VgLineKind::Broken)
             group.suspect = true;
         group.body.append(raw);
         if (line.slot >= 0) {

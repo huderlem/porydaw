@@ -88,6 +88,22 @@ bool isIntArg(const QByteArray &trimmed)
     return true;
 }
 
+// A plain assembler symbol. Anything else (an expression, a quote, a
+// statement separator) is not something the loader resolves, and would not
+// survive being renamed or copied into another project's sources.
+bool isSymbolArg(const QByteArray &trimmed)
+{
+    if (trimmed.isEmpty() || (trimmed[0] >= '0' && trimmed[0] <= '9'))
+        return false;
+    for (const char c : trimmed) {
+        const bool word =
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
+        if (!word)
+            return false;
+    }
+    return true;
+}
+
 // Mirrors the loader's strip_comment + rtrim + ltrim: fills the content
 // region [contentStart, contentEnd) of a raw line (which keeps its '\r').
 void contentBounds(const QByteArray &raw, int *contentStart, int *contentEnd)
@@ -902,7 +918,10 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
         line.slot = nextSlot++;
         voicesInSection++;
         if (isReadOnlyVoice) {
-            line.kind = VgLineKind::ReadOnlyVoice;
+            // The macro word and one symbol, nothing more.
+            const QList<QByteArray> tokens = text.simplified().split(' ');
+            line.kind = tokens.size() == 2 && isSymbolArg(tokens.at(1)) ? VgLineKind::ReadOnlyVoice
+                                                                        : VgLineKind::Broken;
         } else {
             // Tokenize the arguments, keeping every byte for re-rendering.
             const int prefixLen = int(qstrlen(matched->word)) + (matched->requireSpace ? 1 : 0);
@@ -918,7 +937,7 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
                 QVector<QByteArray> values(expected);
                 for (int a = 0; a < expected; a++) {
                     values[a] = line.argPieces.at(a).trimmed();
-                    valid = valid && (macroArgIsSymbol(matched->macro, a) ? !values[a].isEmpty()
+                    valid = valid && (macroArgIsSymbol(matched->macro, a) ? isSymbolArg(values[a])
                                                                           : isIntArg(values[a]));
                 }
                 if (valid) {

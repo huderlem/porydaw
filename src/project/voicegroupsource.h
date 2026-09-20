@@ -171,8 +171,9 @@ enum class VgLineKind {
     Other,         // comment / label / directive — verbatim
     Header,        // voice_group NAME[, startingNote]
     Editable,      // one of the VgMacro macros, args parsed OK
-    ReadOnlyVoice, // cry / cry_reverse
-    Broken,        // recognized macro prefix but unparseable args — verbatim
+    ReadOnlyVoice, // cry / cry_reverse and one plain symbol
+    Broken,        // recognized macro prefix, but not plain integer / symbol
+                   // args of the right count — verbatim
 };
 
 // One line of voicegroup source as parseSource() classifies it.
