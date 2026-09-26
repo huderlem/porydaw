@@ -566,7 +566,8 @@ QString constantForLabel(const QString &label)
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
                                     const QString &constant, const QString &newVoicegroup,
-                                    const QString &ownMidPath)
+                                    const QString &ownMidPath,
+                                    const QSet<QString> *declaredVoicegroups)
 {
     const auto tr = [](const char *text) {
         return QCoreApplication::translate("SongRegistry", text);
@@ -623,7 +624,9 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
     if (!newVoicegroup.isEmpty() &&
         (reserved.voicegroups.contains(newVoicegroup) ||
          QFileInfo::exists(VoicegroupSource::newVoicegroupPath(projectRoot, newVoicegroup)) ||
-         VoicegroupSource::isDeclared(projectRoot, QStringLiteral("_") + newVoicegroup))) {
+         (declaredVoicegroups
+              ? declaredVoicegroups->contains(QStringLiteral("voicegroup_") + newVoicegroup)
+              : VoicegroupSource::isDeclared(projectRoot, QStringLiteral("_") + newVoicegroup)))) {
         conflicts.voicegroup =
             tr("A voicegroup named voicegroup_%1 already exists.").arg(newVoicegroup);
     }

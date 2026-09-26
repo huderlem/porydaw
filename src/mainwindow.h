@@ -258,6 +258,10 @@ class MainWindow : public QMainWindow
     // writes none). Then loads resolve to the project copy and the draft
     // folder goes. Skips what an earlier attempt already did.
     bool commitDraftVoicegroup(SongSession &session, QString *error);
+    // The commit found the cfg switched away from the draft's new
+    // voicegroup: drop it from the draft and rewrite its -G in the undo
+    // history to the committed one.
+    void abandonDraftVoicegroup(SongSession &session);
     // The Rename dialog's voicegroup half: the draft's unwritten voicegroup
     // takes newName — its file in the draft folder, its voice_group/label
     // symbol, the source, the voice edits' target in the undo history and

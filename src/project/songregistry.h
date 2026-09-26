@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -151,10 +152,16 @@ QString constantForLabel(const QString &label);
 // project reload lists for it (DecompProject::discoverUnregisteredSongs gives
 // it the draft's label and a label-derived constant) counts as taken. Only
 // that exact path is waived; song_table.inc and songs.h still decide.
+//
+// declaredVoicegroups (optional) is VoicegroupSource::declaredSymbols,
+// computed once by a caller that checks many names in a row (a dialog, per
+// keystroke); without it the voicegroup symbol is looked up on disk
+// (VoicegroupSource::isDeclared).
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
                                     const QString &constant, const QString &newVoicegroup,
-                                    const QString &ownMidPath = QString());
+                                    const QString &ownMidPath = QString(),
+                                    const QSet<QString> *declaredVoicegroups = nullptr);
 
 // Computes the registration lines against the files as they are on disk
 // right now, matching each file's existing indentation/alignment.

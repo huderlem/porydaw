@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QPair>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -300,6 +301,10 @@ class VoicegroupSource
     // any layout) — a name can be taken without sound/voicegroups/<name>.inc
     // existing (a multi-voicegroup file, a monolithic layout). Reads the disk.
     static bool isDeclared(const QString &projectRoot, const QString &voicegroupArg);
+    // Every "voicegroup<arg>" symbol any voicegroup file declares (what
+    // isDeclared tests one at a time): one full read, for callers that test
+    // many names in a row (the Rename dialog, per keystroke).
+    static QSet<QString> declaredSymbols(const QString &projectRoot);
 
     // The bytes of a new sound/voicegroups/<name>.inc matching the siblings'
     // header style and line endings. copyFromFile/copySectionLabel name an

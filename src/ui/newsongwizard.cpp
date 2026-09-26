@@ -20,8 +20,10 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <optional>
 
 #include "project/songregistry.h"
+#include "project/voicegroupsource.h"
 #include "ui/layout.h"
 
 // "track 4" / "tracks 4 through 9" — ranges stay grammatical when they
@@ -100,10 +102,16 @@ class SongNameFields
         m_nameHint->clear();
         if (label().isEmpty() || constant().isEmpty())
             return false;
-        const QStringList conflicts =
-            SongRegistry::checkNewSongNames(m_project->root(), m_project->songs(), m_reserved,
-                                            label(), constant(), newVoicegroup, m_ownMidPath)
-                .messages();
+        // The voicegroup symbols are read once per dialog, not per
+        // keystroke (every voicegroup file, parsed). A file changed while the
+        // dialog is open doesn't matter: the commit checks again.
+        if (!newVoicegroup.isEmpty() && !m_declaredVoicegroups)
+            m_declaredVoicegroups = VoicegroupSource::declaredSymbols(m_project->root());
+        const QStringList conflicts = SongRegistry::checkNewSongNames(
+                                          m_project->root(), m_project->songs(), m_reserved,
+                                          label(), constant(), newVoicegroup, m_ownMidPath,
+                                          m_declaredVoicegroups ? &*m_declaredVoicegroups : nullptr)
+                                          .messages();
         if (conflicts.isEmpty())
             return true;
         m_nameHint->setText(conflicts.first());
@@ -122,6 +130,7 @@ class SongNameFields
     QLineEdit *m_constant;
     QLabel *m_nameHint;
     bool m_constantEdited;
+    mutable std::optional<QSet<QString>> m_declaredVoicegroups; // lazily, by check()
 };
 
 class IdentityPage : public QWizardPage

@@ -3,6 +3,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
@@ -1127,6 +1128,31 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         const SongInfo *song = songNamed(name);
         check(song && song->registered && song->cfg.voicegroupArg == cfg.voicegroupArg,
               "the switched draft's -G does not name the existing voicegroup");
+        // Undoing the switches (review A) must not bring back the -G of a
+        // voicegroup that was never written: the history now names the
+        // committed one, so every undo keeps it, and the next save writes
+        // no draft -G into midi.cfg.
+        const QString abandonedArg = QStringLiteral("_") + name;
+        check(!voicegroupChoices(*s).contains(abandonedArg),
+              "the abandoned voicegroup is still offered as a choice");
+        bool kept = true;
+        while (s->doc.undoStack()->canUndo()) {
+            s->doc.undoStack()->undo();
+            kept = kept && s->doc.cfg().voicegroupArg == cfg.voicegroupArg &&
+                   s->appliedVoicegroupArg == cfg.voicegroupArg;
+        }
+        check(kept, "undoing a committed draft's settings edits restored its abandoned -G");
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(saveSession(*s), "saving the undone committed draft failed");
+        }
+        const QByteArray cfgText = readBytes(midiDir + QStringLiteral("midi.cfg"));
+        check(!cfgText.isEmpty() &&
+                  !cfgText.toLower().contains(QStringLiteral("-g%1").arg(abandonedArg).toUtf8()),
+              "saving after the undo wrote the abandoned voicegroup's -G into midi.cfg");
+        check(reloadProject(&error) && songNamed(name) &&
+                  songNamed(name)->cfg.voicegroupArg == cfg.voicegroupArg,
+              "after the undo and save the song's -G is not the existing voicegroup");
     }
 
     // 16. voicegroup_<name> declared in another file (review E), so the
@@ -1241,6 +1267,133 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
               "the sweep removed a draft folder another process holds");
         heldLock.reset();
         QDir(held).removeRecursively();
+    }
+
+    // 18. A voicegroup commit that failed after the .inc landed (review E):
+    // the .mid can't be written (the midi directory made read-only; skipped
+    // with a note where the chmod doesn't bite). The retry, with no changes,
+    // commits under the same names with no Rename dialog and leaves the
+    // .inc and its include line as the first attempt wrote them. 18b: the
+    // same failure on a draft switched away from its voicegroup — the
+    // voicegroup is abandoned for good (review A) even though the draft
+    // stays a draft.
+    const QString midiDirPath = QDir::cleanPath(midiDir);
+    const QFileDevice::Permissions midiPerms = QFile::permissions(midiDirPath);
+    const auto lockMidiDir = [&]() {
+        if (!QFile::setPermissions(midiDirPath, QFileDevice::ReadOwner | QFileDevice::ExeOwner |
+                                                    QFileDevice::ReadUser | QFileDevice::ExeUser |
+                                                    QFileDevice::ReadGroup | QFileDevice::ExeGroup |
+                                                    QFileDevice::ReadOther | QFileDevice::ExeOther))
+            return false;
+        QFile probe(midiDir + QStringLiteral(".draftcheck_probe"));
+        if (probe.open(QIODevice::WriteOnly)) {
+            probe.close();
+            probe.remove();
+            QFile::setPermissions(midiDirPath, midiPerms);
+            return false;
+        }
+        return true;
+    };
+    // Save with the midi directory locked: fails, reporting its error.
+    const auto failedSave = [&](SongSession *session) {
+        if (!lockMidiDir())
+            return false;
+        {
+            PromptAnswerer failBox(QMessageBox::Cancel, modalFail);
+            failBox.onDialog(QStringLiteral("Save Song"),
+                             [](QDialog *dialog) { dialog->reject(); });
+            check(!saveSession(*session), "saving with an unwritable midi directory succeeded");
+            check(failBox.handled(QStringLiteral("Save Song")),
+                  "the failed .mid write did not report its error");
+        }
+        QFile::setPermissions(midiDirPath, midiPerms);
+        return true;
+    };
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg4");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        const QString midPath = midiDir + name + QStringLiteral(".mid");
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG4"), player,
+                                 newVgCfg(name), name, &error),
+                   "the fourth voicegroup draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        editVoices(s);
+        if (!failedSave(s)) {
+            std::printf("draftcheck: note: the midi directory stays writable after chmod (root "
+                        "or a file system that ignores permissions); section 18 skipped\n");
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            closeTab(m_tabs->indexOf(s->view));
+        } else {
+            const QByteArray first = readBytes(target);
+            const QDateTime firstTime = QFileInfo(target).lastModified();
+            check(s->isDraft() && s->draft && s->draft->voicegroupWritten &&
+                      first.contains("voice_square_2") && includeCount(name) == 1,
+                  "the failed commit did not land the voicegroup file and its include line");
+            check(!QFile::exists(midPath) && s->draft->wroteMidPath.isEmpty(),
+                  "the failed commit wrote the .mid");
+            check(!QFileInfo::exists(folder) && s->vgSource->filePath() == target &&
+                      !s->editsDraftVoicegroup(),
+                  "after the voicegroup landed the session still edits the draft copy");
+            {
+                PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+                check(saveSession(*s), "retrying the failed voicegroup commit failed");
+            }
+            const SongInfo *song = songNamed(name);
+            check(!s->isDraft() && s->doc.label() == name && song && song->registered &&
+                      song->cfg.voicegroupArg == QStringLiteral("_") + name &&
+                      QFile::exists(midPath),
+                  "the retry did not commit under the original names");
+            check(readBytes(target) == first && QFileInfo(target).lastModified() == firstTime &&
+                      includeCount(name) == 1,
+                  "the retry rewrote the voicegroup file or its include line");
+        }
+    }
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg5");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG5"), player,
+                                 newVgCfg(name), name, &error),
+                   "the fifth voicegroup draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        editVoices(s);
+        SongCfg away = s->doc.cfg();
+        away.voicegroupArg = cfg.voicegroupArg;
+        s->doc.setCfg(away);
+        if (!failedSave(s)) {
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            closeTab(m_tabs->indexOf(s->view));
+        } else {
+            const QString arg = QStringLiteral("_") + name;
+            check(s->isDraft() && s->draft && s->draft->newVoicegroup.isEmpty() &&
+                      !QFileInfo::exists(folder) && !QFile::exists(target) &&
+                      includeCount(name) == 0,
+                  "a failed commit did not abandon the switched-away voicegroup");
+            check(!voicegroupChoices(*s).contains(arg) &&
+                      !reservedSongNames(nullptr).voicegroups.contains(name),
+                  "the abandoned voicegroup is still offered or reserved");
+            bool kept = true;
+            while (s->doc.undoStack()->canUndo()) {
+                s->doc.undoStack()->undo();
+                kept = kept && s->doc.cfg().voicegroupArg == cfg.voicegroupArg;
+            }
+            check(kept, "undo on a draft restored its abandoned voicegroup's -G");
+            {
+                PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+                check(saveSession(*s), "retrying the switched-away draft failed");
+            }
+            const SongInfo *song = songNamed(name);
+            check(!s->isDraft() && song && song->registered &&
+                      song->cfg.voicegroupArg == cfg.voicegroupArg && !QFile::exists(target),
+                  "the retried switched-away draft did not commit with the existing -G");
+        }
     }
 
     if (failures == 0)

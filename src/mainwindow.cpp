@@ -1558,6 +1558,12 @@ void MainWindow::maybeRefreshVoicegroup(SongSession &session)
     // its unsaved edits — last save wins, as with any two-editor overlap.
     if (!session.vgSource || session.vgSource->dirty())
         return;
+    // A draft's unwritten voicegroup has no file of its own yet: a project
+    // file created under its name meanwhile (the dock's New Voicegroup, a
+    // script, a bundle import) is someone else's, and the commit's name
+    // check catches it.
+    if (session.editsDraftVoicegroup())
+        return;
     const QDateTime onDisk = QFileInfo(session.vgSource->filePath()).lastModified();
     if (!onDisk.isValid() || onDisk == session.vgFileTime)
         return;
@@ -1580,6 +1586,9 @@ void MainWindow::refreshSessionsAfterVgSave(const QString &filePath, SongSession
         SongSession *session = owned.get();
         if (session == except || !session->vgSource || session->vgSource->filePath() != filePath)
             continue;
+        if (session->editsDraftVoicegroup())
+            continue; // not this file's: see maybeRefreshVoicegroup
+
         if (session->vgSource->dirty())
             continue; // unsaved edits stay; last save wins, as documented
         QString tried;
@@ -2412,6 +2421,13 @@ void MainWindow::onDocumentChanged(SongSession &session)
             session.voicegroup = vg;
             openVoicegroupSource(session, cfg);
             replayVoiceEdits(session);
+            // Normally a no-op rewrite: every edit applied to the draft's
+            // voicegroup already synced its folder copy (onVoiceEdited),
+            // and replay can't apply one the folder lacks. Kept as the one
+            // place that re-asserts folder == source after replayVoiceEdits
+            // (which changes the source without syncing) — it also retries
+            // an earlier sync whose write failed — so later loads (a save's
+            // reload, the next switch) read what the source holds.
             syncDraftVoicegroupFile(session);
             session.view->setVoicegroup(session.voicegroup);
             if (active)
@@ -3465,6 +3481,9 @@ bool MainWindow::renameDraftVoicegroup(SongSession &session, const QString &newN
             return false;
         }
     }
+    // Never the same file on a case-insensitive file system: the names are
+    // song labels, which the name fields hold to [a-z_][a-z0-9_]*, so two
+    // different names never differ only by case.
     QFile::remove(oldFile);
 
     draft->newVoicegroup = newName;
@@ -3503,9 +3522,11 @@ bool MainWindow::commitDraftVoicegroup(SongSession &session, QString *error)
     const QString root = m_project.root();
     if (!draft->voicegroupWritten) {
         // Switched to another voicegroup since: nothing of this one is
-        // written, and its folder goes with the draft.
-        if (session.doc.cfg().voicegroupArg != draft->voicegroupArg())
+        // written, ever — it is dropped from the draft now.
+        if (session.doc.cfg().voicegroupArg != draft->voicegroupArg()) {
+            abandonDraftVoicegroup(session);
             return true;
+        }
         if (!session.editsDraftVoicegroup()) {
             *error = tr("The new voicegroup %1 could not be opened for saving.")
                          .arg(draft->newVoicegroup);
@@ -3536,6 +3557,25 @@ bool MainWindow::commitDraftVoicegroup(SongSession &session, QString *error)
     }
     // Idempotent: a retry after a failure here adds the line once.
     return VoicegroupSource::appendIncludeLine(root, draft->newVoicegroup, error);
+}
+
+void MainWindow::abandonDraftVoicegroup(SongSession &session)
+{
+    SongDraft *draft = session.draft.get();
+    // Undoing a settings edit must not bring back the -G of a voicegroup
+    // that will never be written: the song would fail to load and its next
+    // save would put an undefined symbol into midi.cfg. The settings edits
+    // in the history name the committed voicegroup instead (a switch to or
+    // from the abandoned one becomes a -G no-op); the voice edits made on
+    // it stay behind as inert entries (no voicegroup has their load name).
+    session.doc.renameDraftVoicegroupArg(draft->voicegroupArg(), session.doc.cfg().voicegroupArg);
+    // No longer choosable, reserved, or searched by the loader.
+    draft->newVoicegroup.clear();
+    draft->voicegroupTarget.clear();
+    draft->voicegroupBytes.clear();
+    draft->removeFolder();
+    if (&session == m_active)
+        updateVoicegroupBrowser();
 }
 
 bool MainWindow::createDraftFolder(SongDraft &draft, QString *error)

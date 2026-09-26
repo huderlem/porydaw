@@ -116,7 +116,10 @@ class SongDocument : public QObject
     // Renames a draft's new voicegroup (the same Rename, PLAN step 3): every
     // cfg that names oldArg as its -G voicegroup — the current one, the
     // saved one, and those the undo history's settings edits restore — names
-    // newArg instead. Drafts only; no revision bump, no undo entry.
+    // newArg instead. Also used when the commit abandons the voicegroup
+    // (the cfg switched away): newArg is then the committed -G, so those
+    // settings edits no longer change it. Drafts only; no revision bump, no
+    // undo entry.
     void renameDraftVoicegroupArg(const QString &oldArg, const QString &newArg);
     bool save(QString *error);
 

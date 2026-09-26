@@ -148,6 +148,9 @@ affects **before** starting the next step.
   whether any voicegroup file declares `voicegroup_<name>` — a full,
   substring-gated read of the voicegroup files, so the wizard, the Rename
   dialog and the commit all see a symbol declared inside another file.
+  (Step 3 review B: the Rename dialog's per-keystroke check instead reads
+  `VoicegroupSource::declaredSymbols` once per dialog and passes the set
+  through `checkNewSongNames`' optional `declaredVoicegroups`.)
   `resolveDraftNameConflicts` passes the new voicegroup only while the
   commit would write it: pending and still named by the cfg.)*
 - Harnesses that drive `MainWindow` (`runTabCheck`, `runVgSaveCheck`,
@@ -423,6 +426,13 @@ possible):
       the draft's voicegroup name first. The commit's name check then
       catches it (Rename), so nothing is overwritten; decide whether
       either should refuse a reserved name up front.
+- [ ] **New voicegroup vs. other writers and scripts** (step 3 review,
+      H; extends the item above): `createVoicegroupNamed`, bundle import,
+      scripting `project.voicegroups()` and `edit.setSettings({voicegroup})`
+      (`scriptapi.cpp` ~2336, ~2858) use the raw catalog, not
+      `voicegroupChoices` — a script can't switch a draft back to its own
+      new voicegroup, and the other writers don't refuse a draft-reserved
+      name up front (the commit's Rename still catches it).
 - [ ] **Failed commit after the `.mid` write** (review 2026-09-26, E):
       `commitDraft` calls `doc.save()`, which writes the `.mid` and then the
       flags; if the flags write fails, the `.mid` stays on disk while the
@@ -432,6 +442,23 @@ possible):
       the file did not exist before the commit), or the close prompt says
       the `.mid` was already written. Add a harness case with an unwritable
       `midi.cfg`/`songs.mk`.
+      *(Step 3 review, F: the same holds for the new voicegroup. Once
+      `vgSource->save()` succeeds, `voicegroupWritten` is set and the draft
+      folder removed, so a commit that then fails (the `.mid` or flags
+      write) and is followed by Discard leaves
+      `sound/voicegroups/<name>.inc` and its `voice_groups.inc` include line
+      orphaned. Decide roll-back vs. warn-on-Discard for the `.mid` and the
+      `.inc` together; `--draftcheck` section 18 already produces that
+      state.)*
+- [ ] **Voicegroup symbols the name check can't see** (step 3 review, G;
+      known limitation, consistent with `VoicegroupSource::open()` and the
+      catalog): `isDeclared` / `declaredSymbols` / the catalog scan only
+      `.inc` files and the `voicegroup…::` / `voice_group` forms. They miss
+      `sound/voicegroups/<name>.s` (the loader resolves it,
+      `voicegroup_loader.c:2108`) and single-colon `voicegroup_x:` labels
+      (`bundleimport.cpp:140` accepts them), so such a name can pass the
+      check and fail the ROM build on a duplicate symbol. Fix all four
+      together if ever.
 - [ ] **Register Song after a failed reload** (review 2026-09-26, F): if
       `reloadProjectOrWarn()` fails inside `commitDraft`, the committed
       session keeps `songId == -1`, so Register Song stays disabled even
@@ -755,3 +782,60 @@ and why, what's still owed.
     No harness case for a crash-stale lock (a dead PID): faking another
     process's lock file is fragile across Qt's lock-info format; the
     unlocked-folder case covers the removal path.
+  - **Review fixes (2026-09-26).** A code review of step 3 found:
+    (A) Undo after committing a draft switched away from its new voicegroup
+    restored a `-G` that was never written (the `SongCfgCommand`s still
+    named it): the song failed to load and the next save put an undefined
+    symbol into `midi.cfg`. Fix: `commitDraftVoicegroup`'s abandon path now
+    calls `MainWindow::abandonDraftVoicegroup`, which rewrites the abandoned
+    arg in the cfgs and the undo history to the committed one
+    (`SongDocument::renameDraftVoicegroupArg`, so those settings edits
+    become `-G` no-ops) and drops the voicegroup from the draft
+    (`newVoicegroup` cleared, folder removed) — so it is no longer in
+    `voicegroupChoices`, reserved, or searched by the loader, even when the
+    rest of the commit then fails. Its voice edits stay in the history as
+    inert entries. (B) The Rename dialog re-read every voicegroup file per
+    keystroke: `SongNameFields` now computes
+    `VoicegroupSource::declaredSymbols(root)` once, lazily on the first
+    check that includes a voicegroup, and passes it to
+    `checkNewSongNames(…, declaredVoicegroups)`; one-shot callers (the
+    commit, the wizard's Sound page) keep `isDeclared`. (C) Case-only
+    rename: no code change. The voicegroup name is always the song label,
+    which only ever comes from the name fields' `[a-z_][a-z0-9_]*`
+    lowercasing validator (or the import suggestion, lowercased), so two
+    names can never differ only by case; a comment at the
+    `QFile::remove(oldFile)` says so. (D) `maybeRefreshVoicegroup` (and
+    `refreshSessionsAfterVgSave`, same misfire when a same-named file is
+    saved) skip a session while `editsDraftVoicegroup()`. (E) The
+    `syncDraftVoicegroupFile` after `replayVoiceEdits` on a `-G` switch
+    is kept, with a comment: it is normally a no-op (every edit applied to
+    the draft voicegroup already synced the folder, and the undo order
+    means replay can't apply one the folder lacks), but `replayVoiceEdits`
+    itself changes the source without syncing, and the call also retries an
+    earlier sync whose write failed — not provably redundant.
+  - Harness (`src/draftcheck.cpp`): section 15 then undoes every command
+    of the committed draft — the `-G` stays the existing voicegroup (and
+    applied) throughout — saves, and asserts `midi.cfg` has no
+    `-G_<abandoned>` and the reloaded song names the existing voicegroup;
+    the abandoned arg is not a choice. Section 18: the midi directory made
+    read-only (probed; skipped with a note if the chmod doesn't bite) → Save
+    fails after the `.inc` and its include line land, no `.mid`; the
+    session edits the project copy → a retry with no changes commits under
+    the same names with no dialog, the `.inc` byte- and mtime-identical,
+    one include line. 18b: the same failure on a draft switched away from
+    its voicegroup → still a draft, but the voicegroup is abandoned (no
+    folder, not offered, not reserved), undo keeps the existing `-G`, and
+    the retry commits with it.
+  - Mutation-tested: skipping `abandonDraftVoicegroup` fails section 15's
+    undo/save assertions and 18b.
+  - Results: `--draftcheck` PASS on a fresh scratch (sections 11–12 and
+    18 ran, not skipped); full `tools/run_checks.sh` PASS on the normal
+    and ASAN builds (draftcheck, vgcheck, vgsavecheck, onboardcheck and
+    scriptcheck included; mkcheck skipped, no fork given).
+  - Deviation: section 18 fails the `.mid` write with a read-only midi
+    directory rather than the read-only `midi.cfg` of sections 11–12, since
+    the latter lets the `.mid` land (the review's scenario asserts it
+    didn't). Deferred into step 5's checklist: F (orphaned `.inc` after a
+    partial commit + Discard), G (`.s` files and single-colon labels
+    unseen by the symbol check), H (scripts/other writers vs. the draft
+    voicegroup).

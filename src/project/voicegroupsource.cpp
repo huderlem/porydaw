@@ -925,6 +925,16 @@ bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voi
     return false;
 }
 
+QSet<QString> VoicegroupSource::declaredSymbols(const QString &projectRoot)
+{
+    QSet<QString> symbols;
+    for (const QString &path : voicegroupFiles(projectRoot)) {
+        for (const DeclaredSymbol &decl : declaredVoicegroups(path))
+            symbols.insert(decl.symbol);
+    }
+    return symbols;
+}
+
 bool VoicegroupSource::reload(QString *error)
 {
     bool ok = false;
