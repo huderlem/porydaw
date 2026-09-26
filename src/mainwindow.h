@@ -9,6 +9,7 @@
 
 #include "audio/audioengine.h"
 #include "project/decompproject.h"
+#include "project/songregistry.h"
 #include "project/voicegroupsource.h"
 #include "songsession.h"
 #include "ui/enginesettings.h"
@@ -256,6 +257,12 @@ class MainWindow : public QMainWindow
     // document, undo history and view survive. Safe to retry after a
     // failure. False with *error when nothing was committed.
     bool commitDraft(SongSession &session, QString *error);
+    // commitDraft's first step: when a name the draft holds was taken since
+    // the wizard (the .mid created, the label or constant registered, the
+    // voicegroup file made), explains the conflict in the Rename dialog and,
+    // on OK, renames the draft in place. False when the user cancels; true
+    // when the names are free (at once or after the rename).
+    bool resolveDraftNameConflicts(SongSession &session);
     // The dialog-less half of deleteSongById (also the harness entry): closes
     // the song's tab discarding its edits, moves the .mid to .porydaw/trash/,
     // removes the flag line, unregisters, drops the sidecar, deletes the
@@ -292,6 +299,12 @@ class MainWindow : public QMainWindow
     // Project-song tabs only; a bundle tab is found by its file instead.
     SongSession *sessionForLabel(const QString &label) const;
     SongSession *sessionForBundlePath(const QString &canonicalPath) const;
+    // The names open tabs hold that the project's files may not know yet
+    // (docs/draft-songs/PLAN.md step 2): every project tab's label, plus
+    // each draft's constant and new voicegroup — the New Song wizard's and
+    // the Rename dialog's reserved list. except is left out (the draft
+    // being renamed doesn't conflict with itself).
+    ReservedSongNames reservedSongNames(const SongSession *except = nullptr) const;
     static QString bundleTabTitle(const QString &label);
     // The strip above a bundle tab's ruler: what it is, and the Import
     // button (SongSession::bundleImportButton).

@@ -85,6 +85,31 @@ struct RegistrationStatus {
     }
 };
 
+// Names held by open tabs that the project's files don't know yet — a
+// draft's label, constant and new voicegroup (docs/draft-songs/PLAN.md).
+// MainWindow::reservedSongNames collects them for checkNewSongNames.
+struct ReservedSongNames {
+    QStringList labels;
+    QStringList constants;
+    QStringList voicegroups; // file base names under sound/voicegroups/
+};
+
+// Why a new song's names can't be used: one message per name, empty when
+// that name is free (SongRegistry::checkNewSongNames).
+struct SongNameConflicts {
+    QString label;      // a song already has the label
+    QString mid;        // sound/songs/midi/<label>.mid exists
+    QString constant;   // songs.h defines it, or another song uses it
+    QString voicegroup; // the new voicegroup's file exists, or a draft makes it
+
+    bool isEmpty() const
+    {
+        return label.isEmpty() && mid.isEmpty() && constant.isEmpty() && voicegroup.isEmpty();
+    }
+    // The non-empty messages, in field order.
+    QStringList messages() const;
+};
+
 namespace SongRegistry {
 
 // -G arguments for every voicegroup label findable in the project: the
@@ -110,6 +135,17 @@ QVector<MusicPlayer> musicPlayers(const QString &projectRoot);
 
 // Default constant for a label: "mus_foo" -> "MUS_FOO".
 QString constantForLabel(const QString &label);
+
+// Whether a new song may take these names: label, constant, and (when not
+// empty) the voicegroup it creates. Reads the disk as it is now — the .mid,
+// song_table.inc's labels, songs.h's defines, the voicegroup file — on top
+// of songs (the project's list, which may be stale after a git pull) and
+// the names reserved by open drafts. An empty argument skips its checks.
+// The New Song wizard and the draft commit (MainWindow::commitDraft) both
+// decide through this, so their rules can't drift.
+SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
+                                    const ReservedSongNames &reserved, const QString &label,
+                                    const QString &constant, const QString &newVoicegroup);
 
 // Computes the registration lines against the files as they are on disk
 // right now, matching each file's existing indentation/alignment.

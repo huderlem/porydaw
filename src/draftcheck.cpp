@@ -1,29 +1,41 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QDialogButtonBox>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
+#include <QPushButton>
+#include <QSet>
 #include <QSettings>
 #include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QUndoStack>
+#include <QWizardPage>
 #include <algorithm>
 #include <cstdio>
 #include <functional>
 
 #include "mainwindow.h"
 #include "project/songregistry.h"
+#include "ui/newsongwizard.h"
 
 // --draftcheck <projectRoot>: draft songs (docs/draft-songs/PLAN.md). Import
 // MIDI / New Song open a draft tab that writes nothing into the project:
 // opening, editing and discarding one leaves every file outside .porydaw/
 // untouched, and no view sidecar appears. Saving a draft commits it in
 // place — .mid, flags, registration — keeping its session, view and undo
-// history. QSettings is redirected into a temp dir; the commit writes into
-// the project — run against a scratch copy.
+// history. Names are reserved: the wizard rejects an open draft's label and
+// constant, and a name taken behind a draft's back (its .mid created) is
+// caught at Save, which writes nothing until the Rename dialog picks a free
+// name. QSettings is redirected into a temp dir; the commit writes into the
+// project — run against a scratch copy.
 
 namespace {
 
@@ -70,9 +82,11 @@ SmfFile draftSmf()
 // its own exec() loop, for as long as the guard is in scope. A 10 ms poll
 // on the active modal widget: any OTHER modal that shows meanwhile (an
 // error box, a second prompt) is recorded as a failure and dismissed, so a
-// surprise dialog fails the section instead of hanging the harness. The
-// guard's destructor stops the poll, so nothing fires into a later
-// section; answered() says whether the expected prompt ever appeared.
+// surprise dialog fails the section instead of hanging the harness —
+// unless onDialog registered a handler for its title, which then runs once
+// and must close it. The guard's destructor stops the poll, so nothing
+// fires into a later section; answered() says whether the expected prompt
+// ever appeared, handled(title) whether a registered dialog did.
 class PromptAnswerer
 {
   public:
@@ -91,6 +105,11 @@ class PromptAnswerer
     PromptAnswerer &operator=(const PromptAnswerer &) = delete;
 
     bool answered() const { return m_answered; }
+    void onDialog(const QString &title, std::function<void(QDialog *)> action)
+    {
+        m_handlers.insert(title, std::move(action));
+    }
+    bool handled(const QString &title) const { return m_handled.contains(title); }
 
   private:
     void poll()
@@ -98,6 +117,13 @@ class PromptAnswerer
         QWidget *modal = QApplication::activeModalWidget();
         if (!modal)
             return;
+        auto *dialog = qobject_cast<QDialog *>(modal);
+        const QString title = modal->windowTitle();
+        if (dialog && m_handlers.contains(title) && !m_handled.contains(title)) {
+            m_handled.insert(title);
+            m_handlers.value(title)(dialog);
+            return;
+        }
         auto *box = qobject_cast<QMessageBox *>(modal);
         if (!m_answered && box && box->windowTitle() == QStringLiteral("Unsaved Changes")) {
             if (QAbstractButton *b = box->button(m_button)) {
@@ -109,7 +135,7 @@ class PromptAnswerer
         m_fail(
             QStringLiteral("unexpected modal \"%1\"%2")
                 .arg(modal->windowTitle(), box ? QStringLiteral(": ") + box->text() : QString()));
-        if (auto *dialog = qobject_cast<QDialog *>(modal))
+        if (dialog)
             dialog->reject();
         else
             modal->close();
@@ -119,7 +145,41 @@ class PromptAnswerer
     Fail m_fail;
     QTimer m_timer;
     bool m_answered = false;
+    QHash<QString, std::function<void(QDialog *)>> m_handlers;
+    QSet<QString> m_handled;
 };
+
+// The New Song wizard's and the Rename dialog's label field.
+QLineEdit *nameField(QWidget *parent)
+{
+    for (QLineEdit *edit : parent->findChildren<QLineEdit *>()) {
+        if (edit->placeholderText() == QStringLiteral("mus_my_song"))
+            return edit;
+    }
+    return nullptr;
+}
+
+// The field after the label: the constant.
+QLineEdit *constantField(QWidget *parent)
+{
+    const QList<QLineEdit *> edits = parent->findChildren<QLineEdit *>();
+    QLineEdit *name = nameField(parent);
+    for (QLineEdit *edit : edits) {
+        if (edit != name)
+            return edit;
+    }
+    return nullptr;
+}
+
+// The text of the red conflict hint under a name field, if any label shows one.
+QString nameHint(QWidget *parent)
+{
+    for (const QLabel *label : parent->findChildren<QLabel *>()) {
+        if (label->text().contains(QStringLiteral("already")))
+            return label->text();
+    }
+    return QString();
+}
 
 } // namespace
 
@@ -440,6 +500,186 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         check(!QFile::exists(midiDir + labelD + QStringLiteral(".mid")),
               "the ordinary save wrote the discarded draft's .mid");
     }
+
+    // 7. Name reservation: the wizard rejects an open draft's label and
+    // constant with the messages it gives project collisions, and the
+    // shared check reads the disk, not only the (possibly stale) song list.
+    const QString labelE = QStringLiteral("mus_draftcheck_e");
+    const QString constantE = QStringLiteral("MUS_DRAFTCHECK_E");
+    if (!check(openDraftSong(draftSmf(), labelE, constantE, player, cfg, QString(), &error),
+               "the fifth draft did not open")) {
+        std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+        return failures;
+    }
+    SongSession *draftE = m_active;
+    {
+        const QStringList vgArgs = vgCatalog(root).groupArgs;
+        const ReservedSongNames reserved = reservedSongNames();
+        check(reserved.labels.contains(labelE) && reserved.constants.contains(constantE),
+              "an open draft's label and constant are not reserved");
+        NewSongWizard wizard(&m_project, vgArgs, reserved);
+        QWizardPage *identity = wizard.page(0);
+        QLineEdit *name = nameField(identity);
+        QLineEdit *constant = constantField(identity);
+        if (check(name && constant, "wizard: name or constant field not found")) {
+            name->setText(labelE);
+            check(!identity->isComplete(), "wizard: accepted an open draft's label");
+            check(nameHint(identity) ==
+                      QStringLiteral("A song named %1 already exists.").arg(labelE),
+                  "wizard: a reserved label did not get the project-collision message");
+            name->setText(QStringLiteral("mus_draftcheck_free"));
+            check(identity->isComplete(), "wizard: a free label was rejected");
+            constant->setText(constantE);
+            // setText does not count as the user's edit; textEdited does.
+            emit constant->textEdited(constantE);
+            check(!identity->isComplete(), "wizard: accepted an open draft's constant");
+            constant->setText(QStringLiteral("MUS_LITTLEROOT"));
+            emit constant->textEdited(constant->text());
+            check(!identity->isComplete(), "wizard: accepted a constant songs.h defines");
+        }
+        // Without the reservation the same label is free: the rejection
+        // above came from the draft, not from the disk.
+        NewSongWizard unreserved(&m_project, vgArgs);
+        if (QLineEdit *freeName = nameField(unreserved.page(0))) {
+            freeName->setText(labelE);
+            check(unreserved.page(0)->isComplete(),
+                  "wizard: an unreserved draft label was rejected");
+        }
+
+        // The disk beats a stale song list: song_table.inc and songs.h
+        // still name a vanilla song absent from the list passed in.
+        const SongNameConflicts stale =
+            SongRegistry::checkNewSongNames(root, {}, {}, QStringLiteral("mus_littleroot"),
+                                            QStringLiteral("MUS_LITTLEROOT"), QString());
+        check(!stale.label.isEmpty() && !stale.mid.isEmpty() && !stale.constant.isEmpty(),
+              "checkNewSongNames trusted the song list over the disk");
+        QString existingVg;
+        for (const QString &arg : vgArgs) {
+            const QString base = arg.startsWith(QLatin1Char('_')) ? arg.mid(1) : arg;
+            if (QFile::exists(root + QStringLiteral("/sound/voicegroups/%1.inc").arg(base))) {
+                existingVg = base;
+                break;
+            }
+        }
+        check(!existingVg.isEmpty() &&
+                  !SongRegistry::checkNewSongNames(root, {}, {}, QString(), QString(), existingVg)
+                       .voicegroup.isEmpty(),
+              "checkNewSongNames missed an existing voicegroup file");
+        ReservedSongNames vgReserved;
+        vgReserved.voicegroups.append(QStringLiteral("mus_draftcheck_vg"));
+        check(!SongRegistry::checkNewSongNames(root, {}, vgReserved, QString(), QString(),
+                                               QStringLiteral("mus_draftcheck_vg"))
+                   .voicegroup.isEmpty(),
+              "checkNewSongNames missed a reserved voicegroup");
+        check(SongRegistry::checkNewSongNames(
+                  root, m_project.songs(), reserved, QStringLiteral("mus_draftcheck_free"),
+                  QStringLiteral("MUS_DRAFTCHECK_FREE"), QStringLiteral("mus_draftcheck_free"))
+                  .isEmpty(),
+              "checkNewSongNames rejected free names");
+    }
+
+    // 8. A name taken behind the draft's back: its .mid appears on disk. Save
+    // writes nothing, opens the Rename dialog (OK disabled on the taken
+    // name), and commits under the new name once it is accepted; the
+    // planted file is never touched.
+    const QString plantedE = midiDir + labelE + QStringLiteral(".mid");
+    const QByteArray plantedBytes("not a song, planted by draftcheck\n");
+    {
+        QFile planted(plantedE);
+        if (!check(planted.open(QIODevice::WriteOnly) &&
+                       planted.write(plantedBytes) == plantedBytes.size(),
+                   "could not plant a file under the draft's .mid"))
+            return failures;
+    }
+    const QDateTime plantedTime = QFileInfo(plantedE).lastModified();
+    const QString labelE2 = QStringLiteral("mus_draftcheck_e2");
+    {
+        bool okDisabledFirst = false;
+        bool okEnabledAfter = false;
+        PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+        rename.onDialog(QStringLiteral("Rename Song"), [&](QDialog *dialog) {
+            auto *buttons = dialog->findChild<QDialogButtonBox *>();
+            QPushButton *ok = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+            QLineEdit *name = nameField(dialog);
+            if (!ok || !name) {
+                dialog->reject();
+                return;
+            }
+            okDisabledFirst = !ok->isEnabled() && name->text() == labelE;
+            name->setText(labelE2);
+            okEnabledAfter = ok->isEnabled();
+            ok->click();
+        });
+        check(saveSession(*draftE), "saving a draft through the Rename dialog failed");
+        check(rename.handled(QStringLiteral("Rename Song")),
+              "a draft whose .mid appeared did not open the Rename dialog");
+        check(okDisabledFirst, "the Rename dialog accepted the taken name");
+        check(okEnabledAfter, "the Rename dialog rejected a free name");
+    }
+    check(m_active == draftE && !draftE->isDraft() && !draftE->isDirty(),
+          "the renamed draft was not committed in place");
+    check(draftE->doc.label() == labelE2 &&
+              draftE->doc.midPath() == midiDir + labelE2 + QStringLiteral(".mid"),
+          "the rename did not move the document's label and .mid path");
+    check(m_tabs->tabText(m_tabs->indexOf(draftE->view)) == labelE2 &&
+              m_tabs->tabToolTip(m_tabs->indexOf(draftE->view)) == draftE->doc.midPath(),
+          "the tab does not show the new name");
+    {
+        QFile planted(plantedE);
+        check(planted.open(QIODevice::ReadOnly) && planted.readAll() == plantedBytes &&
+                  QFileInfo(plantedE).lastModified() == plantedTime,
+              "the commit touched the planted file");
+    }
+    const SongInfo *renamed = nullptr;
+    bool oldNameKnown = false;
+    for (const SongInfo &song : m_project.songs()) {
+        if (song.label == labelE2)
+            renamed = &song;
+        // The planted .mid itself shows up as an unregistered song.
+        oldNameKnown = oldNameKnown || (song.label == labelE && song.registered);
+    }
+    if (check(renamed != nullptr, "the renamed song is not in the project")) {
+        check(renamed->registered && renamed->constant == QStringLiteral("MUS_DRAFTCHECK_E2") &&
+                  renamed->hasCfg && draftE->songId == renamed->id,
+              "the renamed song is not registered under its new names");
+    }
+    check(!oldNameKnown, "the old name was registered");
+    const RegistrationStatus oldNames = SongRegistry::checkRegistration(root, labelE, constantE);
+    check(!oldNames.inSongTable && !oldNames.inSongsH && !oldNames.inCharmap,
+          "the old names reached the registration files");
+    check(persistedLabels().contains(labelE2) && !persistedLabels().contains(labelE),
+          "the renamed song was not persisted under its new name");
+
+    // 9. Cancel on the Rename dialog: nothing is written, the tab stays a
+    // dirty draft, and the Save counts as failed — without a second box.
+    const QString labelF = QStringLiteral("mus_draftcheck_f");
+    if (!check(openDraftSong(draftSmf(), labelF, QStringLiteral("MUS_DRAFTCHECK_F"), player, cfg,
+                             QString(), &error),
+               "the sixth draft did not open")) {
+        std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+        return failures;
+    }
+    SongSession *draftF = m_active;
+    {
+        QFile planted(midiDir + labelF + QStringLiteral(".mid"));
+        check(planted.open(QIODevice::WriteOnly) && planted.write(plantedBytes) > 0,
+              "could not plant a file under the sixth draft's .mid");
+    }
+    const QByteArray beforeF = treeFingerprint(root);
+    {
+        PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+        rename.onDialog(QStringLiteral("Rename Song"), [](QDialog *dialog) { dialog->reject(); });
+        check(!saveSession(*draftF), "cancelling the Rename dialog still saved");
+        check(rename.handled(QStringLiteral("Rename Song")),
+              "the sixth draft did not open the Rename dialog");
+    }
+    check(treeFingerprint(root) == beforeF, "cancelling the Rename dialog wrote into the project");
+    check(m_active == draftF && draftF->isDraft() && draftF->isDirty() &&
+              draftF->doc.label() == labelF && draftF->songId == -1,
+          "cancelling the Rename dialog changed the draft");
+    check(m_tabs->tabText(m_tabs->indexOf(draftF->view)) == labelF + QLatin1Char('*'),
+          "the cancelled draft's tab title changed");
+    check(!persistedLabels().contains(labelF), "the cancelled draft was persisted");
 
     if (failures == 0)
         std::printf("draftcheck: PASS\n");

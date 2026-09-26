@@ -1279,6 +1279,24 @@ SongSession *MainWindow::sessionForLabel(const QString &label) const
     return nullptr;
 }
 
+ReservedSongNames MainWindow::reservedSongNames(const SongSession *except) const
+{
+    ReservedSongNames reserved;
+    for (const auto &session : m_sessions) {
+        if (session->bundle || session.get() == except)
+            continue;
+        // Committed tabs too: their labels are in the song list already,
+        // but a stale list must not let a draft claim one.
+        reserved.labels.append(session->doc.label());
+        if (const SongDraft *draft = session->draft.get()) {
+            reserved.constants.append(draft->constant);
+            if (!draft->newVoicegroup.isEmpty())
+                reserved.voicegroups.append(draft->newVoicegroup);
+        }
+    }
+    return reserved;
+}
+
 SongSession *MainWindow::sessionForBundlePath(const QString &canonicalPath) const
 {
     for (const auto &session : m_sessions) {
@@ -2464,7 +2482,10 @@ bool MainWindow::saveSession(SongSession &session)
         // A draft's first save is its commit into the project; it reports
         // the result itself.
         if (!commitDraft(session, &error)) {
-            QMessageBox::warning(this, tr("Save Song"), error);
+            // No error: the user cancelled the Rename dialog, which already
+            // said why.
+            if (!error.isEmpty())
+                QMessageBox::warning(this, tr("Save Song"), error);
             return false;
         }
         return true;
@@ -2819,7 +2840,8 @@ void MainWindow::newSong()
 {
     if (!m_project.isOpen())
         return;
-    NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, this);
+    NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, reservedSongNames(),
+                         this);
     if (wizard.exec() != QDialog::Accepted)
         return;
     createSongFromWizard(wizard, tr("New Song"));
@@ -2845,7 +2867,7 @@ void MainWindow::importMidi()
         return;
     }
     NewSongWizard wizard(&m_project, std::move(smf), path, vgCatalog(m_project.root()).groupArgs,
-                         this);
+                         reservedSongNames(), this);
     if (wizard.exec() != QDialog::Accepted)
         return;
     createSongFromWizard(wizard, tr("Import MIDI"));
@@ -3183,8 +3205,9 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
         return false;
     }
     // Two tabs under one label would commit over each other's .mid (and the
-    // second commit would find the label already registered). Stopgap until
-    // the wizard reserves draft names (docs/draft-songs/PLAN.md step 2).
+    // second commit would find the label already registered). The wizard
+    // already rejects open tabs' labels (reservedSongNames); this is the
+    // last line of defense for other callers.
     if (sessionForLabel(label)) {
         *error = tr("A song named %1 is already open in another tab. Save or close it first, "
                     "or choose a different name.")
@@ -3229,13 +3252,23 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     SongDraft *draft = session.draft.get();
     if (!draft)
         return true;
+    // Names first, before anything is written: one taken since the wizard
+    // would overwrite another song's file or registration.
+    if (!resolveDraftNameConflicts(session)) {
+        error->clear();
+        return false;
+    }
     const QString root = m_project.root();
     const QString label = session.doc.label();
 
     // The .mid and, since the document has no flags line yet, the song's
     // midi.cfg/songs.mk flags. Rewriting both on a retry is harmless.
-    if (!session.doc.save(error))
+    const bool midExisted = QFileInfo::exists(session.doc.midPath());
+    if (!session.doc.save(error)) {
+        if (!midExisted && QFileInfo::exists(session.doc.midPath()))
+            draft->wroteMid = true;
         return false;
+    }
 
     int songId = -1;
     if (!SongRegistry::registerSong(root, label, draft->constant, draft->player, error, &songId)) {
@@ -3270,6 +3303,48 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
         updateWindowTitle();
         m_songList->setCurrentSong(session.songId);
     }
+    return true;
+}
+
+bool MainWindow::resolveDraftNameConflicts(SongSession &session)
+{
+    SongDraft *draft = session.draft.get();
+    const QString root = m_project.root();
+    const ReservedSongNames reserved = reservedSongNames(&session);
+    SongNameConflicts conflicts =
+        SongRegistry::checkNewSongNames(root, m_project.songs(), reserved, session.doc.label(),
+                                        draft->constant, draft->newVoicegroup);
+    // A .mid an earlier attempt wrote is this draft's own.
+    if (draft->wroteMid)
+        conflicts.mid.clear();
+    if (conflicts.isEmpty())
+        return true;
+
+    SongRenameDialog dialog(&m_project, reserved, session.doc.label(), draft->constant,
+                            !draft->newVoicegroup.isEmpty(), conflicts.messages(), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return false;
+
+    // The draft's own earlier .mid would be left behind under the old name.
+    const QString oldMidPath = session.doc.midPath();
+    const QString label = dialog.label();
+    const QString midPath = root + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+    if (draft->wroteMid && oldMidPath != midPath) {
+        QFile::remove(oldMidPath);
+        draft->wroteMid = false;
+    }
+    session.doc.setDraftIdentity(label, midPath);
+    draft->constant = dialog.constant();
+    // Named after the song. Step 3 (docs/draft-songs/PLAN.md) must also
+    // rename the draft voicegroup's file and symbol and the cfg's -G arg.
+    if (!draft->newVoicegroup.isEmpty())
+        draft->newVoicegroup = label;
+    updateTabTitle(session);
+    const int index = m_tabs->indexOf(session.view);
+    if (index >= 0)
+        m_tabs->setTabToolTip(index, midPath);
+    if (&session == m_active)
+        updateWindowTitle();
     return true;
 }
 
@@ -4628,7 +4703,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     // (wizard pages enumerate voicegroups/players). Registration itself is
     // write-through now, exercised by --onboardcheck against a scratch copy.
     {
-        NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, this);
+        NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, {}, this);
         qInfo("selftest: New Song wizard constructed (Settings window built with the main window)");
     }
 

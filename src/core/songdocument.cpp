@@ -353,6 +353,13 @@ bool SongDocument::loadDraft(const SmfFile &smf, const SongInfo &song, QString *
     return true;
 }
 
+void SongDocument::setDraftIdentity(const QString &label, const QString &midPath)
+{
+    Q_ASSERT(!m_hadCfgLine);
+    m_label = label;
+    m_midPath = midPath;
+}
+
 void SongDocument::adopt(SmfFile smf, const SongInfo &song)
 {
     m_smf = std::move(smf);

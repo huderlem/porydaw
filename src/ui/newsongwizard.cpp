@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -9,6 +10,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QRegularExpressionValidator>
 #include <QSpinBox>
 #include <QToolButton>
@@ -17,6 +19,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <memory>
 
 #include "project/songregistry.h"
 #include "ui/layout.h"
@@ -45,28 +48,92 @@ class LowercaseNameValidator : public QRegularExpressionValidator
     }
 };
 
+// The label and constant rows the Identity page and SongRenameDialog share:
+// the label grammar, a constant that follows the label until the user edits
+// it, and a hint under the label naming the first conflict
+// SongRegistry::checkNewSongNames finds. changed runs on every edit.
+class SongNameFields
+{
+  public:
+    SongNameFields(QWidget *owner, QFormLayout *form, const DecompProject *project,
+                   const ReservedSongNames &reserved, const QString &label, const QString &constant,
+                   const std::function<void()> &changed)
+        : m_project(project)
+        , m_reserved(reserved)
+        , m_constantEdited(!constant.isEmpty() && constant != SongRegistry::constantForLabel(label))
+    {
+        m_name = new QLineEdit(label, owner);
+        m_name->setPlaceholderText(QStringLiteral("mus_my_song"));
+        static const QRegularExpression nameRe(QStringLiteral("[a-z_][a-z0-9_]*"));
+        m_name->setValidator(new LowercaseNameValidator(nameRe, m_name));
+        form->addRow(QObject::tr("&Name:"), m_name);
+
+        m_nameHint = new QLabel(owner);
+        m_nameHint->setStyleSheet(QStringLiteral("color: #c05050;"));
+        form->addRow(QString(), m_nameHint);
+
+        m_constant = new QLineEdit(owner);
+        form->addRow(QObject::tr("&Constant:"), m_constant);
+        if (!constant.isEmpty())
+            m_constant->setText(constant);
+        else if (!label.isEmpty())
+            m_constant->setText(SongRegistry::constantForLabel(label));
+
+        QObject::connect(m_name, &QLineEdit::textChanged, owner,
+                         [this, changed](const QString &text) {
+                             if (!m_constantEdited)
+                                 m_constant->setText(SongRegistry::constantForLabel(text));
+                             changed();
+                         });
+        QObject::connect(m_constant, &QLineEdit::textEdited, owner, [this, changed] {
+            m_constantEdited = true;
+            changed();
+        });
+    }
+
+    // Whether the names are usable, with the hint updated to say why not.
+    // newVoicegroup is checked too when not empty.
+    bool check(const QString &newVoicegroup = QString()) const
+    {
+        m_nameHint->clear();
+        if (label().isEmpty() || constant().isEmpty())
+            return false;
+        const QStringList conflicts =
+            SongRegistry::checkNewSongNames(m_project->root(), m_project->songs(), m_reserved,
+                                            label(), constant(), newVoicegroup)
+                .messages();
+        if (conflicts.isEmpty())
+            return true;
+        m_nameHint->setText(conflicts.first());
+        return false;
+    }
+
+    QString label() const { return m_name->text(); }
+    QString constant() const { return m_constant->text(); }
+    const ReservedSongNames &reserved() const { return m_reserved; }
+
+  private:
+    const DecompProject *m_project;
+    ReservedSongNames m_reserved;
+    QLineEdit *m_name;
+    QLineEdit *m_constant;
+    QLabel *m_nameHint;
+    bool m_constantEdited;
+};
+
 class IdentityPage : public QWizardPage
 {
   public:
-    IdentityPage(DecompProject *project, const QString &suggestedLabel) : m_project(project)
+    IdentityPage(DecompProject *project, const ReservedSongNames &reserved,
+                 const QString &suggestedLabel)
     {
         setTitle(tr("Song identity"));
         setSubTitle(tr("Names the .mid file, the song_table.inc entry, and the "
                        "songs.h constant."));
 
         auto *form = new QFormLayout(this);
-        m_name = new QLineEdit(suggestedLabel, this);
-        m_name->setPlaceholderText(QStringLiteral("mus_my_song"));
-        static const QRegularExpression nameRe(QStringLiteral("[a-z_][a-z0-9_]*"));
-        m_name->setValidator(new LowercaseNameValidator(nameRe, this));
-        form->addRow(tr("&Name:"), m_name);
-
-        m_nameHint = new QLabel(this);
-        m_nameHint->setStyleSheet(QStringLiteral("color: #c05050;"));
-        form->addRow(QString(), m_nameHint);
-
-        m_constant = new QLineEdit(this);
-        form->addRow(tr("&Constant:"), m_constant);
+        m_names = std::make_unique<SongNameFields>(this, form, project, reserved, suggestedLabel,
+                                                   QString(), [this] { emit completeChanged(); });
 
         m_player = new QComboBox(this);
         for (const MusicPlayer &p : SongRegistry::musicPlayers(project->root()))
@@ -74,42 +141,15 @@ class IdentityPage : public QWizardPage
         m_player->setToolTip(tr("Select Background music for a song. Select Sound effect for a "
                                 "sound. Also select it for a fanfare."));
         form->addRow(tr("&Player:"), m_player);
-
-        connect(m_name, &QLineEdit::textChanged, this, [this](const QString &text) {
-            if (!m_constantEdited)
-                m_constant->setText(SongRegistry::constantForLabel(text));
-            emit completeChanged();
-        });
-        connect(m_constant, &QLineEdit::textEdited, this, [this] {
-            m_constantEdited = true;
-            emit completeChanged();
-        });
-        if (!suggestedLabel.isEmpty())
-            m_constant->setText(SongRegistry::constantForLabel(suggestedLabel));
     }
 
-    bool isComplete() const override
-    {
-        m_nameHint->clear();
-        const QString name = m_name->text();
-        if (name.isEmpty() || m_constant->text().isEmpty())
-            return false;
-        for (const SongInfo &song : m_project->songs()) {
-            if (song.label == name) {
-                m_nameHint->setText(tr("A song named %1 already exists.").arg(name));
-                return false;
-            }
-        }
-        if (QFileInfo::exists(m_project->root() +
-                              QStringLiteral("/sound/songs/midi/%1.mid").arg(name))) {
-            m_nameHint->setText(tr("%1.mid already exists.").arg(name));
-            return false;
-        }
-        return true;
-    }
+    // The label, .mid and constant; the Sound page checks the new
+    // voicegroup, whose option it owns.
+    bool isComplete() const override { return m_names->check(); }
 
-    QString label() const { return m_name->text(); }
-    QString constant() const { return m_constant->text(); }
+    QString label() const { return m_names->label(); }
+    QString constant() const { return m_names->constant(); }
+    const ReservedSongNames &reserved() const { return m_names->reserved(); }
     QString player() const
     {
         const QString data = m_player->currentData().toString();
@@ -132,12 +172,8 @@ class IdentityPage : public QWizardPage
     }
 
   private:
-    DecompProject *m_project;
-    QLineEdit *m_name;
-    QLineEdit *m_constant;
+    std::unique_ptr<SongNameFields> m_names;
     QComboBox *m_player;
-    QLabel *m_nameHint;
-    bool m_constantEdited = false;
 };
 
 // ---- Sound: voicegroup + midi.cfg flags ------------------------------------
@@ -147,7 +183,8 @@ class SoundPage : public QWizardPage
   public:
     SoundPage(DecompProject *project, const IdentityPage *identity,
               const QStringList &voicegroupArgs)
-        : m_identity(identity)
+        : m_project(project)
+        , m_identity(identity)
         , m_vgArgs(voicegroupArgs)
     {
         setTitle(tr("Sound settings"));
@@ -212,6 +249,17 @@ class SoundPage : public QWizardPage
                                      .arg(m_identity->label()));
             return false;
         }
+        // What the catalog above can't see: a file created since it was
+        // scanned, or an open draft that creates the same voicegroup.
+        if (newVoicegroupSelected()) {
+            const SongNameConflicts conflicts = SongRegistry::checkNewSongNames(
+                m_project->root(), m_project->songs(), m_identity->reserved(), QString(), QString(),
+                m_identity->label());
+            if (!conflicts.voicegroup.isEmpty()) {
+                QMessageBox::warning(this, tr("New Voicegroup"), conflicts.voicegroup);
+                return false;
+            }
+        }
         return true;
     }
 
@@ -235,6 +283,7 @@ class SoundPage : public QWizardPage
   private:
     static QString newVoicegroupText() { return tr("(create a new voicegroup for this song)"); }
 
+    const DecompProject *m_project;
     const IdentityPage *m_identity;
     bool m_canCreateVoicegroup = false;
     QStringList m_vgArgs;
@@ -488,18 +537,21 @@ class AnalysisPage : public QWizardPage
 // ---- The wizard -------------------------------------------------------------
 
 NewSongWizard::NewSongWizard(DecompProject *project, const QStringList &voicegroupArgs,
-                             QWidget *parent)
+                             const ReservedSongNames &reserved, QWidget *parent)
     : QWizard(parent)
     , m_project(project)
+    , m_reserved(reserved)
 {
     setWindowTitle(tr("New Song"));
     buildPages(QString(), voicegroupArgs);
 }
 
 NewSongWizard::NewSongWizard(DecompProject *project, SmfFile imported, const QString &sourcePath,
-                             const QStringList &voicegroupArgs, QWidget *parent)
+                             const QStringList &voicegroupArgs, const ReservedSongNames &reserved,
+                             QWidget *parent)
     : QWizard(parent)
     , m_project(project)
+    , m_reserved(reserved)
     , m_importMode(true)
     , m_imported(std::move(imported))
 {
@@ -527,7 +579,7 @@ void NewSongWizard::buildPages(const QString &sourcePath, const QStringList &voi
             suggested.prepend(QStringLiteral("mus_"));
     }
 
-    m_identity = new IdentityPage(m_project, suggested);
+    m_identity = new IdentityPage(m_project, m_reserved, suggested);
     if (m_importMode) {
         const QVector<MusicPlayer> players = SongRegistry::musicPlayers(m_project->root());
         m_analysisPage = new AnalysisPage(m_imported, m_analysis, players, sourcePath, m_identity);
@@ -580,4 +632,56 @@ SmfFile NewSongWizard::songFile() const
     if (m_analysisPage->rescaleSelected())
         rescaleDivision(&smf, m_sound->cfg().extendedClocks ? 48 : 24);
     return smf;
+}
+
+// ---- Rename (a draft's commit) ------------------------------------------------
+
+SongRenameDialog::SongRenameDialog(const DecompProject *project, const ReservedSongNames &reserved,
+                                   const QString &label, const QString &constant,
+                                   bool renamesVoicegroup, const QStringList &conflicts,
+                                   QWidget *parent)
+    : QDialog(parent)
+    , m_renamesVoicegroup(renamesVoicegroup)
+{
+    setWindowTitle(tr("Rename Song"));
+    auto *layout = new QVBoxLayout(this);
+    auto *explanation = new QLabel(this);
+    explanation->setWordWrap(true);
+    QString text = tr("%1 can't be added to the project under its current name:").arg(label);
+    for (const QString &conflict : conflicts)
+        text += QStringLiteral("\n• ") + conflict;
+    text += QStringLiteral("\n\n") +
+            tr("Choose another name to add it. The song hasn't been written yet.");
+    explanation->setText(text);
+    layout->addWidget(explanation);
+
+    auto *form = new QFormLayout;
+    layout->addLayout(form);
+    m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+    m_buttons->button(QDialogButtonBox::Ok)->setText(tr("Rename and Save"));
+    m_names = std::make_unique<SongNameFields>(this, form, project, reserved, label, constant,
+                                               [this] { refresh(); });
+    layout->addWidget(m_buttons);
+    connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    refresh();
+}
+
+SongRenameDialog::~SongRenameDialog() = default;
+
+QString SongRenameDialog::label() const
+{
+    return m_names->label();
+}
+
+QString SongRenameDialog::constant() const
+{
+    return m_names->constant();
+}
+
+void SongRenameDialog::refresh()
+{
+    // A new voicegroup is named after the song, so it renames along.
+    m_buttons->button(QDialogButtonBox::Ok)
+        ->setEnabled(m_names->check(m_renamesVoicegroup ? m_names->label() : QString()));
 }

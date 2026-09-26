@@ -108,6 +108,11 @@ class SongDocument : public QObject
     // caller passes the path the song will be saved to and hasCfg=false, so
     // the first save() writes the .mid and the song's flags line.
     bool loadDraft(const SmfFile &smf, const SongInfo &song, QString *error);
+    // Renames a draft before its commit (the Rename dialog, PLAN step 2):
+    // the label and the .mid path the first save() writes. Drafts only — an
+    // ordinary song's file and flags line already live under the old name.
+    // Changes nothing the song's content depends on, so no revision bump.
+    void setDraftIdentity(const QString &label, const QString &midPath);
     bool save(QString *error);
 
     const QString &midPath() const { return m_midPath; }

@@ -1,5 +1,6 @@
 #include "songregistry.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -560,6 +561,63 @@ QVector<MusicPlayer> musicPlayers(const QString &projectRoot)
 QString constantForLabel(const QString &label)
 {
     return label.toUpper();
+}
+
+SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
+                                    const ReservedSongNames &reserved, const QString &label,
+                                    const QString &constant, const QString &newVoicegroup)
+{
+    const auto tr = [](const char *text) {
+        return QCoreApplication::translate("SongRegistry", text);
+    };
+    SongNameConflicts conflicts;
+    if (!label.isEmpty()) {
+        bool taken = reserved.labels.contains(label);
+        for (const SongInfo &song : songs)
+            taken = taken || song.label == label;
+        if (!taken) {
+            for (const QString &line :
+                 readLines(projectRoot + QStringLiteral("/sound/song_table.inc"))) {
+                const QRegularExpressionMatch m = songLineRe().match(line);
+                if (m.hasMatch() && m.captured(2) == label) {
+                    taken = true;
+                    break;
+                }
+            }
+        }
+        if (taken)
+            conflicts.label = tr("A song named %1 already exists.").arg(label);
+        if (QFileInfo::exists(projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(label)))
+            conflicts.mid = tr("%1.mid already exists.").arg(label);
+    }
+    if (!constant.isEmpty()) {
+        // Any #define of the name, numeric or not: a second one breaks the
+        // build either way.
+        static const QRegularExpression defineRe(QStringLiteral(R"(^\s*#define\s+(\w+)\b)"));
+        bool taken = reserved.constants.contains(constant);
+        for (const SongInfo &song : songs)
+            taken = taken || song.constant == constant;
+        if (!taken) {
+            for (const QString &line :
+                 readLines(projectRoot + QStringLiteral("/include/constants/songs.h"))) {
+                const QRegularExpressionMatch m = defineRe.match(line);
+                if (m.hasMatch() && m.captured(1) == constant) {
+                    taken = true;
+                    break;
+                }
+            }
+        }
+        if (taken)
+            conflicts.constant = tr("Another song already uses the constant %1.").arg(constant);
+    }
+    if (!newVoicegroup.isEmpty() &&
+        (reserved.voicegroups.contains(newVoicegroup) ||
+         QFileInfo::exists(projectRoot +
+                           QStringLiteral("/sound/voicegroups/%1.inc").arg(newVoicegroup)))) {
+        conflicts.voicegroup =
+            tr("A voicegroup named voicegroup_%1 already exists.").arg(newVoicegroup);
+    }
+    return conflicts;
 }
 
 RegistrationPlan makePlan(const QString &projectRoot, const QString &label, const QString &constant,
@@ -1728,3 +1786,13 @@ void clearRegistrationMeta(const QString &projectRoot, const QString &label)
 }
 
 } // namespace SongRegistry
+
+QStringList SongNameConflicts::messages() const
+{
+    QStringList list;
+    for (const QString *message : {&label, &mid, &constant, &voicegroup}) {
+        if (!message->isEmpty())
+            list.append(*message);
+    }
+    return list;
+}

@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**; step 1 done 2026-09-26. File/line references verified
+Status: **decisions confirmed 2026-09-26**; steps 1–2 done 2026-09-26. File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -121,6 +121,15 @@ affects **before** starting the next step.
 - `NewSongWizard` checks names at `src/ui/newsongwizard.cpp:97-105`
   (label against `m_project->songs()`, `.mid` existence), and at `:164` /
   `:210` for the new-voicegroup option. It knows nothing about open drafts.
+  *(Step 2: the label/constant rows are now `SongNameFields`, shared with
+  `SongRenameDialog`; every name decision — label, `.mid`, constant, new
+  voicegroup file — goes through `SongRegistry::checkNewSongNames(root,
+  songs, ReservedSongNames, label, constant, newVg) -> SongNameConflicts`,
+  which reads `song_table.inc`/`songs.h`/the files on disk. The wizard gets
+  `MainWindow::reservedSongNames()`: every open project tab's label, and
+  each draft's constant and `newVoicegroup`. The Sound page still checks
+  the cached `-G` catalog first, then the shared check's voicegroup
+  field.)*
 - Harnesses that drive `MainWindow` (`runTabCheck`, `runVgSaveCheck`,
   `runBundleTabCheck`, …) are declared in `src/mainwindow.h:79-149`,
   dispatched from `src/main.cpp`, and listed in `tools/run_checks.sh`.
@@ -266,6 +275,14 @@ commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
    `:3502`) include the draft voicegroup's argument while this draft
    exists. `session.vgFileTime` stays null for a draft voicegroup, so the
    staleness reload never fires on it.
+   *(Step 2 hooks: `reservedSongNames` already reserves
+   `draft->newVoicegroup`, and `resolveDraftNameConflicts` already passes it
+   to the shared check and the Rename dialog (`renamesVoicegroup`), then
+   sets `draft->newVoicegroup = <new label>` on accept. Step 3 must extend
+   that accept path to rename the draft voicegroup's file in the draft
+   folder, its `voice_group`/symbol, and the cfg's `-G` arg — **only if**
+   the cfg still names the draft voicegroup — before the commit continues.
+   The harness should then rename a draft that has a new voicegroup.)*
 6. `commitDraft`, voicegroup step (before `.mid`, as today): **only if**
    `doc.cfg().voicegroupArg` still names the draft voicegroup (the user
    may have switched in Song Settings). Write the file through the
@@ -355,6 +372,9 @@ possible):
 - [ ] **Loading the same label from the browser** while a draft holds it:
       impossible after step 2, since the label is reserved. Assert that
       the wizard rejects it.
+      *(Step 2: `--draftcheck` section 7 already asserts the wizard
+      rejects an open draft's label and constant; tick this with a
+      reference to it.)*
 - [ ] **`cleanupVgPreview`** doesn't touch `drafts/`.
 - [ ] **Failed commit after the `.mid` write** (review 2026-09-26, E):
       `commitDraft` calls `doc.save()`, which writes the `.mid` and then the
@@ -483,3 +503,72 @@ and why, what's still owed.
     disabled after a failed reload, and `storage.song` writing a draft's
     sidecar — each needs a product decision or belongs with the step-5
     feature it touches, not a step-1 regression.
+- **2026-09-26 — Step 2 (name reservation and commit-time conflicts).**
+  Commit: see `git log` on branch `draft-song` ("Draft songs step 2 …").
+  - `SongRegistry::checkNewSongNames` + `ReservedSongNames` +
+    `SongNameConflicts` (`src/project/songregistry.{h,cpp}`): label (song
+    list, open tabs, `song_table.inc` on disk), `.mid` on disk, constant
+    (song list, drafts, any `#define` of it in `songs.h`), new voicegroup
+    (drafts, `sound/voicegroups/<name>.inc`). Empty arguments skip their
+    checks.
+  - `NewSongWizard` takes a `ReservedSongNames` (defaulted, so harness
+    callers are unchanged); `newSong`/`importMidi` pass
+    `MainWindow::reservedSongNames()`. The Identity page's name rows moved
+    into `SongNameFields` (file-local in `newsongwizard.cpp`), shared with
+    the new `SongRenameDialog` (declared in `newsongwizard.h`, title
+    "Rename Song", OK = "Rename and Save", disabled while any name
+    conflicts). The Sound page's new-voicegroup validation adds the shared
+    check after its catalog check.
+  - `commitDraft` first calls `MainWindow::resolveDraftNameConflicts`: on a
+    conflict, nothing is written; the Rename dialog lists the conflicts and,
+    on accept, `SongDocument::setDraftIdentity(label, midPath)` renames the
+    document, `draft->constant` follows, and tab title/tooltip/window title
+    update; the commit then continues. Cancel → `commitDraft` returns false
+    with an empty error, and `saveSession` shows no second box (the dialog
+    already explained), so Save fails and a close prompt stays open.
+  - `SongDraft::wroteMid`: set when a commit attempt wrote the `.mid` and
+    then failed (the flags write), so a retry's name check doesn't count
+    the draft's own file as taken (stance 5). A rename after such a
+    failure removes that stale `.mid` under the old name.
+  - `openDraftSong`'s step-1 label refusal stays as the last line of
+    defense (comment updated).
+  - Harness (`src/draftcheck.cpp`): `PromptAnswerer::onDialog(title,
+    action)` / `handled(title)` drive a registered dialog by title
+    (anything else still fails and is dismissed). Section 7: the wizard,
+    driven offscreen like `onboardcheck`, rejects an open draft's label
+    (same "A song named … already exists." hint) and constant, and a
+    constant `songs.h` defines; without the reservation the label passes;
+    `checkNewSongNames` with an empty song list still finds
+    `mus_littleroot`'s label/`.mid`/constant on disk, an existing
+    voicegroup file, and a reserved voicegroup, and accepts free names.
+    Section 8: a `.mid` planted under an open draft's label → Save opens
+    Rename (OK disabled on the taken name, enabled on a free one) → the
+    commit lands under the new label and its label-derived constant
+    (registered, flags, `songId`, persisted, tab text/tooltip), the old
+    names are in no registration file, and the planted file's bytes and
+    mtime are untouched. Section 9: Cancel on Rename → `saveSession`
+    false, no other modal, tree fingerprint unchanged, still a dirty draft
+    under its old label, not persisted.
+  - Results: `--draftcheck` PASS on the normal and ASAN builds;
+    `--onboardcheck` PASS; full `tools/run_checks.sh` PASS on both builds
+    (mkcheck skipped, no fork given). Mutation-tested: skipping the name
+    check in `commitDraft` fails sections 8–9; dropping labels from
+    `reservedSongNames` fails section 7.
+  - Deviations: (1) `checkNewSongNames` returns a `SongNameConflicts`
+    struct (one message per name, `messages()` for the list) instead of a
+    `QStringList`, so the wizard's pages can each show their own field and
+    `commitDraft` can waive the draft's own `.mid`. It also takes the
+    reserved names, so the Rename dialog can't rename into another draft's
+    names. (2) New wizard behavior: the constant is now checked (the
+    wizard never checked it before) — against `songs.h` and open drafts.
+    Message: "Another song already uses the constant …". (3) The
+    explanation is the Rename dialog's own header, not a separate message
+    box before it (one modal instead of two). (4) The Rename dialog is a
+    small `QDialog` on the shared `SongNameFields`, not the wizard's
+    Identity page itself, which also carries the player combo and wizard
+    page chrome. (5) Reserved labels include every open project tab, not
+    only drafts (matches the step-1 refusal in `openDraftSong`).
+  - Owed: step 3 must finish the voicegroup rename (see the note under
+    step 3's Changes, "Step 2 hooks"). The wizard's Sound-page voicegroup
+    rejection is a modal warning and is covered only through
+    `checkNewSongNames` directly, not by driving the page.
