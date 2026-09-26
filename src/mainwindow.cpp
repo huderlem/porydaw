@@ -41,6 +41,7 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QUndoGroup>
+#include <QUuid>
 
 #include <QChildEvent>
 #include <QCloseEvent>
@@ -237,6 +238,9 @@ class VoiceEditCommand : public QUndoCommand
     {}
 
     const QString &loadName() const { return m_loadName; }
+    // A draft's unwritten voicegroup was renamed (MainWindow::
+    // renameDraftVoicegroup): its edits follow it to the new name.
+    void retarget(const QString &loadName) { m_loadName = loadName; }
     int slot() const { return m_slot; }
     const VgVoice &after() const { return m_after; }
 
@@ -1558,7 +1562,7 @@ void MainWindow::maybeRefreshVoicegroup(SongSession &session)
     if (!onDisk.isValid() || onDisk == session.vgFileTime)
         return;
     QString tried;
-    LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, session.doc.cfg(), &tried);
+    LoadedVoiceGroup *vg = loadVoicegroupForSession(session, session.doc.cfg(), &tried);
     if (!vg)
         return; // keep the previous sound
     session.view->setVoicegroup(nullptr);
@@ -1579,7 +1583,7 @@ void MainWindow::refreshSessionsAfterVgSave(const QString &filePath, SongSession
         if (session->vgSource->dirty())
             continue; // unsaved edits stay; last save wins, as documented
         QString tried;
-        LoadedVoiceGroup *vg = loadVoicegroupFor(session->root, session->doc.cfg(), &tried);
+        LoadedVoiceGroup *vg = loadVoicegroupForSession(*session, session->doc.cfg(), &tried);
         if (!vg)
             continue; // keep the previous sound
         const int keepSlot = session == m_active ? m_vgBrowser->currentSlot() : 0;
@@ -1796,6 +1800,8 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
 
     // Sessions were prompted above; closing them now needs no questions.
     teardownSessions();
+    // Drafts a crash left behind (their own tabs clean up after themselves).
+    sweepStaleDraftFolders(m_project.root());
     invalidateVgCatalog();
     m_pendingSynths.clear(); // unsaved synth definitions die with the project
     // Surviving bundle tabs: currentChanged was suppressed during the
@@ -1846,27 +1852,80 @@ void MainWindow::songOpenInNewTab(int songId)
 }
 
 LoadedVoiceGroup *MainWindow::loadVoicegroupFor(const QString &root, const SongCfg &cfg,
-                                                QString *tried)
+                                                QString *tried, const SongDraft *draft)
 {
     const QStringList candidates = DecompProject::voicegroupCandidates(cfg);
     if (tried)
         *tried = candidates.join(QStringLiteral(", "));
+    // A draft's unwritten voicegroup lives only in its folder, searched
+    // first the way reloadVoicegroupPreview's preview folder is.
+    VoicegroupLoaderConfig config;
+    const VoicegroupLoaderConfig *useConfig = nullptr;
+    if (draft && draft->voicegroupPending() && !draft->folderRelative.isEmpty()) {
+        std::memset(&config, 0, sizeof(config));
+        std::strncpy(config.voicegroupPaths[0], draft->folderRelative.toLocal8Bit().constData(),
+                     VG_MAX_PATH_LEN - 1);
+        config.voicegroupPathCount = 1;
+        useConfig = &config;
+    }
     const QByteArray rootUtf8 = root.toLocal8Bit();
     for (const QString &name : candidates) {
         LoadedVoiceGroup *vg =
-            voicegroup_load(rootUtf8.constData(), name.toLocal8Bit().constData(), nullptr);
+            voicegroup_load(rootUtf8.constData(), name.toLocal8Bit().constData(), useConfig);
         if (vg)
             return vg;
     }
     return nullptr;
 }
 
+LoadedVoiceGroup *MainWindow::loadVoicegroupForSession(const SongSession &session,
+                                                       const SongCfg &cfg, QString *tried)
+{
+    return loadVoicegroupFor(session.root, cfg, tried, session.draft.get());
+}
+
+QStringList MainWindow::voicegroupChoices(const SongSession &session)
+{
+    QStringList choices = vgCatalog(session.root).groupArgs;
+    // The draft's own voicegroup stays choosable while the draft lives, so
+    // a song switched away from it can switch back.
+    if (session.draft && session.draft->voicegroupPending()) {
+        const QString arg = session.draft->voicegroupArg();
+        if (!choices.contains(arg))
+            choices.insert(std::lower_bound(choices.begin(), choices.end(), arg) - choices.begin(),
+                           arg);
+    }
+    return choices;
+}
+
+QList<QPair<QString, VgSynthDesc>>
+MainWindow::pendingSynthsReferencedBy(const SongSession &session) const
+{
+    QList<QPair<QString, VgSynthDesc>> defs;
+    if (!session.vgSource)
+        return defs;
+    for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
+        const VgVoice *v = session.vgSource->voiceAt(slot);
+        if (!v)
+            continue;
+        const auto it = m_pendingSynths.constFind(v->symbol);
+        if (it == m_pendingSynths.constEnd())
+            continue;
+        const QPair<QString, VgSynthDesc> def{it.key(), it.value()};
+        if (!defs.contains(def))
+            defs.append(def);
+    }
+    return defs;
+}
+
 SongSession *MainWindow::populateSession(
     SongSession *session, const SongInfo &song, std::unique_ptr<SongDraft> draft,
     const std::function<bool(SongDocument &, QString *)> &readDocument, QString *error)
 {
+    // The session may not exist yet, and the draft isn't installed until the
+    // document is read: load against the incoming draft directly.
     QString tried;
-    LoadedVoiceGroup *vg = loadVoicegroupFor(m_project.root(), song.cfg, &tried);
+    LoadedVoiceGroup *vg = loadVoicegroupFor(m_project.root(), song.cfg, &tried, draft.get());
     if (!vg) {
         *error = tr("Could not load the voicegroup for %1 (tried: %2).").arg(song.label, tried);
         return nullptr;
@@ -2342,7 +2401,7 @@ void MainWindow::onDocumentChanged(SongSession &session)
         // open one again.
         cleanupVgPreview();
         QString tried;
-        if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, cfg, &tried)) {
+        if (LoadedVoiceGroup *vg = loadVoicegroupForSession(session, cfg, &tried)) {
             session.view->setVoicegroup(nullptr);
             if (active) {
                 m_vgBrowser->setVoicegroup(nullptr);
@@ -2353,6 +2412,7 @@ void MainWindow::onDocumentChanged(SongSession &session)
             session.voicegroup = vg;
             openVoicegroupSource(session, cfg);
             replayVoiceEdits(session);
+            syncDraftVoicegroupFile(session);
             session.view->setVoicegroup(session.voicegroup);
             if (active)
                 updateVoicegroupBrowser();
@@ -2417,25 +2477,17 @@ bool MainWindow::saveSession(SongSession &session)
     // The voicegroup first: the document save below marks the undo stack
     // clean, and a failed voicegroup write must leave the session dirty so
     // the user can retry.
-    const bool vgWasDirty = session.vgSource && session.vgSource->dirty();
+    // A draft's unwritten new voicegroup is not saved here: it reaches the
+    // project with the commit (commitDraftVoicegroup), or never.
+    const bool vgWasDirty =
+        session.vgSource && session.vgSource->dirty() && !session.editsDraftVoicegroup();
     if (vgWasDirty) {
         QString error;
         // Golden Sun synth definitions this voicegroup references that only
         // exist in memory (minted by param edits) must land on disk first —
         // the saved file's symbols have to resolve. Only what the SAVED
         // state references is written; abandoned tweaks never persist.
-        QList<QPair<QString, VgSynthDesc>> newDefs;
-        for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
-            const VgVoice *v = session.vgSource->voiceAt(slot);
-            if (!v)
-                continue;
-            const auto it = m_pendingSynths.constFind(v->symbol);
-            if (it == m_pendingSynths.constEnd())
-                continue;
-            const QPair<QString, VgSynthDesc> def{it.key(), it.value()};
-            if (!newDefs.contains(def))
-                newDefs.append(def);
-        }
+        const QList<QPair<QString, VgSynthDesc>> newDefs = pendingSynthsReferencedBy(session);
         if (!newDefs.isEmpty()) {
             if (!VoicegroupSource::writeSynthDefinitions(session.root, newDefs, &error)) {
                 QMessageBox::warning(this, tr("Save Voicegroup"), error);
@@ -2464,7 +2516,7 @@ bool MainWindow::saveSession(SongSession &session)
         // replaces any preview-loaded state.
         const int slot = &session == m_active ? m_vgBrowser->currentSlot() : 0;
         QString tried;
-        if (LoadedVoiceGroup *vg = loadVoicegroupFor(session.root, session.doc.cfg(), &tried))
+        if (LoadedVoiceGroup *vg = loadVoicegroupForSession(session, session.doc.cfg(), &tried))
             swapVoicegroup(session, vg, slot);
         updateVgDockTitle();
         // Only a real write may refresh the stamp: recording the mtime on a
@@ -2757,7 +2809,7 @@ void MainWindow::openSongSettings()
     if (!m_active || m_active->bundle)
         return;
     SongSettingsDialog dialog(m_active->doc.cfg(), m_active->doc.label(),
-                              vgCatalog(m_active->root).groupArgs, this);
+                              voicegroupChoices(*m_active), this);
     if (dialog.exec() == QDialog::Accepted)
         m_active->doc.setCfg(dialog.cfg());
 }
@@ -3182,17 +3234,9 @@ void MainWindow::editSampleForSlot(int slot)
 
 void MainWindow::createSongFromWizard(const NewSongWizard &wizard, const QString &title)
 {
-    // A new voicegroup still has to exist before the song can load, so that
-    // path writes through for now (docs/draft-songs/PLAN.md step 3).
-    const QString newVoicegroup = wizard.newVoicegroupName();
-    if (!newVoicegroup.isEmpty()) {
-        finishCreateSongWriteThrough(wizard.songFile(), wizard.label(), wizard.constant(),
-                                     wizard.player(), wizard.cfg(), newVoicegroup);
-        return;
-    }
     QString error;
     if (!openDraftSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
-                       wizard.cfg(), newVoicegroup, &error))
+                       wizard.cfg(), wizard.newVoicegroupName(), &error))
         QMessageBox::warning(this, title, error);
 }
 
@@ -3231,6 +3275,25 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
     draft->constant = constant;
     draft->player = player;
     draft->newVoicegroup = newVoicegroup;
+    if (!newVoicegroup.isEmpty()) {
+        // The new voicegroup exactly as createVoicegroup would write it, in
+        // memory; the loader reads it from the draft's own folder.
+        draft->voicegroupBytes = VoicegroupSource::renderNewVoicegroup(
+            m_project.root(), newVoicegroup, QString(), QString(), error);
+        if (draft->voicegroupBytes.isEmpty())
+            return false;
+        draft->voicegroupTarget =
+            VoicegroupSource::newVoicegroupPath(m_project.root(), newVoicegroup);
+        if (!createDraftFolder(*draft, error))
+            return false;
+        QFile out(draft->folder + QLatin1Char('/') + newVoicegroup + QStringLiteral(".inc"));
+        if (!out.open(QIODevice::WriteOnly) ||
+            out.write(draft->voicegroupBytes) != draft->voicegroupBytes.size()) {
+            *error = tr("Cannot write the draft's voicegroup to %1.")
+                         .arg(QDir::toNativeSeparators(out.fileName()));
+            return false; // the draft's destructor removes its folder
+        }
+    }
 
     cleanupVgPreview();
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -3260,6 +3323,10 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     }
     const QString root = m_project.root();
     const QString label = session.doc.label();
+
+    // The new voicegroup before the .mid: the song's -G names it.
+    if (!commitDraftVoicegroup(session, error))
+        return false;
 
     // The .mid and, since the document has no flags line yet, the song's
     // midi.cfg/songs.mk flags. Rewriting both on a retry is harmless.
@@ -3306,22 +3373,37 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
     SongDraft *draft = session.draft.get();
     const QString root = m_project.root();
     const ReservedSongNames reserved = reservedSongNames(&session);
+    // The new voicegroup counts only while the commit would write it: not
+    // once written (a retry), nor when the cfg switched to another one.
+    const QString newVoicegroup =
+        draft->voicegroupPending() && session.doc.cfg().voicegroupArg == draft->voicegroupArg()
+            ? draft->newVoicegroup
+            : QString();
     // A .mid an earlier attempt wrote is this draft's own: the check waives
     // it, and the song list's unregistered entry for it after a reload.
     const SongNameConflicts conflicts =
         SongRegistry::checkNewSongNames(root, m_project.songs(), reserved, session.doc.label(),
-                                        draft->constant, draft->newVoicegroup, draft->wroteMidPath);
+                                        draft->constant, newVoicegroup, draft->wroteMidPath);
     if (conflicts.isEmpty())
         return true;
 
     SongRenameDialog dialog(&m_project, reserved, session.doc.label(), draft->constant,
-                            !draft->newVoicegroup.isEmpty(), conflicts.messages(),
-                            draft->wroteMidPath, this);
+                            !newVoicegroup.isEmpty(), conflicts.messages(), draft->wroteMidPath,
+                            this);
     if (dialog.exec() != QDialog::Accepted)
         return false;
 
     const QString label = dialog.label();
     const QString midPath = root + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+    // The voicegroup is named after the song. First, so a failure leaves the
+    // draft exactly as it was.
+    if (!newVoicegroup.isEmpty() && label != newVoicegroup) {
+        QString error;
+        if (!renameDraftVoicegroup(session, label, &error)) {
+            QMessageBox::warning(this, tr("Save Song"), error);
+            return false;
+        }
+    }
     // The draft's own earlier .mid would be left behind under the old name.
     if (!draft->wroteMidPath.isEmpty() &&
         QDir::cleanPath(draft->wroteMidPath) != QDir::cleanPath(midPath)) {
@@ -3339,12 +3421,174 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
     }
     session.doc.setDraftIdentity(label, midPath);
     draft->constant = dialog.constant();
-    // Named after the song. Step 3 (docs/draft-songs/PLAN.md) must also
-    // rename the draft voicegroup's file and symbol and the cfg's -G arg.
-    if (!draft->newVoicegroup.isEmpty())
-        draft->newVoicegroup = label;
     refreshSessionIdentity(session);
     return true;
+}
+
+bool MainWindow::renameDraftVoicegroup(SongSession &session, const QString &newName, QString *error)
+{
+    SongDraft *draft = session.draft.get();
+    if (!draft || !draft->voicegroupPending())
+        return true;
+    const QString root = m_project.root();
+    const QString oldName = draft->newVoicegroup;
+    const QString oldArg = draft->voicegroupArg();
+    const QByteArray bytes =
+        VoicegroupSource::renderNewVoicegroup(root, newName, QString(), QString(), error);
+    if (bytes.isEmpty())
+        return false;
+    const QString target = VoicegroupSource::newVoicegroupPath(root, newName);
+
+    // The open source, if it is the draft's, carries its edits over: the new
+    // file differs only in its header's name.
+    std::unique_ptr<VoicegroupSource> source;
+    if (session.editsDraftVoicegroup()) {
+        source = std::make_unique<VoicegroupSource>();
+        if (!source->openDraft(root, newName, bytes, target, error))
+            return false;
+        for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
+            const VgVoice *voice = session.vgSource->voiceAt(slot);
+            const VgVoice *fresh = source->voiceAt(slot);
+            if (voice && fresh && session.vgSource->isEditable(slot) && *voice != *fresh)
+                source->setVoice(slot, *voice);
+        }
+    }
+    const QString oldFile = draft->folder + QLatin1Char('/') + oldName + QStringLiteral(".inc");
+    const QString newFile = draft->folder + QLatin1Char('/') + newName + QStringLiteral(".inc");
+    {
+        QFile out(newFile);
+        const QByteArray content = source ? source->renderPreview() : bytes;
+        if (!out.open(QIODevice::WriteOnly) || out.write(content) != content.size()) {
+            *error = tr("Cannot write the draft's voicegroup to %1.")
+                         .arg(QDir::toNativeSeparators(newFile));
+            QFile::remove(newFile);
+            return false;
+        }
+    }
+    QFile::remove(oldFile);
+
+    draft->newVoicegroup = newName;
+    draft->voicegroupBytes = bytes;
+    draft->voicegroupTarget = target;
+    if (source)
+        session.vgSource = std::move(source);
+    // Voice edits find their voicegroup by load name; the cfg (and every
+    // settings edit in the history) by -G arg.
+    const QUndoStack *stack = session.doc.undoStack();
+    const std::function<void(const QUndoCommand *)> retarget = [&](const QUndoCommand *cmd) {
+        if (cmd->id() == kVoiceEditCommandId) {
+            auto *edit = static_cast<VoiceEditCommand *>(const_cast<QUndoCommand *>(cmd));
+            if (edit->loadName() == oldName)
+                edit->retarget(newName);
+            return;
+        }
+        for (int c = 0; c < cmd->childCount(); c++)
+            retarget(cmd->child(c));
+    };
+    for (int i = 0; i < stack->count(); i++)
+        retarget(stack->command(i));
+    session.doc.renameDraftVoicegroupArg(oldArg, draft->voicegroupArg());
+    if (session.appliedVoicegroupArg == oldArg)
+        session.appliedVoicegroupArg = draft->voicegroupArg();
+    if (&session == m_active)
+        updateVoicegroupBrowser();
+    return true;
+}
+
+bool MainWindow::commitDraftVoicegroup(SongSession &session, QString *error)
+{
+    SongDraft *draft = session.draft.get();
+    if (draft->newVoicegroup.isEmpty())
+        return true;
+    const QString root = m_project.root();
+    if (!draft->voicegroupWritten) {
+        // Switched to another voicegroup since: nothing of this one is
+        // written, and its folder goes with the draft.
+        if (session.doc.cfg().voicegroupArg != draft->voicegroupArg())
+            return true;
+        if (!session.editsDraftVoicegroup()) {
+            *error = tr("The new voicegroup %1 could not be opened for saving.")
+                         .arg(draft->newVoicegroup);
+            return false;
+        }
+        // Its synth definitions first, as saveSession does for any
+        // voicegroup; they graduate once the file itself is written.
+        const QList<QPair<QString, VgSynthDesc>> newDefs = pendingSynthsReferencedBy(session);
+        if (!newDefs.isEmpty()) {
+            if (!VoicegroupSource::writeSynthDefinitions(root, newDefs, error))
+                return false;
+            invalidateVgCatalog();
+        }
+        // Through the source, so the voice edits are in it; the name check
+        // before this made sure the file doesn't exist.
+        if (!session.vgSource->save(error))
+            return false;
+        for (const auto &def : newDefs)
+            m_pendingSynths.remove(def.first);
+        // An ordinary project voicegroup from here: loads find the project
+        // copy, the folder goes, and the staleness check has an mtime.
+        draft->voicegroupWritten = true;
+        draft->removeFolder();
+        session.vgFileTime = QFileInfo(session.vgSource->filePath()).lastModified();
+        invalidateVgCatalog();
+        if (&session == m_active)
+            updateVoicegroupBrowser();
+    }
+    // Idempotent: a retry after a failure here adds the line once.
+    return VoicegroupSource::appendIncludeLine(root, draft->newVoicegroup, error);
+}
+
+bool MainWindow::createDraftFolder(SongDraft &draft, QString *error)
+{
+    const QString root = m_project.root();
+    const QString relative =
+        QStringLiteral(".porydaw/drafts/") + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString folder = root + QLatin1Char('/') + relative;
+    // Plain mkpath, as for vgpreview: Sidecar::ensureDir would add .porydaw/
+    // to the project's .gitignore — a project write before the commit.
+    if (!QDir().mkpath(folder)) {
+        *error = tr("Cannot create %1.").arg(QDir::toNativeSeparators(folder));
+        return false;
+    }
+    draft.folder = folder;
+    draft.folderRelative = relative;
+    draft.lock = std::make_unique<QLockFile>(folder + QStringLiteral("/.lock"));
+    // Held for the draft's lifetime: never stale by age, only when this
+    // process is gone.
+    draft.lock->setStaleLockTime(0);
+    if (!draft.lock->tryLock(0)) {
+        *error = tr("Cannot lock %1.").arg(QDir::toNativeSeparators(folder));
+        return false; // the draft's destructor removes the folder
+    }
+    return true;
+}
+
+void MainWindow::syncDraftVoicegroupFile(SongSession &session)
+{
+    if (!session.editsDraftVoicegroup() || session.draft->folder.isEmpty())
+        return;
+    QFile out(session.draft->folder + QLatin1Char('/') + session.draft->newVoicegroup +
+              QStringLiteral(".inc"));
+    if (!out.open(QIODevice::WriteOnly) || out.write(session.vgSource->renderPreview()) < 0)
+        statusBar()->showMessage(tr("Cannot write the draft's voicegroup file."), 8000);
+}
+
+void MainWindow::sweepStaleDraftFolders(const QString &root)
+{
+    const QDir drafts(root + QStringLiteral("/.porydaw/drafts"));
+    if (!drafts.exists())
+        return;
+    for (const QString &name : drafts.entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)) {
+        const QString folder = drafts.filePath(name);
+        // A lock a live Porydaw holds (this one's or another instance's)
+        // keeps the folder; one whose process is gone, or none, doesn't.
+        QLockFile lock(folder + QStringLiteral("/.lock"));
+        lock.setStaleLockTime(0);
+        if (!lock.tryLock(0))
+            continue;
+        lock.unlock();
+        QDir(folder).removeRecursively();
+    }
 }
 
 void MainWindow::refreshSessionIdentity(SongSession &session)
@@ -3364,53 +3608,6 @@ void MainWindow::refreshSessionIdentity(SongSession &session)
     // for the new name and song.changed keeps flowing for this session.
     m_scriptHost->setSession(&session);
 #endif
-}
-
-void MainWindow::finishCreateSongWriteThrough(const SmfFile &smf, const QString &label,
-                                              const QString &constant, const QString &player,
-                                              const SongCfg &cfg, const QString &newVoicegroup)
-{
-    QString error;
-    // The voicegroup first: the song's -G already points at it, so nothing
-    // else may be written if it can't exist. Starts as the dummy template —
-    // the user configures it in the Voicegroup dock.
-    if (!newVoicegroup.isEmpty()) {
-        if (!VoicegroupSource::createVoicegroup(m_project.root(), newVoicegroup, QString(),
-                                                QString(), &error) ||
-            !VoicegroupSource::appendIncludeLine(m_project.root(), newVoicegroup, &error)) {
-            QMessageBox::warning(this, tr("New Song"), error);
-            return;
-        }
-    }
-
-    const QString midiDir = m_project.root() + QStringLiteral("/sound/songs/midi");
-    if (!smf.writeFile(midiDir + QStringLiteral("/%1.mid").arg(label), &error) ||
-        !SongRegistry::writeSongFlags(midiDir, label, SongRegistry::mergeCfgFlags(cfg), &error)) {
-        QMessageBox::warning(this, tr("New Song"), error);
-        return;
-    }
-    int songId = -1;
-    if (!SongRegistry::registerSong(m_project.root(), label, constant, player, &error, &songId)) {
-        // Keep the chosen constant/player so Register Song can retry later;
-        // the song shows a badge in the browser until then.
-        SongRegistry::saveRegistrationMeta(m_project.root(), label, constant, player);
-        QMessageBox::warning(this, tr("New Song"),
-                             tr("Wrote %1/%2.mid, but registering it failed: %3\n"
-                                "Use File → Register Song to retry.")
-                                 .arg(midiDir, label, error));
-    } else {
-        SongRegistry::clearRegistrationMeta(m_project.root(), label);
-        QString message =
-            tr("Created and registered %1 as %2 (song ID %3)").arg(label, constant).arg(songId);
-        if (!newVoicegroup.isEmpty())
-            message += tr(" — configure its new voicegroup in the Voicegroup dock");
-        statusBar()->showMessage(message, 8000);
-    }
-
-    reloadProject();
-    // The fresh song opens in its own tab, next to whatever is being worked
-    // on.
-    loadSongByLabel(label, /*newTab=*/true);
 }
 
 void MainWindow::registerLoadedSong()
@@ -3755,8 +3952,8 @@ void MainWindow::updateVoicegroupBrowser()
     m_vgBrowser->setViewOnly(session->bundle);
     m_vgBrowser->setVoicegroup(session->voicegroup);
     m_vgBrowser->setUsedVoices(session->view->usedVoices());
+    m_vgBrowser->setVoicegroupChoices(voicegroupChoices(*session));
     const VgCatalog &catalog = vgCatalog(session->root);
-    m_vgBrowser->setVoicegroupChoices(catalog.groupArgs);
     m_vgBrowser->setCurrentVoicegroupArg(arg);
     m_vgBrowser->setSampleVariants(catalog.voiceMacroWords, catalog.cries);
     m_vgBrowser->setSource(
@@ -3922,6 +4119,19 @@ void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)
 {
     session.vgSource = std::make_unique<VoicegroupSource>();
     QString error;
+    // A draft's unwritten voicegroup: parsed from its bytes as created; the
+    // edits are replayed on top by the caller when there are any. No file,
+    // so no mtime — the staleness reload never fires on it.
+    if (const SongDraft *draft = session.draft.get();
+        draft && draft->voicegroupPending() && cfg.voicegroupArg == draft->voicegroupArg()) {
+        if (!session.vgSource->openDraft(session.root, draft->newVoicegroup, draft->voicegroupBytes,
+                                         draft->voicegroupTarget, &error)) {
+            session.vgSource.reset();
+            statusBar()->showMessage(tr("Voicegroup editing unavailable: %1").arg(error), 8000);
+        }
+        session.vgFileTime = QDateTime();
+        return;
+    }
     if (!session.vgSource->open(session.root, cfg.voicegroupArg, &error)) {
         session.vgSource.reset();
         session.vgFileTime = QDateTime();
@@ -3991,6 +4201,10 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
 {
     if (!session.vgSource)
         return;
+    // A draft's voicegroup: its folder copy follows every edit, before any
+    // reload below, so later loads (a -G switch back, a save's reload)
+    // hear it too.
+    syncDraftVoicegroupFile(session);
     if (structural) {
         reloadVoicegroupPreview(session, slot);
     } else {

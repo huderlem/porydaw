@@ -113,6 +113,11 @@ class SongDocument : public QObject
     // ordinary song's file and flags line already live under the old name.
     // Changes nothing the song's content depends on, so no revision bump.
     void setDraftIdentity(const QString &label, const QString &midPath);
+    // Renames a draft's new voicegroup (the same Rename, PLAN step 3): every
+    // cfg that names oldArg as its -G voicegroup — the current one, the
+    // saved one, and those the undo history's settings edits restore — names
+    // newArg instead. Drafts only; no revision bump, no undo entry.
+    void renameDraftVoicegroupArg(const QString &oldArg, const QString &newArg);
     bool save(QString *error);
 
     const QString &midPath() const { return m_midPath; }

@@ -217,6 +217,13 @@ class VoicegroupSource
     // Locates the file (or monolithic section) declaring "voicegroup<arg>"
     // and parses it. arg is the song's mid2agb -G value ("" means "_dummy").
     bool open(const QString &projectRoot, const QString &voicegroupArg, QString *error);
+    // A voicegroup that doesn't exist yet (a draft song's new voicegroup,
+    // docs/draft-songs/PLAN.md): parses bytes as though they had been read
+    // from targetPath, which is where save() creates the file. name is the
+    // file's base name (the loader's name; -G arg "_<name>"). dirty()
+    // compares against bytes. Never call reload() on it before a save.
+    bool openDraft(const QString &projectRoot, const QString &name, const QByteArray &bytes,
+                   const QString &targetPath, QString *error);
     // Re-reads the located file from disk, dropping all unsaved edits.
     bool reload(QString *error);
 
@@ -289,23 +296,42 @@ class VoicegroupSource
     // files instead of one each.
     static VgDirectSoundScan directSoundCatalog(const QString &projectRoot);
 
-    // Writes sound/voicegroups/<name>.inc matching the siblings' header style
-    // and line endings. copyFromFile/copySectionLabel name an existing
-    // voicegroup to copy the voice lines from; empty means the 128-slot dummy
-    // template. Requires the per-file layout (sound/voicegroups/ exists).
+    // Whether any voicegroup file declares "voicegroup<arg>" (either form,
+    // any layout) — a name can be taken without sound/voicegroups/<name>.inc
+    // existing (a multi-voicegroup file, a monolithic layout). Reads the disk.
+    static bool isDeclared(const QString &projectRoot, const QString &voicegroupArg);
+
+    // The bytes of a new sound/voicegroups/<name>.inc matching the siblings'
+    // header style and line endings. copyFromFile/copySectionLabel name an
+    // existing voicegroup to copy the voice lines from; empty means the
+    // 128-slot dummy template. Requires the per-file layout
+    // (sound/voicegroups/ exists). Empty with *error on failure. A draft song
+    // keeps these in memory (openDraft); createVoicegroup writes exactly them.
+    static QByteArray renderNewVoicegroup(const QString &projectRoot, const QString &name,
+                                          const QString &copyFromFile,
+                                          const QString &copySectionLabel, QString *error);
+    // The same over voice lines the caller already holds (no line endings;
+    // the song-bundle importer's renamed copies). startingNote > 0 is the
+    // macro header's second argument — the first line is that key's voice; a
+    // label-style project gets dummy voices for the keys below it.
+    static QByteArray renderNewVoicegroupFromLines(const QString &projectRoot, const QString &name,
+                                                   const QList<QByteArray> &body, int startingNote,
+                                                   QString *error);
+    // sound/voicegroups/<name>.inc under projectRoot.
+    static QString newVoicegroupPath(const QString &projectRoot, const QString &name);
+    // Writes what renderNewVoicegroup returns to sound/voicegroups/<name>.inc
+    // (refusing to overwrite an existing file).
     static bool createVoicegroup(const QString &projectRoot, const QString &name,
                                  const QString &copyFromFile, const QString &copySectionLabel,
                                  QString *error);
-    // The same writer over voice lines the caller already holds (no line
-    // endings; the song-bundle importer's renamed copies). startingNote > 0
-    // is the macro header's second argument — the first line is that key's
-    // voice; a label-style project gets dummy voices for the keys below it.
+    // Writes what renderNewVoicegroupFromLines returns, likewise.
     static bool createVoicegroupFromLines(const QString &projectRoot, const QString &name,
                                           const QList<QByteArray> &body, int startingNote,
                                           QString *error);
     // Appends .include "sound/voicegroups/<name>.inc" after the last .include
     // in sound/voice_groups.inc (byte-conservative; no-op if the hub file
-    // doesn't exist — the loader and browser discover the file regardless).
+    // doesn't exist — the loader and browser discover the file regardless —
+    // or already includes the file).
     static bool appendIncludeLine(const QString &projectRoot, const QString &name, QString *error);
     // The inverse pair, for deleting a song's now-unused voicegroup: drops
     // the hub's .include line (no-op when absent), then the .inc file itself.

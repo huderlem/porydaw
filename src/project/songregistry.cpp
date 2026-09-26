@@ -617,10 +617,13 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
         if (taken)
             conflicts.constant = tr("Another song already uses the constant %1.").arg(constant);
     }
+    // The file name and the symbol are separate claims: voicegroup_<name>
+    // may be declared inside another file (a multi-voicegroup .inc, a
+    // monolithic layout) while <name>.inc is free, and vice versa.
     if (!newVoicegroup.isEmpty() &&
         (reserved.voicegroups.contains(newVoicegroup) ||
-         QFileInfo::exists(projectRoot +
-                           QStringLiteral("/sound/voicegroups/%1.inc").arg(newVoicegroup)))) {
+         QFileInfo::exists(VoicegroupSource::newVoicegroupPath(projectRoot, newVoicegroup)) ||
+         VoicegroupSource::isDeclared(projectRoot, QStringLiteral("_") + newVoicegroup))) {
         conflicts.voicegroup =
             tr("A voicegroup named voicegroup_%1 already exists.").arg(newVoicegroup);
     }

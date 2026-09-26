@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <numeric>
 #include <set>
@@ -205,6 +206,8 @@ class SongCfgCommand : public QUndoCommand
     }
 
   private:
+    friend class SongDocument; // renameDraftVoicegroupArg
+
     SongDocument *m_doc;
     SongCfg m_new;
     SongCfg m_old;
@@ -358,6 +361,43 @@ void SongDocument::setDraftIdentity(const QString &label, const QString &midPath
     Q_ASSERT(!m_hadCfgLine);
     m_label = label;
     m_midPath = midPath;
+}
+
+namespace {
+
+// A cfg's -G voicegroup, and its raw -G flag, renamed.
+void renameVoicegroupArg(SongCfg &cfg, const QString &oldArg, const QString &newArg)
+{
+    if (cfg.voicegroupArg != oldArg)
+        return;
+    cfg.voicegroupArg = newArg;
+    for (QString &flag : cfg.rawFlags) {
+        if (flag.size() >= 2 && flag[0] == QLatin1Char('-') &&
+            flag[1].toUpper() == QLatin1Char('G'))
+            flag = flag.left(2) + newArg;
+    }
+}
+
+} // namespace
+
+void SongDocument::renameDraftVoicegroupArg(const QString &oldArg, const QString &newArg)
+{
+    Q_ASSERT(!m_hadCfgLine);
+    renameVoicegroupArg(m_cfg, oldArg, newArg);
+    renameVoicegroupArg(m_savedCfg, oldArg, newArg);
+    // Undoing a settings edit must not bring back a voicegroup that no
+    // longer exists under that name. Macros (script transactions) nest them.
+    const std::function<void(const QUndoCommand *)> visit = [&](const QUndoCommand *cmd) {
+        if (auto *cfgCmd = dynamic_cast<const SongCfgCommand *>(cmd)) {
+            auto *mutableCmd = const_cast<SongCfgCommand *>(cfgCmd);
+            renameVoicegroupArg(mutableCmd->m_new, oldArg, newArg);
+            renameVoicegroupArg(mutableCmd->m_old, oldArg, newArg);
+        }
+        for (int c = 0; c < cmd->childCount(); c++)
+            visit(cmd->child(c));
+    };
+    for (int i = 0; i < m_undoStack.count(); i++)
+        visit(m_undoStack.command(i));
 }
 
 void SongDocument::adopt(SmfFile smf, const SongInfo &song)

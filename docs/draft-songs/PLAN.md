@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**; steps 1–2 done 2026-09-26. File/line references verified
+Status: **decisions confirmed 2026-09-26**; steps 1–3 done 2026-09-26. File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -88,9 +88,10 @@ affects **before** starting the next step.
   `openVoicegroupSource` → view → tab. `trackBudgetFor(SongInfo)` only
   needs `player`. *(Step 1: that body is now
   `MainWindow::populateSession(session, song, draft, readDocument, error)`,
-  shared by `loadSong` and `openDraftSong`; its single
-  `loadVoicegroupFor(m_project.root(), …)` call is the `loadSong` site
-  step 3's `loadVoicegroupForSession` must replace.)*
+  shared by `loadSong` and `openDraftSong`. Step 3: it loads through
+  `loadVoicegroupFor(root, cfg, tried, draft)` with the incoming draft,
+  since the session may not exist yet and the draft is installed only
+  after the document is read.)*
 - *(Step 1)* `loadSong` copies its `SongInfo` and re-resolves it by label
   after the save prompt: answering Save on a draft replaced in place
   commits it, and the commit's project reload replaces the song list a
@@ -109,6 +110,17 @@ affects **before** starting the next step.
   `voicegroupPaths[0] = ".porydaw/vgpreview"`, which is searched **before**
   the project's own voicegroups. `cleanupVgPreview` (`:3889`) wipes
   `vgpreview` on many occasions, so draft files must **not** live there.
+  *(Step 3: every session load goes through
+  `loadVoicegroupForSession(session, cfg, tried)` →
+  `loadVoicegroupFor(root, cfg, tried, draft)`, which puts
+  `SongDraft::folderRelative` (`.porydaw/drafts/<uuid>`) in
+  `voicegroupPaths[0]` while `draft->voicegroupPending()`. The bundle-tab
+  load keeps the plain call: bundles are never drafts.
+  `SongSession::editsDraftVoicegroup()` is true while the open
+  `vgSource` is the draft's unwritten voicegroup (`openDraft`, target
+  `sound/voicegroups/<name>.inc`, no mtime); `saveSession`'s
+  dirty-voicegroup block skips it and `commitDraftVoicegroup` writes it.
+  `VoicegroupSource::appendIncludeLine` is now idempotent.)*
 - `VoicegroupSource::open` (`src/project/voicegroupsource.h:218`) finds and
   parses a file on disk. `createVoicegroupFromLines`
   (`voicegroupsource.cpp:1601`) copies formatting from sibling files
@@ -132,6 +144,12 @@ affects **before** starting the next step.
   each draft's constant and `newVoicegroup`. The Sound page still checks
   the cached `-G` catalog first, then the shared check's voicegroup
   field.)*
+  *(Step 3: the voicegroup test also asks `VoicegroupSource::isDeclared`
+  whether any voicegroup file declares `voicegroup_<name>` — a full,
+  substring-gated read of the voicegroup files, so the wizard, the Rename
+  dialog and the commit all see a symbol declared inside another file.
+  `resolveDraftNameConflicts` passes the new voicegroup only while the
+  commit would write it: pending and still named by the cfg.)*
 - Harnesses that drive `MainWindow` (`runTabCheck`, `runVgSaveCheck`,
   `runBundleTabCheck`, …) are declared in `src/mainwindow.h:79-149`,
   dispatched from `src/main.cpp`, and listed in `tools/run_checks.sh`.
@@ -277,7 +295,7 @@ commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
    `:3502`) include the draft voicegroup's argument while this draft
    exists. `session.vgFileTime` stays null for a draft voicegroup, so the
    staleness reload never fires on it.
-   *(Step 2 hooks: `reservedSongNames` already reserves
+   *(Done in step 3. Step 2 hooks: `reservedSongNames` already reserves
    `draft->newVoicegroup`, and `resolveDraftNameConflicts` already passes it
    to the shared check and the Rename dialog (`renamesVoicegroup`), then
    sets `draft->newVoicegroup = <new label>` on accept. Step 3 must extend
@@ -293,7 +311,8 @@ commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
    the symbol. Step 3 must feed the catalog's group args (`vgCatalog(root)
    .groupArgs`) or a voice_group label index into the shared check, so the
    wizard, the Rename dialog and `commitDraft` all see it; the harness must
-   cover a name whose file doesn't exist but whose symbol does.)*
+   cover a name whose file doesn't exist but whose symbol does. Done in
+   step 3.)*
 6. `commitDraft`, voicegroup step (before `.mid`, as today): **only if**
    `doc.cfg().voicegroupArg` still names the draft voicegroup (the user
    may have switched in Song Settings). Write the file through the
@@ -333,9 +352,10 @@ will do.
 3. The `maybeSaveSession` prompt for a draft reads "Add *<label>* to the
    project?" with the buttons **Add to Project / Discard / Cancel**
    (Discard stays the destructive action).
-4. After commit, the status message says the same thing
-   `finishCreateSong` says today ("Created and registered … (song ID n)",
-   plus the configure-voicegroup hint when one was created). *(Step 1:
+4. After commit, the status message says what the old write-through
+   `finishCreateSong` said ("Created and registered … (song ID n)",
+   plus " — configure its new voicegroup in the Voicegroup dock" when one
+   was created; step 3 deleted that function). *(Step 1:
    `commitDraft` already shows the "Created and registered" message; only
    the voicegroup hint is left. `openDraftSong` shows a placeholder
    "Opened … — nothing is in the project until you save it" to replace.)* Import itself
@@ -394,7 +414,15 @@ possible):
       *(Step 2: `--draftcheck` section 7 already asserts the wizard
       rejects an open draft's label and constant; tick this with a
       reference to it.)*
-- [ ] **`cleanupVgPreview`** doesn't touch `drafts/`.
+- [ ] **`cleanupVgPreview`** doesn't touch `drafts/`. *(Step 3:
+      `--draftcheck` section 13 already asserts the draft folder survives
+      `cleanupVgPreview`; tick this with a reference to it.)*
+- [ ] **New Voicegroup (dock) / `project.createVoicegroup` (scripting)**
+      while a draft reserves a voicegroup name (step 3 note): both write
+      through and don't consult `reservedSongNames`, so they can create
+      the draft's voicegroup name first. The commit's name check then
+      catches it (Rename), so nothing is overwritten; decide whether
+      either should refuse a reserved name up front.
 - [ ] **Failed commit after the `.mid` write** (review 2026-09-26, E):
       `commitDraft` calls `doc.save()`, which writes the `.mid` and then the
       flags; if the flags write fails, the `.mid` stays on disk while the
@@ -638,3 +666,92 @@ and why, what's still owed.
   - Deferred into the plan: the voicegroup-symbol check (step 3, review E)
     and the Rename wording after an existing voicegroup was saved (step 4,
     review F).
+- **2026-09-26 — Step 3 (deferred new voicegroup).** Commit: see `git log`
+  on branch `draft-song` ("Draft songs step 3 …").
+  - `VoicegroupSource`: `renderNewVoicegroup` / `renderNewVoicegroupFromLines`
+    (the byte-producing halves; `createVoicegroup` / `createVoicegroupFromLines`
+    keep their signatures and write exactly those bytes, now also checking
+    the write), `newVoicegroupPath`, `openDraft(root, name, bytes,
+    targetPath, error)`, `isDeclared(root, arg)`; `appendIncludeLine` is a
+    no-op when the hub already includes the file.
+  - `SongDraft` (`src/songsession.h`): `voicegroupTarget`,
+    `voicegroupBytes`, `folder` / `folderRelative`, `lock` (`QLockFile`
+    `<folder>/.lock`, stale time 0), `voicegroupWritten`,
+    `voicegroupPending()`, `voicegroupArg()`, `removeFolder()` (also run by
+    its destructor, so discard / replace / commit / quit all remove the
+    folder). `SongSession::editsDraftVoicegroup()`.
+    `SongDocument::renameDraftVoicegroupArg(old, new)` (current cfg, saved
+    cfg, and the `SongCfgCommand`s in the undo history).
+  - `MainWindow`: `openDraftSong` renders the voicegroup, creates the
+    locked folder (`createDraftFolder`) and writes `<name>.inc` there;
+    `openVoicegroupSource` opens the draft's bytes via `openDraft`
+    (`vgFileTime` stays null); `onVoiceEdited` and the -G switch's replay
+    rewrite the folder copy (`syncDraftVoicegroupFile`);
+    `loadVoicegroupForSession` at the activation staleness reload,
+    `refreshSessionsAfterVgSave`, the -G switch and `saveSession`'s reload;
+    `voicegroupChoices(session)` feeds the dock and Song Settings (the draft
+    arg stays choosable while the draft lives); `pendingSynthsReferencedBy`
+    is shared by `saveSession` and the commit (item 7: the commit writes the
+    draft voicegroup's pending synth definitions first and graduates them
+    after the file lands; `saveSession`'s own block skips the draft
+    voicegroup). `commitDraftVoicegroup` runs before the `.mid`: only if
+    the cfg names the draft voicegroup, `vgSource->save()` → mark written,
+    remove the folder (loads now resolve to the project copy), set
+    `vgFileTime`, invalidate the catalog → `appendIncludeLine`; a retry
+    only re-runs the (idempotent) include. `renameDraftVoicegroup` on a
+    Rename that changes the label: re-renders under the new name, carries
+    the edited voices into a new draft source, rewrites the folder file,
+    retargets the `VoiceEditCommand`s' load name, renames the -G arg (doc +
+    applied). `sweepStaleDraftFolders` in `openProjectDir` after the
+    teardown. `finishCreateSongWriteThrough` and its branch are gone.
+  - Harness (`src/draftcheck.cpp`): 13 — draft with a new voicegroup:
+    tree unchanged, locked folder holding exactly `renderNewVoicegroup`'s
+    bytes, source = unwritten target with no mtime, dock choices offer the
+    arg (catalog doesn't); a structural + a scalar voice edit are heard,
+    the folder copy follows, a reload after `cleanupVgPreview` (the folder
+    survives it) reads the edits from the folder, nothing outside
+    `.porydaw/`; Discard → folder gone. 14 — Save → `.inc` equals the
+    edited source (header, `voice_square_2`), one include line, folder
+    gone, `vgFileTime` = the file's mtime, catalog lists it, the song's
+    `-G` names it, `VoicegroupSource::open` finds it, the voice edit still
+    undoes/redoes. 15 — cfg switched away, back (edits replayed, heard),
+    away again → Save writes no `.inc`/include, folder gone, `-G` = the
+    existing voicegroup. 16 — `voicegroup_<name>` planted in another file
+    (`draftcheck_multi.inc`; `<name>.inc` absent): the shared check rejects
+    it; Save → Rename (OK disabled on the name, enabled on a free one) →
+    committed under the new name with its edits, header and `-G` renamed,
+    old name nowhere, a pre-rename voice edit still undoes. 17 — a project
+    reopen sweeps an unlocked `drafts/` folder and keeps one whose lock the
+    harness holds.
+  - Results: `--draftcheck` PASS (normal build, standalone); full
+    `tools/run_checks.sh` PASS on the normal and ASAN builds, which runs
+    `--draftcheck`, `--vgcheck`, `--vgsavecheck` and `--onboardcheck` on
+    fresh scratches (mkcheck skipped, no fork given). Mutation-tested:
+    dropping `isDeclared` from the check fails 16; dropping the load-name
+    retarget fails 16's undo; dropping the folder sync in `onVoiceEdited`
+    fails 13; dropping `saveSession`'s draft-voicegroup guard fails 14
+    (early write → Rename); dropping the sweep fails 17; dropping the -G
+    rename fails 16.
+  - Deviations: (1) Two render functions (`renderNewVoicegroup` and
+    `…FromLines`), mirroring the two writers. (2) `populateSession` calls
+    `loadVoicegroupFor(…, draft.get())` directly rather than
+    `loadVoicegroupForSession` (no session/draft installed yet); the
+    bundle-tab load is unchanged. (3) The draft folder is made with plain
+    `mkpath`, not `Sidecar::ensureDir`, which would append `.porydaw/` to
+    the project's `.gitignore` — a project write before the commit (same
+    as `vgpreview`). (4) The voicegroup's name conflict (and so its rename)
+    counts only while the commit would write it — pending and still named
+    by the cfg; a draft switched away keeps its old (reserved) name. (5)
+    The undo history is rewritten on a rename (voice edits' load name,
+    settings edits' -G) so pre-rename edits still undo after the commit.
+    (6) Item E is a live disk read (`isDeclared`), not the cached catalog,
+    so a symbol created after the scan is seen too; it runs per keystroke
+    in the Rename dialog only while that dialog renames a voicegroup.
+    (7) The lock file lives inside the folder (`.lock`; the loader skips
+    dot files). (8) The commit status message still lacks the voicegroup
+    hint (step 4 item 4, unchanged scope).
+  - Owed: step 4's voicegroup hint; step 5's new checklist item (dock New
+    Voicegroup / scripting `createVoicegroup` vs. a reserved draft name).
+    No harness case for a crash-stale lock (a dead PID): faking another
+    process's lock file is fragile across Qt's lock-info format; the
+    unlocked-folder case covers the removal path.

@@ -893,6 +893,38 @@ bool VoicegroupSource::open(const QString &projectRoot, const QString &voicegrou
     return reload(error);
 }
 
+bool VoicegroupSource::openDraft(const QString &projectRoot, const QString &name,
+                                 const QByteArray &bytes, const QString &targetPath, QString *error)
+{
+    m_projectRoot = projectRoot;
+    m_arg = QStringLiteral("_") + name;
+    m_filePath = targetPath;
+    m_sectionLabel.clear();
+    m_loadName = name;
+    return parse(bytes, error);
+}
+
+bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voicegroupArg)
+{
+    const QString symbol = QStringLiteral("voicegroup") + voicegroupArg;
+    QString base = voicegroupArg;
+    while (base.startsWith(QLatin1Char('_')))
+        base.remove(0, 1);
+    // open()'s fallback scan: a cheap substring gate before the parse.
+    const QByteArray needle = base.toUtf8();
+    for (const QString &path : voicegroupFiles(projectRoot)) {
+        bool ok = false;
+        const QByteArray content = readAllBytes(path, &ok);
+        if (!ok || (!needle.isEmpty() && !content.contains(needle)))
+            continue;
+        for (const DeclaredSymbol &decl : declaredVoicegroups(content)) {
+            if (decl.symbol == symbol)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool VoicegroupSource::reload(QString *error)
 {
     bool ok = false;
@@ -1548,9 +1580,9 @@ VgAdsrDefaults VoicegroupSource::typicalAdsr(const QString &projectRoot)
     return catalogScan(projectRoot).typicalAdsr;
 }
 
-bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QString &name,
-                                        const QString &copyFromFile,
-                                        const QString &copySectionLabel, QString *error)
+QByteArray VoicegroupSource::renderNewVoicegroup(const QString &projectRoot, const QString &name,
+                                                 const QString &copyFromFile,
+                                                 const QString &copySectionLabel, QString *error)
 {
     QList<QByteArray> body;
     if (!copyFromFile.isEmpty()) {
@@ -1559,7 +1591,7 @@ bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QStrin
         if (!ok) {
             if (error)
                 *error = QStringLiteral("Cannot read %1").arg(copyFromFile);
-            return false;
+            return QByteArray();
         }
         bool unusedNewline = false;
         const QList<QByteArray> lines = splitLines(bytes, &unusedNewline);
@@ -1588,31 +1620,26 @@ bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QStrin
         if (body.isEmpty()) {
             if (error)
                 *error = QStringLiteral("No voice lines found to copy in %1").arg(copyFromFile);
-            return false;
+            return QByteArray();
         }
     } else {
         // The dummy.inc convention: 128 silent-envelope square waves.
         for (int i = 0; i < VOICEGROUP_SIZE; i++)
             body.append(QByteArrayLiteral("\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0"));
     }
-    return createVoicegroupFromLines(projectRoot, name, body, 0, error);
+    return renderNewVoicegroupFromLines(projectRoot, name, body, 0, error);
 }
 
-bool VoicegroupSource::createVoicegroupFromLines(const QString &projectRoot, const QString &name,
-                                                 const QList<QByteArray> &body, int startingNote,
-                                                 QString *error)
+QByteArray VoicegroupSource::renderNewVoicegroupFromLines(const QString &projectRoot,
+                                                          const QString &name,
+                                                          const QList<QByteArray> &body,
+                                                          int startingNote, QString *error)
 {
     const QDir dir(projectRoot + QStringLiteral("/sound/voicegroups"));
     if (!dir.exists()) {
         if (error)
             *error = QStringLiteral("sound/voicegroups/ does not exist in this project.");
-        return false;
-    }
-    const QString targetPath = dir.filePath(name + QStringLiteral(".inc"));
-    if (QFile::exists(targetPath)) {
-        if (error)
-            *error = QStringLiteral("%1 already exists.").arg(targetPath);
-        return false;
+        return QByteArray();
     }
 
     // Match the siblings' header style and line endings.
@@ -1654,18 +1681,64 @@ bool VoicegroupSource::createVoicegroupFromLines(const QString &projectRoot, con
     }
     lines.append(body);
 
+    const QByteArray eol = crlf ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\n");
+    QByteArray bytes;
+    for (const QByteArray &line : lines) {
+        bytes += line;
+        bytes += eol;
+    }
+    return bytes;
+}
+
+QString VoicegroupSource::newVoicegroupPath(const QString &projectRoot, const QString &name)
+{
+    return projectRoot + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+}
+
+namespace {
+
+// createVoicegroup*'s write half: a new file, never over an existing one.
+bool writeNewVoicegroupFile(const QString &targetPath, const QByteArray &bytes, QString *error)
+{
+    if (QFile::exists(targetPath)) {
+        if (error)
+            *error = QStringLiteral("%1 already exists.").arg(targetPath);
+        return false;
+    }
     QFile out(targetPath);
     if (!out.open(QIODevice::WriteOnly)) {
         if (error)
             *error = QStringLiteral("Cannot write %1").arg(targetPath);
         return false;
     }
-    const QByteArray eol = crlf ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\n");
-    for (const QByteArray &line : lines) {
-        out.write(line);
-        out.write(eol);
+    if (out.write(bytes) != bytes.size()) {
+        if (error)
+            *error = QStringLiteral("Short write to %1").arg(targetPath);
+        return false;
     }
     return true;
+}
+
+} // namespace
+
+bool VoicegroupSource::createVoicegroup(const QString &projectRoot, const QString &name,
+                                        const QString &copyFromFile,
+                                        const QString &copySectionLabel, QString *error)
+{
+    const QByteArray bytes =
+        renderNewVoicegroup(projectRoot, name, copyFromFile, copySectionLabel, error);
+    return !bytes.isEmpty() &&
+           writeNewVoicegroupFile(newVoicegroupPath(projectRoot, name), bytes, error);
+}
+
+bool VoicegroupSource::createVoicegroupFromLines(const QString &projectRoot, const QString &name,
+                                                 const QList<QByteArray> &body, int startingNote,
+                                                 QString *error)
+{
+    const QByteArray bytes =
+        renderNewVoicegroupFromLines(projectRoot, name, body, startingNote, error);
+    return !bytes.isEmpty() &&
+           writeNewVoicegroupFile(newVoicegroupPath(projectRoot, name), bytes, error);
 }
 
 bool VoicegroupSource::appendIncludeLine(const QString &projectRoot, const QString &name,
@@ -1688,12 +1761,17 @@ bool VoicegroupSource::appendIncludeLine(const QString &projectRoot, const QStri
 
     int lastInclude = -1;
     QByteArray indent;
+    const QByteArray needle = "\"sound/voicegroups/" + name.toUtf8() + ".inc\"";
     for (int i = 0; i < lines.size(); i++) {
         QByteArray line = lines.at(i);
         if (line.endsWith('\r'))
             line.chop(1);
         const QByteArray text = line.trimmed();
         if (text.startsWith(".include")) {
+            // Already included (a retried draft commit): a second line would
+            // define the voicegroup twice.
+            if (text.contains(needle))
+                return true;
             lastInclude = i;
             indent = leadingWs(line);
         }

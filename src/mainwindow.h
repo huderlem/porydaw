@@ -152,10 +152,12 @@ class MainWindow : public QMainWindow
     int runBundleImportTabCheck(const QString &bundleZip, const QString &projectRoot,
                                 const QString &scratchDir);
 
-    // Import MIDI / New Song's finish for a song on an existing voicegroup
-    // (docs/draft-songs/PLAN.md): opens smf as a draft tab named label —
-    // editable and playable, but nothing is written to the project until
-    // its first save (commitDraft). False with *error when it can't open.
+    // Import MIDI / New Song's finish (docs/draft-songs/PLAN.md): opens smf
+    // as a draft tab named label — editable and playable, but nothing is
+    // written to the project until its first save (commitDraft). A non-empty
+    // newVoicegroup (cfg's -G then names "_<newVoicegroup>") is created in
+    // memory and loaded from the draft's own folder under .porydaw/drafts/.
+    // False with *error when it can't open.
     bool openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
                        const QString &player, const SongCfg &cfg, const QString &newVoicegroup,
                        QString *error);
@@ -240,23 +242,36 @@ class MainWindow : public QMainWindow
                                  std::unique_ptr<SongDraft> draft,
                                  const std::function<bool(SongDocument &, QString *)> &readDocument,
                                  QString *error);
-    // New Song / Import finish: a draft tab (openDraftSong), or the
-    // write-through path when the wizard asked for a new voicegroup. title
-    // heads a failure's message box.
+    // New Song / Import finish: a draft tab (openDraftSong). title heads a
+    // failure's message box.
     void createSongFromWizard(const NewSongWizard &wizard, const QString &title);
-    // New Song / Import finish when the wizard asked for a new voicegroup:
-    // creates it, writes the .mid + midi.cfg line, registers the song in
-    // the registration files, reloads the project, and opens the song in a
-    // new tab. Goes away once drafts can carry a new voicegroup (step 3).
-    void finishCreateSongWriteThrough(const SmfFile &smf, const QString &label,
-                                      const QString &constant, const QString &player,
-                                      const SongCfg &cfg, const QString &newVoicegroup);
-    // A draft's first save: writes the .mid and its flags, registers the
-    // song (a failed registration still commits, as an unregistered song),
-    // and turns the session into an ordinary project song in place — its
-    // document, undo history and view survive. Safe to retry after a
-    // failure. False with *error when nothing was committed.
+    // A draft's first save: writes its new voicegroup (when the cfg still
+    // names it), the .mid and its flags, registers the song (a failed
+    // registration still commits, as an unregistered song), and turns the
+    // session into an ordinary project song in place — its document, undo
+    // history and view survive. Safe to retry after a failure. False with
+    // *error when nothing was committed.
     bool commitDraft(SongSession &session, QString *error);
+    // commitDraft's voicegroup step: the draft's new voicegroup, edits
+    // included, through its source's save() plus the hub's include line —
+    // only while the cfg names it (a draft switched to another voicegroup
+    // writes none). Then loads resolve to the project copy and the draft
+    // folder goes. Skips what an earlier attempt already did.
+    bool commitDraftVoicegroup(SongSession &session, QString *error);
+    // The Rename dialog's voicegroup half: the draft's unwritten voicegroup
+    // takes newName — its file in the draft folder, its voice_group/label
+    // symbol, the source, the voice edits' target in the undo history and
+    // the cfg's -G arg. False with *error (nothing changed) on failure.
+    bool renameDraftVoicegroup(SongSession &session, const QString &newName, QString *error);
+    // Creates draft's folder under <root>/.porydaw/drafts/ and its lock.
+    bool createDraftFolder(SongDraft &draft, QString *error);
+    // Rewrites the draft folder's copy of the session's unwritten voicegroup
+    // from its (edited) source, so the next load hears the edits. No-op for
+    // any other session.
+    void syncDraftVoicegroupFile(SongSession &session);
+    // At project open: removes .porydaw/drafts/ folders no live Porydaw
+    // holds the lock of (left by a crash); locked ones are skipped.
+    static void sweepStaleDraftFolders(const QString &root);
     // commitDraft's first step: when a name the draft holds was taken since
     // the wizard (the .mid created, the label or constant registered, the
     // voicegroup file made), explains the conflict in the Rename dialog and,
@@ -421,7 +436,20 @@ class MainWindow : public QMainWindow
     // Sidecar view state (SPEC §4.4): written whenever a session is let go
     // (tab close, project switch, app close). Cosmetic; silent on failure.
     void saveViewState(SongSession &session);
-    LoadedVoiceGroup *loadVoicegroupFor(const QString &root, const SongCfg &cfg, QString *tried);
+    // Loads cfg's voicegroup under root. With a draft whose new voicegroup
+    // is unwritten, the draft folder is searched before the project's own
+    // voicegroups (its copy is the only one).
+    LoadedVoiceGroup *loadVoicegroupFor(const QString &root, const SongCfg &cfg, QString *tried,
+                                        const SongDraft *draft = nullptr);
+    // Every load of a session's voicegroup: under its root, draft-aware.
+    LoadedVoiceGroup *loadVoicegroupForSession(const SongSession &session, const SongCfg &cfg,
+                                               QString *tried);
+    // The -G args a session can choose from: the project catalog's, plus
+    // its draft's unwritten new voicegroup.
+    QStringList voicegroupChoices(const SongSession &session);
+    // The pending (in-memory) synth definitions the session's voicegroup
+    // source references — what must be written before that source is saved.
+    QList<QPair<QString, VgSynthDesc>> pendingSynthsReferencedBy(const SongSession &session) const;
     // Starts (or resumes) playback; from Stopped, seeks to the edit cursor
     // first so playback begins there. fromEditCursor forces that seek even
     // out of Paused — the Space binding (Reaper-style restart), while the

@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QDateTime>
+#include <QDir>
+#include <QLockFile>
 #include <QString>
 #include <QTemporaryDir>
 
@@ -41,13 +43,33 @@ struct SynthToneBuf {
 
 // What a draft session (docs/draft-songs/PLAN.md) still has to write: a
 // song made by Import MIDI or New Song lives only in memory until its first
-// save commits it — the .mid and its flags, then the registration.
+// save commits it — its new voicegroup (if any), the .mid and its flags,
+// then the registration.
 struct SongDraft {
     QString constant; // registration: songs.h constant
     QString player;   // registration: song-table music player
-    // The wizard's new voicegroup, created at commit. Always empty for now:
-    // a song asking for one still takes the write-through path.
+    // The wizard's new voicegroup (sound/voicegroups/<newVoicegroup>.inc,
+    // -G arg "_<newVoicegroup>"), written at commit only if the song's cfg
+    // still names it. Empty when the song uses an existing voicegroup.
     QString newVoicegroup;
+    // Where the commit writes it, and its bytes as created
+    // (VoicegroupSource::renderNewVoicegroup): the pristine state the
+    // session's VoicegroupSource::openDraft parses, before any voice edit.
+    QString voicegroupTarget;
+    QByteArray voicegroupBytes;
+    // Until the commit, the loader reads the voicegroup from
+    // <root>/.porydaw/drafts/<uuid>/<newVoicegroup>.inc (PLAN D3), kept
+    // current with the voice edits; folderRelative is that folder relative
+    // to the root (the loader's search paths are). The session holds
+    // folder/.lock so another Porydaw's stale-folder sweep leaves it alone.
+    // Both are cleared (and the folder removed) once the voicegroup is
+    // written, and the folder goes with the draft.
+    QString folder;
+    QString folderRelative;
+    std::unique_ptr<QLockFile> lock;
+    // The commit wrote the voicegroup file: from here it is an ordinary
+    // project voicegroup (a retry only makes sure of its include line).
+    bool voicegroupWritten = false;
     // A .mid this draft wrote itself: an earlier commit attempt wrote it and
     // then failed (its flags write). The name check waives exactly this file
     // — and the unregistered song a project reload lists for it — so a retry
@@ -55,6 +77,28 @@ struct SongDraft {
     // that delete fails, the path stays here (the file is still the draft's,
     // should the user rename back) and the user was told.
     QString wroteMidPath;
+
+    // The new voicegroup exists only in this draft (not written yet).
+    bool voicegroupPending() const { return !newVoicegroup.isEmpty() && !voicegroupWritten; }
+    QString voicegroupArg() const { return QStringLiteral("_") + newVoicegroup; }
+
+    // Drops the draft folder (and its lock): after the voicegroup commit,
+    // and when the draft goes away (discarded, committed, replaced).
+    void removeFolder()
+    {
+        if (lock)
+            lock->unlock();
+        lock.reset();
+        if (!folder.isEmpty())
+            QDir(folder).removeRecursively();
+        folder.clear();
+        folderRelative.clear();
+    }
+
+    SongDraft() = default;
+    SongDraft(const SongDraft &) = delete;
+    SongDraft &operator=(const SongDraft &) = delete;
+    ~SongDraft() { removeFolder(); }
 };
 
 struct SongSession {
@@ -106,6 +150,14 @@ struct SongSession {
         return !bundle && (draft || doc.isDirty() || (vgSource && vgSource->dirty()));
     }
     bool isDraft() const { return draft != nullptr; }
+    // The open voicegroup source is the draft's unwritten new voicegroup:
+    // its edits are saved by the commit, never by the ordinary dirty-
+    // voicegroup save (which would write it into the project early).
+    bool editsDraftVoicegroup() const
+    {
+        return draft && draft->voicegroupPending() && vgSource &&
+               vgSource->filePath() == draft->voicegroupTarget;
+    }
 
     ~SongSession()
     {

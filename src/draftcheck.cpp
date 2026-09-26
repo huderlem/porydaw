@@ -9,6 +9,7 @@
 #include <QHash>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLockFile>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
@@ -40,8 +41,12 @@
 // caught at Save, which writes nothing until the Rename dialog picks a free
 // name (or only a free constant). A commit that failed after writing its
 // .mid retries under the same name, even after a project reload lists that
-// .mid as an unregistered song. QSettings is redirected into a temp dir; the commit writes into the
-// project — run against a scratch copy.
+// .mid as an unregistered song. A draft's new voicegroup lives in its own
+// .porydaw/drafts/ folder until the commit writes it, edits included — only
+// if the cfg still names it — and a Rename renames it too; a symbol declared
+// in another file counts as taken; project open sweeps unlocked draft
+// folders. QSettings is redirected into a temp dir; the commit writes into
+// the project — run against a scratch copy.
 
 namespace {
 
@@ -940,6 +945,302 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
                   "keeping the label deleted the draft's own .mid");
         }
         QFile::setPermissions(cfgPath, cfgPerms);
+    }
+
+    // 13-17. A draft with a new voicegroup (PLAN step 3): the voicegroup
+    // lives in memory and in the draft's own .porydaw/drafts/<uuid>/ folder
+    // until the commit writes it — with its edits — only if the cfg still
+    // names it.
+    const auto readBytes = [](const QString &path) {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    };
+    const QString hubPath = root + QStringLiteral("/sound/voice_groups.inc");
+    const auto includeCount = [&](const QString &name) {
+        return int(readBytes(hubPath).count(
+            QStringLiteral("\"sound/voicegroups/%1.inc\"").arg(name).toUtf8()));
+    };
+    const auto newVgCfg = [&cfg](const QString &name) {
+        SongCfg c = cfg;
+        c.voicegroupArg = QStringLiteral("_") + name;
+        return c;
+    };
+    // Slot 0 becomes a square_2 (structural: reloaded), slot 1's sustain
+    // drops (scalar: poked into the loaded ToneData).
+    const auto editVoices = [&](SongSession *session) {
+        VgVoice v0 = *session->vgSource->voiceAt(0);
+        v0.macro = VgMacro::Square2;
+        onVoiceEditRequested(0, v0, /*structural=*/true);
+        VgVoice v1 = *session->vgSource->voiceAt(1);
+        v1.sustain = 9;
+        onVoiceEditRequested(1, v1, /*structural=*/false);
+    };
+
+    // 13. Opening, editing and discarding: nothing outside .porydaw/.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg1");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        const QByteArray before = treeFingerprint(root);
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG1"), player,
+                                 newVgCfg(name), name, &error),
+                   "a draft with a new voicegroup did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        check(treeFingerprint(root) == before, "a draft with a new voicegroup wrote on open");
+        check(s->editsDraftVoicegroup() && s->vgSource->filePath() == target &&
+                  !s->vgFileTime.isValid() && !QFile::exists(target),
+              "the draft's voicegroup source is not the unwritten new voicegroup");
+        const QString folder = s->draft->folder;
+        check(!folder.isEmpty() && folder.startsWith(root + QStringLiteral("/.porydaw/drafts/")) &&
+                  QFileInfo(folder).isDir() && QFile::exists(folder + QStringLiteral("/.lock")),
+              "the draft has no locked folder under .porydaw/drafts/");
+        const QByteArray rendered =
+            VoicegroupSource::renderNewVoicegroup(root, name, QString(), QString(), &error);
+        check(!rendered.isEmpty() && s->draft->voicegroupBytes == rendered &&
+                  readBytes(folder + QLatin1Char('/') + name + QStringLiteral(".inc")) == rendered,
+              "the draft folder does not hold the voicegroup createVoicegroup would write");
+        check(s->voicegroup != nullptr && !s->vgSource->dirty(),
+              "the draft's new voicegroup did not load clean");
+        check(voicegroupChoices(*s).contains(QStringLiteral("_") + name) &&
+                  !vgCatalog(root).groupArgs.contains(QStringLiteral("_") + name),
+              "the dock's choices do not offer the draft's voicegroup (or the catalog has it)");
+
+        const uint8_t type0 = s->voicegroup->voices[0].type;
+        const uint8_t sustain1 = s->voicegroup->voices[1].sustain;
+        editVoices(s);
+        check(s->vgSource->dirty() && s->voicegroup->voices[0].type != type0 &&
+                  s->voicegroup->voices[1].sustain != sustain1,
+              "the draft voicegroup's edits are not heard");
+        const QByteArray synced = readBytes(folder + QLatin1Char('/') + name + ".inc");
+        check(synced == s->vgSource->renderPreview() && synced.contains("voice_square_2"),
+              "the draft folder's copy did not follow the edits");
+        check(treeFingerprint(root) == before && !QFile::exists(target),
+              "editing the draft's voicegroup wrote into the project");
+        // Without the preview shadow, a reload reads the draft folder.
+        cleanupVgPreview();
+        check(QFileInfo(folder).isDir(), "cleanupVgPreview removed the draft folder");
+        QString tried;
+        if (LoadedVoiceGroup *reloaded = loadVoicegroupForSession(*s, s->doc.cfg(), &tried)) {
+            check(reloaded->voices[0].type == s->voicegroup->voices[0].type &&
+                      reloaded->voices[1].sustain == s->voicegroup->voices[1].sustain,
+                  "reloading the draft's voicegroup lost the edits");
+            voicegroup_free(reloaded);
+        } else {
+            check(false, "the draft's voicegroup does not reload from its folder");
+        }
+
+        {
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            closeTab(m_tabs->indexOf(s->view));
+            check(prompt.answered(), "closing a draft with a new voicegroup did not prompt");
+        }
+        check(!sessionForLabel(name), "discarding did not close the voicegroup draft");
+        check(!QFileInfo::exists(folder), "discarding the draft left its folder behind");
+        check(treeFingerprint(root) == before && !QFile::exists(target) && includeCount(name) == 0,
+              "discarding a voicegroup draft wrote into the project");
+    }
+
+    // 14. Save commits the voicegroup with its edits, its include line, and
+    // a .mid whose -G names it.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg2");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG2"), player,
+                                 newVgCfg(name), name, &error),
+                   "the second voicegroup draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        editVoices(s);
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(saveSession(*s), "saving a voicegroup draft failed");
+        }
+        check(!s->isDraft() && !s->isDirty() && !s->vgSource->dirty(),
+              "the committed voicegroup draft is still unsaved");
+        const QByteArray written = readBytes(target);
+        check(!written.isEmpty() && written.contains("voice_square_2") &&
+                  written.contains(QStringLiteral("voice_group %1").arg(name).toUtf8()) &&
+                  written == s->vgSource->renderPreview(),
+              "the committed voicegroup file is missing or lacks the edits");
+        check(includeCount(name) == 1, "the committed voicegroup's include line is not there once");
+        check(!QFileInfo::exists(folder), "the commit left the draft folder behind");
+        check(s->vgSource->filePath() == target && s->vgFileTime.isValid() &&
+                  s->vgFileTime == QFileInfo(target).lastModified(),
+              "the committed session does not track the project's voicegroup file");
+        check(vgCatalog(root).groupArgs.contains(QStringLiteral("_") + name),
+              "the catalog does not list the committed voicegroup");
+        const SongInfo *song = songNamed(name);
+        check(song && song->registered && song->hasCfg &&
+                  song->cfg.voicegroupArg == QStringLiteral("_") + name && s->songId == song->id,
+              "the committed song's -G does not name its new voicegroup");
+        VoicegroupSource reopened;
+        check(reopened.open(root, QStringLiteral("_") + name, &error) && reopened.voiceAt(0) &&
+                  reopened.voiceAt(0)->macro == VgMacro::Square2,
+              "the committed voicegroup does not reopen from the project");
+        // The voice edit is still undoable against the project file.
+        s->doc.undoStack()->undo();
+        check(s->vgSource->dirty() && s->isDirty(), "undoing a committed voice edit did nothing");
+        s->doc.undoStack()->redo();
+        check(!s->vgSource->dirty() && !s->isDirty(),
+              "redo did not return to the saved voicegroup");
+    }
+
+    // 15. The cfg switched to an existing voicegroup (and back, and away
+    // again): the edits follow the switches, and Save writes no voicegroup.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg3");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG3"), player,
+                                 newVgCfg(name), name, &error),
+                   "the third voicegroup draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        editVoices(s);
+        const uint8_t editedType = s->voicegroup->voices[0].type;
+        SongCfg away = s->doc.cfg();
+        away.voicegroupArg = cfg.voicegroupArg;
+        s->doc.setCfg(away);
+        check(!s->editsDraftVoicegroup() && s->appliedVoicegroupArg == cfg.voicegroupArg &&
+                  voicegroupChoices(*s).contains(QStringLiteral("_") + name),
+              "switching away did not open the existing voicegroup (or dropped the choice)");
+        s->doc.setCfg(newVgCfg(name));
+        check(s->editsDraftVoicegroup() && s->vgSource->dirty() &&
+                  s->vgSource->voiceAt(0)->macro == VgMacro::Square2 &&
+                  s->voicegroup->voices[0].type == editedType,
+              "switching back to the draft's voicegroup lost its edits");
+        s->doc.setCfg(away);
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(saveSession(*s), "saving a draft switched to another voicegroup failed");
+        }
+        check(!s->isDraft() && !QFile::exists(target) && includeCount(name) == 0,
+              "a draft switched away from its voicegroup still wrote it");
+        check(!QFileInfo::exists(folder), "the abandoned voicegroup's draft folder remained");
+        const SongInfo *song = songNamed(name);
+        check(song && song->registered && song->cfg.voicegroupArg == cfg.voicegroupArg,
+              "the switched draft's -G does not name the existing voicegroup");
+    }
+
+    // 16. voicegroup_<name> declared in another file (review E), so the
+    // file name alone is free: the shared check sees the symbol, and Save's
+    // Rename renames the draft's voicegroup — file, symbol, -G — with it.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vgr");
+        const QString name2 = QStringLiteral("mus_draftcheck_vgr2");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        const QString target2 = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name2);
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VGR"), player,
+                                 newVgCfg(name), name, &error),
+                   "the renamed voicegroup draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        editVoices(s);
+        const QString multiPath = root + QStringLiteral("/sound/voicegroups/draftcheck_multi.inc");
+        {
+            QFile multi(multiPath);
+            const QByteArray bytes = QStringLiteral("voice_group draftcheck_other\n"
+                                                    "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0\n"
+                                                    "voice_group %1\n"
+                                                    "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0\n")
+                                         .arg(name)
+                                         .toUtf8();
+            check(multi.open(QIODevice::WriteOnly) && multi.write(bytes) == bytes.size(),
+                  "could not plant a multi-voicegroup file");
+        }
+        check(!QFile::exists(target) &&
+                  !SongRegistry::checkNewSongNames(root, {}, {}, QString(), QString(), name)
+                       .voicegroup.isEmpty(),
+              "checkNewSongNames missed a voicegroup symbol declared in another file");
+        check(SongRegistry::checkNewSongNames(root, {}, {}, QString(), QString(), name2)
+                  .voicegroup.isEmpty(),
+              "checkNewSongNames rejected a free voicegroup name");
+        bool okDisabledFirst = false;
+        bool okEnabledAfter = false;
+        {
+            PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+            rename.onDialog(QStringLiteral("Rename Song"), [&](QDialog *dialog) {
+                auto *buttons = dialog->findChild<QDialogButtonBox *>();
+                QPushButton *ok = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+                QLineEdit *field = nameField(dialog);
+                if (!ok || !field) {
+                    dialog->reject();
+                    return;
+                }
+                okDisabledFirst = !ok->isEnabled() && field->text() == name;
+                field->setText(name2);
+                okEnabledAfter = ok->isEnabled();
+                ok->click();
+            });
+            check(saveSession(*s), "saving a draft whose voicegroup symbol was taken failed");
+            check(rename.handled(QStringLiteral("Rename Song")),
+                  "a taken voicegroup symbol did not open the Rename dialog");
+        }
+        check(okDisabledFirst, "the Rename dialog accepted a taken voicegroup symbol");
+        check(okEnabledAfter, "the Rename dialog rejected a free voicegroup name");
+        check(!s->isDraft() && s->doc.label() == name2 &&
+                  s->doc.cfg().voicegroupArg == QStringLiteral("_") + name2 &&
+                  s->appliedVoicegroupArg == s->doc.cfg().voicegroupArg,
+              "the rename did not carry the draft's -G arg to the new voicegroup");
+        const QByteArray written = readBytes(target2);
+        check(written.contains(QStringLiteral("voice_group %1\n").arg(name2).toUtf8()) &&
+                  written.contains("voice_square_2") && s->vgSource->filePath() == target2,
+              "the renamed voicegroup was not written under its new name with its edits");
+        check(!QFile::exists(target) && includeCount(name) == 0 && includeCount(name2) == 1,
+              "the old voicegroup name reached the project");
+        check(!QFileInfo::exists(folder), "the renamed draft left its folder behind");
+        const SongInfo *song = songNamed(name2);
+        check(song && song->registered && song->cfg.voicegroupArg == QStringLiteral("_") + name2,
+              "the renamed song's -G does not name the renamed voicegroup");
+        // The pre-rename voice edits follow the voicegroup's new name.
+        s->doc.undoStack()->undo();
+        check(s->vgSource->dirty(), "a voice edit made before the rename no longer undoes");
+        s->doc.undoStack()->redo();
+        check(!s->vgSource->dirty(),
+              "redo after the rename did not return to the saved voicegroup");
+        QFile::remove(multiPath);
+    }
+
+    // 17. Stale-folder sweep at project open: an unlocked folder (a crash's
+    // leftover) goes; one whose lock a live process holds stays.
+    if (SongSession *leftover = sessionForLabel(labelF); leftover && leftover->isDraft()) {
+        PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+        closeTab(m_tabs->indexOf(leftover->view));
+    }
+    {
+        const QString drafts = root + QStringLiteral("/.porydaw/drafts/");
+        const QString stale = drafts + QStringLiteral("draftcheck-stale");
+        const QString held = drafts + QStringLiteral("draftcheck-held");
+        QDir().mkpath(stale);
+        QDir().mkpath(held);
+        {
+            QFile planted(stale + QStringLiteral("/mus_stale.inc"));
+            check(planted.open(QIODevice::WriteOnly) &&
+                      planted.write("voice_group mus_stale\n") > 0,
+                  "could not plant a stale draft folder");
+        }
+        auto heldLock = std::make_unique<QLockFile>(held + QStringLiteral("/.lock"));
+        heldLock->setStaleLockTime(0);
+        check(heldLock->tryLock(0), "could not lock the planted held draft folder");
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(openProjectDir(root, /*interactive=*/false), "reopening the project failed");
+        }
+        check(!QFileInfo::exists(stale), "the sweep left an unlocked draft folder");
+        check(QFileInfo::exists(held + QStringLiteral("/.lock")),
+              "the sweep removed a draft folder another process holds");
+        heldLock.reset();
+        QDir(held).removeRecursively();
     }
 
     if (failures == 0)

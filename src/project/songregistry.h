@@ -100,7 +100,7 @@ struct SongNameConflicts {
     QString label;      // a song already has the label
     QString mid;        // sound/songs/midi/<label>.mid exists
     QString constant;   // songs.h defines it, or another song uses it
-    QString voicegroup; // the new voicegroup's file exists, or a draft makes it
+    QString voicegroup; // its file or voicegroup_<name> exists, or a draft makes it
 
     bool isEmpty() const
     {
@@ -138,7 +138,8 @@ QString constantForLabel(const QString &label);
 
 // Whether a new song may take these names: label, constant, and (when not
 // empty) the voicegroup it creates. Reads the disk as it is now — the .mid,
-// song_table.inc's labels, songs.h's defines, the voicegroup file — on top
+// song_table.inc's labels, songs.h's defines, the voicegroup file and any
+// file declaring its voicegroup_<name> symbol — on top
 // of songs (the project's list, which may be stale after a git pull) and
 // the names reserved by open drafts. An empty argument skips its checks.
 // The New Song wizard and the draft commit (MainWindow::commitDraft) both
