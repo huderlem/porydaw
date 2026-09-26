@@ -124,8 +124,10 @@ affects **before** starting the next step.
   *(Step 2: the label/constant rows are now `SongNameFields`, shared with
   `SongRenameDialog`; every name decision — label, `.mid`, constant, new
   voicegroup file — goes through `SongRegistry::checkNewSongNames(root,
-  songs, ReservedSongNames, label, constant, newVg) -> SongNameConflicts`,
-  which reads `song_table.inc`/`songs.h`/the files on disk. The wizard gets
+  songs, ReservedSongNames, label, constant, newVg[, ownMidPath]) ->
+  SongNameConflicts`, which reads `song_table.inc`/`songs.h`/the files on
+  disk; `ownMidPath` waives a `.mid` the draft itself wrote in a failed
+  commit (`SongDraft::wroteMidPath`). The wizard gets
   `MainWindow::reservedSongNames()`: every open project tab's label, and
   each draft's constant and `newVoicegroup`. The Sound page still checks
   the cached `-G` catalog first, then the shared check's voicegroup
@@ -283,6 +285,15 @@ commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
    folder, its `voice_group`/symbol, and the cfg's `-G` arg — **only if**
    the cfg still names the draft voicegroup — before the commit continues.
    The harness should then rename a draft that has a new voicegroup.)*
+   *(Review of step 2, 2026-09-26, E: `checkNewSongNames`' voicegroup test
+   is file-name-only — it asks whether `sound/voicegroups/<name>.inc`
+   exists (`songregistry.cpp`, the `newVoicegroup` branch). But
+   `voicegroup_<name>` can be defined inside another file (a multi-group
+   `.inc`, monolithic layouts), so a free file name can still collide on
+   the symbol. Step 3 must feed the catalog's group args (`vgCatalog(root)
+   .groupArgs`) or a voice_group label index into the shared check, so the
+   wizard, the Rename dialog and `commitDraft` all see it; the harness must
+   cover a name whose file doesn't exist but whose symbol does.)*
 6. `commitDraft`, voicegroup step (before `.mid`, as today): **only if**
    `doc.cfg().voicegroupArg` still names the draft voicegroup (the user
    may have switched in Song Settings). Write the file through the
@@ -329,7 +340,15 @@ will do.
    the voicegroup hint is left. `openDraftSong` shows a placeholder
    "Opened … — nothing is in the project until you save it" to replace.)* Import itself
    says "Imported *<label>* as a draft — Save to add it to the project."
-5. Manual docs: add a short section to `docsrc/manual/` wherever Import
+5. *(Review of step 2, 2026-09-26, F.)* The Rename dialog says "The song
+   hasn't been written yet." That is not the whole truth when the draft
+   edited an **existing** voicegroup: `saveSession`'s dirty-voicegroup
+   block runs before `commitDraft`'s name check, so that `.inc` was already
+   saved when the dialog opens (and stays saved on Cancel). Either the
+   dialog says so when it happened, or this step moves the name check ahead
+   of the voicegroup save (so Cancel really writes nothing) — decide and
+   cover it in the harness.
+6. Manual docs: add a short section to `docsrc/manual/` wherever Import
    MIDI / New Song are described. Add a CHANGELOG entry that follows the
    existing convention.
 
@@ -572,3 +591,50 @@ and why, what's still owed.
     step 3's Changes, "Step 2 hooks"). The wizard's Sound-page voicegroup
     rejection is a modal warning and is covered only through
     `checkNewSongNames` directly, not by driving the page.
+  - **Review fixes (2026-09-26).** A code review of step 2 found:
+    (A) the `wroteMid` waiver was incomplete — it cleared only the `.mid`
+    conflict, but after any project reload `discoverUnregisteredSongs`
+    lists the draft's own leftover `.mid` as an unregistered song with the
+    draft's label (and label-derived constant), so the retry still opened
+    Rename, where `SongNameFields` knew nothing of the waiver and disabled
+    OK on the original label (stance 5 broken). Fix: the waiver is a
+    first-class `ownMidPath` argument of `checkNewSongNames` — that exact
+    `.mid` doesn't count as existing, and an **unregistered** song whose
+    `midPath` is it doesn't count for the label or constant (`song_table.inc`
+    and `songs.h` still do). `SongDraft::wroteMid` became `QString
+    wroteMidPath`, passed to the check and through `SongRenameDialog` to
+    `SongNameFields`. (B) Stale label caches after a rename: the script
+    host's session label (so every `song.changed` for the tab was dropped
+    and no `song.activated` fired for the new name) and the transport's
+    song label. Fix: `MainWindow::refreshSessionIdentity(session)` — tab
+    title/tooltip and, for the active session, window title, transport
+    label and `ScriptHost::setSession` (a no-op unless the label changed,
+    then `song.activated` with the new label; no engine rebind). Called
+    after a rename and at the end of every commit. (C) The old `.mid`'s
+    delete after a rename ignored failure: now a "Save Song" warning names
+    the stray file and `wroteMidPath` keeps it (a rename back waives it
+    again). (D) Harness gaps, below.
+  - Harness (`src/draftcheck.cpp`): section 7 also rejects a `songs.h`
+    define absent from the song list (vanilla's hex `MUS_ROUTE118`; a
+    planted alias otherwise). Section 8 asserts the transport label, window
+    title, a `song.activated` with the new label and a `song.changed` after
+    an edit (console-engine listeners). Section 10: a constant-only conflict
+    (an alias define planted in `songs.h`) → Rename keeps the label, changes
+    only the constant, commits under the original label. Section 11:
+    `midi.cfg` made read-only (probed; skipped with a note if the chmod
+    doesn't bite, e.g. as root) → Save fails after the `.mid` lands →
+    `reloadProject` lists it unregistered (asserted, and the un-waived check
+    flags label/`.mid`/constant) → retry with no changes commits under the
+    original names with no dialog. Section 12: the same partial commit plus
+    a planted constant → Rename opens for the constant alone, OK enabled on
+    the original label once the constant changes.
+  - Mutation-tested: dropping the waiver from the check fails 11, from the
+    dialog fails 12; dropping the script-host refresh fails 8. C has no
+    harness case: making the old `.mid` undeletable needs a read-only
+    `midi/` directory, which also blocks the `.mid` write itself.
+  - Results: `--draftcheck` PASS on the normal and ASAN builds (sections
+    11–12 ran, not skipped); full `tools/run_checks.sh` PASS on both builds
+    (scriptcheck included; mkcheck skipped, no fork given).
+  - Deferred into the plan: the voicegroup-symbol check (step 3, review E)
+    and the Rename wording after an existing voicegroup was saved (step 4,
+    review F).

@@ -565,16 +565,22 @@ QString constantForLabel(const QString &label)
 
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
-                                    const QString &constant, const QString &newVoicegroup)
+                                    const QString &constant, const QString &newVoicegroup,
+                                    const QString &ownMidPath)
 {
     const auto tr = [](const char *text) {
         return QCoreApplication::translate("SongRegistry", text);
+    };
+    const QString own = ownMidPath.isEmpty() ? QString() : QDir::cleanPath(ownMidPath);
+    // The unregistered song a reload lists for the caller's own .mid.
+    const auto isOwn = [&own](const SongInfo &song) {
+        return !own.isEmpty() && !song.registered && QDir::cleanPath(song.midPath) == own;
     };
     SongNameConflicts conflicts;
     if (!label.isEmpty()) {
         bool taken = reserved.labels.contains(label);
         for (const SongInfo &song : songs)
-            taken = taken || song.label == label;
+            taken = taken || (song.label == label && !isOwn(song));
         if (!taken) {
             for (const QString &line :
                  readLines(projectRoot + QStringLiteral("/sound/song_table.inc"))) {
@@ -587,7 +593,8 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
         }
         if (taken)
             conflicts.label = tr("A song named %1 already exists.").arg(label);
-        if (QFileInfo::exists(projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(label)))
+        const QString midPath = projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+        if (QFileInfo::exists(midPath) && QDir::cleanPath(midPath) != own)
             conflicts.mid = tr("%1.mid already exists.").arg(label);
     }
     if (!constant.isEmpty()) {
@@ -596,7 +603,7 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
         static const QRegularExpression defineRe(QStringLiteral(R"(^\s*#define\s+(\w+)\b)"));
         bool taken = reserved.constants.contains(constant);
         for (const SongInfo &song : songs)
-            taken = taken || song.constant == constant;
+            taken = taken || (song.constant == constant && !isOwn(song));
         if (!taken) {
             for (const QString &line :
                  readLines(projectRoot + QStringLiteral("/include/constants/songs.h"))) {

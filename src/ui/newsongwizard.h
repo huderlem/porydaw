@@ -75,7 +75,10 @@ class NewSongWizard : public QWizard
 // rows, decided by the same SongRegistry::checkNewSongNames, under an
 // explanation listing conflicts. Its OK button stays disabled while any
 // name is taken. renamesVoicegroup: the draft creates a voicegroup named
-// after the song, which must be free under the new label too.
+// after the song, which must be free under the new label too. ownMidPath: a
+// .mid the draft's earlier commit attempt wrote (SongDraft::wroteMidPath),
+// waived by the check so keeping the label stays possible when only, say,
+// the constant conflicts.
 class SongRenameDialog : public QDialog
 {
     Q_OBJECT
@@ -83,7 +86,8 @@ class SongRenameDialog : public QDialog
   public:
     SongRenameDialog(const DecompProject *project, const ReservedSongNames &reserved,
                      const QString &label, const QString &constant, bool renamesVoicegroup,
-                     const QStringList &conflicts, QWidget *parent = nullptr);
+                     const QStringList &conflicts, const QString &ownMidPath = QString(),
+                     QWidget *parent = nullptr);
     ~SongRenameDialog() override;
 
     QString label() const;

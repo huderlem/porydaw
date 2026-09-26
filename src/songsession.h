@@ -48,10 +48,13 @@ struct SongDraft {
     // The wizard's new voicegroup, created at commit. Always empty for now:
     // a song asking for one still takes the write-through path.
     QString newVoicegroup;
-    // An earlier commit attempt wrote the .mid and then failed (its flags
-    // write): the file is this draft's own, so a retry's name check must
-    // not count it as taken (PLAN stance 5).
-    bool wroteMid = false;
+    // A .mid this draft wrote itself: an earlier commit attempt wrote it and
+    // then failed (its flags write). The name check waives exactly this file
+    // — and the unregistered song a project reload lists for it — so a retry
+    // commits under the same name (PLAN stance 5). A rename deletes it; if
+    // that delete fails, the path stays here (the file is still the draft's,
+    // should the user rename back) and the user was told.
+    QString wroteMidPath;
 };
 
 struct SongSession {

@@ -263,6 +263,12 @@ class MainWindow : public QMainWindow
     // on OK, renames the draft in place. False when the user cancels; true
     // when the names are free (at once or after the rename).
     bool resolveDraftNameConflicts(SongSession &session);
+    // After a session's label or .mid path changed in place (a draft's
+    // rename, its commit): the tab title and tooltip and, for the active
+    // session, the window title, the transport's song label and the script
+    // host's session label — what activateSession sets, without rebinding
+    // the engine.
+    void refreshSessionIdentity(SongSession &session);
     // The dialog-less half of deleteSongById (also the harness entry): closes
     // the song's tab discarding its edits, moves the .mid to .porydaw/trash/,
     // removes the flag line, unregisters, drops the sidecar, deletes the

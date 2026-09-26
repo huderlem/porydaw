@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
 #include <QTabWidget>
@@ -25,6 +26,9 @@
 #include "mainwindow.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
+#ifdef PORYDAW_SCRIPTING
+#include "scripting/scripthost.h"
+#endif
 
 // --draftcheck <projectRoot>: draft songs (docs/draft-songs/PLAN.md). Import
 // MIDI / New Song open a draft tab that writes nothing into the project:
@@ -34,7 +38,9 @@
 // history. Names are reserved: the wizard rejects an open draft's label and
 // constant, and a name taken behind a draft's back (its .mid created) is
 // caught at Save, which writes nothing until the Rename dialog picks a free
-// name. QSettings is redirected into a temp dir; the commit writes into the
+// name (or only a free constant). A commit that failed after writing its
+// .mid retries under the same name, even after a project reload lists that
+// .mid as an unregistered song. QSettings is redirected into a temp dir; the commit writes into the
 // project — run against a scratch copy.
 
 namespace {
@@ -226,6 +232,37 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     const QString midiDir = root + QStringLiteral("/sound/songs/midi/");
     const auto persistedLabels = [] {
         return QSettings().value(QStringLiteral("lastOpenSongs")).toStringList();
+    };
+
+    const QString songsHPath = root + QStringLiteral("/include/constants/songs.h");
+    // Appends a #define to songs.h, as a git pull or another tool might.
+    const auto plantDefine = [&songsHPath](const QString &name, const QString &value) {
+        QFile file(songsHPath);
+        if (!file.open(QIODevice::Append))
+            return false;
+        const QByteArray line = QStringLiteral("#define %1 %2\n").arg(name, value).toUtf8();
+        return file.write(line) == line.size();
+    };
+    // The first songs.h define no listed song uses as its constant: an alias
+    // (or a hex value) the project's song list never picks up. Plants one
+    // when the project has none.
+    const auto unlistedSongsHDefine = [&]() -> QString {
+        static const QRegularExpression defineRe(
+            QStringLiteral(R"(^\s*#define\s+((?:MUS|SE|PH)_\w+)\b)"));
+        QSet<QString> listed;
+        for (const SongInfo &song : m_project.songs())
+            listed.insert(song.constant);
+        QFile file(songsHPath);
+        if (file.open(QIODevice::ReadOnly)) {
+            while (!file.atEnd()) {
+                const QRegularExpressionMatch m =
+                    defineRe.match(QString::fromUtf8(file.readLine()));
+                if (m.hasMatch() && !listed.contains(m.captured(1)))
+                    return m.captured(1);
+            }
+        }
+        const QString planted = QStringLiteral("MUS_DRAFTCHECK_ALIAS");
+        return plantDefine(planted, QStringLiteral("MUS_DUMMY")) ? planted : QString();
     };
 
     const QByteArray pristine = treeFingerprint(root);
@@ -536,6 +573,16 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             constant->setText(QStringLiteral("MUS_LITTLEROOT"));
             emit constant->textEdited(constant->text());
             check(!identity->isComplete(), "wizard: accepted a constant songs.h defines");
+            // A define songs.h has but the song list doesn't (vanilla's
+            // MUS_ROUTE118/MUS_NONE are hex, so the project never reads them
+            // as songs): only a read of the file itself can reject it.
+            const QString alias = unlistedSongsHDefine();
+            if (check(!alias.isEmpty(), "no songs.h define outside the song list to test with")) {
+                constant->setText(alias);
+                emit constant->textEdited(alias);
+                check(!identity->isComplete(),
+                      "wizard: accepted a songs.h define the song list doesn't know");
+            }
         }
         // Without the reservation the same label is free: the rejection
         // above came from the draft, not from the disk.
@@ -593,6 +640,15 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     }
     const QDateTime plantedTime = QFileInfo(plantedE).lastModified();
     const QString labelE2 = QStringLiteral("mus_draftcheck_e2");
+#ifdef PORYDAW_SCRIPTING
+    // A plugin watching the song: after the rename it must hear the new
+    // name (song.activated) and keep hearing edits (song.changed).
+    m_scriptHost->evalConsole(
+        QStringLiteral("var dcChanged = 0; var dcActivated = '';"
+                       "porydaw.song.on('changed', function () { dcChanged++; });"
+                       "porydaw.song.on('activated', function (e) {"
+                       "  dcActivated = e ? e.label : ''; });"));
+#endif
     {
         bool okDisabledFirst = false;
         bool okEnabledAfter = false;
@@ -649,6 +705,21 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
           "the old names reached the registration files");
     check(persistedLabels().contains(labelE2) && !persistedLabels().contains(labelE),
           "the renamed song was not persisted under its new name");
+    // What activateSession set by label follows the rename.
+    check(m_songLabel->text().trimmed() == labelE2,
+          "the transport's song label kept the old name after the rename");
+    check(windowTitle().contains(labelE2), "the window title kept the old name after the rename");
+#ifdef PORYDAW_SCRIPTING
+    check(m_scriptHost->evalConsole(QStringLiteral("dcActivated")) == labelE2,
+          "the rename did not fire song.activated with the new label");
+    m_scriptHost->evalConsole(QStringLiteral("dcChanged = 0;"));
+    draftE->doc.addNote(0, 48, 62, 24, 100);
+    QApplication::processEvents(); // song.changed is delivered after the turn
+    check(m_scriptHost->evalConsole(QStringLiteral("dcChanged")).toInt() >= 1,
+          "song.changed stopped firing for the renamed song");
+    draftE->doc.undoStack()->undo();
+    QApplication::processEvents();
+#endif
 
     // 9. Cancel on the Rename dialog: nothing is written, the tab stays a
     // dirty draft, and the Save counts as failed — without a second box.
@@ -680,6 +751,196 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     check(m_tabs->tabText(m_tabs->indexOf(draftF->view)) == labelF + QLatin1Char('*'),
           "the cancelled draft's tab title changed");
     check(!persistedLabels().contains(labelF), "the cancelled draft was persisted");
+
+    // Looks up a song in the (reloaded) project list.
+    const auto songNamed = [this](const QString &label) -> const SongInfo * {
+        for (const SongInfo &song : m_project.songs()) {
+            if (song.label == label)
+                return &song;
+        }
+        return nullptr;
+    };
+    // The Rename dialog, kept at its label: OK must start disabled (the
+    // constant is taken), and changing only the constant must enable it.
+    const auto keepLabelNewConstant = [&](PromptAnswerer &answerer, const QString &label,
+                                          const QString &newConstant, bool *okDisabledFirst,
+                                          bool *okEnabledAfter) {
+        answerer.onDialog(QStringLiteral("Rename Song"), [=](QDialog *dialog) {
+            auto *buttons = dialog->findChild<QDialogButtonBox *>();
+            QPushButton *ok = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+            QLineEdit *name = nameField(dialog);
+            QLineEdit *constant = constantField(dialog);
+            if (!ok || !name || !constant) {
+                dialog->reject();
+                return;
+            }
+            *okDisabledFirst = !ok->isEnabled() && name->text() == label;
+            constant->setText(newConstant);
+            emit constant->textEdited(newConstant);
+            *okEnabledAfter = ok->isEnabled() && name->text() == label;
+            ok->click();
+        });
+    };
+
+    // 10. Only the constant was taken behind the draft's back (songs.h gained
+    // an alias define): the Rename dialog lets the label stay and changes
+    // just the constant, and the commit lands under the original label.
+    {
+        const QString labelG = QStringLiteral("mus_draftcheck_g");
+        const QString constantG = QStringLiteral("MUS_DRAFTCHECK_G");
+        const QString constantG2 = QStringLiteral("MUS_DRAFTCHECK_G2");
+        if (!check(openDraftSong(draftSmf(), labelG, constantG, player, cfg, QString(), &error),
+                   "the seventh draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *draftG = m_active;
+        check(plantDefine(constantG, QStringLiteral("MUS_DUMMY")),
+              "could not plant a define in songs.h");
+        bool okDisabledFirst = false;
+        bool okEnabledAfter = false;
+        {
+            PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+            keepLabelNewConstant(rename, labelG, constantG2, &okDisabledFirst, &okEnabledAfter);
+            check(saveSession(*draftG), "saving a draft whose constant was taken failed");
+            check(rename.handled(QStringLiteral("Rename Song")),
+                  "a draft whose constant was taken did not open the Rename dialog");
+        }
+        check(okDisabledFirst, "the Rename dialog accepted the taken constant");
+        check(okEnabledAfter, "the Rename dialog would not keep the label with a new constant");
+        const SongInfo *song = songNamed(labelG);
+        check(!draftG->isDraft() && draftG->doc.label() == labelG && song && song->registered &&
+                  song->constant == constantG2 && draftG->songId == song->id,
+              "the constant-only rename did not commit under the original label");
+    }
+
+    // 11-12. A commit that failed after writing the .mid (its flags write
+    // failed), then a project reload, which lists that .mid as an
+    // unregistered song under the draft's label. The .mid is the draft's
+    // own: a retry commits under the same name (11), and a Rename dialog
+    // opened for another reason still lets the label stay (12).
+    const QString cfgPath = midiDir + QStringLiteral("midi.cfg");
+    const QFileDevice::Permissions cfgPerms = QFile::permissions(cfgPath);
+    // Makes midi.cfg unwritable; false (restored) when the file system or
+    // the user (root) ignores that — the caller then skips with a note.
+    const auto lockCfg = [&]() {
+        if (!QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::ReadUser |
+                                                QFileDevice::ReadGroup | QFileDevice::ReadOther))
+            return false;
+        QFile probe(cfgPath);
+        if (probe.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            probe.close();
+            QFile::setPermissions(cfgPath, cfgPerms);
+            return false;
+        }
+        return true;
+    };
+    // Opens a draft, fails its first Save after the .mid lands, reloads the
+    // project. False (with the failure recorded) when that didn't happen.
+    const auto partialCommit = [&](const QString &label, const QString &constant,
+                                   SongSession **out) {
+        if (!check(openDraftSong(draftSmf(), label, constant, player, cfg, QString(), &error),
+                   "a partial-commit draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return false;
+        }
+        SongSession *draft = m_active;
+        *out = draft;
+        const QString midPath = midiDir + label + QStringLiteral(".mid");
+        const QByteArray cfgBefore = [&] {
+            QFile f(cfgPath);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        }();
+        {
+            PromptAnswerer failBox(QMessageBox::Cancel, modalFail);
+            failBox.onDialog(QStringLiteral("Save Song"),
+                             [](QDialog *dialog) { dialog->reject(); });
+            check(!saveSession(*draft), "saving with an unwritable midi.cfg succeeded");
+            check(failBox.handled(QStringLiteral("Save Song")),
+                  "the failed flags write did not report its error");
+        }
+        QFile::setPermissions(cfgPath, cfgPerms);
+        QFile cfgFile(cfgPath);
+        check(cfgFile.open(QIODevice::ReadOnly) && cfgFile.readAll() == cfgBefore,
+              "the failed commit changed midi.cfg");
+        if (!check(QFile::exists(midPath) && draft->isDraft() && draft->draft &&
+                       draft->draft->wroteMidPath == midPath,
+                   "the failed commit did not leave the draft's own .mid behind"))
+            return false;
+        QString reloadError;
+        check(reloadProject(&reloadError), "reloading the project failed");
+        const SongInfo *stray = songNamed(label);
+        // The reviewed bug's precondition: the reload lists the draft's own
+        // .mid as an unregistered song under its label and constant.
+        check(stray && !stray->registered && stray->constant == constant,
+              "the reload did not list the draft's own .mid as an unregistered song");
+        const SongNameConflicts unwaived = SongRegistry::checkNewSongNames(
+            root, m_project.songs(), reservedSongNames(draft), label, constant, QString());
+        check(!unwaived.label.isEmpty() && !unwaived.mid.isEmpty() && !unwaived.constant.isEmpty(),
+              "without the waiver the draft's own .mid did not read as taken");
+        check(SongRegistry::checkNewSongNames(root, m_project.songs(), reservedSongNames(draft),
+                                              label, constant, QString(), midPath)
+                  .isEmpty(),
+              "the waiver did not clear the draft's own .mid and its unregistered entry");
+        check(draft->isDraft() && draft->songId == -1, "the reload resolved the draft's song ID");
+        return true;
+    };
+
+    if (!lockCfg()) {
+        std::printf("draftcheck: note: midi.cfg stays writable after chmod (root or a file "
+                    "system that ignores permissions); partial-commit sections 11-12 skipped\n");
+    } else {
+        // 11. Retry with no changes: no Rename dialog, the original names.
+        const QString labelH = QStringLiteral("mus_draftcheck_h");
+        const QString constantH = QStringLiteral("MUS_DRAFTCHECK_H");
+        SongSession *draftH = nullptr;
+        if (partialCommit(labelH, constantH, &draftH)) {
+            {
+                PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+                check(saveSession(*draftH), "retrying a partially committed draft failed");
+            }
+            const SongInfo *song = songNamed(labelH);
+            check(!draftH->isDraft() && !draftH->isDirty() && draftH->doc.label() == labelH &&
+                      song && song->registered && song->constant == constantH && song->hasCfg &&
+                      draftH->songId == song->id,
+                  "the retry did not commit under the original names");
+            check(persistedLabels().contains(labelH), "the retried commit was not persisted");
+        }
+
+        // 12. The same, but songs.h has meanwhile taken the constant: the
+        // Rename dialog opens for the constant alone and keeps the label
+        // allowed — the draft's own .mid and its unregistered entry don't
+        // count against it.
+        const QString labelI = QStringLiteral("mus_draftcheck_i");
+        const QString constantI = QStringLiteral("MUS_DRAFTCHECK_I");
+        const QString constantI2 = QStringLiteral("MUS_DRAFTCHECK_I2");
+        SongSession *draftI = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(labelI, constantI, &draftI)) {
+            check(plantDefine(constantI, QStringLiteral("MUS_DUMMY")),
+                  "could not plant a define in songs.h");
+            bool okDisabledFirst = false;
+            bool okEnabledAfter = false;
+            {
+                PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+                keepLabelNewConstant(rename, labelI, constantI2, &okDisabledFirst, &okEnabledAfter);
+                check(saveSession(*draftI), "saving the partially committed draft failed");
+                check(rename.handled(QStringLiteral("Rename Song")),
+                      "a taken constant did not open the Rename dialog");
+            }
+            check(okDisabledFirst, "the Rename dialog accepted the taken constant (retry)");
+            check(okEnabledAfter,
+                  "the Rename dialog counted the draft's own .mid against keeping its label");
+            const SongInfo *song = songNamed(labelI);
+            check(!draftI->isDraft() && draftI->doc.label() == labelI && song && song->registered &&
+                      song->constant == constantI2 && draftI->songId == song->id,
+                  "the retry with a new constant did not commit under the original label");
+            check(QFile::exists(midiDir + labelI + QStringLiteral(".mid")),
+                  "keeping the label deleted the draft's own .mid");
+        }
+        QFile::setPermissions(cfgPath, cfgPerms);
+    }
 
     if (failures == 0)
         std::printf("draftcheck: PASS\n");

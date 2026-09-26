@@ -143,9 +143,17 @@ QString constantForLabel(const QString &label);
 // the names reserved by open drafts. An empty argument skips its checks.
 // The New Song wizard and the draft commit (MainWindow::commitDraft) both
 // decide through this, so their rules can't drift.
+//
+// ownMidPath (optional) is a .mid the caller wrote itself — a draft whose
+// earlier commit attempt wrote its .mid and then failed (PLAN stance 5). That
+// file is not a conflict: neither its existence nor the unregistered song a
+// project reload lists for it (DecompProject::discoverUnregisteredSongs gives
+// it the draft's label and a label-derived constant) counts as taken. Only
+// that exact path is waived; song_table.inc and songs.h still decide.
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
-                                    const QString &constant, const QString &newVoicegroup);
+                                    const QString &constant, const QString &newVoicegroup,
+                                    const QString &ownMidPath = QString());
 
 // Computes the registration lines against the files as they are on disk
 // right now, matching each file's existing indentation/alignment.

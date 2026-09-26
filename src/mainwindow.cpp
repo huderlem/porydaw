@@ -3266,7 +3266,7 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     const bool midExisted = QFileInfo::exists(session.doc.midPath());
     if (!session.doc.save(error)) {
         if (!midExisted && QFileInfo::exists(session.doc.midPath()))
-            draft->wroteMid = true;
+            draft->wroteMidPath = session.doc.midPath();
         return false;
     }
 
@@ -3295,14 +3295,9 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     reloadProjectOrWarn();
     persistOpenTabs();
     refreshRegisterAction();
-    const int index = m_tabs->indexOf(session.view);
-    if (index >= 0)
-        m_tabs->setTabToolTip(index, session.doc.midPath());
-    updateTabTitle(session);
-    if (&session == m_active) {
-        updateWindowTitle();
+    refreshSessionIdentity(session);
+    if (&session == m_active)
         m_songList->setCurrentSong(session.songId);
-    }
     return true;
 }
 
@@ -3311,27 +3306,36 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
     SongDraft *draft = session.draft.get();
     const QString root = m_project.root();
     const ReservedSongNames reserved = reservedSongNames(&session);
-    SongNameConflicts conflicts =
+    // A .mid an earlier attempt wrote is this draft's own: the check waives
+    // it, and the song list's unregistered entry for it after a reload.
+    const SongNameConflicts conflicts =
         SongRegistry::checkNewSongNames(root, m_project.songs(), reserved, session.doc.label(),
-                                        draft->constant, draft->newVoicegroup);
-    // A .mid an earlier attempt wrote is this draft's own.
-    if (draft->wroteMid)
-        conflicts.mid.clear();
+                                        draft->constant, draft->newVoicegroup, draft->wroteMidPath);
     if (conflicts.isEmpty())
         return true;
 
     SongRenameDialog dialog(&m_project, reserved, session.doc.label(), draft->constant,
-                            !draft->newVoicegroup.isEmpty(), conflicts.messages(), this);
+                            !draft->newVoicegroup.isEmpty(), conflicts.messages(),
+                            draft->wroteMidPath, this);
     if (dialog.exec() != QDialog::Accepted)
         return false;
 
-    // The draft's own earlier .mid would be left behind under the old name.
-    const QString oldMidPath = session.doc.midPath();
     const QString label = dialog.label();
     const QString midPath = root + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
-    if (draft->wroteMid && oldMidPath != midPath) {
-        QFile::remove(oldMidPath);
-        draft->wroteMid = false;
+    // The draft's own earlier .mid would be left behind under the old name.
+    if (!draft->wroteMidPath.isEmpty() &&
+        QDir::cleanPath(draft->wroteMidPath) != QDir::cleanPath(midPath)) {
+        if (QFile::remove(draft->wroteMidPath) || !QFileInfo::exists(draft->wroteMidPath)) {
+            draft->wroteMidPath.clear();
+        } else {
+            // Still the draft's (a rename back waives it again); say so
+            // rather than leave a stray song file behind silently.
+            QMessageBox::warning(this, tr("Save Song"),
+                                 tr("Could not delete %1, written by an earlier attempt to save "
+                                    "this song. It is not part of the renamed song; delete it "
+                                    "yourself.")
+                                     .arg(QDir::toNativeSeparators(draft->wroteMidPath)));
+        }
     }
     session.doc.setDraftIdentity(label, midPath);
     draft->constant = dialog.constant();
@@ -3339,13 +3343,27 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
     // rename the draft voicegroup's file and symbol and the cfg's -G arg.
     if (!draft->newVoicegroup.isEmpty())
         draft->newVoicegroup = label;
+    refreshSessionIdentity(session);
+    return true;
+}
+
+void MainWindow::refreshSessionIdentity(SongSession &session)
+{
     updateTabTitle(session);
     const int index = m_tabs->indexOf(session.view);
     if (index >= 0)
-        m_tabs->setTabToolTip(index, midPath);
-    if (&session == m_active)
-        updateWindowTitle();
-    return true;
+        m_tabs->setTabToolTip(index, session.doc.midPath());
+    if (&session != m_active)
+        return;
+    // What activateSession shows or hands out by label, minus the engine
+    // rebind: the song under the same session is the same song.
+    updateWindowTitle();
+    m_songLabel->setText(QStringLiteral("  %1").arg(session.doc.label()));
+#ifdef PORYDAW_SCRIPTING
+    // A no-op unless the label changed; then the plugins get song.activated
+    // for the new name and song.changed keeps flowing for this session.
+    m_scriptHost->setSession(&session);
+#endif
 }
 
 void MainWindow::finishCreateSongWriteThrough(const SmfFile &smf, const QString &label,
