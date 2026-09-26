@@ -1,4 +1,5 @@
 #include <QAbstractButton>
+#include <QApplication>
 #include <QCryptographicHash>
 #include <QDirIterator>
 #include <QFile>
@@ -11,6 +12,7 @@
 #include <QUndoStack>
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 
 #include "mainwindow.h"
 #include "project/songregistry.h"
@@ -64,23 +66,60 @@ SmfFile draftSmf()
     return smf;
 }
 
-// Answers the next QMessageBox that opens (the close/save prompt) with
-// button, from inside its own exec() loop. A box that never appears is
-// never answered; one that shows a different button set is dismissed.
-void answerNextPrompt(QWidget *window, QMessageBox::StandardButton button)
+// Answers the close/save prompt ("Unsaved Changes") with button from inside
+// its own exec() loop, for as long as the guard is in scope. A 10 ms poll
+// on the active modal widget: any OTHER modal that shows meanwhile (an
+// error box, a second prompt) is recorded as a failure and dismissed, so a
+// surprise dialog fails the section instead of hanging the harness. The
+// guard's destructor stops the poll, so nothing fires into a later
+// section; answered() says whether the expected prompt ever appeared.
+class PromptAnswerer
 {
-    QTimer::singleShot(0, window, [window, button] {
-        for (QMessageBox *box : window->findChildren<QMessageBox *>()) {
-            if (!box->isVisible())
-                continue;
-            if (QAbstractButton *b = box->button(button))
-                b->click();
-            else
-                box->reject(); // never hang the harness in exec()
+  public:
+    using Fail = std::function<void(const QString &)>;
+
+    PromptAnswerer(QMessageBox::StandardButton button, Fail fail)
+        : m_button(button)
+        , m_fail(std::move(fail))
+    {
+        m_timer.setInterval(10);
+        QObject::connect(&m_timer, &QTimer::timeout, [this] { poll(); });
+        m_timer.start();
+    }
+    ~PromptAnswerer() { m_timer.stop(); }
+    PromptAnswerer(const PromptAnswerer &) = delete;
+    PromptAnswerer &operator=(const PromptAnswerer &) = delete;
+
+    bool answered() const { return m_answered; }
+
+  private:
+    void poll()
+    {
+        QWidget *modal = QApplication::activeModalWidget();
+        if (!modal)
             return;
+        auto *box = qobject_cast<QMessageBox *>(modal);
+        if (!m_answered && box && box->windowTitle() == QStringLiteral("Unsaved Changes")) {
+            if (QAbstractButton *b = box->button(m_button)) {
+                m_answered = true;
+                b->click();
+                return;
+            }
         }
-    });
-}
+        m_fail(
+            QStringLiteral("unexpected modal \"%1\"%2")
+                .arg(modal->windowTitle(), box ? QStringLiteral(": ") + box->text() : QString()));
+        if (auto *dialog = qobject_cast<QDialog *>(modal))
+            dialog->reject();
+        else
+            modal->close();
+    }
+
+    QMessageBox::StandardButton m_button;
+    Fail m_fail;
+    QTimer m_timer;
+    bool m_answered = false;
+};
 
 } // namespace
 
@@ -105,6 +144,10 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             failures++;
         }
         return ok;
+    };
+    const PromptAnswerer::Fail modalFail = [&failures](const QString &what) {
+        std::fprintf(stderr, "draftcheck: FAIL: %s\n", qUtf8Printable(what));
+        failures++;
     };
 
     // An existing voicegroup: the one a vanilla song already uses.
@@ -160,10 +203,38 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     check(draftA->doc.isDirty(), "an edit did not reach the draft's undo stack");
     check(treeFingerprint(root) == pristine, "editing a draft wrote into the project");
 
+    // 2b. A second draft under the same label is refused (a stopgap until
+    // the wizard reserves draft names, PLAN step 2): the two would commit
+    // over one .mid. The first draft is left exactly as it was.
+    {
+        const int tabsBefore = m_tabs->count();
+        const size_t notesBefore = draftA->doc.notesForTrack(0).size();
+        QString dupError;
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(!openDraftSong(draftSmf(), labelA, QStringLiteral("MUS_DRAFTCHECK_A"), player,
+                                 cfg, QString(), &dupError),
+                  "a second draft under an open draft's label opened");
+            check(!noPrompt.answered(), "refusing a duplicate draft prompted");
+        }
+        check(!dupError.isEmpty(), "refusing a duplicate draft gave no error");
+        check(m_tabs->count() == tabsBefore && m_active == draftA &&
+                  sessionForLabel(labelA) == draftA,
+              "refusing a duplicate draft changed the tabs");
+        check(draftA->isDraft() && draftA->isDirty() &&
+                  draftA->doc.notesForTrack(0).size() == notesBefore,
+              "refusing a duplicate draft touched the first one");
+        check(treeFingerprint(root) == pristine,
+              "refusing a duplicate draft wrote into the project");
+    }
+
     // 3. Discard through the close prompt: the tab goes and nothing is left
     // behind, view sidecar included.
-    answerNextPrompt(this, QMessageBox::Discard);
-    closeTab(m_tabs->indexOf(draftA->view));
+    {
+        PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+        closeTab(m_tabs->indexOf(draftA->view));
+        check(prompt.answered(), "closing a draft did not prompt");
+    }
     draftA = nullptr;
     check(!sessionForLabel(labelA), "discarding did not close the draft");
     check(treeFingerprint(root) == pristine, "discarding a draft wrote into the project");
@@ -189,7 +260,12 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     draftB->doc.addNote(0, 48, 67, 24, 100);
     check(treeFingerprint(root) == pristine, "the second draft wrote before saving");
 
-    check(saveSession(*draftB), "saving the draft failed");
+    {
+        // No prompt expected: the guard only fails and dismisses a surprise
+        // box (e.g. a registration-failure warning).
+        PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+        check(saveSession(*draftB), "saving the draft failed");
+    }
     check(sessionForLabel(labelB) == draftB && m_active == draftB && draftB->view == viewB,
           "the commit did not keep the session and its view");
     check(!draftB->isDraft() && !draftB->isDirty(), "the committed song is still unsaved");
@@ -221,6 +297,12 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
               "the committed session did not pick up its song ID");
     }
     check(persistedLabels().contains(labelB), "the committed song was not persisted as open");
+    {
+        QString dupError;
+        check(!openDraftSong(draftSmf(), labelB, constantB, player, cfg, QString(), &dupError) &&
+                  m_active == draftB,
+              "a draft opened under a committed song's open label");
+    }
 
     // The pre-save edit is still undoable, and undo dirties the song again.
     const size_t notesSaved = draftB->doc.notesForTrack(0).size();
@@ -249,8 +331,11 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             break;
         }
     }
-    answerNextPrompt(this, QMessageBox::Save);
-    loadSongByLabel(existing);
+    {
+        PromptAnswerer prompt(QMessageBox::Save, modalFail);
+        loadSongByLabel(existing);
+        check(prompt.answered(), "loading a song over a draft did not prompt");
+    }
     check(m_active == draftC && m_tabs->count() == tabsBefore && !draftC->isDraft() &&
               draftC->doc.label() == existing,
           "loading a song over a draft did not replace it in place");
@@ -261,6 +346,100 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             check(draftC->songId == song.id, "the song loaded over a draft has a stale ID");
     }
     check(committedC, "answering Save over a draft did not commit it");
+
+    // 6. A draft replaced in place by a browser load, answering Discard: the
+    // tab becomes the requested song as an ordinary project song — not a
+    // draft, its ID resolved, persisted, saved through the normal path —
+    // and nothing of the discarded draft reaches the disk.
+    {
+        const QString labelD = QStringLiteral("mus_draftcheck_d");
+        if (!check(openDraftSong(draftSmf(), labelD, QStringLiteral("MUS_DRAFTCHECK_D"), player,
+                                 cfg, QString(), &error),
+                   "the fourth draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *draftD = m_active;
+        draftD->doc.addNote(0, 48, 72, 24, 100);
+        const int tabsBefore = m_tabs->count();
+        const int songsBefore = int(m_project.songs().size());
+        const QByteArray beforeD = treeFingerprint(root);
+        QString target;
+        for (const SongInfo &song : m_project.songs()) {
+            if (song.isPlayable() && song.registered && !sessionForLabel(song.label)) {
+                target = song.label;
+                break;
+            }
+        }
+        {
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            loadSongByLabel(target);
+            check(prompt.answered(), "loading a song over a draft did not prompt (Discard)");
+        }
+        check(m_active == draftD && m_tabs->count() == tabsBefore && draftD->doc.label() == target,
+              "loading a song over a discarded draft did not replace it in place");
+        check(!draftD->isDraft(), "the song loaded over a discarded draft is still a draft");
+        check(!draftD->isDirty(), "the song loaded over a discarded draft is dirty");
+        int targetId = -1;
+        for (const SongInfo &song : m_project.songs()) {
+            if (song.label == target)
+                targetId = song.id;
+        }
+        check(targetId >= 0 && draftD->songId == targetId,
+              "the song loaded over a discarded draft has no (or a stale) song ID");
+        check(persistedLabels().contains(target),
+              "the song loaded over a discarded draft was not persisted as open");
+        check(!persistedLabels().contains(labelD), "the discarded draft was persisted");
+        check(treeFingerprint(root) == beforeD,
+              "discarding a replaced draft wrote into the project");
+        check(!QFile::exists(midiDir + labelD + QStringLiteral(".mid")),
+              "discarding a replaced draft wrote its .mid");
+        check(
+            !QFile::exists(root + QStringLiteral("/.porydaw/") + labelD + QStringLiteral(".json")),
+            "discarding a replaced draft wrote its view sidecar");
+        bool knowsD = false;
+        for (const SongInfo &song : m_project.songs())
+            knowsD = knowsD || song.label == labelD;
+        check(!knowsD && int(m_project.songs().size()) == songsBefore,
+              "the discarded draft reached the project's song list");
+
+        // Its next save is an ordinary save: the .mid is rewritten from the
+        // document, and the registration files are left alone.
+        const QString songTable = root + QStringLiteral("/sound/song_table.inc");
+        const QString songsH = root + QStringLiteral("/include/constants/songs.h");
+        const auto stamp = [](const QString &path) {
+            const QFileInfo info(path);
+            return QStringLiteral("%1|%2")
+                .arg(info.size())
+                .arg(info.lastModified().toMSecsSinceEpoch());
+        };
+        const QString tableBefore = stamp(songTable);
+        const QString headerBefore = stamp(songsH);
+        const QString midPath = draftD->doc.midPath();
+        const QString midBefore = stamp(midPath);
+        draftD->doc.addNote(0, 48, 71, 24, 100);
+        {
+            PromptAnswerer noPrompt(QMessageBox::Cancel, modalFail);
+            check(saveSession(*draftD), "saving the song loaded over a discarded draft failed");
+        }
+        check(!draftD->isDirty() && m_active == draftD && draftD->songId == targetId,
+              "the ordinary save left the song unsaved or moved its ID");
+        check(stamp(midPath) != midBefore, "the ordinary save did not write the .mid");
+        SmfFile saved;
+        check(SmfFile::readFile(midPath, &saved, &error) &&
+                  std::equal(saved.tracks.begin(), saved.tracks.end(),
+                             draftD->doc.smf().tracks.begin(), draftD->doc.smf().tracks.end(),
+                             [](const SmfTrack &a, const SmfTrack &b) {
+                                 return a.events == b.events && a.endTick == b.endTick;
+                             }),
+              "the ordinary save's .mid is not the document");
+        check(stamp(songTable) == tableBefore && stamp(songsH) == headerBefore,
+              "the ordinary save re-registered the song");
+        check(int(m_project.songs().size()) == songsBefore,
+              "the ordinary save changed the project's song list");
+        check(!QFile::exists(midiDir + labelD + QStringLiteral(".mid")),
+              "the ordinary save wrote the discarded draft's .mid");
+    }
 
     if (failures == 0)
         std::printf("draftcheck: PASS\n");

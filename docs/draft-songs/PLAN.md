@@ -356,6 +356,32 @@ possible):
       impossible after step 2, since the label is reserved. Assert that
       the wizard rejects it.
 - [ ] **`cleanupVgPreview`** doesn't touch `drafts/`.
+- [ ] **Failed commit after the `.mid` write** (review 2026-09-26, E):
+      `commitDraft` calls `doc.save()`, which writes the `.mid` and then the
+      flags; if the flags write fails, the `.mid` stays on disk while the
+      session is still a draft. A later Discard then leaves a stray,
+      unregistered `.mid` in the project. Decide: either the commit removes
+      a `.mid` it wrote itself when the rest of the commit failed (only if
+      the file did not exist before the commit), or the close prompt says
+      the `.mid` was already written. Add a harness case with an unwritable
+      `midi.cfg`/`songs.mk`.
+- [ ] **Register Song after a failed reload** (review 2026-09-26, F): if
+      `reloadProjectOrWarn()` fails inside `commitDraft`, the committed
+      session keeps `songId == -1`, so Register Song stays disabled even
+      though the registration-failure warning may just have said "use
+      File → Register Song to retry". Either enable Register Song for a
+      committed session whose ID is unresolved (by label), or resolve
+      `songId` directly from the registration result.
+- [ ] **`storage.song` on a draft** (review 2026-09-26, G; part of the
+      Scripting item above, called out because it writes today):
+      `storage.song.set`/`remove` (`StorageApi::songSet` →
+      `writeSongStore`, `src/scripting/scriptapi.cpp` ~1819–1884) resolve
+      `ViewSidecar::pathFor(root, label)` and so write
+      `.porydaw/<label>.json` for a draft — a project write before the
+      commit. Gate writes on a draft (throw, like a bundle tab, or hold the
+      store in memory and flush it at commit). Reads (`songStore`) can
+      also pick up a stale sidecar left by an earlier song of the same
+      name; a draft should read an empty (or in-memory) store.
 
 **Acceptance:** checklist ticked in the progress entry. Full sweep on
 normal and ASAN.
@@ -410,13 +436,50 @@ and why, what's still owed.
     every file's relative path + size + mtime outside `.porydaw/`, not
     of contents (815 MB tree; any write moves the mtime, so it is
     stricter, not looser). (4) The `loadSong` copy/re-resolve above
-    (fact added to §3), covered by harness section 5 — which passes
-    with or without the fix on vanilla pokeemerald (no ASAN report:
-    the reload happens not to free/shift the referenced entry there),
-    so the fix is defensive. (5) `commitDraft` reports doc-save failure
+    (fact added to §3) is defensive and NOT exercised by the harness on
+    vanilla pokeemerald: `registerSong` appends the new song after the
+    existing IDs (vanilla has no free slots), so a commit's reload never
+    shifts a registered song's ID, and the reload happened not to free the
+    referenced entry either (no ASAN report without the fix). Section 5
+    passes with or without it; only a project where registration fills a
+    freed slot, or where the reload reallocates the list, would tell. (5) `commitDraft` reports doc-save failure
     through `saveSession`'s existing "Save Song" box; the registration
     failure keeps its own warning (re-titled "Save Song") and still
     commits.
   - Owed: nothing for step 1. The draft tab tooltip is the future
     `.mid` path and the close prompt still reads "has unsaved changes"
     (step 4). A draft can't yet be recognised by any UI beyond `*`.
+  - **Review fixes (2026-09-26).** A code review of step 1 found:
+    (A) two open drafts could share a label — Import MIDI twice as the same
+    name opened two draft tabs whose commits overwrote one `.mid`. Stopgap:
+    `openDraftSong` now refuses when `sessionForLabel(label)` already holds
+    a tab (draft or committed), with an error the wizard's caller shows in
+    its warning box; proper name reservation stays with step 2. (B) The
+    harness never answered Discard for a draft replaced in place (section 5
+    answers Save, so `draft` was already cleared before `populateSession`
+    reassigned it). (C) The log entry above overstated section 5's coverage
+    of the `loadSong` re-resolve; reworded. (D) `answerNextPrompt` could
+    fire late into an unrelated box, and a surprise warning box hung the
+    harness. Harness changes (`src/draftcheck.cpp`): a scoped
+    `PromptAnswerer` polls `QApplication::activeModalWidget()` every 10 ms
+    while the action runs, answers only a box titled "Unsaved Changes",
+    records any other modal as a failure and dismisses it, and stops in its
+    destructor (so nothing leaks into a later section); each prompt is
+    asserted to have appeared, and the save calls run under a no-prompt
+    guard. New section 2b: a second draft under an open draft's label is
+    refused, the first draft untouched (tabs, notes, tree); plus a refusal
+    under a committed song's open label in section 4. New section 6: a
+    draft replaced in place by a browser load, answering Discard — the tab
+    is an ordinary song (`!isDraft()`, resolved `songId`, persisted),
+    nothing of the draft is on disk or in the song list, and its next edit
+    + save rewrites the `.mid` without touching `song_table.inc`/`songs.h`.
+    Mutation-tested: removing the label guard fails 2b and section 4's
+    refusal; making `populateSession` keep the old draft on a Discard fails
+    section 6; forcing `commitDraft`'s registration-failure warning fails
+    the harness (as "unexpected modal") instead of hanging it. Results:
+    `--draftcheck` PASS normal + ASAN; full `tools/run_checks.sh` PASS on
+    both builds (mkcheck skipped, no fork). Deferred to step 5's checklist
+    (E–G above): stray `.mid` after a half-failed commit, Register Song
+    disabled after a failed reload, and `storage.song` writing a draft's
+    sidecar — each needs a product decision or belongs with the step-5
+    feature it touches, not a step-1 regression.

@@ -3182,6 +3182,15 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
         *error = tr("No project is open.");
         return false;
     }
+    // Two tabs under one label would commit over each other's .mid (and the
+    // second commit would find the label already registered). Stopgap until
+    // the wizard reserves draft names (docs/draft-songs/PLAN.md step 2).
+    if (sessionForLabel(label)) {
+        *error = tr("A song named %1 is already open in another tab. Save or close it first, "
+                    "or choose a different name.")
+                     .arg(label);
+        return false;
+    }
     // The song as the project will know it once committed: the same .mid
     // path and cfg the write-through path wrote, with no flags line yet
     // (so the first save writes one) and no song ID.
