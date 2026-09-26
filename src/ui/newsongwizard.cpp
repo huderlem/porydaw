@@ -651,7 +651,8 @@ SmfFile NewSongWizard::songFile() const
 SongRenameDialog::SongRenameDialog(const DecompProject *project, const ReservedSongNames &reserved,
                                    const QString &label, const QString &constant,
                                    bool renamesVoicegroup, const QStringList &conflicts,
-                                   const QString &ownMidPath, QWidget *parent)
+                                   const QString &ownMidPath, const QStringList &alreadyWritten,
+                                   QWidget *parent)
     : QDialog(parent)
     , m_renamesVoicegroup(renamesVoicegroup)
 {
@@ -662,8 +663,15 @@ SongRenameDialog::SongRenameDialog(const DecompProject *project, const ReservedS
     QString text = tr("%1 can't be added to the project under its current name:").arg(label);
     for (const QString &conflict : conflicts)
         text += QStringLiteral("\n• ") + conflict;
-    text += QStringLiteral("\n\n") +
-            tr("Choose another name to add it. The song hasn't been written yet.");
+    text += QStringLiteral("\n\n") + tr("Choose another name to add it.") + QLatin1Char(' ');
+    // A retry after a save that failed partway: what it wrote stays.
+    if (alreadyWritten.isEmpty()) {
+        text += tr("The song hasn't been written yet.");
+    } else {
+        text += tr("An earlier save that failed partway already wrote:");
+        for (const QString &path : alreadyWritten)
+            text += QStringLiteral("\n• ") + path;
+    }
     explanation->setText(text);
     layout->addWidget(explanation);
 

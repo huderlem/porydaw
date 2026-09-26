@@ -29,6 +29,7 @@
 #include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpressionValidator>
+#include <QScopedValueRollback>
 #include <QSet>
 #include <QSettings>
 #include <QSpinBox>
@@ -1981,13 +1982,16 @@ SongSession *MainWindow::populateSession(
 
     session->view->setSong(session->timeline.get(), session->voicegroup);
     session->view->setDocument(&session->doc);
+    // Before the view state: a draft replaced in place loses its banner
+    // here, and the restored splitter sizes and scroll must fit the view
+    // without it.
+    updateDraftBanner(*session);
+
     // A draft has no view state of its own (a sidecar under its label
     // belongs to some earlier song of that name).
     SongView::ViewState viewState;
     if (!session->draft && ViewSidecar::load(session->root, song.label, &viewState))
         session->view->applyViewState(viewState);
-
-    updateDraftBanner(*session);
 
     if (created) {
         const int index = m_tabs->addTab(session->view, song.label);
@@ -2563,8 +2567,9 @@ void MainWindow::saveSong()
 
 bool MainWindow::saveSession(SongSession &session)
 {
-    if (session.doc.midPath().isEmpty() || session.bundle)
+    if (session.doc.midPath().isEmpty() || session.bundle || m_saveInProgress)
         return false;
+    const QScopedValueRollback<bool> saving(m_saveInProgress, true);
 
     // A draft's names before anything is written, the voicegroup below
     // included: one taken since the wizard would overwrite another song's
@@ -3491,9 +3496,19 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
     if (conflicts.isEmpty())
         return true;
 
+    // What an earlier, partly failed commit left in the project: the
+    // dialog must not claim the song is unwritten.
+    QStringList alreadyWritten;
+    const auto shown = [&root](const QString &path) {
+        return QDir::toNativeSeparators(QDir(root).relativeFilePath(path));
+    };
+    if (draft->voicegroupWritten && !draft->voicegroupTarget.isEmpty())
+        alreadyWritten.append(tr("%1 (and its include line)").arg(shown(draft->voicegroupTarget)));
+    if (!draft->wroteMidPath.isEmpty())
+        alreadyWritten.append(shown(draft->wroteMidPath));
     SongRenameDialog dialog(&m_project, reserved, session.doc.label(), draft->constant,
                             !newVoicegroup.isEmpty(), conflicts.messages(), draft->wroteMidPath,
-                            this);
+                            alreadyWritten, this);
     if (dialog.exec() != QDialog::Accepted)
         return false;
 
@@ -4573,8 +4588,24 @@ bool MainWindow::maybeSaveSession(SongSession &session)
         QMessageBox box(QMessageBox::Question, tr("Unsaved Draft"),
                         tr("Add %1 to the project?").arg(session.doc.label()),
                         QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this);
-        box.setInformativeText(tr("It isn't in the project yet. Discarding it closes the song "
-                                  "for good."));
+        // An existing voicegroup the draft edited is shared with other songs:
+        // Add rewrites it and Discard drops the edits, so say which. (The
+        // draft's own new voicegroup is part of the song, like its notes.)
+        const bool sharedVgDirty = vgDirty && !session.editsDraftVoicegroup();
+        if (sharedVgDirty) {
+            // A per-file voicegroup loads by its file name, a section of a
+            // monolithic file by its voicegroup_ symbol.
+            QString name = session.vgSource->loadName();
+            if (name.startsWith(QStringLiteral("voicegroup_")))
+                name = name.mid(int(qstrlen("voicegroup_")));
+            box.setInformativeText(
+                tr("It isn't in the project yet, but it has edits to voicegroup %1, which other "
+                   "songs may use. Add to Project saves those too; Discard drops them.")
+                    .arg(name));
+        } else {
+            box.setInformativeText(tr("It isn't in the project yet. Discarding it closes the "
+                                      "song for good."));
+        }
         box.button(QMessageBox::Save)->setText(tr("Add to Project"));
         box.setDefaultButton(QMessageBox::Save);
         box.exec();

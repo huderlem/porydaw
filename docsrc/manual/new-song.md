@@ -19,9 +19,9 @@ Link to [Importing MIDI Files](midi-import.md) for the latter. -->
 A new song starts out as a **draft**: it opens in its own tab, titled `[draft] <song>`, with a banner across the top that says the song isn't in your project yet. You can play and edit a draft like any other song, but nothing is written to your decomp project until you save it.
 
 - **Save** (`Ctrl+S`, or the banner's **Save to project** button) adds the song to your project: Porydaw writes its `.mid` and `midi.cfg` line, registers it, and creates its new voicegroup if you asked for one. The tab stays open and becomes a normal song tab, and your undo history is kept.
-- **Closing the tab** asks whether to add the song to the project. Choose **Discard** to throw the draft away. Your project is left exactly as it was.
+- **Closing the tab** asks whether to add the song to the project. Choose **Discard** to throw the draft away; nothing of the draft is written. Two things can already be in your project, though: if a save failed partway (for example, a file couldn't be written), it may have written some of the song's files before it stopped, and samples you imported into the voicegroup with **Import Sample** are written right away. If the draft uses an existing voicegroup and you edited it, the prompt says so: other songs may use that voicegroup, so adding the song saves those edits too, and discarding drops them.
 
-If another song has taken the draft's name by the time you save (for example, after a `git pull`), Porydaw asks you to rename the draft before it writes anything.
+If another song has taken the draft's name by the time you save (for example, after a `git pull`), Porydaw asks you to rename the draft before it writes the song. (If an earlier save failed partway, the rename dialog lists the files it already wrote.)
 
 Drafts only live in memory. They aren't reopened when Porydaw restarts, and they don't appear in the song list until they are saved.
 

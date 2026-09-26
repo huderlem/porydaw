@@ -413,7 +413,10 @@ class MainWindow : public QMainWindow
     void onDocumentChanged(SongSession &session);
     // Saves the session's song AND its dirty voicegroup — the two are one
     // document to the user. The voicegroup goes first, so a failed write
-    // leaves the session dirty. false = nothing was marked clean.
+    // leaves the session dirty. false = nothing was marked clean. A no-op
+    // (false) while another save is still running: its modal boxes (a
+    // draft's Rename dialog, an error) spin a nested loop in which a queued
+    // banner click or a script could start a second one.
     bool saveSession(SongSession &session);
     // Prompts to save the session's unsaved changes (song edits and
     // voicegroup edits alike); false = user cancelled the action.
@@ -548,6 +551,8 @@ class MainWindow : public QMainWindow
     // being torn down or bulk-restored; the caller activates once at the end.
     bool m_tearingDown = false;
     bool m_restoringSession = false;
+    // saveSession is running (see there).
+    bool m_saveInProgress = false;
     VgCatalog m_vgCatalog;
 
     SongListPanel *m_songList = nullptr;

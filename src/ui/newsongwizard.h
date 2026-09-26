@@ -78,7 +78,9 @@ class NewSongWizard : public QWizard
 // after the song, which must be free under the new label too. ownMidPath: a
 // .mid the draft's earlier commit attempt wrote (SongDraft::wroteMidPath),
 // waived by the check so keeping the label stays possible when only, say,
-// the constant conflicts.
+// the constant conflicts. alreadyWritten: the project files (display paths)
+// such an earlier attempt already wrote, which the explanation lists in
+// place of "The song hasn't been written yet."
 class SongRenameDialog : public QDialog
 {
     Q_OBJECT
@@ -87,7 +89,7 @@ class SongRenameDialog : public QDialog
     SongRenameDialog(const DecompProject *project, const ReservedSongNames &reserved,
                      const QString &label, const QString &constant, bool renamesVoicegroup,
                      const QStringList &conflicts, const QString &ownMidPath = QString(),
-                     QWidget *parent = nullptr);
+                     const QStringList &alreadyWritten = QStringList(), QWidget *parent = nullptr);
     ~SongRenameDialog() override;
 
     QString label() const;

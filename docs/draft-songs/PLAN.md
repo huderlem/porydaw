@@ -878,8 +878,10 @@ and why, what's still owed.
     which the existing-voicegroup save changes (it rewrites an existing
     file; voice edits don't touch symbols), and the Rename's voicegroup
     rename concerns only the draft's own voicegroup, which that block
-    skips. So the dialog's "The song hasn't been written yet." is now true,
-    and its wording is unchanged.
+    skips. So a Rename cancelled on a first save writes nothing, and the
+    dialog's "The song hasn't been written yet." holds then — but not on a
+    retry after a partial commit (the `.inc` + include line or the `.mid`
+    already on disk); the review fixes below make the wording conditional.
   - Docs: `docsrc/manual/new-song.md` "Draft songs" section,
     `midi-import.md` "After the import" paragraph linking to it; CHANGELOG
     "Changed" entry under Unreleased.
@@ -920,3 +922,63 @@ and why, what's still owed.
     informative text. (3) `createSongFromWizard` takes `bool imported`
     instead of a dialog title, to pick the status wording. (4) The
     screenshot env var ships (existing pattern).
+  - **Review fixes (2026-09-26).** A code review of step 4 found six small
+    issues; all fixed in one commit on `draft-song` ("Draft songs step 4
+    review fixes …").
+    - A. The draft close prompt hid edits to an existing (shared)
+      voicegroup. `maybeSaveSession`'s draft branch now shows "It isn't in
+      the project yet, but it has edits to voicegroup <name>, which other
+      songs may use. Add to Project saves those too; Discard drops them."
+      when `vgSource` is dirty and is not the draft's own new voicegroup
+      (`editsDraftVoicegroup`); the plain text otherwise. `<name>` is
+      `loadName()` without a `voicegroup_` prefix. Harness: section 3 asserts
+      the plain text, 13 (own new voicegroup edited) the plain text, 19 the
+      vg-dirty text (Cancel keeps the tab, writes nothing).
+    - B. `populateSession` now calls `updateDraftBanner` before the view
+      sidecar's `applyViewState`. Harness: sections 5 and 6 plant a sidecar
+      for the target (roll pane at its minimum, scrolled to the bottom)
+      through a fresh load in its own tab, then assert the replaced-in-place
+      view has the same splitter sizes and vertical scroll. The window is
+      shown (1280×800) around those checks only — a hidden window never lays
+      its views out (every splitter size reads 0). Finding: the old order
+      does NOT fail this check — QSplitter restores its requested sizes when
+      the view grows and the scroll clamp gives the same value — so the
+      reorder is a correctness tidy-up with no observable effect found
+      offscreen, and the assertion is a regression guard, not a mutation
+      test.
+    - C. `SongRenameDialog` takes `alreadyWritten` (display paths):
+      `resolveDraftNameConflicts` passes the voicegroup `.inc` ("(and its
+      include line)") when `voicegroupWritten`, and `wroteMidPath`; the
+      dialog then says "An earlier save that failed partway already wrote:"
+      with the list instead of "The song hasn't been written yet."
+      Harness: section 9 asserts the unwritten wording, 12 (a `.mid` from a
+      partial commit) the list with that `.mid`. The manual no longer says
+      Discard leaves the project "exactly as it was" unconditionally
+      (partial saves, Import Sample is write-through, shared voicegroup
+      edits), and the step 4 entry above no longer calls the old wording
+      "now true".
+    - D. `NoPromptGuard` (RAII around a Cancel `PromptAnswerer`) fails on
+      destruction when a close prompt appeared, naming its line; every
+      former `PromptAnswerer noPrompt(Cancel, …)` uses it (11 sites, plus two
+      in the section-5/6 view reference).
+    - E. `MainWindow::m_saveInProgress` (a `QScopedValueRollback` in
+      `saveSession`): a save started while another runs — a queued banner
+      click, Save Song/Ctrl+S, a script — returns false at once. Harness 9b:
+      two banner clicks plus `m_saveAction->trigger()` and a direct
+      `saveSession` from inside the Rename dialog; one dialog only, the
+      nested save refused. (The nested calls run from a `singleShot`, not the
+      answerer's timer slot: Qt doesn't re-enter a timer, so a dialog opened
+      from that slot is never answered and the harness hangs.)
+      Mutation-tested: without the guard 9b fails with three unexpected
+      "Rename Song" modals.
+    - F. With `PORYDAW_DRAFTCHECK_SHOTS`, the window is hidden again after
+      the `draft-tab.png` grab. The run also saves
+      `draft-close-prompt-vg.png` (section 19's prompt).
+    - Mutation-tested A (always the plain text) and C (always "hasn't been
+      written yet"): sections 19 and 12 fail.
+    - Screenshot (session scratchpad, not committed):
+      `step4-close-prompt-vg.png`.
+    - Results: `--draftcheck` PASS on fresh scratches, with and without the
+      shots env var; full `tools/run_checks.sh` on the normal and ASAN
+      builds: PASS (draftcheck, tabcheck, onboardcheck, vgsavecheck,
+      bundlecheck and scriptcheck included; mkcheck skipped, no fork given).
