@@ -242,15 +242,17 @@ class MainWindow : public QMainWindow
                                  std::unique_ptr<SongDraft> draft,
                                  const std::function<bool(SongDocument &, QString *)> &readDocument,
                                  QString *error);
-    // New Song / Import finish: a draft tab (openDraftSong). title heads a
-    // failure's message box.
-    void createSongFromWizard(const NewSongWizard &wizard, const QString &title);
+    // New Song / Import finish: a draft tab (openDraftSong), then a status
+    // message saying so. imported picks the wording and a failure box's
+    // title.
+    void createSongFromWizard(const NewSongWizard &wizard, bool imported);
     // A draft's first save: writes its new voicegroup (when the cfg still
     // names it), the .mid and its flags, registers the song (a failed
     // registration still commits, as an unregistered song), and turns the
     // session into an ordinary project song in place — its document, undo
     // history and view survive. Safe to retry after a failure. False with
-    // *error when nothing was committed.
+    // *error when nothing was committed. The caller (saveSession) has
+    // already settled the names (resolveDraftNameConflicts).
     bool commitDraft(SongSession &session, QString *error);
     // commitDraft's voicegroup step: the draft's new voicegroup, edits
     // included, through its source's save() plus the hub's include line —
@@ -276,7 +278,8 @@ class MainWindow : public QMainWindow
     // At project open: removes .porydaw/drafts/ folders no live Porydaw
     // holds the lock of (left by a crash); locked ones are skipped.
     static void sweepStaleDraftFolders(const QString &root);
-    // commitDraft's first step: when a name the draft holds was taken since
+    // A draft's Save starts here (saveSession, before any write — the
+    // dirty-voicegroup save included): when a name the draft holds was taken since
     // the wizard (the .mid created, the label or constant registered, the
     // voicegroup file made), explains the conflict in the Rename dialog and,
     // on OK, renames the draft in place. False when the user cancels; true
@@ -331,12 +334,23 @@ class MainWindow : public QMainWindow
     // being renamed doesn't conflict with itself).
     ReservedSongNames reservedSongNames(const SongSession *except = nullptr) const;
     static QString bundleTabTitle(const QString &label);
+    // A draft tab's title (docs/draft-songs/PLAN.md step 4), marked like a
+    // bundle tab's; the tab and window titles add the unsaved marker.
+    static QString draftTabTitle(const QString &label);
+    // The tab's tooltip: the song's .mid, or for a draft (whose .mid doesn't
+    // exist yet) what Save and closing will do.
+    QString sessionTabToolTip(const SongSession &session) const;
     // The strip above a bundle tab's ruler: what it is, and the Import
     // button (SongSession::bundleImportButton).
     QWidget *createBundleBanner(SongSession &session);
     // Import needs a project to import into: every bundle tab's button
     // follows m_project.isOpen().
     void refreshBundleBanners();
+    // The strip above a draft tab's ruler (SongSession::draftBanner): what
+    // Save and closing do, and a Save to project button. Created while the
+    // session is a draft, its text following the label; removed once it
+    // isn't (committed, or replaced in place by another song).
+    void updateDraftBanner(SongSession &session);
     void importBundle(SongSession &session);
     // Applies an accepted import plan to the open project, reloads it, and
     // opens the imported song in a new editable tab. bundleTab, the tab the

@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**; steps 1–3 done 2026-09-26. File/line references verified
+Status: **decisions confirmed 2026-09-26**; steps 1–4 done 2026-09-26. File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -121,6 +121,10 @@ affects **before** starting the next step.
   `sound/voicegroups/<name>.inc`, no mtime); `saveSession`'s
   dirty-voicegroup block skips it and `commitDraftVoicegroup` writes it.
   `VoicegroupSource::appendIncludeLine` is now idempotent.)*
+  *(Step 4: a draft's `saveSession` calls `resolveDraftNameConflicts`
+  first, before the dirty-voicegroup block, so a cancelled Rename writes
+  nothing — not even an edited existing voicegroup. `commitDraft` assumes
+  the names are settled.)*
 - `VoicegroupSource::open` (`src/project/voicegroupsource.h:218`) finds and
   parses a file on disk. `createVoicegroupFromLines`
   (`voicegroupsource.cpp:1601`) copies formatting from sibling files
@@ -341,21 +345,21 @@ commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
 **Scope:** Users can see that a tab is a draft and what Save and close
 will do.
 
-**Changes**
+**Changes** *(all done in step 4; see its progress entry)*
 
-1. A banner strip above the ruler on draft tabs. Reuse the bundle banner
+1. ✅ A banner strip above the ruler on draft tabs. Reuse the bundle banner
    code (`:2080-2110`). Text: "*<label>* isn't in your project yet. Save
    adds it; closing the tab discards it." Include a **Save to project**
    button.
-2. The tab title gets the same kind of marker a bundle tab has (for
+2. ✅ The tab title gets the same kind of marker a bundle tab has (for
    example `label*` plus an italic font, or a `[draft]` prefix; pick one
    that fits `bundleTabTitle`). The tooltip explains it in place of the
    `.mid` path, which doesn't exist yet. The window title
    (`updateWindowTitle`, `:4007`) follows.
-3. The `maybeSaveSession` prompt for a draft reads "Add *<label>* to the
+3. ✅ The `maybeSaveSession` prompt for a draft reads "Add *<label>* to the
    project?" with the buttons **Add to Project / Discard / Cancel**
    (Discard stays the destructive action).
-4. After commit, the status message says what the old write-through
+4. ✅ After commit, the status message says what the old write-through
    `finishCreateSong` said ("Created and registered … (song ID n)",
    plus " — configure its new voicegroup in the Voicegroup dock" when one
    was created; step 3 deleted that function). *(Step 1:
@@ -363,7 +367,7 @@ will do.
    the voicegroup hint is left. `openDraftSong` shows a placeholder
    "Opened … — nothing is in the project until you save it" to replace.)* Import itself
    says "Imported *<label>* as a draft — Save to add it to the project."
-5. *(Review of step 2, 2026-09-26, F.)* The Rename dialog says "The song
+5. ✅ *(Review of step 2, 2026-09-26, F.)* The Rename dialog says "The song
    hasn't been written yet." That is not the whole truth when the draft
    edited an **existing** voicegroup: `saveSession`'s dirty-voicegroup
    block runs before `commitDraft`'s name check, so that `.inc` was already
@@ -371,7 +375,7 @@ will do.
    dialog says so when it happened, or this step moves the name check ahead
    of the voicegroup save (so Cancel really writes nothing) — decide and
    cover it in the harness.
-6. Manual docs: add a short section to `docsrc/manual/` wherever Import
+6. ✅ Manual docs: add a short section to `docsrc/manual/` wherever Import
    MIDI / New Song are described. Add a CHANGELOG entry that follows the
    existing convention.
 
@@ -839,3 +843,80 @@ and why, what's still owed.
     partial commit + Discard), G (`.s` files and single-colon labels
     unseen by the symbol check), H (scripts/other writers vs. the draft
     voicegroup).
+- **2026-09-26 — Step 4 (draft UX).** Commit: see `git log` on branch
+  `draft-song` ("Draft songs step 4 …").
+  - Banner: `MainWindow::updateDraftBanner(session)` builds a `QFrame`
+    `draftBanner` (label `draftBannerText`: "*<label>* isn't in your project
+    yet. Save adds it; closing the tab discards it.", button
+    `draftSaveButton` "Save to project", no focus, queued click →
+    `saveSession`) through `SongView::setTopBanner`, like the bundle banner,
+    and deletes it once the session is no longer a draft. Held in
+    `SongSession::draftBanner`; called from `populateSession` (so a draft
+    replaced in place loses it) and `refreshSessionIdentity` (the text
+    follows a rename; the commit removes it). The theme's
+    `bundleBannerStyleSheet` colors `#draftBanner`/`#draftBannerText` too.
+  - Titles: `draftTabTitle(label)` = "[draft] <label>" (mirrors
+    `bundleTabTitle`); the tab adds `*` (a draft is always dirty), the
+    window title is "[draft] <label>[*] — <project> — porydaw", modified.
+    `sessionTabToolTip(session)`: the `.mid` path, or for a draft "Draft: not
+    in the project yet. Saving writes sound/songs/midi/<label>.mid and
+    registers the song; closing the tab discards it." — used by
+    `populateSession` and `refreshSessionIdentity`.
+  - Close prompt for a draft: title "Unsaved Draft", text "Add <label> to
+    the project?", informative "It isn't in the project yet. Discarding it
+    closes the song for good.", buttons Add to Project (the standard Save
+    button, relabeled, default) / Discard (destructive role) / Cancel. The
+    non-draft "Unsaved Changes" prompt is unchanged.
+  - Status messages: `commitDraft` appends " — configure its new
+    voicegroup in the Voicegroup dock" when the commit (or an earlier
+    attempt) wrote the draft's new voicegroup; `createSongFromWizard(wizard,
+    bool imported)` says "Imported/Created <label> as a draft — Save to add
+    it to the project." The step-1 placeholder in `openDraftSong` is gone.
+  - Item 5: chose **(a)**. `saveSession` runs `resolveDraftNameConflicts`
+    before its dirty-voicegroup block (moved out of `commitDraft`): the
+    check reads only the song list, reserved names and the disk, none of
+    which the existing-voicegroup save changes (it rewrites an existing
+    file; voice edits don't touch symbols), and the Rename's voicegroup
+    rename concerns only the draft's own voicegroup, which that block
+    skips. So the dialog's "The song hasn't been written yet." is now true,
+    and its wording is unchanged.
+  - Docs: `docsrc/manual/new-song.md` "Draft songs" section,
+    `midi-import.md` "After the import" paragraph linking to it; CHANGELOG
+    "Changed" entry under Unreleased.
+  - Harness (`src/draftcheck.cpp`): `PromptAnswerer` also answers "Unsaved
+    Draft" and gains `inspect(fn)`. Section 1: tab title, tooltip, window
+    title (+ modified), banner by object name with the plan's text and an
+    enabled focusless Save to project button. Section 3: the close prompt's
+    title, text, button labels, default and destructive role. Section 4:
+    the commit goes through the banner button; banner gone, tab
+    title/tooltip/window title ordinary, the exact "Created and registered"
+    message. Sections 5–6: banner gone and ordinary title after a replace in
+    place (Save and Discard). 8: banner gone after rename + commit. 9: the
+    cancelled draft keeps its [draft] title and banner. 14/15: the
+    voicegroup hint present / absent. New 19: an existing voicegroup edited
+    in a draft whose `.mid` is planted → Rename Cancel → tree fingerprint and
+    the `.inc` unchanged, still dirty; Rename accept → the `.inc` is saved
+    with the edit. New 20: `createSongFromWizard` for New Song and Import
+    (blank / import wizards filled offscreen) opens a draft, writes nothing,
+    and shows the status message. `PORYDAW_DRAFTCHECK_SHOTS=<dir>` (shipped,
+    like `PORYDAW_BUNDLE_SHOT`) saves `draft-tab.png` and
+    `draft-close-prompt.png`.
+  - Screenshots (session scratchpad, not committed): `step4-draft-tab.png`
+    (window with the draft tab, banner and `[draft] mus_draftcheck_a*`
+    title) and `step4-close-prompt.png` (the Add to Project / Discard /
+    Cancel prompt).
+  - Mutation-tested: keeping the name check after the voicegroup block
+    fails section 19; not deleting the banner fails 4, 5, 6 and 8.
+  - Results: `--draftcheck` PASS on a fresh scratch (with the shots env
+    var); full `tools/run_checks.sh` PASS on the normal and ASAN builds
+    (draftcheck, tabcheck, onboardcheck, vgsavecheck, bundlecheck and
+    scriptcheck included; mkcheck skipped, no fork given).
+  - Owed: nothing for step 4. No manual pass in a real (non-offscreen)
+    window yet — the screenshots are the visual check; step 6 covers the
+    real-project pass.
+  - Deviations: (1) The window title uses the same "[draft]" prefix as the
+    tab, not a separate wording. (2) The prompt's title is "Unsaved Draft"
+    (the plan named only its text and buttons), and it adds a one-line
+    informative text. (3) `createSongFromWizard` takes `bool imported`
+    instead of a dialog title, to pick the status wording. (4) The
+    screenshot env var ships (existing pattern).

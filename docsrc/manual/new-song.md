@@ -14,6 +14,17 @@ Link to [Importing MIDI Files](midi-import.md) for the latter. -->
 - Song settings (reverb, priority, etc. — link to Song Settings)
 -->
 
+## Draft songs
+
+A new song starts out as a **draft**: it opens in its own tab, titled `[draft] <song>`, with a banner across the top that says the song isn't in your project yet. You can play and edit a draft like any other song, but nothing is written to your decomp project until you save it.
+
+- **Save** (`Ctrl+S`, or the banner's **Save to project** button) adds the song to your project: Porydaw writes its `.mid` and `midi.cfg` line, registers it, and creates its new voicegroup if you asked for one. The tab stays open and becomes a normal song tab, and your undo history is kept.
+- **Closing the tab** asks whether to add the song to the project. Choose **Discard** to throw the draft away. Your project is left exactly as it was.
+
+If another song has taken the draft's name by the time you save (for example, after a `git pull`), Porydaw asks you to rename the draft before it writes anything.
+
+Drafts only live in memory. They aren't reopened when Porydaw restarts, and they don't appear in the song list until they are saved.
+
 ## What "registering" means
 
 <!-- TODO: Plain-language version of the magic: the decomp project needs a

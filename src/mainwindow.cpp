@@ -1656,6 +1656,11 @@ void MainWindow::updateTabTitle(SongSession &session)
         m_tabs->setTabText(index, bundleTabTitle(session.doc.label()));
         return;
     }
+    if (session.draft) {
+        // The asterisk stays: a draft is unsaved by definition (isDirty).
+        m_tabs->setTabText(index, draftTabTitle(session.doc.label()) + QLatin1Char('*'));
+        return;
+    }
     m_tabs->setTabText(index, session.isDirty() ? session.doc.label() + QLatin1Char('*')
                                                 : session.doc.label());
 }
@@ -1982,9 +1987,11 @@ SongSession *MainWindow::populateSession(
     if (!session->draft && ViewSidecar::load(session->root, song.label, &viewState))
         session->view->applyViewState(viewState);
 
+    updateDraftBanner(*session);
+
     if (created) {
         const int index = m_tabs->addTab(session->view, song.label);
-        m_tabs->setTabToolTip(index, song.midPath);
+        m_tabs->setTabToolTip(index, sessionTabToolTip(*session));
         updateTabTitle(*session);
         if (!m_restoringSession) {
             // The first tab activates inside addTab; later ones here.
@@ -1993,7 +2000,7 @@ SongSession *MainWindow::populateSession(
                 activateSession(session);
         }
     } else {
-        m_tabs->setTabToolTip(m_tabs->indexOf(session->view), song.midPath);
+        m_tabs->setTabToolTip(m_tabs->indexOf(session->view), sessionTabToolTip(*session));
         updateTabTitle(*session);
         activateSession(session, /*force=*/true);
     }
@@ -2078,6 +2085,20 @@ bool MainWindow::isBundlePath(const QString &path)
 QString MainWindow::bundleTabTitle(const QString &label)
 {
     return tr("[bundle] %1").arg(label);
+}
+
+QString MainWindow::draftTabTitle(const QString &label)
+{
+    return tr("[draft] %1").arg(label);
+}
+
+QString MainWindow::sessionTabToolTip(const SongSession &session) const
+{
+    if (!session.draft)
+        return session.doc.midPath();
+    return tr("Draft: not in the project yet. Saving writes %1 and registers the song; "
+              "closing the tab discards it.")
+        .arg(QDir::toNativeSeparators(QDir(session.root).relativeFilePath(session.doc.midPath())));
 }
 
 bool MainWindow::resolveBundleRoot(const QFileInfo &info, std::unique_ptr<QTemporaryDir> *tempDir,
@@ -2221,6 +2242,61 @@ QWidget *MainWindow::createBundleBanner(SongSession &session)
     row->addWidget(import);
     session.bundleImportButton = import;
     return banner;
+}
+
+void MainWindow::updateDraftBanner(SongSession &session)
+{
+    if (!session.draft) {
+        // The layout lets go of a deleted child. Never from inside the
+        // banner's own click: its button's save is queued.
+        delete session.draftBanner;
+        session.draftBanner = nullptr;
+        return;
+    }
+    if (!session.draftBanner) {
+        auto *banner = new QFrame;
+        banner->setObjectName(QStringLiteral("draftBanner"));
+        // Colored by the theme stylesheet, like the bundle banner.
+        banner->setFrameShape(QFrame::NoFrame);
+        auto *row = new QHBoxLayout(banner);
+        row->setContentsMargins(8, 4, 8, 4);
+        auto *text = new QLabel(banner);
+        text->setObjectName(QStringLiteral("draftBannerText"));
+        text->setTextFormat(Qt::RichText);
+        row->addWidget(text);
+        row->addStretch(1);
+        auto *save = new QPushButton(tr("Save to project"), banner);
+        save->setObjectName(QStringLiteral("draftSaveButton"));
+        // No keyboard focus: Space must keep toggling playback in the tab.
+        save->setFocusPolicy(Qt::NoFocus);
+        SongSession *s = &session;
+        // Queued: the commit removes this banner, and the button with it,
+        // which must not happen inside its own click.
+        connect(
+            save, &QPushButton::clicked, this,
+            [this, s] {
+                for (const auto &session : m_sessions) {
+                    if (session.get() == s) {
+                        saveSession(*s);
+                        return;
+                    }
+                }
+            },
+            Qt::QueuedConnection);
+        row->addWidget(save);
+        session.view->setTopBanner(banner);
+        session.draftBanner = banner;
+    }
+    if (auto *text = session.draftBanner->findChild<QLabel *>(QStringLiteral("draftBannerText"))) {
+        text->setText(tr("<i>%1</i> isn't in your project yet. Save adds it; closing the tab "
+                         "discards it.")
+                          .arg(session.doc.label().toHtmlEscaped()));
+    }
+    if (auto *save =
+            session.draftBanner->findChild<QPushButton *>(QStringLiteral("draftSaveButton"))) {
+        save->setToolTip(tr("Write the song's .mid into %1 and register it (the same as Save).")
+                             .arg(QDir(session.root).dirName()));
+    }
 }
 
 void MainWindow::refreshBundleBanners()
@@ -2490,6 +2566,13 @@ bool MainWindow::saveSession(SongSession &session)
     if (session.doc.midPath().isEmpty() || session.bundle)
         return false;
 
+    // A draft's names before anything is written, the voicegroup below
+    // included: one taken since the wizard would overwrite another song's
+    // file or registration, and a Rename cancelled here must leave the
+    // project exactly as it was (docs/draft-songs/PLAN.md step 4 item 5).
+    if (session.draft && !resolveDraftNameConflicts(session))
+        return false;
+
     // The voicegroup first: the document save below marks the undo stack
     // clean, and a failed voicegroup write must leave the session dirty so
     // the user can retry.
@@ -2550,8 +2633,7 @@ bool MainWindow::saveSession(SongSession &session)
         // A draft's first save is its commit into the project; it reports
         // the result itself.
         if (!commitDraft(session, &error)) {
-            // No error: the user cancelled the Rename dialog, which already
-            // said why.
+            // No error: the failure was already reported in a box.
             if (!error.isEmpty())
                 QMessageBox::warning(this, tr("Save Song"), error);
             return false;
@@ -2912,7 +2994,7 @@ void MainWindow::newSong()
                          this);
     if (wizard.exec() != QDialog::Accepted)
         return;
-    createSongFromWizard(wizard, tr("New Song"));
+    createSongFromWizard(wizard, /*imported=*/false);
 }
 
 void MainWindow::importMidi()
@@ -2938,7 +3020,7 @@ void MainWindow::importMidi()
                          reservedSongNames(), this);
     if (wizard.exec() != QDialog::Accepted)
         return;
-    createSongFromWizard(wizard, tr("Import MIDI"));
+    createSongFromWizard(wizard, /*imported=*/true);
 }
 
 void MainWindow::importSample()
@@ -3248,12 +3330,19 @@ void MainWindow::editSampleForSlot(int slot)
                              8000);
 }
 
-void MainWindow::createSongFromWizard(const NewSongWizard &wizard, const QString &title)
+void MainWindow::createSongFromWizard(const NewSongWizard &wizard, bool imported)
 {
     QString error;
-    if (!openDraftSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
-                       wizard.cfg(), wizard.newVoicegroupName(), &error))
-        QMessageBox::warning(this, title, error);
+    const QString label = wizard.label();
+    if (!openDraftSong(wizard.songFile(), label, wizard.constant(), wizard.player(), wizard.cfg(),
+                       wizard.newVoicegroupName(), &error)) {
+        QMessageBox::warning(this, imported ? tr("Import MIDI") : tr("New Song"), error);
+        return;
+    }
+    statusBar()->showMessage(
+        imported ? tr("Imported %1 as a draft — Save to add it to the project.").arg(label)
+                 : tr("Created %1 as a draft — Save to add it to the project.").arg(label),
+        8000);
 }
 
 bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
@@ -3320,8 +3409,6 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
     QApplication::restoreOverrideCursor();
     if (!session)
         return false;
-    statusBar()->showMessage(
-        tr("Opened %1 — nothing is in the project until you save it").arg(label), 8000);
     updateTransportActions();
     return true;
 }
@@ -3331,18 +3418,17 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     SongDraft *draft = session.draft.get();
     if (!draft)
         return true;
-    // Names first, before anything is written: one taken since the wizard
-    // would overwrite another song's file or registration.
-    if (!resolveDraftNameConflicts(session)) {
-        error->clear();
-        return false;
-    }
+    // The names were settled by saveSession's resolveDraftNameConflicts,
+    // before its dirty-voicegroup save: nothing since writes a name.
     const QString root = m_project.root();
     const QString label = session.doc.label();
 
     // The new voicegroup before the .mid: the song's -G names it.
     if (!commitDraftVoicegroup(session, error))
         return false;
+    // Written by this commit or an earlier attempt's (empty when the draft
+    // has none, or abandoned it): the status message points the user at it.
+    const QString createdVoicegroup = draft->voicegroupWritten ? draft->newVoicegroup : QString();
 
     // The .mid and, since the document has no flags line yet, the song's
     // midi.cfg/songs.mk flags. Rewriting both on a retry is harmless.
@@ -3366,10 +3452,12 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
         error->clear();
     } else {
         SongRegistry::clearRegistrationMeta(root, label);
-        statusBar()->showMessage(tr("Created and registered %1 as %2 (song ID %3)")
-                                     .arg(label, draft->constant)
-                                     .arg(songId),
-                                 8000);
+        QString message = tr("Created and registered %1 as %2 (song ID %3)")
+                              .arg(label, draft->constant)
+                              .arg(songId);
+        if (!createdVoicegroup.isEmpty())
+            message += tr(" — configure its new voicegroup in the Voicegroup dock");
+        statusBar()->showMessage(message, 8000);
     }
 
     // An ordinary project song from here: the reload's refreshSessionSongIds
@@ -3636,7 +3724,8 @@ void MainWindow::refreshSessionIdentity(SongSession &session)
     updateTabTitle(session);
     const int index = m_tabs->indexOf(session.view);
     if (index >= 0)
-        m_tabs->setTabToolTip(index, session.doc.midPath());
+        m_tabs->setTabToolTip(index, sessionTabToolTip(session));
+    updateDraftBanner(session);
     if (&session != m_active)
         return;
     // What activateSession shows or hands out by label, minus the engine
@@ -4478,6 +4567,22 @@ bool MainWindow::maybeSaveSession(SongSession &session)
     // can't see is a data-loss trap.
     if (&session != m_active && m_tabs->indexOf(session.view) >= 0)
         m_tabs->setCurrentWidget(session.view);
+    if (session.draft) {
+        // Nothing of a draft is in the project yet: its Save is an Add, and
+        // Discard loses the whole song, not just the latest edits.
+        QMessageBox box(QMessageBox::Question, tr("Unsaved Draft"),
+                        tr("Add %1 to the project?").arg(session.doc.label()),
+                        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this);
+        box.setInformativeText(tr("It isn't in the project yet. Discarding it closes the song "
+                                  "for good."));
+        box.button(QMessageBox::Save)->setText(tr("Add to Project"));
+        box.setDefaultButton(QMessageBox::Save);
+        box.exec();
+        const auto choice = box.standardButton(box.clickedButton());
+        if (choice == QMessageBox::Save)
+            return saveSession(session);
+        return choice == QMessageBox::Discard;
+    }
     const auto choice = QMessageBox::question(
         this, tr("Unsaved Changes"),
         vgDirty ? tr("%1 has unsaved changes (including voicegroup edits). Save them?")
@@ -4508,6 +4613,10 @@ void MainWindow::updateWindowTitle()
         setWindowTitle(QStringLiteral("%1 — %2 — porydaw")
                            .arg(m_active->doc.label(), QFileInfo(m_active->bundlePath).fileName()));
         setWindowModified(false);
+    } else if (m_active && m_active->draft) {
+        setWindowTitle(QStringLiteral("%1[*] — %2 — porydaw")
+                           .arg(draftTabTitle(m_active->doc.label()), project));
+        setWindowModified(true);
     } else if (m_active) {
         setWindowTitle(QStringLiteral("%1[*] — %2 — porydaw").arg(m_active->doc.label(), project));
         setWindowModified(m_active->isDirty());

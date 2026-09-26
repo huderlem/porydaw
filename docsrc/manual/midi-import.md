@@ -38,6 +38,8 @@ voicegroup vs. building one; drum-channel handling (channel 10). -->
 
 ## After the import
 
+The imported song opens as a [draft](new-song.md#draft-songs). Nothing is written to your project until you save it, so you can listen to how a MIDI converts and simply close the tab (choosing **Discard**) if you don't want to keep it.
+
 <!-- TODO: The song is registered like a New Song (link); a listen-through
 checklist: polyphony meter, missing percussion, volume balance, loop point. -->
 

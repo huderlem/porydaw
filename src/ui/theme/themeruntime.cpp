@@ -470,11 +470,13 @@ QString tooltipStyleSheet(const Theme &theme)
 
 QString bundleBannerStyleSheet(const Theme &theme)
 {
-    // The read-only song-bundle banner wears the accent selection pair so it
-    // stands out from the chrome around it; the pair is already resolved for
-    // text contrast. Its Import button keeps the ordinary button colors.
-    return QStringLiteral("QFrame#bundleBanner{background-color:%1;}"
-                          "QLabel#bundleBannerText{background-color:transparent;color:%2;}")
+    // The read-only song-bundle banner (and a draft tab's) wears the accent
+    // selection pair so it stands out from the chrome around it; the pair is
+    // already resolved for text contrast. Its button keeps the ordinary
+    // button colors.
+    return QStringLiteral("QFrame#bundleBanner,QFrame#draftBanner{background-color:%1;}"
+                          "QLabel#bundleBannerText,QLabel#draftBannerText{"
+                          "background-color:transparent;color:%2;}")
         .arg(colorName(theme, Role::selection_background))
         .arg(colorName(theme, Role::selection_text));
 }

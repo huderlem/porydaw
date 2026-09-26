@@ -117,6 +117,9 @@ struct SongSession {
     std::unique_ptr<QTemporaryDir> bundleDir;
     BundleManifest manifest;
     QAbstractButton *bundleImportButton = nullptr; // in the view's banner
+    // A draft's banner strip in the view (MainWindow::updateDraftBanner);
+    // null once the session is no longer a draft.
+    QWidget *draftBanner = nullptr;
     SongDocument doc;
     std::unique_ptr<VoicegroupSource> vgSource;
     std::unique_ptr<MidiTimeline> timeline;

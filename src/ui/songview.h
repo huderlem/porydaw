@@ -143,7 +143,8 @@ class SongView : public QWidget
     // Editing is enabled while a document is attached (may be null).
     void setDocument(SongDocument *document);
     // A strip above the ruler for the owner's notice (the read-only banner
-    // of a song-bundle tab). The view takes ownership; one banner at most.
+    // of a song-bundle tab, a draft's banner). The view takes ownership;
+    // one banner at most. Deleting the banner removes it.
     void setTopBanner(QWidget *banner);
     SongDocument *document() const { return m_document; }
 
