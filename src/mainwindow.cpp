@@ -1585,7 +1585,7 @@ void MainWindow::persistOpenTabs()
     QStringList labels;
     for (int i = 0; i < m_tabs->count(); i++) {
         SongSession *s = sessionForWidget(m_tabs->widget(i));
-        if (s && !s->bundle) // bundle tabs are never restored
+        if (s && !s->bundle && !s->draft) // bundle tabs and drafts are never restored
             labels << s->doc.label();
     }
     if (labels.isEmpty()) {
@@ -1594,16 +1594,17 @@ void MainWindow::persistOpenTabs()
         return;
     }
     settings.setValue(kLastOpenSongsKey, labels);
-    settings.setValue(kLastSongLabelKey,
-                      m_active && !m_active->bundle ? m_active->doc.label() : labels.first());
+    settings.setValue(kLastSongLabelKey, m_active && !m_active->bundle && !m_active->draft
+                                             ? m_active->doc.label()
+                                             : labels.first());
 }
 
 void MainWindow::refreshSessionSongIds()
 {
     for (const auto &session : m_sessions) {
         session->songId = -1;
-        if (session->bundle)
-            continue; // not a project song, whatever its label
+        if (session->bundle || session->draft)
+            continue; // not a project song (yet), whatever its label
         for (const SongInfo &song : m_project.songs()) {
             if (song.label == session->doc.label()) {
                 session->songId = song.id;
@@ -1842,59 +1843,30 @@ LoadedVoiceGroup *MainWindow::loadVoicegroupFor(const QString &root, const SongC
     return nullptr;
 }
 
-void MainWindow::loadSong(const SongInfo &song, bool newTab)
+SongSession *MainWindow::populateSession(
+    SongSession *session, const SongInfo &song, std::unique_ptr<SongDraft> draft,
+    const std::function<bool(SongDocument &, QString *)> &readDocument, QString *error)
 {
-    if (!m_audioOk)
-        return;
-    // Already open somewhere? Focus that tab: two documents over one .mid
-    // would fight over the file on save. Except the song already in the
-    // CURRENT tab — re-activating it falls through to an in-place reload
-    // from disk (the pre-tabs behavior, and the only reload path for a
-    // .mid changed externally).
-    if (SongSession *open = sessionForLabel(song.label)) {
-        if (newTab || open != m_active) {
-            m_tabs->setCurrentWidget(open->view);
-            return;
-        }
-    }
-
-    // A bundle tab is never replaced in place: its session is rooted in the
-    // bundle, and it should outlive browsing the project.
-    const bool created = newTab || !m_active || m_active->bundle;
-    SongSession *session = created ? nullptr : m_active;
-    if (session) {
-        if (!maybeSaveSession(*session))
-            return;
-        saveViewState(*session); // the outgoing song's, while its view is up
-    }
-    cleanupVgPreview();
-
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    QElapsedTimer timer;
-    timer.start();
-
     QString tried;
     LoadedVoiceGroup *vg = loadVoicegroupFor(m_project.root(), song.cfg, &tried);
     if (!vg) {
-        QApplication::restoreOverrideCursor();
-        QMessageBox::warning(
-            this, tr("Load Song"),
-            tr("Could not load the voicegroup for %1 (tried: %2).").arg(song.label, tried));
-        return;
+        *error = tr("Could not load the voicegroup for %1 (tried: %2).").arg(song.label, tried);
+        return nullptr;
     }
 
-    if (!session)
+    const bool created = !session;
+    if (created)
         session = createSession();
     session->doc.setTrackBudget(m_project.trackBudgetFor(song));
-    QString error;
-    if (!session->doc.load(song, &error)) {
+    if (!readDocument(session->doc, error)) {
         voicegroup_free(vg);
         if (created)
             destroySession(session); // not in the tab bar yet
-        QApplication::restoreOverrideCursor();
-        QMessageBox::warning(this, tr("Load Song"), error);
-        return;
+        return nullptr;
     }
+    // A draft replaced in place was answered Discard (or committed) by the
+    // caller's prompt; the session now holds whatever was just read.
+    session->draft = std::move(draft);
 
     auto timeline = session->doc.buildTimeline(m_audio.sampleRate());
 
@@ -1918,13 +1890,16 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
 
     session->view->setSong(session->timeline.get(), session->voicegroup);
     session->view->setDocument(&session->doc);
+    // A draft has no view state of its own (a sidecar under its label
+    // belongs to some earlier song of that name).
     SongView::ViewState viewState;
-    if (ViewSidecar::load(session->root, song.label, &viewState))
+    if (!session->draft && ViewSidecar::load(session->root, song.label, &viewState))
         session->view->applyViewState(viewState);
 
     if (created) {
         const int index = m_tabs->addTab(session->view, song.label);
         m_tabs->setTabToolTip(index, song.midPath);
+        updateTabTitle(*session);
         if (!m_restoringSession) {
             // The first tab activates inside addTab; later ones here.
             m_tabs->setCurrentIndex(index);
@@ -1932,10 +1907,62 @@ void MainWindow::loadSong(const SongInfo &song, bool newTab)
                 activateSession(session);
         }
     } else {
-        const int index = m_tabs->indexOf(session->view);
-        m_tabs->setTabText(index, song.label);
-        m_tabs->setTabToolTip(index, song.midPath);
+        m_tabs->setTabToolTip(m_tabs->indexOf(session->view), song.midPath);
+        updateTabTitle(*session);
         activateSession(session, /*force=*/true);
+    }
+    return session;
+}
+
+void MainWindow::loadSong(const SongInfo &requested, bool newTab)
+{
+    if (!m_audioOk)
+        return;
+    // A copy: the save prompt below may commit a draft, and the commit's
+    // project reload replaces the song list a caller's reference points
+    // into (ids included — see the re-resolve after the prompt).
+    SongInfo song = requested;
+    // Already open somewhere? Focus that tab: two documents over one .mid
+    // would fight over the file on save. Except the song already in the
+    // CURRENT tab — re-activating it falls through to an in-place reload
+    // from disk (the pre-tabs behavior, and the only reload path for a
+    // .mid changed externally).
+    if (SongSession *open = sessionForLabel(song.label)) {
+        if (newTab || open != m_active) {
+            m_tabs->setCurrentWidget(open->view);
+            return;
+        }
+    }
+
+    // A bundle tab is never replaced in place: its session is rooted in the
+    // bundle, and it should outlive browsing the project.
+    const bool created = newTab || !m_active || m_active->bundle;
+    SongSession *session = created ? nullptr : m_active;
+    if (session) {
+        if (!maybeSaveSession(*session))
+            return;
+        saveViewState(*session); // the outgoing song's, while its view is up
+        for (const SongInfo &current : m_project.songs()) {
+            if (current.label == song.label) {
+                song = current;
+                break;
+            }
+        }
+    }
+    cleanupVgPreview();
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QElapsedTimer timer;
+    timer.start();
+
+    QString error;
+    session = populateSession(
+        session, song, nullptr,
+        [&song](SongDocument &doc, QString *err) { return doc.load(song, err); }, &error);
+    if (!session) {
+        QApplication::restoreOverrideCursor();
+        QMessageBox::warning(this, tr("Load Song"), error);
+        return;
     }
 
     const MidiTimeline *tl = session->timeline.get();
@@ -2433,6 +2460,15 @@ bool MainWindow::saveSession(SongSession &session)
     }
 
     QString error;
+    if (session.draft) {
+        // A draft's first save is its commit into the project; it reports
+        // the result itself.
+        if (!commitDraft(session, &error)) {
+            QMessageBox::warning(this, tr("Save Song"), error);
+            return false;
+        }
+        return true;
+    }
     if (!session.doc.save(&error)) {
         QMessageBox::warning(this, tr("Save Song"), error);
         return false;
@@ -2786,8 +2822,7 @@ void MainWindow::newSong()
     NewSongWizard wizard(&m_project, vgCatalog(m_project.root()).groupArgs, this);
     if (wizard.exec() != QDialog::Accepted)
         return;
-    finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
-                     wizard.cfg(), wizard.newVoicegroupName());
+    createSongFromWizard(wizard, tr("New Song"));
 }
 
 void MainWindow::importMidi()
@@ -2813,8 +2848,7 @@ void MainWindow::importMidi()
                          this);
     if (wizard.exec() != QDialog::Accepted)
         return;
-    finishCreateSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
-                     wizard.cfg(), wizard.newVoicegroupName());
+    createSongFromWizard(wizard, tr("Import MIDI"));
 }
 
 void MainWindow::importSample()
@@ -3124,9 +3158,115 @@ void MainWindow::editSampleForSlot(int slot)
                              8000);
 }
 
-void MainWindow::finishCreateSong(const SmfFile &smf, const QString &label, const QString &constant,
-                                  const QString &player, const SongCfg &cfg,
-                                  const QString &newVoicegroup)
+void MainWindow::createSongFromWizard(const NewSongWizard &wizard, const QString &title)
+{
+    // A new voicegroup still has to exist before the song can load, so that
+    // path writes through for now (docs/draft-songs/PLAN.md step 3).
+    const QString newVoicegroup = wizard.newVoicegroupName();
+    if (!newVoicegroup.isEmpty()) {
+        finishCreateSongWriteThrough(wizard.songFile(), wizard.label(), wizard.constant(),
+                                     wizard.player(), wizard.cfg(), newVoicegroup);
+        return;
+    }
+    QString error;
+    if (!openDraftSong(wizard.songFile(), wizard.label(), wizard.constant(), wizard.player(),
+                       wizard.cfg(), newVoicegroup, &error))
+        QMessageBox::warning(this, title, error);
+}
+
+bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
+                               const QString &player, const SongCfg &cfg,
+                               const QString &newVoicegroup, QString *error)
+{
+    if (!m_audioOk || !m_project.isOpen()) {
+        *error = tr("No project is open.");
+        return false;
+    }
+    // The song as the project will know it once committed: the same .mid
+    // path and cfg the write-through path wrote, with no flags line yet
+    // (so the first save writes one) and no song ID.
+    SongInfo song;
+    song.label = label;
+    song.constant = constant;
+    song.player = player;
+    song.midPath = m_project.root() + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+    song.hasMid = true;
+    song.hasCfg = false;
+    song.registered = false;
+    song.cfg = cfg;
+
+    auto draft = std::make_unique<SongDraft>();
+    draft->constant = constant;
+    draft->player = player;
+    draft->newVoicegroup = newVoicegroup;
+
+    cleanupVgPreview();
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    SongSession *session = populateSession(
+        nullptr, song, std::move(draft),
+        [&smf, &song](SongDocument &doc, QString *err) { return doc.loadDraft(smf, song, err); },
+        error);
+    QApplication::restoreOverrideCursor();
+    if (!session)
+        return false;
+    statusBar()->showMessage(
+        tr("Opened %1 — nothing is in the project until you save it").arg(label), 8000);
+    updateTransportActions();
+    return true;
+}
+
+bool MainWindow::commitDraft(SongSession &session, QString *error)
+{
+    SongDraft *draft = session.draft.get();
+    if (!draft)
+        return true;
+    const QString root = m_project.root();
+    const QString label = session.doc.label();
+
+    // The .mid and, since the document has no flags line yet, the song's
+    // midi.cfg/songs.mk flags. Rewriting both on a retry is harmless.
+    if (!session.doc.save(error))
+        return false;
+
+    int songId = -1;
+    if (!SongRegistry::registerSong(root, label, draft->constant, draft->player, error, &songId)) {
+        // Keep the chosen constant/player so Register Song can retry later;
+        // the song shows a badge in the browser until then. The song itself
+        // is on disk, so the draft is committed regardless.
+        SongRegistry::saveRegistrationMeta(root, label, draft->constant, draft->player);
+        QMessageBox::warning(this, tr("Save Song"),
+                             tr("Wrote %1, but registering it failed: %2\n"
+                                "Use File → Register Song to retry.")
+                                 .arg(session.doc.midPath(), *error));
+        error->clear();
+    } else {
+        SongRegistry::clearRegistrationMeta(root, label);
+        statusBar()->showMessage(tr("Created and registered %1 as %2 (song ID %3)")
+                                     .arg(label, draft->constant)
+                                     .arg(songId),
+                                 8000);
+    }
+
+    // An ordinary project song from here: the reload's refreshSessionSongIds
+    // finds it by label, and the tab is persisted like any other.
+    session.draft.reset();
+    reloadProjectOrWarn();
+    persistOpenTabs();
+    refreshRegisterAction();
+    const int index = m_tabs->indexOf(session.view);
+    if (index >= 0)
+        m_tabs->setTabToolTip(index, session.doc.midPath());
+    updateTabTitle(session);
+    if (&session == m_active) {
+        updateWindowTitle();
+        m_songList->setCurrentSong(session.songId);
+    }
+    return true;
+}
+
+void MainWindow::finishCreateSongWriteThrough(const SmfFile &smf, const QString &label,
+                                              const QString &constant, const QString &player,
+                                              const SongCfg &cfg, const QString &newVoicegroup)
 {
     QString error;
     // The voicegroup first: the song's -G already points at it, so nothing
@@ -3999,7 +4139,8 @@ void MainWindow::saveViewState(SongSession &session)
 {
     // Nothing is written for a bundle tab: its root is a throwaway
     // extraction dir, or a bundle folder that opening must not touch.
-    if (session.doc.label().isEmpty() || session.bundle)
+    // Nor for a draft: nothing outside its tab exists until it is saved.
+    if (session.doc.label().isEmpty() || session.bundle || session.draft)
         return;
     ViewSidecar::save(session.root, session.doc.label(), session.view->viewState());
 }

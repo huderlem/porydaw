@@ -103,6 +103,11 @@ class SongDocument : public QObject
     explicit SongDocument(QObject *parent = nullptr);
 
     bool load(const SongInfo &song, QString *error);
+    // A draft (docs/draft-songs/PLAN.md): the same as load, from an
+    // in-memory SMF instead of song.midPath, which need not exist yet. The
+    // caller passes the path the song will be saved to and hasCfg=false, so
+    // the first save() writes the .mid and the song's flags line.
+    bool loadDraft(const SmfFile &smf, const SongInfo &song, QString *error);
     bool save(QString *error);
 
     const QString &midPath() const { return m_midPath; }
@@ -493,6 +498,10 @@ class SongDocument : public QObject
     friend class SongEditCommand;
     friend class SongCfgCommand;
     friend class MoveNotesCommand;
+
+    // The part of load/loadDraft after the read: takes over the parsed file
+    // and the song's identity, and resets the undo history.
+    void adopt(SmfFile smf, const SongInfo &song);
 
     struct EditOp {
         enum Type {

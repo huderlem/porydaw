@@ -336,7 +336,25 @@ bool SongDocument::load(const SongInfo &song, QString *error)
     // flips to format 1 on the first real edit + save.
     if (!SmfFile::readFile(song.midPath, &smf, error))
         return false;
+    adopt(std::move(smf), song);
+    return true;
+}
 
+bool SongDocument::loadDraft(const SmfFile &smf, const SongInfo &song, QString *error)
+{
+    // Through the file encoding and back: the document starts from exactly
+    // what save() will write and what load() would read back after it (the
+    // same canonical encoding, the same format-1 coercion), so committing
+    // the draft changes nothing the user has seen.
+    SmfFile parsed;
+    if (!SmfFile::read(smf.write(), &parsed, error))
+        return false;
+    adopt(std::move(parsed), song);
+    return true;
+}
+
+void SongDocument::adopt(SmfFile smf, const SongInfo &song)
+{
     m_smf = std::move(smf);
     m_cfg = song.cfg;
     m_savedCfg = song.cfg;
@@ -354,7 +372,6 @@ bool SongDocument::load(const SongInfo &song, QString *error)
     // here would re-enter them mid-swap; the caller re-attaches and
     // refreshes everything itself after load returns.
     m_revision++;
-    return true;
 }
 
 bool SongDocument::save(QString *error)

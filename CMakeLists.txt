@@ -266,6 +266,7 @@ endif()
 qt_add_executable(porydaw
     src/main.cpp
     src/tabcheck.cpp
+    src/draftcheck.cpp
     src/eventviewcheck.cpp
     src/rollcheck.cpp
     src/rollcheckplayhead.cpp

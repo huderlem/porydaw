@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 
+#include <functional>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -29,6 +30,7 @@ class QTimer;
 class QWidget;
 class QUndoGroup;
 class PolyphonyPanel;
+class NewSongWizard;
 class SmfFile;
 class SongListPanel;
 class SongView;
@@ -149,6 +151,21 @@ class MainWindow : public QMainWindow
     int runBundleImportTabCheck(const QString &bundleZip, const QString &projectRoot,
                                 const QString &scratchDir);
 
+    // Import MIDI / New Song's finish for a song on an existing voicegroup
+    // (docs/draft-songs/PLAN.md): opens smf as a draft tab named label —
+    // editable and playable, but nothing is written to the project until
+    // its first save (commitDraft). False with *error when it can't open.
+    bool openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
+                       const QString &player, const SongCfg &cfg, const QString &newVoicegroup,
+                       QString *error);
+
+    // Draft-song check (--draftcheck; draftcheck.cpp): opening, editing and
+    // discarding a draft leave the project untouched; saving one commits
+    // it (.mid, flags, registration) in place, undo history included.
+    // Writes into the project: scratch copy only, QSettings must be
+    // redirected. Returns the number of failed expectations.
+    int runDraftCheck(const QString &projectRoot);
+
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
     // harnesses never inherit (or overwrite) the user's session.
@@ -210,14 +227,35 @@ class MainWindow : public QMainWindow
     void populateSongList();
     // Opens a song: focuses its tab when already open, otherwise loads it
     // into the current tab (prompting for unsaved changes) or a new one.
-    void loadSong(const SongInfo &song, bool newTab = false);
+    void loadSong(const SongInfo &requested, bool newTab = false);
     void loadSongByLabel(const QString &label, bool newTab = false);
-    // Shared New Song / Import finish: creates the new voicegroup when the
-    // wizard asked for one, writes the .mid + midi.cfg line, registers the
-    // song in the three registration files, reloads the project, and opens
-    // the song in a new tab.
-    void finishCreateSong(const SmfFile &smf, const QString &label, const QString &constant,
-                          const QString &player, const SongCfg &cfg, const QString &newVoicegroup);
+    // The shared body of loadSong and openDraftSong: loads the song's
+    // voicegroup, reads the document through readDocument into session
+    // (a fresh session, added as a new tab, when null; replaced in place
+    // otherwise), installs draft (null = an ordinary song), and binds the
+    // timeline, voicegroup and view. Null with *error on failure; a
+    // replaced session is then left as it was.
+    SongSession *populateSession(SongSession *session, const SongInfo &song,
+                                 std::unique_ptr<SongDraft> draft,
+                                 const std::function<bool(SongDocument &, QString *)> &readDocument,
+                                 QString *error);
+    // New Song / Import finish: a draft tab (openDraftSong), or the
+    // write-through path when the wizard asked for a new voicegroup. title
+    // heads a failure's message box.
+    void createSongFromWizard(const NewSongWizard &wizard, const QString &title);
+    // New Song / Import finish when the wizard asked for a new voicegroup:
+    // creates it, writes the .mid + midi.cfg line, registers the song in
+    // the registration files, reloads the project, and opens the song in a
+    // new tab. Goes away once drafts can carry a new voicegroup (step 3).
+    void finishCreateSongWriteThrough(const SmfFile &smf, const QString &label,
+                                      const QString &constant, const QString &player,
+                                      const SongCfg &cfg, const QString &newVoicegroup);
+    // A draft's first save: writes the .mid and its flags, registers the
+    // song (a failed registration still commits, as an unregistered song),
+    // and turns the session into an ordinary project song in place — its
+    // document, undo history and view survive. Safe to retry after a
+    // failure. False with *error when nothing was committed.
+    bool commitDraft(SongSession &session, QString *error);
     // The dialog-less half of deleteSongById (also the harness entry): closes
     // the song's tab discarding its edits, moves the .mid to .porydaw/trash/,
     // removes the flag line, unregisters, drops the sidecar, deletes the

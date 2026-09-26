@@ -39,6 +39,17 @@ struct SynthToneBuf {
     uint8_t bytes[17];
 };
 
+// What a draft session (docs/draft-songs/PLAN.md) still has to write: a
+// song made by Import MIDI or New Song lives only in memory until its first
+// save commits it — the .mid and its flags, then the registration.
+struct SongDraft {
+    QString constant; // registration: songs.h constant
+    QString player;   // registration: song-table music player
+    // The wizard's new voicegroup, created at commit. Always empty for now:
+    // a song asking for one still takes the write-through path.
+    QString newVoicegroup;
+};
+
 struct SongSession {
     // Where this tab's song lives: every per-session read (voicegroup load
     // and source, preview files, view sidecar, synth and sample lookups)
@@ -65,7 +76,11 @@ struct SongSession {
     // std::map: Qt 6.2's QHash can't hold move-only values.
     std::map<int, std::unique_ptr<SynthToneBuf>> synthTones;
     SongView *view = nullptr; // tab page; deleted here, before the tab widget
-    int songId = -1;
+    int songId = -1;          // stays -1 while a draft
+    // Set while the session is a draft: its document's midPath is where the
+    // song WILL be saved, and nothing of it is in the project yet. Cleared
+    // by the commit (MainWindow::commitDraft).
+    std::unique_ptr<SongDraft> draft;
     // Engine-applied cfg values, to react only to real changes on edits.
     QString appliedVoicegroupArg;
     int appliedVolume = 127;
@@ -77,8 +92,13 @@ struct SongSession {
 
     // The tab's unsaved-changes state: song and voicegroup edits are one
     // document to the user, so every dirty check (tab title, window title,
-    // close prompts) must combine both.
-    bool isDirty() const { return !bundle && (doc.isDirty() || (vgSource && vgSource->dirty())); }
+    // close prompts) must combine both. A draft is unsaved by definition,
+    // edited or not: closing it loses the song.
+    bool isDirty() const
+    {
+        return !bundle && (draft || doc.isDirty() || (vgSource && vgSource->dirty()));
+    }
+    bool isDraft() const { return draft != nullptr; }
 
     ~SongSession()
     {

@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**, not started. File/line references verified
+Status: **decisions confirmed 2026-09-26**; step 1 done 2026-09-26. File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -86,7 +86,15 @@ affects **before** starting the next step.
 - `loadSong` (`src/mainwindow.cpp:1845`) is the template for building a
   session: voicegroup load → `createSession` → `doc.load` → timeline →
   `openVoicegroupSource` → view → tab. `trackBudgetFor(SongInfo)` only
-  needs `player`.
+  needs `player`. *(Step 1: that body is now
+  `MainWindow::populateSession(session, song, draft, readDocument, error)`,
+  shared by `loadSong` and `openDraftSong`; its single
+  `loadVoicegroupFor(m_project.root(), …)` call is the `loadSong` site
+  step 3's `loadVoicegroupForSession` must replace.)*
+- *(Step 1)* `loadSong` copies its `SongInfo` and re-resolves it by label
+  after the save prompt: answering Save on a draft replaced in place
+  commits it, and the commit's project reload replaces the song list a
+  caller's reference points into (ids may shift).
 - Things keyed by label that write on their own:
   `saveViewState` (`:3998`, called from `:1645`, `:1761`, `:1868`,
   `:4034`) writes `.porydaw/<label>.json`; `persistOpenTabs` (`:1577`)
@@ -226,7 +234,8 @@ between import and Save is handled (D2).
 ### Step 3 — Deferred new voicegroup
 
 **Scope:** "New voicegroup" in the wizard no longer writes anything until
-commit. Delete `finishCreateSongWriteThrough`.
+commit. Delete `finishCreateSongWriteThrough` (and the branch to it in
+`createSongFromWizard`, step 1's shared New Song / Import finish).
 
 **Changes**
 
@@ -248,7 +257,8 @@ commit. Delete `finishCreateSongWriteThrough`.
 4. Voicegroup loading that knows about drafts: every place that loads a
    session's voicegroup (`loadVoicegroupFor` callers, `saveSession`'s
    reload at `:2422`, activation's staleness reload at `:1543`, the cfg
-   voicegroup change at `:2300`, and `loadSong`) goes through a new `loadVoicegroupForSession(session, cfg)`.
+   voicegroup change at `:2300`, and `populateSession` — `loadSong`'s body
+   since step 1) goes through a new `loadVoicegroupForSession(session, cfg)`.
    While the draft's new voicegroup exists, it adds `.porydaw/drafts/<uuid>`
    as `voicegroupPaths[0]`. `reloadVoicegroupPreview` is unchanged, since
    its preview file still shadows everything.
@@ -297,7 +307,10 @@ will do.
    (Discard stays the destructive action).
 4. After commit, the status message says the same thing
    `finishCreateSong` says today ("Created and registered … (song ID n)",
-   plus the configure-voicegroup hint when one was created). Import itself
+   plus the configure-voicegroup hint when one was created). *(Step 1:
+   `commitDraft` already shows the "Created and registered" message; only
+   the voicegroup hint is left. `openDraftSong` shows a placeholder
+   "Opened … — nothing is in the project until you save it" to replace.)* Import itself
    says "Imported *<label>* as a draft — Save to add it to the project."
 5. Manual docs: add a short section to `docsrc/manual/` wherever Import
    MIDI / New Song are described. Add a CHANGELOG entry that follows the
@@ -359,4 +372,51 @@ project: Import → play → edit → close → `git status` clean; Import → S
 Append one entry per step: date, commit(s), what deviated from the plan
 and why, what's still owed.
 
-- _(none yet)_
+- **2026-09-26 — Step 1 (draft sessions, existing voicegroup).** Commit:
+  see `git log` on branch `draft-song` ("Draft songs step 1 …").
+  - `SongDocument::loadDraft(const SmfFile&, const SongInfo&, QString*)`
+    and the private `adopt()` that `load()` now shares.
+    `SongDraft` + `SongSession::draft` / `isDraft()` / the draft term in
+    `isDirty()` (`src/songsession.h`).
+    `MainWindow::populateSession` (extracted from `loadSong`),
+    `openDraftSong` (public), `commitDraft`, `createSongFromWizard`
+    (the shared `newSong`/`importMidi` finish that picks draft vs.
+    write-through), `finishCreateSongWriteThrough` (renamed old path).
+    `saveSession` routes drafts to `commitDraft`; `saveViewState`,
+    `persistOpenTabs` (incl. `lastSongLabel`) and `refreshSessionSongIds`
+    skip drafts.
+  - Harness `--draftcheck SCRATCH` (`src/draftcheck.cpp`,
+    `MainWindow::runDraftCheck`), in `tools/run_checks.sh`. Sections:
+    open (tree unchanged, dirty via draft only, `*`, `songId==-1`, engine
+    bound, not persisted) → edit → Discard via the real `closeTab` /
+    `maybeSaveSession` prompt → second draft + Save (in place, same
+    session/view, `.mid` == document, registered, flags, `songId`,
+    persisted, pre-save edit undoable) → **extra section 5**: a draft
+    replaced in place by a browser load, answering Save.
+  - Results: `--draftcheck` PASS; full `tools/run_checks.sh` PASS on the
+    normal and ASAN builds (mkcheck skipped as usual, no fork given).
+    Mutation-tested: dropping the `saveViewState`/`persistOpenTabs`
+    exclusions fails the harness. Manual: the real File → Import MIDI
+    flow (file dialog + wizard driven offscreen from a throwaway patch,
+    not committed) → edit → play → close → Discard left the scratch
+    project's `git status` clean and wrote no `.porydaw/<label>.json`.
+  - Deviations: (1) `loadDraft` takes `const SmfFile&` plus `QString
+    *error` and round-trips the SMF through `write()`/`read()` so the
+    document is exactly what `load()` would read back after the commit
+    (same encoding, format-1 coercion) — hence it can fail. (2) No new
+    test hook for the Save/Discard prompt: the harness answers the real
+    `QMessageBox` from a timer inside its `exec()`, as `vgsavecheck`
+    does for its dialogs. (3) The harness "tree hash" is a digest of
+    every file's relative path + size + mtime outside `.porydaw/`, not
+    of contents (815 MB tree; any write moves the mtime, so it is
+    stricter, not looser). (4) The `loadSong` copy/re-resolve above
+    (fact added to §3), covered by harness section 5 — which passes
+    with or without the fix on vanilla pokeemerald (no ASAN report:
+    the reload happens not to free/shift the referenced entry there),
+    so the fix is defensive. (5) `commitDraft` reports doc-save failure
+    through `saveSession`'s existing "Save Song" box; the registration
+    failure keeps its own warning (re-titled "Save Song") and still
+    commits.
+  - Owed: nothing for step 1. The draft tab tooltip is the future
+    `.mid` path and the close prompt still reads "has unsaved changes"
+    (step 4). A draft can't yet be recognised by any UI beyond `*`.

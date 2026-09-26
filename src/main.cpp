@@ -38,6 +38,9 @@ int runSessionCheck(const QString &projectRoot, const QString &songLabel);
 // tabcheck.cpp; multi-tab check against redirected QSettings (writes view
 // sidecars into the project: use a copy).
 int runTabCheck(const QString &projectRoot, const QString &songA, const QString &songB);
+// draftcheck.cpp; draft songs (Import MIDI / New Song) against redirected
+// QSettings (the commit writes into the project: use a copy).
+int runDraftCheck(const QString &projectRoot);
 // rollcheck.cpp; piano-roll gesture check (pencil draw + velocity latch +
 // header-drag track reorder); the optional path saves the rendered view
 // after the gestures.
@@ -181,6 +184,9 @@ int main(int argc, char *argv[])
     const int tabCheck = args.indexOf(QStringLiteral("--tabcheck"));
     if (tabCheck >= 0 && tabCheck + 3 < args.size())
         return runTabCheck(args[tabCheck + 1], args[tabCheck + 2], args[tabCheck + 3]);
+    const int draftCheck = args.indexOf(QStringLiteral("--draftcheck"));
+    if (draftCheck >= 0 && draftCheck + 1 < args.size())
+        return runDraftCheck(args[draftCheck + 1]);
     if (args.contains(QStringLiteral("--loopcheck")))
         return runLoopCheck();
     const int polyCheck = args.indexOf(QStringLiteral("--polycheck"));

@@ -120,6 +120,7 @@ run exportcheck-loop base --exportcheck SCRATCH mus_abandoned_ship
 run exportcheck-tail base --exportcheck SCRATCH mus_obtain_item
 run sessioncheck     base --sessioncheck SCRATCH mus_abandoned_ship
 run tabcheck         base --tabcheck SCRATCH mus_abandoned_ship mus_petalburg
+run draftcheck       base --draftcheck SCRATCH
 run eventviewcheck   base --eventviewcheck SCRATCH
 run rollcheck        base --rollcheck SCRATCH mus_abandoned_ship
 run velcheck         base --velcheck SCRATCH mus_abandoned_ship
