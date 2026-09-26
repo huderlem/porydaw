@@ -18,9 +18,10 @@
 //    arguments fail to parse (the increment sits outside the sscanf check);
 //  - "voice_group NAME, n" sets the slot only with the comma form and
 //    0 < n < 128 (:1727); the bare header leaves it at 0;
-//  - prefix order matters (_no_resample before _alt before base, keysplit_all
-//    before keysplit, cry_reverse before cry), and the two programmable_wave
-//    prefixes match without requiring a trailing space (:1877/:1903);
+//  - the DirectSound and cry macros match with their trailing space
+//    (kDirectSoundMacros / kCryMacros), keysplit_all is tried before
+//    keysplit, and the two programmable_wave prefixes match without
+//    requiring a trailing space (:1877/:1903);
 //  - comments are stripped at the first '@' or "//" (strip_comment, :179);
 //  - a monolithic section starts at "<label>::" and, once a voice has been
 //    parsed, ends at the first line with "::" past position 0 or starting
@@ -38,6 +39,9 @@ struct MacroDef {
 const MacroDef kEditableMacros[] = {
     {VgMacro::DirectSoundNoResample, "voice_directsound_no_resample", true},
     {VgMacro::DirectSoundAlt, "voice_directsound_alt", true},
+    {VgMacro::DirectSoundReverse, "voice_directsound_reverse", true},
+    {VgMacro::DirectSoundCompressed, "voice_directsound_compressed", true},
+    {VgMacro::DirectSoundCompressedReverse, "voice_directsound_compressed_reverse", true},
     {VgMacro::DirectSound, "voice_directsound", true},
     {VgMacro::Square1Alt, "voice_square_1_alt", true},
     {VgMacro::Square1, "voice_square_1", true},
@@ -52,10 +56,33 @@ const MacroDef kEditableMacros[] = {
     {VgMacro::Keysplit, "voice_keysplit", true},
 };
 
-const char *const kReadOnlyPrefixes[] = {
-    "cry_reverse ",
-    "cry ",
+// The cry-table macros (the loader's kCryMacros, plus the _custom forms from
+// its kDirectSoundMacros): a voice slot each, shown but never rewritten.
+struct ReadOnlyMacroDef {
+    const char *prefix; // with the trailing space the loader matches
+    int argCount;
+    int symbolArg;
 };
+
+const ReadOnlyMacroDef kReadOnlyMacros[] = {
+    {"cry ", 1, 0},
+    {"cry_reverse ", 1, 0},
+    {"cry_uncomp ", 1, 0},
+    {"cry_reverse_uncomp ", 1, 0},
+    {"cry_custom ", 7, 2},
+    {"cry_reverse_custom ", 7, 2},
+    {"cry_uncomp_custom ", 7, 2},
+    {"cry_reverse_uncomp_custom ", 7, 2},
+};
+
+const ReadOnlyMacroDef *matchReadOnlyMacro(const QByteArray &text)
+{
+    for (const ReadOnlyMacroDef &def : kReadOnlyMacros) {
+        if (text.startsWith(def.prefix))
+            return &def;
+    }
+    return nullptr;
+}
 
 int macroArgCount(VgMacro macro)
 {
@@ -102,6 +129,21 @@ bool isSymbolArg(const QByteArray &trimmed)
             return false;
     }
     return true;
+}
+
+// The macro's arguments, trimmed; empty unless the count fits and they are a
+// symbol where the sample goes and plain integers elsewhere.
+QList<QByteArray> readOnlyMacroArgs(const ReadOnlyMacroDef &def, const QByteArray &text)
+{
+    QList<QByteArray> args = text.mid(int(qstrlen(def.prefix))).split(',');
+    if (args.size() != def.argCount)
+        return {};
+    for (int a = 0; a < args.size(); a++) {
+        args[a] = args.at(a).trimmed();
+        if (a == def.symbolArg ? !isSymbolArg(args.at(a)) : !isIntArg(args.at(a)))
+            return {};
+    }
+    return args;
 }
 
 // Mirrors the loader's strip_comment + rtrim + ltrim: fills the content
@@ -168,8 +210,9 @@ QList<QByteArray> splitLines(const QByteArray &content, bool *endsWithNewline)
 // GAS label — it still assembles and links because sample data shares its
 // assembly unit with the voicegroups referencing it, so it must be listed);
 // a label whose .incbin points into a cries directory is a pokemon cry, not
-// an instrument sample, and is skipped.
-void collectSampleSymbols(const QByteArray &content, QStringList *symbols)
+// an instrument sample: it goes to cries (when asked for) instead.
+void collectSampleSymbols(const QByteArray &content, QStringList *symbols,
+                          QStringList *cries = nullptr)
 {
     static const QRegularExpression labelRe(QStringLiteral(R"(^(\w+)::?)"));
     static const QRegularExpression incbinRe(QStringLiteral(R"(^\s*\.incbin\s+"([^"]+)\")"));
@@ -190,6 +233,8 @@ void collectSampleSymbols(const QByteArray &content, QStringList *symbols)
         if (incbin.hasMatch() && !pending.isEmpty()) {
             if (!incbin.captured(1).contains(QStringLiteral("cries/")))
                 symbols->append(pending);
+            else if (cries)
+                cries->append(pending);
             pending.clear();
         }
     }
@@ -463,6 +508,7 @@ QStringList voicegroupFiles(const QString &projectRoot)
 // extracted from the same bytes.
 struct SoundDataScan {
     QStringList symbols;                          // deduped + sorted, as symbolsFromFiles
+    QStringList cries;                            // deduped + sorted
     QList<QPair<QString, VgSynthDesc>> synthDefs; // file order, as scanSynthDefs
 };
 
@@ -474,11 +520,13 @@ SoundDataScan scanSoundData(const QString &projectRoot)
         const QByteArray content = readAllBytes(path, &ok);
         if (!ok)
             continue;
-        collectSampleSymbols(content, &scan.symbols);
+        collectSampleSymbols(content, &scan.symbols, &scan.cries);
         collectSynthDefs(content, &scan.synthDefs);
     }
     scan.symbols.removeDuplicates();
     std::sort(scan.symbols.begin(), scan.symbols.end());
+    scan.cries.removeDuplicates();
+    std::sort(scan.cries.begin(), scan.cries.end());
     return scan;
 }
 
@@ -499,12 +547,12 @@ QStringList filterDirectSound(const SoundDataScan &scan)
     return instruments + phonemes;
 }
 
-// The set_synth_* assembler macro words the project defines. They normally
-// live in asm/macros/music_voice.inc, but any macro file counts — only
-// their existence gates writing new definitions.
-QStringList synthMacroWords(const QString &projectRoot)
+// The assembler macro words the project defines that start with prefix. They
+// normally live in asm/macros/music_voice.inc, but any macro file counts —
+// only their existence gates what gets written.
+QStringList definedMacroWords(const QString &projectRoot, const QString &prefix)
 {
-    static const QRegularExpression macroRe(QStringLiteral(R"(^\s*\.macro\s+(set_synth_\w+))"));
+    const QRegularExpression macroRe(QStringLiteral(R"(^\s*\.macro\s+(%1\w*))").arg(prefix));
     QStringList words;
     QDirIterator it(projectRoot + QStringLiteral("/asm/macros"), {QStringLiteral("*.inc")},
                     QDir::Files);
@@ -519,6 +567,11 @@ QStringList synthMacroWords(const QString &projectRoot)
         }
     }
     return words;
+}
+
+QStringList synthMacroWords(const QString &projectRoot)
+{
+    return definedMacroWords(projectRoot, QStringLiteral("set_synth_"));
 }
 
 } // namespace
@@ -540,7 +593,12 @@ QString vgMacroDisplayName(VgMacro macro)
     case VgMacro::DirectSoundNoResample:
         return QStringLiteral("Sample (no resample)");
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
         return QStringLiteral("Sample (reversed)");
+    case VgMacro::DirectSoundCompressed:
+        return QStringLiteral("Sample (compressed)");
+    case VgMacro::DirectSoundCompressedReverse:
+        return QStringLiteral("Sample (compressed, reversed)");
     case VgMacro::Square1:
         return QStringLiteral("Square 1");
     case VgMacro::Square1Alt:
@@ -573,7 +631,12 @@ uint8_t vgMacroVoiceType(VgMacro macro)
     case VgMacro::DirectSoundNoResample:
         return VOICE_DIRECTSOUND_NO_RESAMPLE;
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
         return VOICE_DIRECTSOUND_ALT;
+    case VgMacro::DirectSoundCompressed:
+        return VOICE_CRY;
+    case VgMacro::DirectSoundCompressedReverse:
+        return VOICE_CRY_REVERSE;
     case VgMacro::Square1:
         return VOICE_SQUARE_1;
     case VgMacro::Square1Alt:
@@ -604,6 +667,9 @@ bool vgMacroHasSymbol(VgMacro macro)
     case VgMacro::DirectSound:
     case VgMacro::DirectSoundNoResample:
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
     case VgMacro::ProgWave:
     case VgMacro::ProgWaveAlt:
     case VgMacro::Keysplit:
@@ -614,12 +680,26 @@ bool vgMacroHasSymbol(VgMacro macro)
     }
 }
 
+bool vgMacroIsDirectSound(VgMacro macro)
+{
+    return vgAdsrFamily(macro) == int(VgMacro::DirectSound);
+}
+
+bool vgMacroIsCompressed(VgMacro macro)
+{
+    return macro == VgMacro::DirectSoundCompressed ||
+           macro == VgMacro::DirectSoundCompressedReverse;
+}
+
 bool vgMacroIsCgb(VgMacro macro)
 {
     switch (macro) {
     case VgMacro::DirectSound:
     case VgMacro::DirectSoundNoResample:
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
     case VgMacro::Keysplit:
     case VgMacro::KeysplitAll:
         return false;
@@ -634,6 +714,9 @@ int vgAdsrFamily(VgMacro macro)
     case VgMacro::DirectSound:
     case VgMacro::DirectSoundNoResample:
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
         return int(VgMacro::DirectSound);
     case VgMacro::Square1:
     case VgMacro::Square1Alt:
@@ -901,27 +984,17 @@ bool VoicegroupSource::parse(const QByteArray &content, QString *error)
                 break;
             }
         }
-        bool isReadOnlyVoice = false;
-        if (!matched) {
-            for (const char *prefix : kReadOnlyPrefixes) {
-                if (text.startsWith(prefix)) {
-                    isReadOnlyVoice = true;
-                    break;
-                }
-            }
-        }
-        if (!matched && !isReadOnlyVoice) {
+        const ReadOnlyMacroDef *readOnly = matched ? nullptr : matchReadOnlyMacro(text);
+        if (!matched && !readOnly) {
             m_lines.append(line);
             continue;
         }
 
         line.slot = nextSlot++;
         voicesInSection++;
-        if (isReadOnlyVoice) {
-            // The macro word and one symbol, nothing more.
-            const QList<QByteArray> tokens = text.simplified().split(' ');
-            line.kind = tokens.size() == 2 && isSymbolArg(tokens.at(1)) ? VgLineKind::ReadOnlyVoice
-                                                                        : VgLineKind::Broken;
+        if (readOnly) {
+            line.kind = readOnlyMacroArgs(*readOnly, text).isEmpty() ? VgLineKind::Broken
+                                                                     : VgLineKind::ReadOnlyVoice;
         } else {
             // Tokenize the arguments, keeping every byte for re-rendering.
             const int prefixLen = int(qstrlen(matched->word)) + (matched->requireSpace ? 1 : 0);
@@ -1003,14 +1076,14 @@ VgParsedSource VoicegroupSource::parseSource(const QByteArray &content, const QS
         out.slot = line.slot;
         out.voice = line.voice;
         if (line.kind == VgLineKind::ReadOnlyVoice) {
-            // The loader's sscanf("%s") after the macro word: the first
-            // whitespace-delimited token.
             int start = 0, end = 0;
             contentBounds(line.raw, &start, &end);
-            const QList<QByteArray> tokens =
-                line.raw.mid(start, end - start).simplified().split(' ');
-            if (tokens.size() >= 2)
-                out.crySymbol = QString::fromUtf8(tokens.at(1));
+            const QByteArray text = line.raw.mid(start, end - start);
+            if (const ReadOnlyMacroDef *def = matchReadOnlyMacro(text)) {
+                const QList<QByteArray> args = readOnlyMacroArgs(*def, text);
+                if (!args.isEmpty())
+                    out.crySymbol = QString::fromUtf8(args.at(def->symbolArg));
+            }
         }
         parsed.lines.append(out);
     }
@@ -1198,6 +1271,9 @@ VgDirectSoundScan VoicegroupSource::directSoundCatalog(const QString &projectRoo
     const SoundDataScan data = scanSoundData(projectRoot);
     VgDirectSoundScan scan;
     scan.directSound = filterDirectSound(data);
+    scan.cries = data.cries;
+    scan.voiceMacroWords =
+        definedMacroWords(projectRoot, QStringLiteral("(?:voice_directsound|cry)"));
     scan.synths.defs = data.synthDefs;
     scan.synths.macroWords = synthMacroWords(projectRoot);
     return scan;

@@ -1,3 +1,4 @@
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -317,7 +318,7 @@ bool buildMacroProject(const QString &root)
             return false;
     }
     // A cry: lives in a subdirectory, has no DirectSoundWaveData_ prefix, and
-    // is read by `cry` voices from the raw .bin only.
+    // is read by `cry` voices from the built .bin (there is no source here).
     dsData += sampleEntry("Cry_Testmon", QByteArray(kSamples) + "cries/testmon.bin");
 
     QHash<int, QByteArray> top;
@@ -708,8 +709,58 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         refuses("missing", {QStringLiteral("DirectSoundWaveData_snare"),
                             QStringLiteral("Cry_Testmon"), QStringLiteral("incomplete")});
         QFile::rename(samples + QStringLiteral("snare.bak"), samples + QStringLiteral("snare.wav"));
+
+        // An unbuilt cry with its source there is no refusal: the loader
+        // plays the source, so the bundle carries that instead of the .bin.
+        {
+            writeFile(samples + QStringLiteral("cries/testmon.wav"), fixtureWav(40));
+            SongBundle::Exporter exporter(root, song.doc, &song.vg);
+            const QString out = path("unbuilt_cry");
+            error.clear();
+            expect(exporter.stage(out, &error), QStringLiteral("unbuilt-cry export: ") + error);
+            const QString bundled = out + QStringLiteral("/sound/direct_sound_samples/Cry_Testmon");
+            expect(readFileBytes(bundled + QStringLiteral(".wav")) == fixtureWav(40) &&
+                       !QFile::exists(bundled + QStringLiteral(".bin")),
+                   QStringLiteral("an unbuilt cry is bundled as its source .wav"));
+            Loaded bundle(out, QStringLiteral("bundle_song"));
+            expect(bundle.vg && bundle.vg->voices[40].wav && bundle.vg->voices[40].wav->type == 0,
+                   QStringLiteral("the bundled cry source loads as plain PCM"));
+        }
         QFile::rename(samples + QStringLiteral("cries/testmon.bak"),
                       samples + QStringLiteral("cries/testmon.bin"));
+        // Built, but the source was edited since: still the source.
+        {
+            QFile bin(samples + QStringLiteral("cries/testmon.bin"));
+            bin.open(QIODevice::ReadWrite);
+            bin.setFileTime(QDateTime::currentDateTime().addSecs(-3600),
+                            QFileDevice::FileModificationTime);
+            bin.close();
+            SongBundle::Exporter exporter(root, song.doc, &song.vg);
+            const QString out = path("stale_cry");
+            error.clear();
+            expect(exporter.stage(out, &error), QStringLiteral("stale-cry export: ") + error);
+            const QString bundled = out + QStringLiteral("/sound/direct_sound_samples/Cry_Testmon");
+            expect(QFile::exists(bundled + QStringLiteral(".wav")) &&
+                       !QFile::exists(bundled + QStringLiteral(".bin")),
+                   QStringLiteral("a cry .bin older than its source is passed over"));
+        }
+        // Built after its source: the .bin again, and only that.
+        {
+            QFile bin(samples + QStringLiteral("cries/testmon.bin"));
+            bin.open(QIODevice::ReadWrite);
+            bin.setFileTime(QDateTime::currentDateTime().addSecs(3600),
+                            QFileDevice::FileModificationTime);
+            bin.close();
+            SongBundle::Exporter exporter(root, song.doc, &song.vg);
+            const QString out = path("fresh_cry");
+            error.clear();
+            expect(exporter.stage(out, &error), QStringLiteral("fresh-cry export: ") + error);
+            const QString bundled = out + QStringLiteral("/sound/direct_sound_samples/Cry_Testmon");
+            expect(QFile::exists(bundled + QStringLiteral(".bin")) &&
+                       !QFile::exists(bundled + QStringLiteral(".wav")),
+                   QStringLiteral("a cry .bin newer than its source is what gets bundled"));
+        }
+        QFile::remove(samples + QStringLiteral("cries/testmon.wav"));
 
         // Undefined table, wave and sub-voicegroup symbols, all named at once.
         const QString snd = root + QStringLiteral("/sound/");
@@ -864,9 +915,13 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         DecompProject project;
         QString error;
         expect(project.open(corpus, &error), QStringLiteral("corpus opens: ") + error);
+        // PORYDAW_SAMPLE_CORPUS_SONG=<label> exports just that song instead.
+        const QString only = qEnvironmentVariable("PORYDAW_SAMPLE_CORPUS_SONG");
         int playable = 0, exported = 0, skipped = 0;
         for (const SongInfo &info : project.songs()) {
-            if (!info.isPlayable() || playable++ % 8 != 0 || exported >= 60)
+            if (!info.isPlayable())
+                continue;
+            if (only.isEmpty() ? (playable++ % 8 != 0 || exported >= 60) : info.label != only)
                 continue;
             const QString tag = QStringLiteral("corpus ") + info.label;
             SongDocument doc;

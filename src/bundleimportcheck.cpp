@@ -695,6 +695,25 @@ void runBundleImportSections(const QString &scratchDir, int *failures)
                QStringLiteral("a cry line carrying a second directive refuses: ") +
                    describePlan(plan));
 
+        // A pokeemerald-expansion sample macro the project has no definition
+        // of would not assemble; once it is defined the same bundle plans.
+        const QString expansion = path("expansion_macro_bundle");
+        copyTree(bundle, expansion);
+        topGroup = readFile(expansion + QStringLiteral("/sound/voicegroups/bundle_song.inc"));
+        topGroup.replace("\tcry Cry_Testmon",
+                         "\tvoice_directsound_compressed 60, 0, Cry_Testmon, 255, 0, 255, 0");
+        writeFile(expansion + QStringLiteral("/sound/voicegroups/bundle_song.inc"), topGroup);
+        plan = SongBundle::makeImportPlan(expansion, root);
+        expect(!plan.ok() &&
+                   plan.refusals.join(QLatin1Char(' ')).contains("voice_directsound_compressed"),
+               QStringLiteral("an undefined expansion voice macro refuses: ") + describePlan(plan));
+        const QString expansionMacros = root + QStringLiteral("/asm/macros/expansion_voice.inc");
+        writeFile(expansionMacros, "\t.macro voice_directsound_compressed key:req\n\t.endm\n");
+        plan = SongBundle::makeImportPlan(expansion, root);
+        expect(plan.ok(),
+               QStringLiteral("the macro defined, the same bundle plans: ") + describePlan(plan));
+        QFile::remove(expansionMacros);
+
         const QString broken = path("broken_bundle");
         copyTree(bundle, broken);
         drums = readFile(broken + QStringLiteral("/sound/voicegroups/test_drumset.inc"));

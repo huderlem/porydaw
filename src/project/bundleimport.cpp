@@ -210,11 +210,14 @@ struct References {
     QSet<QString> waves;
     QSet<QString> tables;
     QStringList subGroups;
+    QSet<QString> macroWords; // the voice lines' macro words
 };
 
 void collectReferences(const GroupSource &group, References *refs)
 {
     for (const VgSourceLine &line : group.voices) {
+        if (line.kind == VgLineKind::Editable || line.kind == VgLineKind::ReadOnlyVoice)
+            refs->macroWords.insert(QString::fromUtf8(line.raw.simplified().split(' ').first()));
         if (line.kind == VgLineKind::ReadOnlyVoice && !line.crySymbol.isEmpty())
             refs->cries.insert(line.crySymbol);
         if (line.kind != VgLineKind::Editable)
@@ -224,7 +227,12 @@ void collectReferences(const GroupSource &group, References *refs)
         case VgMacro::DirectSound:
         case VgMacro::DirectSoundNoResample:
         case VgMacro::DirectSoundAlt:
+        case VgMacro::DirectSoundReverse:
             refs->directSound.insert(v.symbol);
+            break;
+        case VgMacro::DirectSoundCompressed:
+        case VgMacro::DirectSoundCompressedReverse:
+            refs->cries.insert(v.symbol);
             break;
         case VgMacro::ProgWave:
         case VgMacro::ProgWaveAlt:
@@ -612,8 +620,9 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
             item.wavSource = B + QLatin1Char('/') + stem + QStringLiteral(".wav");
         if (QFile::exists(B + QLatin1Char('/') + rel))
             item.binSource = B + QLatin1Char('/') + rel;
-        if ((item.wavSource.isEmpty() && item.binSource.isEmpty()) ||
-            (refs.cries.contains(symbol) && item.binSource.isEmpty())) {
+        // (A cry voice is fine with either: it plays a .wav's data through
+        // the mixer's plain path, as it does for an unbuilt project's cries.)
+        if (item.wavSource.isEmpty() && item.binSource.isEmpty()) {
             incomplete.append(symbol);
             continue;
         }
@@ -703,6 +712,28 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
                               "assemble. Add ipatix's improved mixer (with its synth macros) to "
                               "the project first.")
                    .arg(newSynths.join(QStringLiteral(", "))));
+
+    // The pokeemerald-expansion sample macros (voice_directsound_compressed,
+    // cry_custom, ...): vanilla projects have no such words to assemble.
+    {
+        static const QSet<QString> vanilla = {QStringLiteral("voice_directsound"),
+                                              QStringLiteral("voice_directsound_no_resample"),
+                                              QStringLiteral("voice_directsound_alt"),
+                                              QStringLiteral("cry"), QStringLiteral("cry_reverse")};
+        const QStringList defined = VoicegroupSource::directSoundCatalog(P).voiceMacroWords;
+        QStringList missing;
+        for (const QString &word : sortedList(refs.macroWords)) {
+            const bool sampleMacro = word.startsWith(QLatin1String("voice_directsound")) ||
+                                     word.startsWith(QLatin1String("cry"));
+            if (sampleMacro && !vanilla.contains(word) && !defined.contains(word))
+                missing.append(word);
+        }
+        if (!missing.isEmpty())
+            refuse(QStringLiteral("This song's voicegroup uses voice macros the project doesn't "
+                                  "define (%1), so it would not assemble. They come from "
+                                  "pokeemerald-expansion's asm/macros/music_voice.inc.")
+                       .arg(missing.join(QStringLiteral(", "))));
+    }
 
     // ---- 2. Programmable waves -------------------------------------------------------
     {

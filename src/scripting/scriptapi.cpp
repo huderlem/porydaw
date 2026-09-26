@@ -1898,12 +1898,21 @@ QStringList StorageApi::songKeys() const
 namespace {
 
 const VgMacro kVgMacros[] = {
-    VgMacro::DirectSound,    VgMacro::DirectSoundNoResample,
-    VgMacro::DirectSoundAlt, VgMacro::Square1,
-    VgMacro::Square1Alt,     VgMacro::Square2,
-    VgMacro::Square2Alt,     VgMacro::ProgWave,
-    VgMacro::ProgWaveAlt,    VgMacro::Noise,
-    VgMacro::NoiseAlt,       VgMacro::Keysplit,
+    VgMacro::DirectSound,
+    VgMacro::DirectSoundNoResample,
+    VgMacro::DirectSoundAlt,
+    VgMacro::DirectSoundReverse,
+    VgMacro::DirectSoundCompressed,
+    VgMacro::DirectSoundCompressedReverse,
+    VgMacro::Square1,
+    VgMacro::Square1Alt,
+    VgMacro::Square2,
+    VgMacro::Square2Alt,
+    VgMacro::ProgWave,
+    VgMacro::ProgWaveAlt,
+    VgMacro::Noise,
+    VgMacro::NoiseAlt,
+    VgMacro::Keysplit,
     VgMacro::KeysplitAll,
 };
 
@@ -1920,6 +1929,16 @@ bool parseVgMacro(const QString &text, VgMacro *out)
         }
     }
     return false;
+}
+
+// The pokeemerald-expansion sample macros only assemble where the project
+// defines them; every other macro is vanilla.
+bool voiceMacroDefined(const ScriptHost &host, VgMacro macro)
+{
+    if (macro != VgMacro::DirectSoundReverse && !vgMacroIsCompressed(macro))
+        return true;
+    return host.bindings().voicegroupCatalog &&
+           host.bindings().voicegroupCatalog().voiceMacroWords.contains(vgMacroName(macro));
 }
 
 QString vgLineKindName(VgLineKind kind)
@@ -2483,6 +2502,7 @@ QVariantMap VoicegroupApi::symbols() const
                                      {QStringLiteral("table"), pair.second}});
     }
     out.insert(QStringLiteral("directSound"), c.directSound);
+    out.insert(QStringLiteral("cries"), c.cries);
     out.insert(QStringLiteral("progWave"), c.progWave);
     out.insert(QStringLiteral("drumkits"), c.drumkits);
     out.insert(QStringLiteral("synths"), c.synths);
@@ -2863,6 +2883,9 @@ void EditApi::setVoice(int slot, const QVariantMap &spec)
         VgVoice voice = before;
         if (!applyVoiceSpec(spec, &voice, &error)) {
             throwError(QStringLiteral("edit.setVoice: ") + error);
+        } else if (voice.macro != before.macro && !voiceMacroDefined(m_host, voice.macro)) {
+            throwError(QStringLiteral("edit.setVoice: this project doesn't define the %1 macro")
+                           .arg(vgMacroName(voice.macro)));
         } else {
             // A type change into another envelope family starts from the
             // project-typical envelope, as the dock does (the old family's

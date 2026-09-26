@@ -402,6 +402,8 @@ class MainWindow : public QMainWindow
         bool valid = false;
         QStringList groupArgs; // the -G choices (SongRegistry::voicegroupArgs)
         QStringList directSound;
+        QStringList cries;           // compressed voices' sample choices
+        QStringList voiceMacroWords; // VgDirectSoundScan::voiceMacroWords
         QStringList progWave;
         QList<QPair<QString, QString>> keysplits;
         QStringList drumkits;

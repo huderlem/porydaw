@@ -145,7 +145,12 @@ void collectLine(const VgSourceLine &line, bool recurse, References *refs)
     case VgMacro::DirectSound:
     case VgMacro::DirectSoundNoResample:
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
         refs->directSound.insert(v.symbol);
+        break;
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
+        refs->cries.insert(v.symbol);
         break;
     case VgMacro::ProgWave:
     case VgMacro::ProgWaveAlt:
@@ -538,58 +543,54 @@ bool Exporter::stage(const QString &destDir, QString *error)
             }
         }
         const QString relPath = incbins.value(symbol);
-        // Without an .incbin only the sample-directory fallback can resolve
-        // the symbol, and `cry` voices never take it.
-        if (relPath.isEmpty() && (refs.cries.contains(symbol) || sampleDirFile(symbol).isEmpty())) {
-            unresolved.append(QStringLiteral("%1 (sample)").arg(symbol));
-            continue;
-        }
-        QString name;
-        if (!claimName(symbol, &name))
-            return fail(QStringLiteral("Samples %1 and %2 would share a file name in the bundle.")
-                            .arg(sampleNameFolded.value(name.toCaseFolded()), symbol));
         const QString rawPath = m_root + QLatin1Char('/') + relPath;
-        bool resolved = true;
-        if (refs.directSound.contains(symbol)) {
-            QString source = relPath.isEmpty() ? QString() : rawPath;
-            bool converted = false; // a .wav / .aif the loader decodes
-            if (relPath.endsWith(QStringLiteral(".bin"))) {
-                const QString stem = rawPath.left(rawPath.size() - 4);
-                for (const char *ext : {".wav", ".aif"}) {
-                    if (QFile::exists(stem + QLatin1String(ext))) {
-                        source = stem + QLatin1String(ext);
-                        converted = true;
-                        break;
-                    }
+        // resolve_and_load_sample's order: the .wav / .aif beside the
+        // .incbin's .bin, the .incbin file itself, then <sample dir>/<symbol>.
+        QString source = relPath.isEmpty() ? QString() : rawPath;
+        bool converted = false; // a .wav / .aif the loader decodes
+        QString besideBin;      // the .bin's own source file
+        if (relPath.endsWith(QStringLiteral(".bin"))) {
+            const QString stem = rawPath.left(rawPath.size() - 4);
+            for (const char *ext : {".wav", ".aif"}) {
+                if (QFile::exists(stem + QLatin1String(ext))) {
+                    source = besideBin = stem + QLatin1String(ext);
+                    converted = true;
+                    break;
                 }
             }
-            if (source.isEmpty() || !QFile::exists(source)) {
-                // resolve_and_load_sample's fallback: <sample dir>/<symbol>.wav
-                // or .aif.
-                source = sampleDirFile(symbol);
-                converted = true;
-            }
-            if (source.isEmpty())
-                resolved = false;
-            else if (converted && source.endsWith(QStringLiteral(".aif")))
-                aifSamples.append(symbol);
-            else
-                addSampleFile(symbol, name, source, converted);
         }
-        if (refs.cries.contains(symbol)) {
-            // cry voices read the raw .incbin path only (the build artifact).
-            if (QFile::exists(rawPath))
-                addSampleFile(symbol, name, rawPath, /*isWav=*/false);
-            else
-                resolved = false;
+        if (source.isEmpty() || !QFile::exists(source)) {
+            source = sampleDirFile(symbol);
+            converted = true;
         }
-        if (!resolved) {
+        // resolve_and_load_compressed_sample: a cry voice plays the built
+        // DPCM .bin while that is at least as new as its source, and the
+        // source otherwise (an unbuilt project has no cry .bin at all).
+        const bool cryPlaysBin =
+            refs.cries.contains(symbol) && relPath.endsWith(QStringLiteral(".bin")) &&
+            QFile::exists(rawPath) &&
+            (besideBin.isEmpty() || QFileInfo(rawPath).lastModified().toSecsSinceEpoch() >=
+                                        QFileInfo(besideBin).lastModified().toSecsSinceEpoch());
+        const bool needsSource = refs.directSound.contains(symbol) || !cryPlaysBin;
+        if (needsSource && source.isEmpty()) {
             unresolved.append(
                 relPath.isEmpty()
                     ? QStringLiteral("%1 (sample)").arg(symbol)
                     : QStringLiteral("%1 (sample file %2 is missing)").arg(symbol, relPath));
             continue;
         }
+        QString name;
+        if (!claimName(symbol, &name))
+            return fail(QStringLiteral("Samples %1 and %2 would share a file name in the bundle.")
+                            .arg(sampleNameFolded.value(name.toCaseFolded()), symbol));
+        if (needsSource) {
+            if (converted && source.endsWith(QStringLiteral(".aif")))
+                aifSamples.append(symbol);
+            else
+                addSampleFile(symbol, name, source, converted);
+        }
+        if (cryPlaysBin)
+            addSampleFile(symbol, name, rawPath, /*isWav=*/false);
         sampleIncbins.insert(symbol, QStringLiteral("sound/direct_sound_samples/%1.bin").arg(name));
     }
 
@@ -656,7 +657,7 @@ bool Exporter::stage(const QString &destDir, QString *error)
         return fail(QStringLiteral("The song's voicegroup references things this project "
                                    "doesn't define, so the bundle would be incomplete: %1. (An "
                                    "unsaved Golden Sun synth voice resolves once the song is "
-                                   "saved; a cry voice needs the project built.)")
+                                   "saved.)")
                         .arg(joinNames(unresolved)));
 
     // ---- Write the tree ----

@@ -450,9 +450,7 @@ bool MainWindow::runTabCheck(const QString &projectRoot, const QString &songA, c
         int dsSlot = -1;
         for (int i = 0; i < VOICEGROUP_SIZE && dsSlot < 0; i++) {
             const VgVoice *v = tabA->vgSource->voiceAt(i);
-            if (v &&
-                (v->macro == VgMacro::DirectSound || v->macro == VgMacro::DirectSoundNoResample ||
-                 v->macro == VgMacro::DirectSoundAlt))
+            if (v && vgMacroIsDirectSound(v->macro))
                 dsSlot = i;
         }
         if (dsSlot >= 0) {

@@ -403,6 +403,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             const VgCatalog &c = vgCatalog(m_project.root());
             out.groupArgs = c.groupArgs;
             out.directSound = c.directSound;
+            out.cries = c.cries;
+            out.voiceMacroWords = c.voiceMacroWords;
             out.progWave = c.progWave;
             out.drumkits = c.drumkits;
             out.keysplits = c.keysplits;
@@ -935,7 +937,8 @@ void MainWindow::buildUi()
                 return;
             }
             const WaveData *wd = sampleWaveFor(symbol);
-            if (!wd || !wd->data || wd->size == 0)
+            // type != 0 is DPCM data: size counts samples, not bytes.
+            if (!wd || !wd->data || wd->size == 0 || wd->type != 0)
                 return;
             m_audio.auditionSample(
                 QByteArray::fromRawData(reinterpret_cast<const char *>(wd->data), int(wd->size)),
@@ -2950,9 +2953,9 @@ void MainWindow::importSampleForSlot(int slot)
         // replacing its ADSR (or key/pan/macro variant) would commit
         // something other than what was heard.
         const VgVoice *dest = m_active->vgSource->voiceAt(slot);
-        const bool keepDest = dest && (dest->macro == VgMacro::DirectSound ||
-                                       dest->macro == VgMacro::DirectSoundNoResample ||
-                                       dest->macro == VgMacro::DirectSoundAlt);
+        // (A compressed voice doesn't qualify: the import is a plain sample.)
+        const bool keepDest =
+            dest && vgMacroIsDirectSound(dest->macro) && !vgMacroIsCompressed(dest->macro);
         VgVoice voice;
         if (keepDest) {
             voice = *dest;
@@ -3513,6 +3516,7 @@ void MainWindow::updateVoicegroupBrowser()
     const VgCatalog &catalog = vgCatalog(session->root);
     m_vgBrowser->setVoicegroupChoices(catalog.groupArgs);
     m_vgBrowser->setCurrentVoicegroupArg(arg);
+    m_vgBrowser->setSampleVariants(catalog.voiceMacroWords, catalog.cries);
     m_vgBrowser->setSource(
         session->vgSource.get(), catalog.directSound, catalog.progWave, catalog.keysplits,
         catalog.drumkits, catalog.typicalAdsr, catalog.synths, m_pendingSynths,
@@ -3570,6 +3574,8 @@ const MainWindow::VgCatalog &MainWindow::vgCatalog(const QString &root)
         m_vgCatalog.typicalAdsr = scan.typicalAdsr;
         const VgDirectSoundScan sound = VoicegroupSource::directSoundCatalog(root);
         m_vgCatalog.directSound = sound.directSound;
+        m_vgCatalog.cries = sound.cries;
+        m_vgCatalog.voiceMacroWords = sound.voiceMacroWords;
         m_vgCatalog.synths = sound.synths;
         m_vgCatalog.progWave = VoicegroupSource::progWaveSymbols(root);
         m_vgCatalog.valid = true;
@@ -3656,7 +3662,8 @@ void MainWindow::auditionKeysplit(const QString &symbol)
         return; // nested split: the engine refuses these too
     const AuditionSlots::Adsr adsr{sub.attack, sub.decay, sub.sustain, sub.release};
     const int cgbType = sub.type & 0x07;
-    if (cgbType == 0 && sub.wav && sub.wav->data && sub.wav->size > 0) {
+    // type != 0 is DPCM data: size counts samples, not the bytes behind data.
+    if (cgbType == 0 && sub.wav && sub.wav->data && sub.wav->size > 0 && sub.wav->type == 0) {
         m_audio.auditionSample(
             QByteArray::fromRawData(reinterpret_cast<const char *>(sub.wav->data),
                                     int(sub.wav->size)),
@@ -3810,8 +3817,7 @@ bool MainWindow::applyPendingSynthTones(SongSession &session, LoadedVoiceGroup *
     bool changed = false;
     for (int slot = 0; slot < VOICEGROUP_SIZE; slot++) {
         const VgVoice *v = session.vgSource->voiceAt(slot);
-        if (!v || (v->macro != VgMacro::DirectSound && v->macro != VgMacro::DirectSoundNoResample &&
-                   v->macro != VgMacro::DirectSoundAlt))
+        if (!v || !vgMacroIsDirectSound(v->macro))
             continue;
         const VgSynthDesc *desc = synthDescForSymbol(session.root, v->symbol);
         if (!desc)
@@ -4384,9 +4390,7 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
             // DirectSound family only: keysplit/drumkit voices are non-CGB
             // too, but have no scalar fields and take sub-voicegroup symbols,
             // not samples.
-            if (!v ||
-                (v->macro != VgMacro::DirectSound && v->macro != VgMacro::DirectSoundNoResample &&
-                 v->macro != VgMacro::DirectSoundAlt))
+            if (!v || !vgMacroIsDirectSound(v->macro))
                 continue;
             if (dsSlot < 0)
                 dsSlot = i;

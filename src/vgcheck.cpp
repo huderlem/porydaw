@@ -1,5 +1,7 @@
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QString>
 #include <cstdio>
 #include <cstring>
@@ -82,8 +84,7 @@ QByteArray loaderVoiceName(const QString &symbol)
 
 bool isDirectSound(VgMacro m)
 {
-    return m == VgMacro::DirectSound || m == VgMacro::DirectSoundNoResample ||
-           m == VgMacro::DirectSoundAlt;
+    return vgMacroIsDirectSound(m);
 }
 bool isSquare1(VgMacro m)
 {
@@ -906,6 +907,186 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
         QDir(fakeRoot).removeRecursively();
         if (failures == before)
             std::printf("vgcheck: single-colon label scan OK\n");
+    }
+
+    // ---- compressed samples: the pokeemerald-expansion voice and cry macros ----
+    // Every macro the loader counts as a voice must be one here too, or the
+    // slots after it drift apart. A compressed voice loads its built DPCM
+    // .bin, and falls back to the sample's source in an unbuilt project.
+    {
+        const int before = failures;
+        const QString fakeRoot = projectRoot + QStringLiteral("/.porydaw/compcheck");
+        QDir().mkpath(fakeRoot + QStringLiteral("/asm/macros"));
+        QDir().mkpath(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries"));
+        QDir().mkpath(fakeRoot + QStringLiteral("/sound/voicegroups"));
+        const auto writeFile = [](const QString &path, const QByteArray &bytes) {
+            QFile out(path);
+            return out.open(QIODevice::WriteOnly) && out.write(bytes) == bytes.size();
+        };
+        const auto expectComp = [&failures](const char *what, bool ok) {
+            if (!ok) {
+                std::fprintf(stderr, "vgcheck: FAIL: compressed %s\n", what);
+                failures++;
+            }
+        };
+        // One DPCM-compressed sample: type 1, 64 samples, and the two 33-byte
+        // blocks the encoders emit for that size.
+        QByteArray dpcmBin(16, '\0');
+        dpcmBin[0] = 1;
+        dpcmBin[12] = 64;
+        dpcmBin += QByteArray(66, '\0');
+        // A minimal 8-bit mono WAV of eight samples.
+        QByteArray wav("RIFF\x2c\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0", 24);
+        wav += QByteArray("\x11\x2b\0\0\x11\x2b\0\0\x01\0\x08\0", 12);
+        wav += QByteArray("data\x08\0\0\0", 8) + QByteArray(8, '\x90');
+        const bool wrote =
+            writeFile(fakeRoot + QStringLiteral("/asm/macros/music_voice.inc"),
+                      "\t.macro voice_directsound_compressed base_midi_key:req\n\t.endm\n"
+                      "\t.macro _voice_directsound base_midi_key:req\n\t.endm\n") &&
+            writeFile(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries/built.bin"),
+                      dpcmBin) &&
+            writeFile(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries/unbuilt.wav"),
+                      wav) &&
+            writeFile(fakeRoot + QStringLiteral("/sound/direct_sound_data.inc"),
+                      "\t.align 2\n"
+                      "Cry_Built::\n"
+                      "\t.incbin \"sound/direct_sound_samples/cries/built.bin\"\n"
+                      "\n"
+                      "\t.align 2\n"
+                      "Cry_Unbuilt::\n"
+                      "\t.incbin \"sound/direct_sound_samples/cries/unbuilt.bin\"\n"
+                      "\n"
+                      "\t.align 2\n"
+                      "Cry_Both::\n"
+                      "\t.incbin \"sound/direct_sound_samples/cries/both.bin\"\n") &&
+            writeFile(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries/both.bin"),
+                      dpcmBin) &&
+            writeFile(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries/both.wav"),
+                      wav) &&
+            writeFile(fakeRoot + QStringLiteral("/sound/voicegroups/compcheck.inc"),
+                      "voicegroup_compcheck::\n"
+                      "\tvoice_directsound_compressed 60, 0, Cry_Built, 255, 0, 255, 0\n"
+                      "\tvoice_directsound_compressed_reverse 60, 0, Cry_Unbuilt, 255, 0, 255, 0\n"
+                      "\tcry_custom 72, 0, Cry_Built, 255, 0, 255, 9\n"
+                      "\tcry_reverse_uncomp Cry_Unbuilt\n"
+                      "\tvoice_directsound_reverse 60, 0, Cry_Unbuilt, 255, 0, 255, 0\n"
+                      // A tab after the word matches on neither side: no slot.
+                      "\tvoice_directsound_compressed\t60, 0, Cry_Built, 255, 0, 255, 0\n"
+                      "\tvoice_noise 60, 0, 0, 0, 1, 0, 1\n"
+                      "\tcry Cry_Both\n"
+                      // Symbols longer than the loader's buffers (ASAN's to catch).
+                      "\tvoice_directsound 60, 0, " +
+                          QByteArray(600, 'A') + ", 255, 0, 255, 0\n\tcry " + QByteArray(600, 'B') +
+                          "\n\tvoice_keysplit " + QByteArray(600, 'C') + ", " +
+                          QByteArray(600, 'D') + "\n\tvoice_noise 60, 0, 0, 0, 2, 0, 2\n");
+        if (!wrote) {
+            std::fprintf(stderr, "vgcheck: cannot write compcheck mini-project\n");
+            failures++;
+        } else {
+            const VgDirectSoundScan scan = VoicegroupSource::directSoundCatalog(fakeRoot);
+            expectComp("catalog lists the cries apart from the samples",
+                       scan.cries ==
+                               QStringList({QStringLiteral("Cry_Both"), QStringLiteral("Cry_Built"),
+                                            QStringLiteral("Cry_Unbuilt")}) &&
+                           scan.directSound.isEmpty());
+            expectComp("catalog reports only the defined voice macros",
+                       scan.voiceMacroWords ==
+                           QStringList({QStringLiteral("voice_directsound_compressed")}));
+
+            // The .bin against the source beside it: the newer one plays.
+            const auto loadsBothAs = [&](int hoursAfterSource) -> int {
+                QFile bin(fakeRoot + QStringLiteral("/sound/direct_sound_samples/cries/both.bin"));
+                const QDateTime source =
+                    QFileInfo(fakeRoot +
+                              QStringLiteral("/sound/direct_sound_samples/cries/both.wav"))
+                        .lastModified();
+                if (!bin.open(QIODevice::ReadWrite) ||
+                    !bin.setFileTime(source.addSecs(hoursAfterSource * 3600),
+                                     QFileDevice::FileModificationTime))
+                    return -1;
+                bin.close();
+                LoadedVoiceGroup *both =
+                    voicegroup_load(fakeRoot.toUtf8().constData(), "compcheck", nullptr);
+                const int type = both && both->voices[6].wav ? both->voices[6].wav->type : -1;
+                if (both)
+                    voicegroup_free(both);
+                return type;
+            };
+            expectComp("a .bin built after its source plays", loadsBothAs(1) == 1);
+            expectComp("a .bin as old as its source plays", loadsBothAs(0) == 1);
+            expectComp("a .bin older than its source gives way to it", loadsBothAs(-1) == 0);
+
+            LoadedVoiceGroup *vg =
+                voicegroup_load(fakeRoot.toUtf8().constData(), "compcheck", nullptr);
+            if (!vg) {
+                std::fprintf(stderr, "vgcheck: FAIL: compcheck voicegroup_load failed\n");
+                failures++;
+            } else {
+                const ToneData *t = vg->voices;
+                expectComp("voice loads its DPCM .bin", t[0].type == VOICE_CRY && t[0].wav &&
+                                                            t[0].wav->type == 1 &&
+                                                            t[0].wav->size == 64);
+                expectComp("reverse voice falls back to the unbuilt cry's source",
+                           t[1].type == VOICE_CRY_REVERSE && t[1].wav && t[1].wav->type == 0 &&
+                               t[1].wav->size == 8);
+                expectComp("cry_custom keeps its arguments", t[2].type == VOICE_CRY &&
+                                                                 t[2].key == 72 &&
+                                                                 t[2].release == 9 && t[2].wav);
+                expectComp("cry_reverse_uncomp loads reversed",
+                           t[3].type == VOICE_DIRECTSOUND_ALT && t[3].wav);
+                expectComp("voice_directsound_reverse loads reversed",
+                           t[4].type == VOICE_DIRECTSOUND_ALT && t[4].wav);
+                expectComp("the slot after them is where the file says", t[5].type == VOICE_NOISE);
+                expectComp("overlong symbols resolve to nothing and keep their slots",
+                           !t[7].wav && !t[8].wav && !t[9].subGroup && t[10].type == VOICE_NOISE &&
+                               t[10].decay == 2);
+                voicegroup_free(vg);
+            }
+
+            VoicegroupSource comp;
+            QString compError;
+            if (!comp.open(fakeRoot, QStringLiteral("_compcheck"), &compError)) {
+                std::fprintf(stderr, "vgcheck: FAIL: compcheck source open: %s\n",
+                             qUtf8Printable(compError));
+                failures++;
+            } else {
+                const VgVoice *v0 = comp.voiceAt(0);
+                const VgVoice *v1 = comp.voiceAt(1);
+                const VgVoice *v4 = comp.voiceAt(4);
+                const VgVoice *v5 = comp.voiceAt(5);
+                expectComp("source parses the compressed macros as editable",
+                           v0 && v0->macro == VgMacro::DirectSoundCompressed && v1 &&
+                               v1->macro == VgMacro::DirectSoundCompressedReverse &&
+                               v1->symbol == QLatin1String("Cry_Unbuilt") && v4 &&
+                               v4->macro == VgMacro::DirectSoundReverse);
+                expectComp("source keeps the cry macros read-only",
+                           comp.kindAt(2) == VgLineKind::ReadOnlyVoice &&
+                               comp.kindAt(3) == VgLineKind::ReadOnlyVoice);
+                expectComp("source slots match the loader's", v5 && v5->macro == VgMacro::Noise);
+                const VgParsedSource parsed = VoicegroupSource::parseSource(comp.renderPreview());
+                QStringList crySymbols;
+                for (const VgSourceLine &line : parsed.lines) {
+                    if (line.kind == VgLineKind::ReadOnlyVoice)
+                        crySymbols.append(line.crySymbol);
+                }
+                expectComp("parseSource finds the cry macros' symbols",
+                           crySymbols.mid(0, 3) == QStringList({QStringLiteral("Cry_Built"),
+                                                                QStringLiteral("Cry_Unbuilt"),
+                                                                QStringLiteral("Cry_Both")}));
+                if (v0) {
+                    VgVoice edited = *v0;
+                    edited.release = 200;
+                    comp.setVoice(0, edited);
+                    expectComp("an edit rewrites only its arguments",
+                               comp.renderPreview().contains(
+                                   "\tvoice_directsound_compressed 60, 0, Cry_Built, "
+                                   "255, 0, 255, 200\n"));
+                }
+            }
+        }
+        QDir(fakeRoot).removeRecursively();
+        if (failures == before)
+            std::printf("vgcheck: compressed sample voices OK\n");
     }
 
     // ---- Golden Sun synths: loader roundtrip through the real voicegroup ----

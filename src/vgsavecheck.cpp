@@ -103,8 +103,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
     int dsSlot = -1;
     for (int i = 0; i < VOICEGROUP_SIZE && dsSlot < 0; i++) {
         const VgVoice *v = tab->vgSource->voiceAt(i);
-        if (v && (v->macro == VgMacro::DirectSound || v->macro == VgMacro::DirectSoundNoResample ||
-                  v->macro == VgMacro::DirectSoundAlt))
+        if (v && vgMacroIsDirectSound(v->macro))
             dsSlot = i;
     }
     if (dsSlot < 0) {
@@ -333,9 +332,7 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
         int synthSlot = -1;
         for (int i = 0; i < VOICEGROUP_SIZE && synthSlot < 0; i++) {
             const VgVoice *v = tab->vgSource->voiceAt(i);
-            if (v &&
-                (v->macro == VgMacro::DirectSound || v->macro == VgMacro::DirectSoundNoResample ||
-                 v->macro == VgMacro::DirectSoundAlt) &&
+            if (v && vgMacroIsDirectSound(v->macro) && !vgMacroIsCompressed(v->macro) &&
                 !setupCatalog.find(v->symbol))
                 synthSlot = i;
         }

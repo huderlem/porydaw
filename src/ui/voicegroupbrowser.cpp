@@ -35,12 +35,24 @@ constexpr int kAuditionVelocity = 112;
 // current macro when it isn't offered). Keysplit isn't offered either —
 // keysplit instruments share the Sample dropdown with plain samples, and the
 // chosen symbol alone decides which macro the line gets (see commitEdit).
+//
+// The compressed Sample variants are pokeemerald-expansion macros, offered
+// only in projects that define them (macroOffered). voice_directsound_reverse
+// is never offered: it assembles the same byte as voice_directsound_alt,
+// which every project has.
 const VgMacro kSelectableMacros[] = {
-    VgMacro::DirectSound,    VgMacro::DirectSoundNoResample,
-    VgMacro::DirectSoundAlt, VgMacro::KeysplitAll,
-    VgMacro::Square1,        VgMacro::Square1Alt,
-    VgMacro::Square2,        VgMacro::Square2Alt,
-    VgMacro::ProgWave,       VgMacro::ProgWaveAlt,
+    VgMacro::DirectSound,
+    VgMacro::DirectSoundNoResample,
+    VgMacro::DirectSoundAlt,
+    VgMacro::DirectSoundCompressed,
+    VgMacro::DirectSoundCompressedReverse,
+    VgMacro::KeysplitAll,
+    VgMacro::Square1,
+    VgMacro::Square1Alt,
+    VgMacro::Square2,
+    VgMacro::Square2Alt,
+    VgMacro::ProgWave,
+    VgMacro::ProgWaveAlt,
     VgMacro::Noise,
 };
 
@@ -52,7 +64,12 @@ QString typeItemTip(VgMacro macro)
         return QObject::tr("Same as Sample, but the note's pitch is ignored. Typically used for "
                            "percussion instruments.");
     case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
         return QObject::tr("Same as Sample, but played backwards.");
+    case VgMacro::DirectSoundCompressed:
+        return QObject::tr("A DPCM-compressed sample, such as a Pokémon cry.");
+    case VgMacro::DirectSoundCompressedReverse:
+        return QObject::tr("A DPCM-compressed sample, such as a Pokémon cry, played backwards.");
     case VgMacro::Square1Alt:
     case VgMacro::Square2Alt:
     case VgMacro::ProgWaveAlt:
@@ -77,8 +94,7 @@ constexpr int kSynthTypeData = -1;
 
 bool macroIsDsFamily(VgMacro m)
 {
-    return m == VgMacro::DirectSound || m == VgMacro::DirectSoundNoResample ||
-           m == VgMacro::DirectSoundAlt;
+    return vgMacroIsDirectSound(m);
 }
 
 // A loaded DirectSound tone whose sample has size 0 is a Golden Sun synth
@@ -581,6 +597,12 @@ void VoicegroupBrowser::setSource(VoicegroupSource *source, const QStringList &s
     populateEditor();
 }
 
+void VoicegroupBrowser::setSampleVariants(const QStringList &macroWords, const QStringList &cries)
+{
+    m_voiceMacroWords = macroWords;
+    m_cries = cries;
+}
+
 void VoicegroupBrowser::setSampleInfoProvider(std::function<SamplePickInfo(const QString &)> fn)
 {
     m_samplePicker->setInfoProvider(std::move(fn));
@@ -733,6 +755,8 @@ void VoicegroupBrowser::populateEditor()
     const int shownData = synth ? kSynthTypeData : int(typeComboMacro(voice->macro));
     m_typeCombo->clear();
     for (VgMacro macro : kSelectableMacros) {
+        if (vgMacroIsCompressed(macro) && !m_voiceMacroWords.contains(vgMacroName(macro)))
+            continue;
         m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
         const QString tip = typeItemTip(macro);
         if (!tip.isEmpty())
@@ -771,6 +795,8 @@ void VoicegroupBrowser::populateEditor()
             m_samplePicker->setDisplayFullSymbols(wave);
             if (wave)
                 m_samplePicker->setChoices(QStringList(), m_waveSymbols, QStringList());
+            else if (vgMacroIsCompressed(voice->macro))
+                m_samplePicker->setChoices(QStringList(), m_cries, QStringList());
             else
                 m_samplePicker->setChoices(m_keysplitChoices, m_plainSamples, m_phonemes);
             m_samplePicker->setCurrentSymbol(voice->symbol);
@@ -787,7 +813,9 @@ void VoicegroupBrowser::populateEditor()
             }
             m_symbolCombo->setCurrentText(voice->symbol);
         }
-        const bool sampleVoice = !synth && !wave && !drumkit && macroIsDsFamily(voice->macro);
+        // Not on compressed voices: Sample Editor writes plain samples.
+        const bool sampleVoice = !synth && !wave && !drumkit && macroIsDsFamily(voice->macro) &&
+                                 !vgMacroIsCompressed(voice->macro);
         m_newSampleButton->setVisible(sampleVoice);
         m_editSampleButton->setVisible(sampleVoice);
     }
@@ -835,7 +863,11 @@ void VoicegroupBrowser::commitEdit()
         // A synth voice stays a voice_directsound line; the symbol alone
         // carries the waveform and pulse parameters, deduplicated across the
         // project's definitions (param-named entries are minted on demand).
-        v.macro = macroIsDsFamily(cur->macro) ? cur->macro : VgMacro::DirectSound;
+        // (Never a compressed one: its symbol is read as a cry everywhere.)
+        v.macro = !macroIsDsFamily(cur->macro)                          ? VgMacro::DirectSound
+                  : cur->macro == VgMacro::DirectSoundCompressed        ? VgMacro::DirectSound
+                  : cur->macro == VgMacro::DirectSoundCompressedReverse ? VgMacro::DirectSoundAlt
+                                                                        : cur->macro;
         v.keysplitTable.clear();
         VgSynthDesc desc;
         QString symbol;
@@ -913,11 +945,19 @@ void VoicegroupBrowser::commitEdit()
         if (!wave && !drumkit && typeChanged &&
             (m_keysplitTables.contains(symbol) || m_synthBySymbol.contains(symbol)))
             symbol.clear();
+        // Compressed and plain sample voices browse different lists; a Type
+        // change between them leaves a symbol from the other one behind.
+        const bool compressed = vgMacroIsCompressed(v.macro);
+        if (!wave && !drumkit && typeChanged && compressed != vgMacroIsCompressed(cur->macro) &&
+            compressed != m_cries.contains(symbol))
+            symbol.clear();
         if (symbol.isEmpty()) {
             if (wave)
                 symbol = m_waveSymbols.value(0);
             else if (drumkit)
                 symbol = m_drumkitChoices.value(0);
+            else if (compressed)
+                symbol = m_cries.value(0);
             else
                 symbol = m_sampleChoices.value(m_keysplitTables.size()); // first sample
         }

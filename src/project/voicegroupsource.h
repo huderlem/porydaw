@@ -19,6 +19,12 @@ enum class VgMacro {
     DirectSound,
     DirectSoundNoResample,
     DirectSoundAlt,
+    // pokeemerald-expansion spellings: _reverse assembles the same type byte
+    // as _alt; the _compressed pair are the cry types (0x20 / 0x30) with a
+    // full argument list, for DPCM-compressed samples.
+    DirectSoundReverse,
+    DirectSoundCompressed,
+    DirectSoundCompressedReverse,
     Square1,
     Square1Alt,
     Square2,
@@ -35,6 +41,8 @@ QString vgMacroName(VgMacro macro);        // the .inc macro word
 QString vgMacroDisplayName(VgMacro macro); // UI label
 uint8_t vgMacroVoiceType(VgMacro macro);   // matching VOICE_* constant
 bool vgMacroHasSymbol(VgMacro macro);      // DirectSound/ProgWave sample arg
+bool vgMacroIsDirectSound(VgMacro macro);  // any voice_directsound* sample voice
+bool vgMacroIsCompressed(VgMacro macro);   // plays a DPCM-compressed (cry) sample
 bool vgMacroIsCgb(VgMacro macro);          // CGB ADSR ranges (A/D/R 0-7, S 0-15)
 
 // One editable voice's parsed macro arguments, exactly as written in the file
@@ -151,7 +159,12 @@ struct VgCatalogScan {
 // catalog together (both parse the same files).
 struct VgDirectSoundScan {
     QStringList directSound; // directSoundSymbols
-    VgSynthCatalog synths;   // synthInstruments
+    QStringList cries;       // the cries/ labels directSoundSymbols leaves out
+    // The voice_directsound* and cry* macro words the project's asm/macros
+    // define. A variant missing here wouldn't assemble, so it is never
+    // offered (nor imported from a song bundle).
+    QStringList voiceMacroWords;
+    VgSynthCatalog synths; // synthInstruments
 };
 
 // The envelope a voice should adopt when it switches into a new envelope
@@ -171,7 +184,8 @@ enum class VgLineKind {
     Other,         // comment / label / directive — verbatim
     Header,        // voice_group NAME[, startingNote]
     Editable,      // one of the VgMacro macros, args parsed OK
-    ReadOnlyVoice, // cry / cry_reverse and one plain symbol
+    ReadOnlyVoice, // a cry-table macro (cry, cry_reverse, cry_uncomp, their
+                   // _custom forms, ...) with well-formed arguments
     Broken,        // recognized macro prefix, but not plain integer / symbol
                    // args of the right count — verbatim
 };

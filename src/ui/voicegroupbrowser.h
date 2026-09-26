@@ -47,6 +47,11 @@ class VoicegroupBrowser : public QWidget
     void setVoicegroupChoices(const QStringList &args);
     void setCurrentVoicegroupArg(const QString &arg);
 
+    // The Sample type variants beyond the vanilla three: macroWords are the
+    // voice_directsound* macros the project defines (a variant whose macro is
+    // missing is never offered), cries the samples the compressed variants
+    // browse. Call before setSource, which repopulates the editor.
+    void setSampleVariants(const QStringList &macroWords, const QStringList &cries);
     // The editable source model behind the displayed voicegroup, or nullptr
     // when none could be located (editor shows why). Not owned; clear before
     // the source is destroyed. The symbol lists feed the sample/wave/drumkit
@@ -153,6 +158,8 @@ class VoicegroupBrowser : public QWidget
     // The same choices partitioned for the picker's sections.
     QStringList m_keysplitChoices, m_plainSamples, m_phonemes;
     QStringList m_waveSymbols;
+    QStringList m_cries;                      // compressed voices browse these instead
+    QStringList m_voiceMacroWords;            // voice_directsound* macros the project defines
     QStringList m_drumkitChoices;             // sub-voicegroups used as drumkits
     QHash<QString, QString> m_keysplitTables; // sub-voicegroup -> table
     VgSynthCatalog m_synths;                  // on-disk definitions only (the dropdown)

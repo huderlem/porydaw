@@ -564,8 +564,9 @@ class VoicegroupApi : public ApiObject
     // sustain, release), "cry" (read-only), "broken", "empty" or "other".
     Q_INVOKABLE QVariantList voices() const;
     Q_INVOKABLE QVariant voice(int slot) const;
-    // The project's instrument symbols: {directSound, progWave, drumkits,
-    // synths, keysplits: [{voicegroup, table}]}.
+    // The project's instrument symbols: {directSound, cries, progWave,
+    // drumkits, synths, keysplits: [{voicegroup, table}]}. cries are what the
+    // compressed sample types take.
     Q_INVOKABLE QVariantMap symbols() const;
     // The project-typical envelope for a voice type (+ symbol):
     // {attack, decay, sustain, release}, in the type's own scale.

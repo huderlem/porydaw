@@ -56,6 +56,8 @@ class OverlayHandle;
 struct VoicegroupCatalog {
     QStringList groupArgs; // -G args, sorted
     QStringList directSound;
+    QStringList cries;           // what the compressed sample types take
+    QStringList voiceMacroWords; // VgDirectSoundScan::voiceMacroWords
     QStringList progWave;
     QStringList drumkits;
     QStringList synths;
