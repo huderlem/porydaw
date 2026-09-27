@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added support for compressed sample voices.
 
 ## Changed
-- `File -> Import MIDI...` and `File -> New Song...` now open the song as a draft tab, titled `[draft] <song>`. Nothing is written to your decomp project until you save the draft (`Ctrl+S` or the banner's `Save to project` button). Closing the tab (or opening another project, or quitting) asks only whether to discard the draft; to keep it, choose `Cancel` and save it. Choosing `Discard` leaves your project as it was (apart from samples or voicegroups you created from the Voicegroup dock or `Tools -> Import Sample` meanwhile, which are written right away), so you can preview how a MIDI converts before adding it. If an earlier save of the draft failed partway, `Discard` also removes the files that save already wrote, unless your project has started using them since (a registered `.mid`, a voicegroup another song uses).
+- `File -> Import MIDI...` and `File -> New Song...` now open the song as a draft. Nothing is actually written to your decomp project until you actually save the song.
 
 ## Fixed
 - Fix issue where keysplits whose filename mismatched the actual macro would be ignored and silent during playback.
