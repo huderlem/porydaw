@@ -266,15 +266,30 @@ class MainWindow : public QMainWindow
     void abandonDraftVoicegroup(SongSession &session);
     // What an earlier, partly failed commit of this draft wrote into the
     // project and a Discard removes again (docs/draft-songs/PLAN.md step 5):
-    // its own .mid (wroteMidPath) and its new voicegroup's file + include
-    // line (voicegroupWritten), unless another song uses that voicegroup by
-    // now. Display paths, relative to the session's root.
-    QStringList draftLeftovers(const SongSession &session) const;
-    // Removes draftLeftovers from the project; a file that can't be removed
-    // gets a warning naming it. Called wherever a draft is dropped
-    // unsaved: its tab closed or replaced, a project switch, quit. Reloads
-    // the project when it removed something from it.
-    void removeDraftLeftovers(SongSession &session);
+    // its own .mid (wroteMidPath) and its new voicegroup's file + the
+    // include line the commit added (voicegroupWritten, includeLineAdded).
+    // Display paths, relative to the session's root. *kept (optional) gets
+    // what a Discard keeps because the project has taken it over since —
+    // the .mid registered or given flags (read from disk), the voicegroup
+    // used by another tab or song — or can't be checked.
+    QStringList draftLeftovers(const SongSession &session, QStringList *kept = nullptr) const;
+    enum class DraftLeftover { None, Removed, Kept };
+    DraftLeftover draftMidLeftover(const SongSession &session) const;
+    DraftLeftover draftVoicegroupLeftover(const SongSession &session) const;
+    // Whether another tab or a song of the draft's own project names the
+    // draft's written voicegroup. True ("keep") whenever that can't be
+    // checked: no project open, or another project's (a project switch).
+    static bool
+    draftVoicegroupUsedElsewhere(const SongSession &session, const SongDraft &draft,
+                                 const std::vector<std::unique_ptr<SongSession>> &sessions,
+                                 const DecompProject &project);
+    // Removes draftLeftovers from the project (keeping what draftLeftovers
+    // puts in *kept); a file that can't be removed gets a warning naming
+    // it. Called wherever a draft is dropped unsaved: its tab closed or
+    // replaced, a project switch (before the new project opens), quit. The
+    // draft lets go of all of them, so a second call is a no-op. Reloads
+    // the project when it removed something; returns whether it did.
+    bool removeDraftLeftovers(SongSession &session);
     // Writes the draft's in-memory storage.song values (SongDraft::
     // pluginStore) into the song's sidecar under its final label; nothing
     // when neither holds any.
@@ -309,10 +324,14 @@ class MainWindow : public QMainWindow
     // The dialog-less half of deleteSongById (also the harness entry): closes
     // the song's tab discarding its edits, moves the .mid to .porydaw/trash/,
     // removes the flag line, unregisters, drops the sidecar, deletes the
-    // named voicegroup (empty = keep), and reloads the project. Best-effort:
+    // named voicegroup (empty = keep), and reloads the project. Refused
+    // (false, nothing done) for a label an open draft holds. Best-effort:
     // every step runs; false collects what failed into *error.
     bool performSongDeletion(const SongInfo &song, const QString &deleteVoicegroupName,
                              QString *error);
+    // Delete Song refuses a label an open draft holds (a .mid its failed
+    // save left, listed by a reload); the message says why.
+    QString draftDeletionRefusal(const QString &label) const;
     // Re-reads the project's music data after a registration change.
     // Without *error a failure shows a message box.
     bool reloadProject(QString *error = nullptr);

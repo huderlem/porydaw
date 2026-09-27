@@ -71,6 +71,10 @@ struct SongDraft {
     // The commit wrote the voicegroup file: from here it is an ordinary
     // project voicegroup (a retry only makes sure of its include line).
     bool voicegroupWritten = false;
+    // The commit added the voicegroup's include line to sound/voice_groups.inc
+    // itself (the hub may already have had one, e.g. a dangling include the
+    // user left): a Discard's rollback removes only a line it added.
+    bool includeLineAdded = false;
     // A .mid this draft wrote itself: an earlier commit attempt wrote it and
     // then failed (its flags write). The name check waives exactly this file
     // — and the unregistered song a project reload lists for it — so a retry

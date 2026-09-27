@@ -498,7 +498,7 @@ possible):
       File → Register Song to retry". Either enable Register Song for a
       committed session whose ID is unresolved (by label), or resolve
       `songId` directly from the registration result.
-      ✅ *(Step 5: `commitDraft` sets `songId` from `registerSong`'s result before the reload, which still re-resolves it by label. No harness case — see the progress entry for why the scenario can't be forced, and why it can't help when the registration itself failed.)*
+      ✅ *(Step 5: moot — a failed reload closes the project model (`DecompProject::reload` = `open`, which starts with `close()`, emptying `songs()`; `refreshRegisterAction` treats an out-of-range id as complete), so Register Song has nothing to register either way. `commitDraft` keeps `songId` from the registration for consistency only. No harness case — see the progress entry for why the scenario can't be forced.)*
 - [x] **`storage.song` on a draft** (review 2026-09-26, G; part of the
       Scripting item above, called out because it writes today):
       `storage.song.set`/`remove` (`StorageApi::songSet` →
@@ -510,6 +510,32 @@ possible):
       also pick up a stale sidecar left by an earlier song of the same
       name; a draft should read an empty (or in-memory) store.
       ✅ *(Step 5, decided: in memory. `SongDraft::pluginStore`; `songStore`/`writeSongStore` use it for a draft (no sidecar read or written); `flushDraftPluginStore` writes it at commit under the final label, replacing any stale `plugins` object. API.md documents it. `--scriptcheck` draft block.)*
+- [x] **Rename, then a retry that fails after its `.mid`** (review
+      2026-09-27, H; known limitation): after a Rename whose delete of the
+      old `.mid` failed (`wroteMidPath` kept, the user warned), a retry
+      commit that fails after writing the new `.mid` overwrites
+      `wroteMidPath`, so the old file falls outside the rollback. A leak
+      (a stray unregistered `.mid`, recoverable), never a wrong delete.
+      ✅ *(Known limitation, no code change, no harness case.)*
+- [x] **"Used elsewhere" sees only `-G` args** (review 2026-09-27, I;
+      known limitation): `draftVoicegroupUsedElsewhere` compares other
+      tabs' and project songs' `cfg().voicegroupArg` only. It misses
+      another voicegroup referencing `voicegroup_<name>` as a keysplit or
+      drum sub-group, and other tabs' undo history (a settings edit that
+      would switch back to it). The review expected the guard's
+      conservative default (review C) to turn every miss into a kept stray;
+      it does only where the guard can't check at all (no project open,
+      another root). In the draft's own project a miss means the rollback
+      deletes the voicegroup: a keysplit/drumkit made to name it since (the
+      dock lists it after the partial commit's reload) then dangles and
+      breaks the ROM build, and undoing the other tab's switch brings back
+      a `-G` naming a deleted file. Narrow (the user must pick the partly
+      written voicegroup in another voicegroup's keysplit, then Discard the
+      draft), but a wrong delete, not a stray. The cheap fix, if wanted:
+      the keysplit/drumkit half of `SongRegistry::deletableVoicegroup`
+      (`VoicegroupSource::catalogScan`), which Delete Song already uses.
+      ✅ *(Known limitation as recorded by the 2026-09-27 review brief, no
+      code change, no harness case; flagged in the review-fixes entry.)*
 
 **Acceptance:** checklist ticked in the progress entry. Full sweep on
 normal and ASAN.
@@ -1117,3 +1143,93 @@ and why, what's still owed.
     first normal sweep failed only `gen_scripting_docs` (the reference page
     was stale after the API.md edits); regenerated, and the rerun passed.
   - Owed: step 6.
+  - **Review fixes (2026-09-27).** A code review of the Discard rollback
+    (`removeDraftLeftovers`, `draftLeftovers`,
+    `draftVoicegroupUsedElsewhere`) found real problems; A–G fixed in one
+    commit on `draft-song` ("Draft songs step 5 review fixes …"), H–I
+    recorded as known limitations in the checklist above. Principle: when
+    in doubt, keep the file.
+    - A. Discard deleted a `.mid` registered since (the reload lists it,
+      and the browser's Register / `project.registerSong` took it). (1)
+      `draftMidLeftover` keeps the `.mid` when the disk (not the model)
+      says the project claims it: `song_table.inc` lists its label or
+      `songs.h` defines the draft's or the label's default constant (both
+      through `checkNewSongNames`' scans), `midi.cfg`/`songs.mk` has a
+      flags line, a registration file exists but can't be read, or another
+      tab has that label open (a draft renamed away from it). The prompt
+      then says "The project uses it by now, so Discard keeps it." (or
+      "… uses <paths> by now, so Discard keeps that and removes the
+      rest."); `draftLeftovers` takes a `kept` out-list. (2)
+      `registerSongByLabel` (browser Register, Register Song,
+      `project.registerSong`) refuses a label an open draft holds
+      ("<label> is an unsaved draft; save it with Add to Project …").
+      API.md notes the throw.
+    - B. `loadSong` focuses the tab of a label an open draft holds, in
+      place or in a new tab, instead of replacing the draft with its own
+      leftover entry.
+    - C. `openProjectDir` reads the new project into a local
+      `DecompProject` first, then runs the Discarded drafts' rollback while
+      every tab and the old project are still there (as `closeEvent` does),
+      then swaps it into `m_project` (re-read when the same root was
+      reopened and the rollback removed something). The guard
+      (`draftVoicegroupUsedElsewhere`, now a private static member so the
+      harness can call it) returns "keep" when no project is open or the
+      roots differ. `removeDraftLeftovers` now lets go of everything it
+      handled (removed, kept or failed), so the teardown's second call is a
+      no-op and nothing kept stays reserved; it returns whether it removed
+      anything.
+    - D. Delete Song refuses a label an open draft holds: `deleteSongById`
+      before its dialog, `performSongDeletion` itself
+      (`draftDeletionRefusal`: "Close the draft tab first …").
+    - E. `VoicegroupSource::appendIncludeLine` reports whether it wrote the
+      line (`bool *added`); `SongDraft::includeLineAdded` records it (a
+      retry that finds the line keeps an earlier `true`). The rollback
+      removes the include line only when the commit added it, else only
+      the `.inc`; the prompt says "(and its include line)" only then.
+    - F. The Register-Song-after-failed-reload tick above re-worded (moot).
+    - G. §21 now asserts its snapshot: before the commit the tree differs
+      only by `sound/direct_sound_data.inc` and the sample's `.wav`
+      (`treeListing`/`treeChanges`; the sample's sidecar is
+      `.porydaw/samples/<name>.json`, outside the listing, asserted on its
+      own). `fileDialogPick` fails the section on a `QMessageBox` under its
+      title (Export WAV's error box) instead of accepting it.
+    - Harness (`--draftcheck`): 22c2 — a new-voicegroup partial commit;
+      direct guard calls (a control with the draft's own project: not used;
+      no project open: keep; a one-song temp project at another root:
+      keep); another tab switches to the voicegroup and saves; a project
+      switch (same root) answering Discard keeps the `.inc` and its include
+      line, removes the `.mid`, and the prompt says the voicegroup stays.
+      22e — partial commit → reload: `loadSong` on the leftover entry (in
+      place and new tab) keeps the same draft session and tab count, no
+      prompt; `performSongDeletion` and `deleteSongById` refuse (nothing
+      moved to the trash); `registerSongByLabel` refuses; then
+      `SongRegistry::registerSong` writes the registration directly
+      (model still stale) → Discard keeps the `.mid`, prompt says so. 22f —
+      the same with a flags line (`writeSongFlags`) → kept. 22g — a planted
+      dangling include line → partial commit (`includeLineAdded` false) →
+      Discard removes the `.inc`, the hub is byte-identical to the planted
+      one, the prompt has no "(and its include line)". `--scriptcheck`'s
+      draft block: `project.registerSong(<draft label>)` throws, nothing
+      registered.
+    - Mutation-tested (each reverted singly, fresh scratch): no disk claim
+      check (A1) fails 22e/22f; no register refusal (A2) fails 22e; no
+      draft focus in `loadSong` (B) fails 22e's no-prompt guard; the guard
+      returning "not used" for an unchecked root (C) fails 22c2's direct
+      calls; no Delete Song refusal (D) fails 22e; ignoring
+      `includeLineAdded` (E) fails 22g. The old C ordering alone is not
+      caught by the same-root reopen (the reread project lists the saved
+      song's `-G`), as the brief expected — hence the direct calls.
+    - Deviation: C reads the new project before the rollback (not strictly
+      "rollback right after the prompts"), so a failed open leaves every
+      tab, a Discarded draft's leftovers included, as it was, and the old
+      project stays open (previously a failed open had already closed it).
+    - Finding on I: the brief's claim that a miss "can only cause a kept
+      stray" does not hold in the draft's own project — see the checklist
+      item; recorded, not fixed, per the brief.
+    - Docs: manual (`new-song.md`) — kept files and the browser's
+      Register/Delete/click on a draft's entry; CHANGELOG entry; API.md +
+      regenerated `docsrc/reference/scripting.md`.
+    - Results: `--draftcheck` and `--scriptcheck` PASS on fresh scratches
+      on the normal and ASAN builds (no skip notes: 22a–g and 25 ran); full
+      `tools/run_checks.sh` PASS on both (gen_scripting_docs included;
+      mkcheck skipped, no fork given).

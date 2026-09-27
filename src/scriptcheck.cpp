@@ -3679,6 +3679,15 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
                         !QFile::exists(projectRoot +
                                        QStringLiteral("/sound/voicegroups/%1.inc").arg(draftLabel)),
                     "project.createVoicegroup took a name an open draft reserves");
+                messages.clear();
+                check(run(QStringLiteral("porydaw.project.registerSong('%1')").arg(draftLabel))
+                              .isNull() &&
+                          hasMessage(messages, QStringLiteral("console"), 2,
+                                     QStringLiteral("%1 is an unsaved draft").arg(draftLabel)) &&
+                          !SongRegistry::checkRegistration(projectRoot, draftLabel,
+                                                           QStringLiteral("MUS_SCRIPTCHECK_DRAFT"))
+                               .inSongTable,
+                      "project.registerSong registered a label an open draft holds");
                 m_tabs->setCurrentWidget(original->view);
                 check(run(QStringLiteral("porydaw.project.open('%1')").arg(draftLabel)) ==
                               QStringLiteral("true") &&

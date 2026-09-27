@@ -1752,8 +1752,10 @@ bool VoicegroupSource::createVoicegroupFromLines(const QString &projectRoot, con
 }
 
 bool VoicegroupSource::appendIncludeLine(const QString &projectRoot, const QString &name,
-                                         QString *error)
+                                         QString *error, bool *added)
 {
+    if (added)
+        *added = false;
     const QString hubPath = projectRoot + QStringLiteral("/sound/voice_groups.inc");
     if (!QFile::exists(hubPath))
         return true; // discovery works without the hub; only the game build needs it
@@ -1806,6 +1808,8 @@ bool VoicegroupSource::appendIncludeLine(const QString &projectRoot, const QStri
     if (endsWithNewline && !lines.isEmpty())
         joined += '\n';
     out.write(joined);
+    if (added)
+        *added = true;
     return true;
 }
 

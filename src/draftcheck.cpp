@@ -14,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLockFile>
+#include <QMap>
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
@@ -67,8 +68,11 @@
 // Bundle (with the draft's hints) / Import Sample for a slot work on a
 // draft, bundle import and New Voicegroup keep off its names; Discard of a
 // partly committed draft (close, replace, project switch, quit) removes
-// what that commit wrote, and a project switch's Add commits into the old
-// project first. QSettings is
+// what that commit wrote — but keeps a .mid registered or flagged since, a
+// voicegroup another tab took over, and an include line the hub already
+// had — and a project switch's Add commits into the old project first. A
+// draft's leftover browser entry focuses the draft; Register Song and
+// Delete Song refuse its label. QSettings is
 // redirected into a temp dir; the commit writes into the project — run
 // against a scratch copy. PORYDAW_DRAFTCHECK_SHOTS=<dir> saves screenshots.
 
@@ -80,9 +84,9 @@ namespace {
 // byContent lists files (relative paths) digested by their bytes instead:
 // ones a rollback rewrites back to what they held (an include line added,
 // then removed again).
-QByteArray treeFingerprint(const QString &root, const QStringList &byContent = {})
+QMap<QString, QString> treeListing(const QString &root, const QStringList &byContent = {})
 {
-    QStringList entries;
+    QMap<QString, QString> entries;
     QDirIterator it(root, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         it.next();
@@ -92,7 +96,7 @@ QByteArray treeFingerprint(const QString &root, const QStringList &byContent = {
             continue;
         if (byContent.contains(rel)) {
             QFile file(info.filePath());
-            entries << QStringLiteral("%1|%2").arg(
+            entries.insert(
                 rel, QString::fromLatin1(QCryptographicHash::hash(file.open(QIODevice::ReadOnly)
                                                                       ? file.readAll()
                                                                       : QByteArray(),
@@ -100,14 +104,37 @@ QByteArray treeFingerprint(const QString &root, const QStringList &byContent = {
                                              .toHex()));
             continue;
         }
-        entries << QStringLiteral("%1|%2|%3")
-                       .arg(rel)
-                       .arg(info.size())
-                       .arg(info.lastModified().toMSecsSinceEpoch());
+        entries.insert(
+            rel,
+            QStringLiteral("%1|%2").arg(info.size()).arg(info.lastModified().toMSecsSinceEpoch()));
     }
-    entries.sort();
+    return entries;
+}
+
+QByteArray treeFingerprint(const QString &root, const QStringList &byContent = {})
+{
+    const QMap<QString, QString> listing = treeListing(root, byContent);
+    QStringList entries;
+    for (auto it = listing.constBegin(); it != listing.constEnd(); ++it)
+        entries << it.key() + QLatin1Char('|') + it.value();
     return QCryptographicHash::hash(entries.join(QLatin1Char('\n')).toUtf8(),
                                     QCryptographicHash::Sha1);
+}
+
+// The relative paths added, removed or changed between two listings.
+QStringList treeChanges(const QMap<QString, QString> &before, const QMap<QString, QString> &after)
+{
+    QStringList changed;
+    for (auto it = before.constBegin(); it != before.constEnd(); ++it) {
+        if (after.value(it.key()) != it.value())
+            changed << it.key();
+    }
+    for (auto it = after.constBegin(); it != after.constEnd(); ++it) {
+        if (!before.contains(it.key()))
+            changed << it.key();
+    }
+    changed.sort();
+    return changed;
 }
 
 // A one-bar song with one note, on top of New Song's blank template.
@@ -1865,9 +1892,18 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     QTemporaryDir outDir;
     if (!check(outDir.isValid(), "no temp dir for exports"))
         return failures;
-    const auto fileDialogPick = [](const QString &path) {
-        return [path](QDialog *dialog) {
+    const auto fileDialogPick = [&modalFail](const QString &path) {
+        return [path, &modalFail](QDialog *dialog) {
             auto *files = qobject_cast<QFileDialog *>(dialog);
+            // A message box under the same title is the action's error
+            // report (Export WAV's "could not render"), not a step to click
+            // through.
+            if (auto *box = qobject_cast<QMessageBox *>(dialog)) {
+                modalFail(QStringLiteral("unexpected message box \"%1\": %2")
+                              .arg(box->windowTitle(), box->text()));
+                dialog->reject();
+                return;
+            }
             if (!files) {
                 dialog->accept(); // an options dialog sharing the title
                 return;
@@ -1900,7 +1936,7 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         }
         SongSession *s = m_active;
         const QString folder = s->draft->folder;
-        const QByteArray before = treeFingerprint(root);
+        const QMap<QString, QString> before = treeListing(root);
         check(!m_registerAction->isEnabled(), "Register Song is enabled on a draft");
 
         // Song Settings: the dialog's accept is doc.setCfg(dialog.cfg()).
@@ -2015,7 +2051,24 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         check(!QFile::exists(target) && includeCount(name) == 0,
               "Import Sample into a draft wrote the draft's voicegroup into the project");
         check(s->isDraft() && !songNamed(name), "the imports before the commit changed the draft");
-        (void)before;
+        // Before the commit the project holds only what Import Sample writes
+        // through: the sample and the sample table (its sidecar is
+        // .porydaw/samples/<name>.json, outside the listing — asserted on
+        // its own).
+        {
+            const QStringList changed = treeChanges(before, treeListing(root));
+            const QStringList expected = {
+                QStringLiteral("sound/direct_sound_data.inc"),
+                QStringLiteral("sound/direct_sound_samples/%1.wav").arg(sampleName),
+            };
+            if (!check(changed == expected,
+                       "before the commit the project changed by more (or less) than Import "
+                       "Sample's sample and direct_sound_data.inc"))
+                std::fprintf(stderr, "draftcheck: changed: %s\n",
+                             qUtf8Printable(changed.join(QStringLiteral(", "))));
+            check(QFile::exists(root + QStringLiteral("/.porydaw/samples/%1.json").arg(sampleName)),
+                  "Import Sample did not write the sample's sidecar");
+        }
 
         // The commit: the voicegroup with the sample's voice, the flags as
         // Song Settings left them, the registration with the draft's names.
@@ -2164,6 +2217,270 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             check(m_active == replaced && !replaced->isDraft() && replaced->doc.label() == target &&
                       !QFile::exists(midiDir + QStringLiteral("mus_draftcheck_rb4.mid")),
                   "a replace in place answered Discard left the partial commit's .mid");
+        }
+        // A new-voicegroup draft whose first Save failed after the .inc,
+        // its include line and the .mid landed (midi.cfg unwritable), as in
+        // 22a. planted: the hub already had the include line (a dangling one
+        // the user left), so the commit added none.
+        const auto partialVgCommit = [&](const QString &name, const QString &constant, bool planted,
+                                         SongSession **out) {
+            if (!check(
+                    openDraftSong(draftSmf(), name, constant, player, newVgCfg(name), name, &error),
+                    "a partial new-voicegroup draft did not open")) {
+                std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+                return false;
+            }
+            SongSession *s = m_active;
+            *out = s;
+            editVoices(s);
+            if (!check(lockCfg(), "midi.cfg could no longer be made unwritable"))
+                return false;
+            {
+                PromptAnswerer failBox(QMessageBox::Cancel, modalFail);
+                failBox.onDialog(QStringLiteral("Save Song"),
+                                 [](QDialog *dialog) { dialog->reject(); });
+                check(!saveSession(*s), "saving with an unwritable midi.cfg succeeded");
+            }
+            QFile::setPermissions(cfgPath, cfgPerms);
+            return check(
+                s->isDraft() && s->draft->voicegroupWritten &&
+                    s->draft->includeLineAdded == !planted &&
+                    s->draft->wroteMidPath == midiDir + name + QStringLiteral(".mid") &&
+                    QFile::exists(root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name)) &&
+                    QFile::exists(s->draft->wroteMidPath) && includeCount(name) == 1,
+                "the partial new-voicegroup commit did not land the .inc, one include "
+                "line (recorded as the commit's own or not) and the .mid");
+        };
+        const auto shownPath = [](const QString &rel) { return QDir::toNativeSeparators(rel); };
+
+        // 22c2. A partly written voicegroup another tab has taken over since
+        // (switched to it and saved) survives a project switch's Discard
+        // (review C): the rollback runs before the switch, while that tab
+        // and the old project can still tell. The same root is reopened, so
+        // the guard's "keep" for a project it can't check (none open, or
+        // another root) is asserted by direct calls.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb7");
+            const QString vgPath = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            SongSession *s = nullptr;
+            if (partialVgCommit(name, QStringLiteral("MUS_DRAFTCHECK_RB7"), false, &s)) {
+                const std::vector<std::unique_ptr<SongSession>> noSessions;
+                check(!draftVoicegroupUsedElsewhere(*s, *s->draft, noSessions, m_project),
+                      "the guard called the draft's voicegroup used before anything used it");
+                check(draftVoicegroupUsedElsewhere(*s, *s->draft, noSessions, DecompProject()),
+                      "the guard did not keep the voicegroup with no project open");
+                QTemporaryDir elsewhere;
+                DecompProject other;
+                bool planted =
+                    elsewhere.isValid() && QDir(elsewhere.path()).mkpath(QStringLiteral("sound"));
+                {
+                    QFile table(elsewhere.filePath(QStringLiteral("sound/song_table.inc")));
+                    planted = planted && table.open(QIODevice::WriteOnly) &&
+                              table.write("\tsong mus_dummy, MUSIC_PLAYER_BGM, 0\n") > 0;
+                }
+                if (check(planted && other.open(elsewhere.path(), &error),
+                          "the mismatched-root project did not open")) {
+                    check(draftVoicegroupUsedElsewhere(*s, *s->draft, noSessions, other),
+                          "the guard did not keep the voicegroup against another project's root");
+                } else {
+                    std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+                }
+                // Another tab takes the voicegroup over and saves.
+                QString target;
+                for (const SongInfo &song : m_project.songs()) {
+                    if (song.isPlayable() && song.registered && song.hasCfg &&
+                        !sessionForLabel(song.label)) {
+                        target = song.label;
+                        break;
+                    }
+                }
+                const QString targetMid = midiDir + target + QStringLiteral(".mid");
+                const QByteArray cfgBytes = readBytes(cfgPath);
+                const QByteArray midBytes = readBytes(targetMid);
+                loadSongByLabel(target, /*newTab=*/true);
+                SongSession *o = m_active;
+                if (check(o && o != s && o->doc.label() == target,
+                          "the taking-over song did not open in its own tab")) {
+                    SongCfg taken = o->doc.cfg();
+                    taken.voicegroupArg = QStringLiteral("_") + name;
+                    o->doc.setCfg(taken);
+                    NoPromptGuard noPrompt(modalFail, __LINE__);
+                    check(saveSession(*o), "saving the taking-over song failed");
+                }
+                check(draftVoicegroupUsedElsewhere(*s, *s->draft, m_sessions, m_project),
+                      "the guard missed the tab that took the voicegroup over");
+                {
+                    PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                    QString info;
+                    prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                    check(openProjectDir(root, /*interactive=*/false),
+                          "reopening the project failed");
+                    check(prompt.answered(), "the project switch did not prompt for the draft");
+                    check(info.contains(wroteText) &&
+                              info.contains(
+                                  QStringLiteral("The project uses %1 by now, so Discard keeps "
+                                                 "that and removes the rest.")
+                                      .arg(shownPath(
+                                          QStringLiteral("sound/voicegroups/%1.inc").arg(name)))),
+                          "the close prompt does not say the taken-over voicegroup stays");
+                }
+                check(QFile::exists(vgPath) && includeCount(name) == 1,
+                      "a project switch's Discard removed a voicegroup another tab took over");
+                check(!QFile::exists(midiDir + name + QStringLiteral(".mid")),
+                      "a project switch's Discard kept the draft's own .mid");
+                // Back to how it was, for the sections after.
+                QFile::setPermissions(cfgPath, cfgPerms);
+                QFile cfgOut(cfgPath);
+                QFile midOut(targetMid);
+                check(cfgOut.open(QIODevice::WriteOnly) &&
+                          cfgOut.write(cfgBytes) == cfgBytes.size() &&
+                          midOut.open(QIODevice::WriteOnly) &&
+                          midOut.write(midBytes) == midBytes.size(),
+                      "could not restore the taking-over song");
+                cfgOut.close();
+                midOut.close();
+                check(VoicegroupSource::deleteVoicegroup(root, name, &error),
+                      "could not delete the taken-over voicegroup");
+                check(reloadProject(&error), "reloading the project failed");
+            }
+        }
+
+        // 22e. The reload after a partial commit lists the draft's .mid as
+        // an unregistered song (review A/B/D). Loading it from the browser
+        // focuses the draft, in place or in a new tab; Delete Song and
+        // Register Song refuse it. Registered behind the draft's back (the
+        // files written directly — the model still says unregistered), a
+        // Discard keeps it and says so.
+        SongSession *held = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb5"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB5"), &held)) {
+            const QString label = QStringLiteral("mus_draftcheck_rb5");
+            const QString constant = QStringLiteral("MUS_DRAFTCHECK_RB5");
+            const QString midPath = midiDir + label + QStringLiteral(".mid");
+            const SongInfo *listed = songNamed(label);
+            if (check(listed && m_active == held, "the draft's leftover song is not listed")) {
+                const SongInfo stray = *listed;
+                const int tabs = m_tabs->count();
+                {
+                    NoPromptGuard noPrompt(modalFail, __LINE__);
+                    loadSong(stray, /*newTab=*/false);
+                    check(m_active == held && held->isDraft() && m_tabs->count() == tabs &&
+                              held->draft->wroteMidPath == midPath && QFile::exists(midPath),
+                          "loading the draft's leftover entry replaced the draft");
+                    loadSong(stray, /*newTab=*/true);
+                    check(m_active == held && held->isDraft() && m_tabs->count() == tabs,
+                          "loading the draft's leftover entry in a new tab did not focus the "
+                          "draft");
+                }
+                QString refusal;
+                check(!performSongDeletion(stray, QString(), &refusal) &&
+                          refusal == draftDeletionRefusal(label) && QFile::exists(midPath) &&
+                          !QFile::exists(root +
+                                         QStringLiteral("/.porydaw/trash/%1.mid").arg(label)) &&
+                          sessionForLabel(label) == held && held->isDraft(),
+                      "Delete Song went ahead on a label an open draft holds");
+                {
+                    PromptAnswerer dialogs(QMessageBox::Cancel, modalFail);
+                    QString shown;
+                    dialogs.onDialog(QStringLiteral("Delete Song"), [&shown](QDialog *dialog) {
+                        if (auto *box = qobject_cast<QMessageBox *>(dialog))
+                            shown = box->text();
+                        dialog->reject();
+                    });
+                    deleteSongById(stray.id);
+                    check(shown == draftDeletionRefusal(label) && QFile::exists(midPath),
+                          "the Delete Song dialog did not refuse a draft's label up front");
+                }
+                QString regError;
+                int regId = -1;
+                check(!registerSongByLabel(label, QString(), QString(), &regId, &regError) &&
+                          regError.contains(QStringLiteral("unsaved draft")) &&
+                          !SongRegistry::checkRegistration(root, label, constant).inSongTable,
+                      "Register Song registered a label an open draft holds");
+                // Registered since, behind the model's back.
+                check(SongRegistry::registerSong(root, label, constant, player, &error, &regId),
+                      "could not register the leftover .mid directly");
+                {
+                    PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                    QString info;
+                    prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                    closeTab(m_tabs->indexOf(held->view));
+                    check(prompt.answered() && !sessionForLabel(label),
+                          "the draft over a registered .mid did not close through the prompt");
+                    check(info.contains(wroteText + shownPath(QStringLiteral("sound/songs/midi/") +
+                                                              label + QStringLiteral(".mid"))) &&
+                              info.endsWith(QStringLiteral(
+                                  "The project uses it by now, so Discard keeps it.")),
+                          "the close prompt does not say the registered .mid stays");
+                }
+                check(QFile::exists(midPath), "Discard deleted the .mid of a registered song");
+                SongRegistry::unregisterSong(root, label, constant, &error);
+            }
+            QFile::remove(midPath);
+            check(reloadProject(&error), "reloading the project failed");
+        }
+        // 22f. The same with a flags line written since (midi.cfg): kept.
+        SongSession *flagged = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb6"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB6"), &flagged)) {
+            const QString label = QStringLiteral("mus_draftcheck_rb6");
+            const QString midPath = midiDir + label + QStringLiteral(".mid");
+            check(SongRegistry::writeSongFlags(QDir::cleanPath(midiDir), label,
+                                               {QStringLiteral("-E"), QStringLiteral("-V080")},
+                                               &error),
+                  "could not write the leftover .mid's flags directly");
+            {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                closeTab(m_tabs->indexOf(flagged->view));
+                check(prompt.answered() && !sessionForLabel(label),
+                      "the draft over a flagged .mid did not close through the prompt");
+            }
+            check(QFile::exists(midPath), "Discard deleted a .mid that has a flags line");
+            SongRegistry::removeSongFlags(QDir::cleanPath(midiDir), label, &error);
+            QFile::remove(midPath);
+            check(reloadProject(&error), "reloading the project failed");
+        }
+        // 22g. The hub already had a (dangling) include line for the new
+        // voicegroup's name (review E): the commit adds none, and Discard
+        // removes the .inc but keeps the user's line.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb8");
+            const QString vgPath = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            const QByteArray hubOriginal = readBytes(hubPath);
+            const QByteArray eol = hubOriginal.contains("\r\n") ? "\r\n" : "\n";
+            QByteArray hubPlanted = hubOriginal;
+            if (!hubPlanted.isEmpty() && !hubPlanted.endsWith('\n'))
+                hubPlanted += eol;
+            hubPlanted += ".include \"sound/voicegroups/" + name.toUtf8() + ".inc\"" + eol;
+            QFile hubOut(hubPath);
+            check(hubOut.open(QIODevice::WriteOnly) &&
+                      hubOut.write(hubPlanted) == hubPlanted.size(),
+                  "could not plant the dangling include line");
+            hubOut.close();
+            SongSession *s = nullptr;
+            if (partialVgCommit(name, QStringLiteral("MUS_DRAFTCHECK_RB8"), true, &s)) {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                QString info;
+                prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                closeTab(m_tabs->indexOf(s->view));
+                check(prompt.answered() && !sessionForLabel(name),
+                      "the planted-include draft did not close through the prompt");
+                check(info.contains(
+                          shownPath(QStringLiteral("sound/voicegroups/%1.inc").arg(name))) &&
+                          !info.contains(QStringLiteral("(and its include line)")) &&
+                          info.endsWith(QStringLiteral("Discard removes what it wrote.")),
+                      "the close prompt claims the user's include line as the save's");
+                check(!QFile::exists(vgPath) && readBytes(hubPath) == hubPlanted,
+                      "Discard removed an include line the commit did not add (or kept the .inc)");
+            }
+            check(VoicegroupSource::removeIncludeLine(root, name, &error) &&
+                      readBytes(hubPath) == hubOriginal,
+                  "could not remove the planted include line");
+            check(reloadProject(&error), "reloading the project failed");
         }
         QFile::setPermissions(cfgPath, cfgPerms);
     }

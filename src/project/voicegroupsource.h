@@ -336,8 +336,11 @@ class VoicegroupSource
     // Appends .include "sound/voicegroups/<name>.inc" after the last .include
     // in sound/voice_groups.inc (byte-conservative; no-op if the hub file
     // doesn't exist — the loader and browser discover the file regardless —
-    // or already includes the file).
-    static bool appendIncludeLine(const QString &projectRoot, const QString &name, QString *error);
+    // or already includes the file). *added (optional) says whether this
+    // call wrote the line — false for both no-ops — so a caller that may
+    // have to take it back again removes only a line it added.
+    static bool appendIncludeLine(const QString &projectRoot, const QString &name, QString *error,
+                                  bool *added = nullptr);
     // The inverse pair, for deleting a song's now-unused voicegroup: drops
     // the hub's .include line (no-op when absent), then the .inc file itself.
     // Idempotent — an already-deleted voicegroup is a success.

@@ -78,7 +78,7 @@ export function deactivate() {}
 | `song(label)` | one entry of `songs()`, or `null` |
 | `open(label, {newTab?})` | opens the song in the active tab (or a new tab). An open draft's label switches to the draft's tab. |
 | `registration(label)` | `{complete, inSongTable, inSongsH, inLdScript, inCharmap, inDebugMenu, gaps}` |
-| `registerSong(label, {constant?, player?})` | same as `File → Register Songs` |
+| `registerSong(label, {constant?, player?})` | same as `File → Register Songs`. Throws for a label an open draft holds (save the draft instead: its Save registers it). |
 | `unregisterSong(label)` | |
 | `reload()` | re-reads the project's music data |
 | `musicPlayers()` | `[{name, number, trackCount}]` |
