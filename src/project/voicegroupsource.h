@@ -300,11 +300,16 @@ class VoicegroupSource
     // Whether any voicegroup file declares "voicegroup<arg>" (either form,
     // any layout) — a name can be taken without sound/voicegroups/<name>.inc
     // existing (a multi-voicegroup file, a monolithic layout). Reads the disk.
-    static bool isDeclared(const QString &projectRoot, const QString &voicegroupArg);
+    // skipPath (optional): a file not to read — a draft's own partly written
+    // voicegroup (SongDraft::voicegroupFileCreated).
+    static bool isDeclared(const QString &projectRoot, const QString &voicegroupArg,
+                           const QString &skipPath = QString());
     // Every "voicegroup<arg>" symbol any voicegroup file declares (what
     // isDeclared tests one at a time): one full read, for callers that test
-    // many names in a row (the Rename dialog, per keystroke).
-    static QSet<QString> declaredSymbols(const QString &projectRoot);
+    // many names in a row (the Rename dialog, per keystroke). skipPath as
+    // for isDeclared.
+    static QSet<QString> declaredSymbols(const QString &projectRoot,
+                                         const QString &skipPath = QString());
 
     // The bytes of a new sound/voicegroups/<name>.inc matching the siblings'
     // header style and line endings. copyFromFile/copySectionLabel name an

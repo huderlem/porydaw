@@ -33,6 +33,11 @@
 #include <functional>
 #include <memory>
 
+#ifdef Q_OS_UNIX
+#include <csignal>
+#include <sys/resource.h>
+#endif
+
 #include "mainwindow.h"
 #include "project/bundlearchive.h"
 #include "project/bundleimport.h"
@@ -1398,6 +1403,14 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
 
     // 14. Save commits the voicegroup with its edits, its include line, and
     // a .mid whose -G names it.
+    const QString vgHint = QStringLiteral(" — configure its new voicegroup in the Voicegroup dock");
+    // Whether an open draft has a folder of its own under drafts/.
+    const auto anyDraftFolder = [this] {
+        return std::any_of(m_sessions.begin(), m_sessions.end(), [](const auto &session) {
+            return session->isDraft() && !session->draft->folder.isEmpty();
+        });
+    };
+    const QString draftsDir = root + QStringLiteral("/.porydaw/drafts");
     {
         const QString name = QStringLiteral("mus_draftcheck_vg2");
         const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
@@ -1416,9 +1429,11 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         }
         check(!s->isDraft() && !s->isDirty() && !s->vgSource->dirty(),
               "the committed voicegroup draft is still unsaved");
-        check(statusBar()->currentMessage().endsWith(
-                  QStringLiteral(" — configure its new voicegroup in the Voicegroup dock")),
-              "the commit's status message lacks the new-voicegroup hint");
+        // Edited as a draft: no hint to go configure it (step 6, H2; 14b
+        // has the unedited case).
+        check(statusBar()->currentMessage().startsWith(QStringLiteral("Created and registered")) &&
+                  !statusBar()->currentMessage().contains(vgHint),
+              "the commit's status message sends the user to configure an edited voicegroup");
         const QByteArray written = readBytes(target);
         check(!written.isEmpty() && written.contains("voice_square_2") &&
                   written.contains(QStringLiteral("voice_group %1").arg(name).toUtf8()) &&
@@ -1445,6 +1460,32 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         s->doc.undoStack()->redo();
         check(!s->vgSource->dirty() && !s->isDirty(),
               "redo did not return to the saved voicegroup");
+    }
+
+    // 14b. An unedited new voicegroup: the status message sends the user to
+    // configure it, and with no draft left open the commit leaves no empty
+    // .porydaw/drafts/ behind (step 6, H1/H2).
+    {
+        const QString name = QStringLiteral("mus_draftcheck_vg2b");
+        if (check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_VG2B"), player,
+                                newVgCfg(name), name, &error),
+                  "the unedited voicegroup draft did not open")) {
+            SongSession *s = m_active;
+            {
+                NoPromptGuard noPrompt(modalFail, __LINE__);
+                check(saveSession(*s), "saving an unedited voicegroup draft failed");
+            }
+            check(!s->isDraft() && statusBar()->currentMessage().endsWith(vgHint),
+                  "the commit's status message lacks the new-voicegroup hint");
+            if (anyDraftFolder())
+                std::printf("draftcheck: note: another draft has a folder; section 14b's "
+                            "empty-drafts check skipped\n");
+            else
+                check(!QFileInfo::exists(draftsDir),
+                      "the commit left an empty .porydaw/drafts/ behind");
+        } else {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+        }
     }
 
     // 15. The cfg switched to an existing voicegroup (and back, and away
@@ -1626,6 +1667,10 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
               "the sweep removed a draft folder another process holds");
         heldLock.reset();
         QDir(held).removeRecursively();
+        // An emptied drafts/ goes with its last folder (step 6, H1).
+        sweepStaleDraftFolders(root);
+        check(anyDraftFolder() || !QFileInfo::exists(draftsDir),
+              "the sweep left an empty .porydaw/drafts/ behind");
     }
 
     // 18. A voicegroup commit that failed after the .inc landed (review E):
@@ -2580,8 +2625,205 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
                   "could not delete the referenced voicegroup");
             check(reloadProject(&error), "reloading the project failed");
         }
+        // 22j. The partial commit's .mid registered behind the draft's back
+        // (as 22e), then Save (step 6, A): song_table.inc forces a Rename
+        // even with the waiver, and accepting it must not delete the .mid
+        // the project now uses. The dialog says it stays.
+        SongSession *claimed = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb11"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB11"), &claimed)) {
+            const QString label = QStringLiteral("mus_draftcheck_rb11");
+            const QString constant = QStringLiteral("MUS_DRAFTCHECK_RB11");
+            const QString label2 = QStringLiteral("mus_draftcheck_rb11b");
+            const QString midPath = midiDir + label + QStringLiteral(".mid");
+            int regId = -1;
+            check(SongRegistry::registerSong(root, label, constant, player, &error, &regId),
+                  "could not register the leftover .mid directly");
+            QString explanation;
+            {
+                PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+                rename.onDialog(QStringLiteral("Rename Song"), [&](QDialog *dialog) {
+                    explanation = renameExplanation(dialog);
+                    auto *buttons = dialog->findChild<QDialogButtonBox *>();
+                    QPushButton *ok = buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+                    QLineEdit *name = nameField(dialog);
+                    if (!ok || !name) {
+                        dialog->reject();
+                        return;
+                    }
+                    name->setText(label2);
+                    if (ok->isEnabled())
+                        ok->click();
+                    else
+                        dialog->reject();
+                });
+                check(saveSession(*claimed), "saving through the Rename dialog failed");
+                check(rename.handled(QStringLiteral("Rename Song")),
+                      "a registered leftover .mid did not force a Rename");
+            }
+            check(explanation.contains(
+                      shownPath(QStringLiteral("sound/songs/midi/") + label +
+                                QStringLiteral(".mid")) +
+                      QStringLiteral(" (the project uses it by now, so a rename keeps it)")),
+                  "the Rename dialog does not say the registered .mid stays");
+            check(QFile::exists(midPath), "accepting the Rename deleted a .mid the project uses");
+            check(!claimed->isDraft() && claimed->doc.label() == label2 &&
+                      QFile::exists(midiDir + label2 + QStringLiteral(".mid")),
+                  "the renamed draft was not committed under its new name");
+            SongRegistry::unregisterSong(root, label, constant, &error);
+            QFile::remove(midPath);
+            check(reloadProject(&error), "reloading the project failed");
+        }
         QFile::setPermissions(cfgPath, cfgPerms);
     }
+
+#ifdef Q_OS_UNIX
+    // 22k. A voicegroup save that fails after creating its file (step 6,
+    // B): RLIMIT_FSIZE lets save() create the .inc and then refuses the
+    // write, leaving a short file. The draft records the file as its own
+    // (voicegroupFileCreated), so (1) a plain retry commits over it with no
+    // Rename dialog, (2) a Discard removes it, and (3) a Rename (forced by
+    // a label registered since) moves the voicegroup and removes the old
+    // short file.
+    {
+        // Saves s with every file write past a few bytes refused, answering
+        // the error box (the limit lifted first). True when the save failed
+        // as intended: a short .inc on disk, recorded as the draft's own.
+        const auto failVgSave = [&](SongSession *s, const QString &name) {
+            const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            struct rlimit before;
+            getrlimit(RLIMIT_FSIZE, &before);
+            const auto restore = [before] { setrlimit(RLIMIT_FSIZE, &before); };
+            void (*oldHandler)(int) = std::signal(SIGXFSZ, SIG_IGN);
+            bool saved = true;
+            {
+                PromptAnswerer failBox(QMessageBox::Cancel, modalFail);
+                failBox.onDialog(QStringLiteral("Save Song"), [&](QDialog *dialog) {
+                    restore();
+                    dialog->reject();
+                });
+                struct rlimit tight = before;
+                tight.rlim_cur = 16;
+                setrlimit(RLIMIT_FSIZE, &tight);
+                saved = saveSession(*s);
+                restore();
+                check(failBox.handled(QStringLiteral("Save Song")),
+                      "the failed voicegroup save did not report its error");
+            }
+            std::signal(SIGXFSZ, oldHandler);
+            return check(!saved && s->isDraft() && !s->draft->voicegroupWritten &&
+                             s->draft->voicegroupFileCreated && QFile::exists(target) &&
+                             QFileInfo(target).size() <= 16 && includeCount(name) == 0 &&
+                             s->draft->wroteMidPath.isEmpty() &&
+                             !QFile::exists(midiDir + name + QStringLiteral(".mid")),
+                         "the failed voicegroup save did not leave a short .inc recorded as the "
+                         "draft's own (and nothing else)");
+        };
+        // (1) Retry.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb12");
+            const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            if (check(openDraftSong(draftSmf(), name, name.toUpper(), player, newVgCfg(name), name,
+                                    &error),
+                      "the short-write draft did not open")) {
+                SongSession *s = m_active;
+                editVoices(s);
+                if (failVgSave(s, name)) {
+                    {
+                        NoPromptGuard noPrompt(modalFail, __LINE__);
+                        check(saveSession(*s), "retrying after a short voicegroup write failed");
+                    }
+                    const QByteArray written = readBytes(target);
+                    check(!s->isDraft() && written == s->vgSource->renderPreview() &&
+                              written.contains("voice_square_2") && includeCount(name) == 1,
+                          "the retry did not write the whole voicegroup over its short file");
+                }
+            }
+        }
+        // (2) Discard.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb13");
+            const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            const QByteArray before = treeFingerprint(root, {hubRel});
+            if (check(openDraftSong(draftSmf(), name, name.toUpper(), player, newVgCfg(name), name,
+                                    &error),
+                      "the short-write draft did not open")) {
+                SongSession *s = m_active;
+                if (failVgSave(s, name)) {
+                    PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                    QString info;
+                    prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                    closeTab(m_tabs->indexOf(s->view));
+                    check(prompt.answered() && !sessionForLabel(name),
+                          "the short-write draft did not close through the prompt");
+                    check(info.contains(wroteText) &&
+                              info.contains(QDir::toNativeSeparators(
+                                  QStringLiteral("sound/voicegroups/%1.inc").arg(name))),
+                          "the close prompt does not list the short .inc");
+                    check(!QFile::exists(target) && treeFingerprint(root, {hubRel}) == before,
+                          "Discard left the short .inc behind");
+                }
+            }
+        }
+        // (3) Rename.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb14");
+            const QString name2 = QStringLiteral("mus_draftcheck_rb14b");
+            const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            const QString target2 = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name2);
+            if (check(openDraftSong(draftSmf(), name, name.toUpper(), player, newVgCfg(name), name,
+                                    &error),
+                      "the short-write draft did not open")) {
+                SongSession *s = m_active;
+                if (failVgSave(s, name)) {
+                    int regId = -1;
+                    check(SongRegistry::registerSong(root, name, name.toUpper(), player, &error,
+                                                     &regId),
+                          "could not register the short-write draft's label directly");
+                    QString explanation;
+                    {
+                        PromptAnswerer rename(QMessageBox::Cancel, modalFail);
+                        rename.onDialog(QStringLiteral("Rename Song"), [&](QDialog *dialog) {
+                            explanation = renameExplanation(dialog);
+                            auto *buttons = dialog->findChild<QDialogButtonBox *>();
+                            QPushButton *ok =
+                                buttons ? buttons->button(QDialogButtonBox::Ok) : nullptr;
+                            QLineEdit *field = nameField(dialog);
+                            if (!ok || !field) {
+                                dialog->reject();
+                                return;
+                            }
+                            field->setText(name2);
+                            if (ok->isEnabled())
+                                ok->click();
+                            else
+                                dialog->reject();
+                        });
+                        check(saveSession(*s),
+                              "saving the short-write draft through Rename failed");
+                        check(rename.handled(QStringLiteral("Rename Song")),
+                              "a registered label did not force a Rename");
+                    }
+                    check(explanation.contains(QDir::toNativeSeparators(
+                              QStringLiteral("sound/voicegroups/%1.inc (partly)").arg(name))),
+                          "the Rename dialog does not list the short .inc");
+                    check(!s->isDraft() && s->doc.label() == name2 &&
+                              s->doc.cfg().voicegroupArg == QStringLiteral("_") + name2 &&
+                              QFile::exists(target2) && includeCount(name2) == 1,
+                          "the renamed short-write draft was not committed with its voicegroup");
+                    check(!QFile::exists(target) && includeCount(name) == 0,
+                          "the Rename left the old short .inc behind");
+                    SongRegistry::unregisterSong(root, name, name.toUpper(), &error);
+                    check(reloadProject(&error), "reloading the project failed");
+                }
+            }
+        }
+    }
+#else
+    std::printf("draftcheck: note: no RLIMIT_FSIZE here; section 22k skipped\n");
+#endif
 
     // 23. The dock's New Voicegroup (and project.createVoicegroup, through
     // the same helper) refuses a name an open draft's new voicegroup holds,

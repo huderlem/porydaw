@@ -54,16 +54,19 @@ class LowercaseNameValidator : public QRegularExpressionValidator
 // the label grammar, a constant that follows the label until the user edits
 // it, and a hint under the label naming the first conflict
 // SongRegistry::checkNewSongNames finds. changed runs on every edit.
-// ownMidPath is passed through to that check (a draft's own earlier .mid).
+// ownMidPath and ownVoicegroupPath are passed through to that check (a
+// draft's own earlier .mid and partly written voicegroup file).
 class SongNameFields
 {
   public:
     SongNameFields(QWidget *owner, QFormLayout *form, const DecompProject *project,
                    const ReservedSongNames &reserved, const QString &label, const QString &constant,
-                   const std::function<void()> &changed, const QString &ownMidPath = QString())
+                   const std::function<void()> &changed, const QString &ownMidPath = QString(),
+                   const QString &ownVoicegroupPath = QString())
         : m_project(project)
         , m_reserved(reserved)
         , m_ownMidPath(ownMidPath)
+        , m_ownVoicegroupPath(ownVoicegroupPath)
         , m_constantEdited(!constant.isEmpty() && constant != SongRegistry::constantForLabel(label))
     {
         m_name = new QLineEdit(label, owner);
@@ -106,12 +109,14 @@ class SongNameFields
         // keystroke (every voicegroup file, parsed). A file changed while the
         // dialog is open doesn't matter: the commit checks again.
         if (!newVoicegroup.isEmpty() && !m_declaredVoicegroups)
-            m_declaredVoicegroups = VoicegroupSource::declaredSymbols(m_project->root());
-        const QStringList conflicts = SongRegistry::checkNewSongNames(
-                                          m_project->root(), m_project->songs(), m_reserved,
-                                          label(), constant(), newVoicegroup, m_ownMidPath,
-                                          m_declaredVoicegroups ? &*m_declaredVoicegroups : nullptr)
-                                          .messages();
+            m_declaredVoicegroups =
+                VoicegroupSource::declaredSymbols(m_project->root(), m_ownVoicegroupPath);
+        const QStringList conflicts =
+            SongRegistry::checkNewSongNames(
+                m_project->root(), m_project->songs(), m_reserved, label(), constant(),
+                newVoicegroup, m_ownMidPath,
+                m_declaredVoicegroups ? &*m_declaredVoicegroups : nullptr, m_ownVoicegroupPath)
+                .messages();
         if (conflicts.isEmpty())
             return true;
         m_nameHint->setText(conflicts.first());
@@ -125,7 +130,8 @@ class SongNameFields
   private:
     const DecompProject *m_project;
     ReservedSongNames m_reserved;
-    QString m_ownMidPath; // a .mid the draft wrote itself: not a conflict
+    QString m_ownMidPath;        // a .mid the draft wrote itself: not a conflict
+    QString m_ownVoicegroupPath; // a voicegroup file the draft created itself: neither
     QLineEdit *m_name;
     QLineEdit *m_constant;
     QLabel *m_nameHint;
@@ -651,8 +657,8 @@ SmfFile NewSongWizard::songFile() const
 SongRenameDialog::SongRenameDialog(const DecompProject *project, const ReservedSongNames &reserved,
                                    const QString &label, const QString &constant,
                                    bool renamesVoicegroup, const QStringList &conflicts,
-                                   const QString &ownMidPath, const QStringList &alreadyWritten,
-                                   QWidget *parent)
+                                   const QString &ownMidPath, const QString &ownVoicegroupPath,
+                                   const QStringList &alreadyWritten, QWidget *parent)
     : QDialog(parent)
     , m_renamesVoicegroup(renamesVoicegroup)
 {
@@ -680,7 +686,8 @@ SongRenameDialog::SongRenameDialog(const DecompProject *project, const ReservedS
     m_buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     m_buttons->button(QDialogButtonBox::Ok)->setText(tr("Rename and Save"));
     m_names = std::make_unique<SongNameFields>(
-        this, form, project, reserved, label, constant, [this] { refresh(); }, ownMidPath);
+        this, form, project, reserved, label, constant, [this] { refresh(); }, ownMidPath,
+        ownVoicegroupPath);
     layout->addWidget(m_buttons);
     connect(m_buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(m_buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);

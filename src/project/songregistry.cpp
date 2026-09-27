@@ -563,11 +563,17 @@ QString constantForLabel(const QString &label)
     return label.toUpper();
 }
 
+QString midPathFor(const QString &projectRoot, const QString &label)
+{
+    return projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+}
+
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
                                     const QString &constant, const QString &newVoicegroup,
                                     const QString &ownMidPath,
-                                    const QSet<QString> *declaredVoicegroups)
+                                    const QSet<QString> *declaredVoicegroups,
+                                    const QString &ownVoicegroupPath)
 {
     const auto tr = [](const char *text) {
         return QCoreApplication::translate("SongRegistry", text);
@@ -594,7 +600,7 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
         }
         if (taken)
             conflicts.label = tr("A song named %1 already exists.").arg(label);
-        const QString midPath = projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+        const QString midPath = midPathFor(projectRoot, label);
         if (QFileInfo::exists(midPath) && QDir::cleanPath(midPath) != own)
             conflicts.mid = tr("%1.mid already exists.").arg(label);
     }
@@ -621,12 +627,18 @@ SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<So
     // The file name and the symbol are separate claims: voicegroup_<name>
     // may be declared inside another file (a multi-voicegroup .inc, a
     // monolithic layout) while <name>.inc is free, and vice versa.
+    const QString vgFile = newVoicegroup.isEmpty()
+                               ? QString()
+                               : VoicegroupSource::newVoicegroupPath(projectRoot, newVoicegroup);
+    const QString ownVg =
+        ownVoicegroupPath.isEmpty() ? QString() : QDir::cleanPath(ownVoicegroupPath);
     if (!newVoicegroup.isEmpty() &&
         (reserved.voicegroups.contains(newVoicegroup) ||
-         QFileInfo::exists(VoicegroupSource::newVoicegroupPath(projectRoot, newVoicegroup)) ||
+         (QFileInfo::exists(vgFile) && QDir::cleanPath(vgFile) != ownVg) ||
          (declaredVoicegroups
               ? declaredVoicegroups->contains(QStringLiteral("voicegroup_") + newVoicegroup)
-              : VoicegroupSource::isDeclared(projectRoot, QStringLiteral("_") + newVoicegroup)))) {
+              : VoicegroupSource::isDeclared(projectRoot, QStringLiteral("_") + newVoicegroup,
+                                             ownVg)))) {
         conflicts.voicegroup =
             tr("A voicegroup named voicegroup_%1 already exists.").arg(newVoicegroup);
     }

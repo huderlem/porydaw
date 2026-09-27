@@ -486,7 +486,8 @@ class ScriptHost : public QObject
     QFileSystemWatcher *m_watcher = nullptr;
     QTimer *m_rescanTimer = nullptr;
     SongSession *m_session = nullptr;
-    QString m_sessionLabel; // the song the session held when set (in-place swaps re-activate)
+    QString m_sessionLabel;      // the song the session held when set (in-place swaps re-activate)
+    bool m_sessionDraft = false; // whether it was a draft then (a commit re-activates)
     uint64_t m_sessionGeneration = 0; // bumped by every setSession that took effect
     QMetaObject::Connection m_docConnection;
     int m_paintDepth = 0;

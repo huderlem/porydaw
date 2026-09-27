@@ -904,8 +904,10 @@ bool VoicegroupSource::openDraft(const QString &projectRoot, const QString &name
     return parse(bytes, error);
 }
 
-bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voicegroupArg)
+bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voicegroupArg,
+                                  const QString &skipPath)
 {
+    const QString skip = skipPath.isEmpty() ? QString() : QDir::cleanPath(skipPath);
     const QString symbol = QStringLiteral("voicegroup") + voicegroupArg;
     QString base = voicegroupArg;
     while (base.startsWith(QLatin1Char('_')))
@@ -913,6 +915,8 @@ bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voi
     // open()'s fallback scan: a cheap substring gate before the parse.
     const QByteArray needle = base.toUtf8();
     for (const QString &path : voicegroupFiles(projectRoot)) {
+        if (!skip.isEmpty() && QDir::cleanPath(path) == skip)
+            continue;
         bool ok = false;
         const QByteArray content = readAllBytes(path, &ok);
         if (!ok || (!needle.isEmpty() && !content.contains(needle)))
@@ -925,10 +929,13 @@ bool VoicegroupSource::isDeclared(const QString &projectRoot, const QString &voi
     return false;
 }
 
-QSet<QString> VoicegroupSource::declaredSymbols(const QString &projectRoot)
+QSet<QString> VoicegroupSource::declaredSymbols(const QString &projectRoot, const QString &skipPath)
 {
+    const QString skip = skipPath.isEmpty() ? QString() : QDir::cleanPath(skipPath);
     QSet<QString> symbols;
     for (const QString &path : voicegroupFiles(projectRoot)) {
+        if (!skip.isEmpty() && QDir::cleanPath(path) == skip)
+            continue;
         for (const DeclaredSymbol &decl : declaredVoicegroups(path))
             symbols.insert(decl.symbol);
     }
@@ -1230,7 +1237,9 @@ bool VoicegroupSource::save(QString *error)
     }
     if (m_endsWithNewline && !m_lines.isEmpty())
         joined += '\n';
-    if (out.write(joined) != joined.size()) {
+    // flush(): a small file sits in QFile's buffer until close, which
+    // reports nothing — a full disk would pass as saved.
+    if (out.write(joined) != joined.size() || !out.flush()) {
         if (error)
             *error = QStringLiteral("Short write to %1").arg(m_filePath);
         return false;

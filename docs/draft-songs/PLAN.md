@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**; steps 1–4 done 2026-09-26, step 5 done 2026-09-27. File/line references verified
+Status: **all steps done 2026-09-27** (decisions confirmed 2026-09-26; steps 1–4 done 2026-09-26, steps 5–6 2026-09-27). File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -139,12 +139,15 @@ affects **before** starting the next step.
   *(Step 5: a draft's hints now come from its `SongDraft`; exporting a
   draft, new voicegroup included, needed nothing else.)*
 - *(Step 5)* A draft dropped unsaved goes through `removeDraftLeftovers`
-  wherever that happens: `destroySession` (tab close, project-switch
-  teardown, Delete Song of its own leftover `.mid`), `loadSong`'s replace
-  in place (right after the prompt, before `populateSession`), and
-  `closeEvent`. It works from `session.root` and the
-  draft's own absolute paths, because `openProjectDir` opens the new project
-  before `teardownSessions`.
+  wherever that happens: `destroySession` (tab close), `loadSong`'s replace
+  in place (right after the prompt, before `populateSession`), a project
+  switch and `closeEvent`. (Step 5 review: Delete Song refuses a label a
+  draft holds, so it never reaches a draft; `openProjectDir` reads the new
+  project into a local `DecompProject` first, then runs the Discarded
+  drafts' rollback while the old project and every tab are still there,
+  then swaps it into `m_project` and tears down — the teardown's
+  `destroySession` call is a no-op by then.) It works from `session.root`
+  and the draft's own absolute paths.
 - *(Step 5)* `DecompProject::open`/`reload` begins with `close()`: a failed
   reload leaves the project model empty (no root, no songs), not stale.
 - `refreshRegisterAction` (`:3197`) is already disabled when `songId < 0`.
@@ -480,7 +483,7 @@ possible):
       orphaned. Decide roll-back vs. warn-on-Discard for the `.mid` and the
       `.inc` together; `--draftcheck` section 18 already produces that
       state.)*
-      ✅ *(Step 5, decided: roll back. `removeDraftLeftovers` — from `destroySession`, a replace in place (`loadSong`) and `closeEvent` — deletes `wroteMidPath` and, when `voicegroupWritten`, the `.inc` + include line (`VoicegroupSource::deleteVoicegroup`), then reloads the project; a removal that fails warns ("Discard Draft") naming the file. The close prompt lists them (`draftLeftovers`). `--draftcheck` §22a (both files, prompt text, content fingerprint), §22b (the warning, via a read-only midi directory), §22c/d, §25.)*
+      ✅ *(Step 5, decided: roll back. `removeDraftLeftovers` — from `destroySession`, a replace in place (`loadSong`) and `closeEvent` — deletes `wroteMidPath` and, when `voicegroupWritten`, the `.inc` (`QFile::remove`) and — only when the commit added it (`includeLineAdded`, Step 5 review E) — its include line (`VoicegroupSource::removeIncludeLine`), then reloads the project; a removal that fails warns ("Discard Draft") naming the file. The close prompt lists them (`draftLeftovers`). `--draftcheck` §22a (both files, prompt text, content fingerprint), §22b (the warning, via a read-only midi directory), §22c/d, §25.)*
 - [x] **Voicegroup symbols the name check can't see** (step 3 review, G;
       known limitation, consistent with `VoicegroupSource::open()` and the
       catalog): `isDeclared` / `declaredSymbols` / the catalog scan only
@@ -1047,8 +1050,9 @@ and why, what's still owed.
     (`destroySession`), replace in place (`loadSong`, right after the
     prompt), project switch (`teardownSessions` → `destroySession`), quit
     (`closeEvent`) — deletes `wroteMidPath` and, when `voicegroupWritten`,
-    the `.inc` and its include line through `VoicegroupSource::
-    deleteVoicegroup`, then reloads the project (a reload may already list
+    the `.inc` (`QFile::remove`) and its include line
+    (`VoicegroupSource::removeIncludeLine`; after review E only a line the
+    commit added), then reloads the project (a reload may already list
     the `.mid` as an unregistered song). A failed removal warns ("Discard
     Draft", modal) with the paths. The draft close prompt's informative text
     gains "An earlier save that failed partway already wrote into the
@@ -1250,3 +1254,120 @@ and why, what's still owed.
       on the normal and ASAN builds (no skip notes: 22a–g and 25 ran); full
       `tools/run_checks.sh` PASS on both (gen_scripting_docs included;
       mkcheck skipped, no fork given).
+- **2026-09-27 — Step 6 (final review).** Commit: see `git log` on branch
+  `draft-song` ("Draft songs step 6 …").
+  - Review: a code review over the combined diff since step 1
+    (`55af994..d3e4637`) found two must-fix deletion/bookkeeping holes (A,
+    B), six cheap should-fixes (C–H, H from the manual pass) and a set of
+    behavior-neutral simplifications. Principle, as in step 5: when in
+    doubt, keep the file.
+  - A. **Rename could delete a `.mid` the project claims.**
+    `resolveDraftNameConflicts` removed `wroteMidPath` on a rename without
+    the check the Discard rollback uses. Now the delete is gated on
+    `draftMidLeftover(session) == Removed`; when it says Kept the draft lets
+    go of the path (clears `wroteMidPath`) and leaves the file, and the
+    Rename dialog's "already wrote" list says "<path> (the project uses it
+    by now, so a rename keeps it)". The retry waiver itself is unchanged
+    (still `wroteMidPath`; `song_table.inc` decides the label) — dropping it
+    when claimed broke §12, where `songs.h` gaining the draft's *constant*
+    counts as a claim but the user must still be able to keep the label.
+    Harness 22j: partial commit → `SongRegistry::registerSong` directly →
+    Save → Rename to a new label → the old `.mid` survives, the dialog says
+    so, the song commits under the new name.
+  - B. **A failed/short `.inc` write left an untracked file.** New
+    `SongDraft::voicegroupFileCreated`: `commitDraftVoicegroup` records the
+    target when it did not exist before `vgSource->save()` and does after,
+    whatever the result (the `.mid`'s `midExisted` pattern). The retry's
+    name check waives exactly that file — `checkNewSongNames(…,
+    ownVoicegroupPath)`, which skips its existence and any symbol it
+    declares (`VoicegroupSource::isDeclared`/`declaredSymbols` take a
+    `skipPath`), threaded through `SongNameFields`/`SongRenameDialog` — and
+    `draftVoicegroupLeftover` counts it, so a Discard removes it (guarded by
+    `draftVoicegroupUsedElsewhere` as before) and the close prompt lists it.
+    A Rename away from the name removes the old short file under the same
+    guard (the dialog lists it as "(partly)"); `abandonDraftVoicegroup` (cfg
+    switched away) does too. Found on the way: `VoicegroupSource::save`
+    never saw a short write of a small file — `QFile` buffers it and
+    `close()` reports nothing — so it now checks `flush()`. Forcing: no
+    hook needed; on POSIX the harness sets `RLIMIT_FSIZE` to 16 bytes (with
+    `SIGXFSZ` ignored) around the save, so `save()` creates the file and
+    the flush fails (lifted in the error box's answerer). Harness 22k
+    (skipped with a note on non-POSIX): (1) retry commits over the short
+    file with no Rename dialog; (2) Discard removes it, tree fingerprint as
+    before; (3) a label registered since forces a Rename → the voicegroup
+    moves to the new name, the old short file is gone.
+  - C. `openProjectDir`'s failed re-read after the rollback (same root
+    reopened): **known limitation**, comment corrected. The tabs stay open
+    with the Discarded drafts' leftovers already removed; a draft whose
+    written voicegroup went still names it in its `-G`, so a later Add to
+    Project would commit a song naming a deleted voicegroup. Same shape as
+    step 5 deviation (5); both need an unreadable `song_table.inc` between
+    two reads. Fixing it means re-creating a pending draft voicegroup (draft
+    folder + `openDraft` source from `renderPreview`), which is invasive.
+  - D. Stale plan facts: §3's rollback bullet (Delete Song never reaches a
+    draft; `openProjectDir` reads the new project first, rolls back, then
+    swaps it in), step 5's roll-back tick and progress entry (`QFile::remove`
+    + `removeIncludeLine`, not `deleteVoicegroup`); `mainwindow.h`'s
+    `removeDraftLeftovers` comment ("after the new project is read, before
+    it is swapped in").
+  - E. `saveSession`'s dead "no error: already reported" branch is now a
+    `Q_ASSERT(!error.isEmpty())` + the warning; `commitDraft`'s comment says
+    false = still a draft, written `.inc`/`.mid` tracked for retry/rollback.
+  - F. CHANGELOG no longer says Discard leaves the project "untouched"
+    unqualified; `docsrc/manual/new-song.md` lists every write-through
+    action: Tools → Import Sample, the dock's New sample… / Edit sample…,
+    and the dock's New Voicegroup (other names).
+  - G. `ScriptHost::setSession` also re-activates when the session's draft
+    state changed (`m_sessionDraft`), so a commit — which `commitDraft`
+    already routes through `refreshSessionIdentity` — fires
+    `song.activated` with `isDraft` false. API.md: `midPath` for a draft
+    "may already exist after a save that failed partway"; `isDraft` and the
+    `activated` event row mention it; `docsrc/reference/scripting.md`
+    regenerated. `--scriptcheck`'s draft block asserts exactly one
+    `activated` with `isDraft` false.
+  - H. (1) `SongDraft::removeFolder` and `sweepStaleDraftFolders` `rmdir`
+    `.porydaw/drafts/` once it is empty (rmdir refuses a non-empty one).
+    §14b (no other draft with a folder open) and §17 (after the sweep)
+    assert it is gone. (2) The commit's status hint "— configure its new
+    voicegroup in the Voicegroup dock" is dropped when the draft's
+    voicegroup was edited (its source dirty before the save, or a
+    `VoiceEditCommand` on it in the history — covers a retry after it was
+    written). §14 (edited) now asserts no hint; §14b (unedited) asserts it.
+  - Simplifications (behavior identical): `SongRegistry::midPathFor`
+    (`openDraftSong`, `resolveDraftNameConflicts`, `checkNewSongNames`);
+    `SongDraft::folderFile`; `MainWindow::draftHolding(label)` (openSong
+    binding, `registerSongByLabel`, `deleteSongById`,
+    `performSongDeletion`); one `displayPath(root, path)` helper for
+    `resolveDraftNameConflicts` and `draftLeftovers`; `openDraftSong`
+    private; `voicegroupBytes` cleared once the voicegroup is written.
+    `openDraftSong`'s label refusal kept (not dead).
+  - Mutation-tested (each reverted singly, fresh scratch): no `midKept`
+    gate (A) fails 22j ("accepting the Rename deleted a .mid the project
+    uses"); not recording `voicegroupFileCreated` (B) fails 22k and cascades
+    (the retry opens a Rename); always showing the hint (H2) fails §14; no
+    draft-state term in `setSession` (G) fails scriptcheck.
+  - Manual pass (real build, offscreen, driven through the real menus and
+    dialogs on a fresh copy of pokeemerald; report in the session
+    scratchpad): all four scenarios PASS. S1 Import → play → edit → close →
+    Discard: `git status` identical to baseline, no `drafts/`, nothing in
+    `lastOpenSongs`. S2 Import with a new voicegroup → edit voice 0's attack
+    → Save to project: registration files, `midi.cfg` flags, include line,
+    `.mid` and `.inc` (with the edit) written, nothing else; `make` built
+    the ROM with `mus_step6_keep` and `voicegroup_mus_step6_keep` in the
+    map. S3 Quit with a draft open: Cancel keeps it, Add commits and quits.
+    S4 Restart: both restored as ordinary songs, the voice edit intact. Its
+    two oddities are H1/H2 above; the other two (the new-voicegroup
+    template's 128 identical Square 1 voices, the transport time resetting
+    on save) predate drafts.
+  - Known limitations carried forward: C above; step 5 deviation (4)
+    (pending synth definitions a partial commit wrote are not rolled back)
+    and (5) (replace in place whose load then fails); step 5 G (`.s` files
+    and single-colon labels invisible to the name check); step 5 H (a
+    rename whose `.mid` delete failed, then a retry failing after its
+    `.mid`, leaks the old file — never a wrong delete). Follow-up:
+    `src/draftcheck.cpp` (~2900 lines, one function) should be split into
+    per-section helpers; not done here.
+  - Results: `--draftcheck` and `--scriptcheck` PASS on fresh scratches on
+    the normal and ASAN builds (22k ran, no skip notes); full
+    `tools/run_checks.sh` PASS on the normal and ASAN builds
+    (`gen_scripting_docs` in sync; mkcheck skipped, no fork given).

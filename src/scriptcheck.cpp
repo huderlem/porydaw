@@ -3708,8 +3708,18 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
                     }
                 });
                 modalGuard.start();
+                // The commit is a new song to the API (step 6, G): activated
+                // fires once, seeing isDraft false.
+                run(QStringLiteral(
+                    "var draftActs = []; var draftActsOff = porydaw.song.on('activated', "
+                    "function (e) { draftActs.push((e ? e.label : '') + ':' + "
+                    "porydaw.song.isDraft); })"));
                 const QString saved = run(QStringLiteral("porydaw.song.save()"));
                 modalGuard.stop();
+                check(run(QStringLiteral("draftActs.join(',')")) ==
+                          draftLabel + QStringLiteral(":false"),
+                      "the draft's commit did not fire song.activated once (isDraft false)");
+                run(QStringLiteral("draftActsOff()"));
                 check(!surpriseModal, "song.save() on a draft showed a dialog");
                 check(saved == QStringLiteral("true") && m_active == draft && !draft->isDraft() &&
                           QFile::exists(midPath),

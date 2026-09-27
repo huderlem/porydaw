@@ -97,10 +97,10 @@ export function deactivate() {}
 |---|---|
 | `loaded` | whether any song is currently loaded |
 | `readOnly` | whether the song is a read-only song bundle |
-| `isDraft` | whether the song is a draft: a song from `File → Import MIDI…` or `File → New Song…` that isn't in the project yet. Its first `save()` adds it to the project. |
+| `isDraft` | whether the song is a draft: a song from `File → Import MIDI…` or `File → New Song…` that isn't in the project yet. Its first `save()` adds it to the project, and `activated` then fires for it (now with `isDraft` false). |
 | `revision` | increments on every edit/undo/redo to the song |
 | `label` | the song's name/label |
-| `midPath` | the filepath to the song's midi file. For a draft, the path its first save will write (the file doesn't exist yet). |
+| `midPath` | the filepath to the song's midi file. For a draft, the path its first save writes (the file may already exist after a save that failed partway). |
 | `ticksPerBeat` | number of ticks per beat |
 | `ticksPerClock` | |
 | `startTempo` | tempo at the start of the song (beats per minute) |
@@ -117,7 +117,7 @@ export function deactivate() {}
 | `lanePoints(track, cc, {from?, to?})` | Get a track's automation lane events. `[{tick, value}]`; `cc` is 0–127 or `song.CC.BEND` / `.TEMPO` / `.VOICE` / `.MOD` / `.VOLUME` / `.PAN` / `.BEND_RANGE` / `.LFO_SPEED` |
 | `CC` | lane constants: the controllers porydaw draws as automation lanes, `MOD` (1), `VOLUME` (7), `PAN` (10), `BEND_RANGE` (20), `LFO_SPEED` (21), plus the pseudo-CCs for event-backed lanes, `BEND` (pitch bend), `TEMPO` (song-level, `track: -1`), `VOICE` (program changes). Anywhere a `cc` is accepted |
 | `on("changed", fn({revision, origin}))` | event handler that's called whenever the song changed from an edit. `origin` is `"user"`, `"script"` or `"history"` (Edit → Undo/Redo). `revision` is the song's revision as the event reaches you. To make song edits in response to this event, you should read [Reacting to edits](#reacting-to-edits) first! |
-| `on("activated", fn({label} \| null))` | the active song tab changed |
+| `on("activated", fn({label} \| null))` | the active song tab changed, or its song did in place (another song opened into the tab, a draft added to the project by its first save) |
 | `chunkCount`, `chunkTrack(chunk)`, `chunkEndTick(chunk)` | the file's MTrk chunks: the engine track a chunk is (-1 for the seq/tempo chunk and other trackless chunks) and its end-of-track tick |
 | `rawEvents(chunk, {from?, to?})` | the chunk's MIDI events as they are in the file: `[{index, tick, status, type, channel, data0, data1, metaType, blob, text}]`. `type` is `noteOn`, `noteOff` (a note-on with velocity 0 too), `cc`, `program`, `bend`, `aftertouch`, `pressure`, `meta` or `sysex`; `blob` (bytes) and `text` (text metas 1–7) only for metas/sysex. `index` is the position in the chunk right now — it shifts with every edit |
 

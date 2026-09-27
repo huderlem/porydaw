@@ -804,8 +804,10 @@ void ScriptHost::onPathChanged(const QString &path)
 void ScriptHost::setSession(SongSession *session)
 {
     // The same session can be handed a different song in place (opening a
-    // song into the active tab): that is a new song to the API too.
-    if (session == m_session && (!session || session->doc.label() == m_sessionLabel))
+    // song into the active tab), or become a project song (a draft's
+    // commit, which may rename it too): that is a new song to the API too.
+    if (session == m_session && (!session || (session->doc.label() == m_sessionLabel &&
+                                              session->isDraft() == m_sessionDraft)))
         return;
     disconnect(m_docConnection);
     // A song.changed still pending for the old song is moot: song.activated
@@ -814,6 +816,7 @@ void ScriptHost::setSession(SongSession *session)
     m_changedTimer->stop();
     m_session = session;
     m_sessionLabel = session ? session->doc.label() : QString();
+    m_sessionDraft = session && session->isDraft();
     m_sessionGeneration++;
     m_lastBeat = -1; // the new song's first beat should fire
     if (session) {

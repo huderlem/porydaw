@@ -137,6 +137,9 @@ QVector<MusicPlayer> musicPlayers(const QString &projectRoot);
 // Default constant for a label: "mus_foo" -> "MUS_FOO".
 QString constantForLabel(const QString &label);
 
+// Where a song's .mid lives: <root>/sound/songs/midi/<label>.mid.
+QString midPathFor(const QString &projectRoot, const QString &label);
+
 // Whether a new song may take these names: label, constant, and (when not
 // empty) the voicegroup it creates. Reads the disk as it is now — the .mid,
 // song_table.inc's labels, songs.h's defines, the voicegroup file and any
@@ -157,11 +160,19 @@ QString constantForLabel(const QString &label);
 // computed once by a caller that checks many names in a row (a dialog, per
 // keystroke); without it the voicegroup symbol is looked up on disk
 // (VoicegroupSource::isDeclared).
+//
+// ownVoicegroupPath (optional) is the voicegroup file counterpart of
+// ownMidPath: a sound/voicegroups/<name>.inc an earlier commit attempt of the
+// draft created and then failed to finish writing
+// (SongDraft::voicegroupFileCreated). Neither its existence nor a symbol it
+// declares counts as taken; a caller passing declaredVoicegroups computes
+// that set without it (declaredSymbols' skipPath).
 SongNameConflicts checkNewSongNames(const QString &projectRoot, const QVector<SongInfo> &songs,
                                     const ReservedSongNames &reserved, const QString &label,
                                     const QString &constant, const QString &newVoicegroup,
                                     const QString &ownMidPath = QString(),
-                                    const QSet<QString> *declaredVoicegroups = nullptr);
+                                    const QSet<QString> *declaredVoicegroups = nullptr,
+                                    const QString &ownVoicegroupPath = QString());
 
 // Computes the registration lines against the files as they are on disk
 // right now, matching each file's existing indentation/alignment.

@@ -341,7 +341,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         bindings.pluginsMenu = [this]() -> QMenu * { return m_pluginsMenu; };
         bindings.openSong = [this](const QString &label, bool newTab) {
             // A draft is in no song list yet: its tab is the song.
-            if (SongSession *open = sessionForLabel(label); open && open->draft) {
+            if (SongSession *open = draftHolding(label)) {
                 m_tabs->setCurrentWidget(open->view);
                 return m_active == open;
             }
@@ -1287,6 +1287,12 @@ SongSession *MainWindow::sessionForWidget(QWidget *widget) const
     return nullptr;
 }
 
+SongSession *MainWindow::draftHolding(const QString &label) const
+{
+    SongSession *open = sessionForLabel(label);
+    return open && open->draft ? open : nullptr;
+}
+
 SongSession *MainWindow::sessionForLabel(const QString &label) const
 {
     // Project songs only: a bundle tab may carry the same label as a song
@@ -1816,7 +1822,12 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
 
     // The new project is read before anything of the old one changes, so a
     // failed open leaves every tab (a Discarded draft's leftovers included)
-    // as it was.
+    // as it was. Known limitation (docs/draft-songs/PLAN.md step 6, C): a
+    // failed re-read after the rollback below (the same root reopened)
+    // leaves the tabs open with the Discarded drafts' leftovers already
+    // removed — a draft whose written voicegroup went still names it in its
+    // -G, so a later Add to Project would commit a song naming a deleted
+    // voicegroup.
     QString error;
     DecompProject next;
     const auto openFailed = [&] {
@@ -2688,9 +2699,10 @@ bool MainWindow::saveSession(SongSession &session)
         // A draft's first save is its commit into the project; it reports
         // the result itself.
         if (!commitDraft(session, &error)) {
-            // No error: the failure was already reported in a box.
-            if (!error.isEmpty())
-                QMessageBox::warning(this, tr("Save Song"), error);
+            // Every failure says why (a written .inc/.mid stays tracked for
+            // the retry or a Discard's rollback).
+            Q_ASSERT(!error.isEmpty());
+            QMessageBox::warning(this, tr("Save Song"), error);
             return false;
         }
         return true;
@@ -3429,7 +3441,7 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
     song.label = label;
     song.constant = constant;
     song.player = player;
-    song.midPath = m_project.root() + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+    song.midPath = SongRegistry::midPathFor(m_project.root(), label);
     song.hasMid = true;
     song.hasCfg = false;
     song.registered = false;
@@ -3450,7 +3462,7 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
             VoicegroupSource::newVoicegroupPath(m_project.root(), newVoicegroup);
         if (!createDraftFolder(*draft, error))
             return false;
-        QFile out(draft->folder + QLatin1Char('/') + newVoicegroup + QStringLiteral(".inc"));
+        QFile out(draft->folderFile(newVoicegroup));
         if (!out.open(QIODevice::WriteOnly) ||
             out.write(draft->voicegroupBytes) != draft->voicegroupBytes.size()) {
             *error = tr("Cannot write the draft's voicegroup to %1.")
@@ -3472,6 +3484,29 @@ bool MainWindow::openDraftSong(const SmfFile &smf, const QString &label, const Q
     return true;
 }
 
+namespace {
+// Whether doc's undo history (macros included) holds a voice edit on the
+// voicegroup loaded as loadName.
+bool historyEditsVoicegroup(SongDocument &doc, const QString &loadName)
+{
+    const std::function<bool(const QUndoCommand *)> edits = [&](const QUndoCommand *cmd) {
+        if (cmd->id() == kVoiceEditCommandId)
+            return static_cast<const VoiceEditCommand *>(cmd)->loadName() == loadName;
+        for (int c = 0; c < cmd->childCount(); c++) {
+            if (edits(cmd->child(c)))
+                return true;
+        }
+        return false;
+    };
+    const QUndoStack *stack = doc.undoStack();
+    for (int i = 0; i < stack->count(); i++) {
+        if (edits(stack->command(i)))
+            return true;
+    }
+    return false;
+}
+} // namespace
+
 bool MainWindow::commitDraft(SongSession &session, QString *error)
 {
     SongDraft *draft = session.draft.get();
@@ -3482,6 +3517,12 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     const QString root = m_project.root();
     const QString label = session.doc.label();
 
+    // Edited while a draft (unsaved edits on its source, or voice edits in
+    // the history — a retry after it was written): the status message
+    // needn't send the user to configure it.
+    const bool voicegroupEdited = !draft->newVoicegroup.isEmpty() &&
+                                  ((session.editsDraftVoicegroup() && session.vgSource->dirty()) ||
+                                   historyEditsVoicegroup(session.doc, draft->newVoicegroup));
     // The new voicegroup before the .mid: the song's -G names it.
     if (!commitDraftVoicegroup(session, error))
         return false;
@@ -3518,7 +3559,7 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
         QString message = tr("Created and registered %1 as %2 (song ID %3)")
                               .arg(label, draft->constant)
                               .arg(songId);
-        if (!createdVoicegroup.isEmpty())
+        if (!createdVoicegroup.isEmpty() && !voicegroupEdited)
             message += tr(" — configure its new voicegroup in the Voicegroup dock");
         statusBar()->showMessage(message, 8000);
     }
@@ -3538,6 +3579,15 @@ bool MainWindow::commitDraft(SongSession &session, QString *error)
     return true;
 }
 
+namespace {
+// A project file as the draft dialogs show it: relative to the root, native
+// separators.
+QString displayPath(const QString &root, const QString &path)
+{
+    return QDir::toNativeSeparators(QDir(root).relativeFilePath(path));
+}
+} // namespace
+
 bool MainWindow::resolveDraftNameConflicts(SongSession &session)
 {
     SongDraft *draft = session.draft.get();
@@ -3550,31 +3600,48 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
             ? draft->newVoicegroup
             : QString();
     // A .mid an earlier attempt wrote is this draft's own: the check waives
-    // it, and the song list's unregistered entry for it after a reload.
+    // it, and the song list's unregistered entry for it after a reload
+    // (song_table.inc still decides the label). The same for a voicegroup
+    // file an earlier attempt created but failed to finish. A rename leaves
+    // the old .mid behind only when the project claims it by now
+    // (draftMidLeftover, as a Discard decides): when in doubt, keep.
+    const bool midKept = draftMidLeftover(session) == DraftLeftover::Kept;
+    const QString ownMid = draft->wroteMidPath;
+    const QString ownVg = draft->voicegroupFileCreated && !draft->voicegroupWritten
+                              ? draft->voicegroupTarget
+                              : QString();
     const SongNameConflicts conflicts =
         SongRegistry::checkNewSongNames(root, m_project.songs(), reserved, session.doc.label(),
-                                        draft->constant, newVoicegroup, draft->wroteMidPath);
+                                        draft->constant, newVoicegroup, ownMid, nullptr, ownVg);
     if (conflicts.isEmpty())
         return true;
 
     // What an earlier, partly failed commit left in the project: the
     // dialog must not claim the song is unwritten.
     QStringList alreadyWritten;
-    const auto shown = [&root](const QString &path) {
-        return QDir::toNativeSeparators(QDir(root).relativeFilePath(path));
-    };
     if (draft->voicegroupWritten && !draft->voicegroupTarget.isEmpty())
-        alreadyWritten.append(tr("%1 (and its include line)").arg(shown(draft->voicegroupTarget)));
-    if (!draft->wroteMidPath.isEmpty())
-        alreadyWritten.append(shown(draft->wroteMidPath));
+        alreadyWritten.append(
+            tr("%1 (and its include line)").arg(displayPath(root, draft->voicegroupTarget)));
+    else if (!ownVg.isEmpty() && QFileInfo::exists(ownVg))
+        alreadyWritten.append(tr("%1 (partly)").arg(displayPath(root, ownVg)));
+    if (midKept)
+        alreadyWritten.append(tr("%1 (the project uses it by now, so a rename keeps it)")
+                                  .arg(displayPath(root, draft->wroteMidPath)));
+    else if (!draft->wroteMidPath.isEmpty())
+        alreadyWritten.append(displayPath(root, draft->wroteMidPath));
     SongRenameDialog dialog(&m_project, reserved, session.doc.label(), draft->constant,
-                            !newVoicegroup.isEmpty(), conflicts.messages(), draft->wroteMidPath,
+                            !newVoicegroup.isEmpty(), conflicts.messages(), ownMid, ownVg,
                             alreadyWritten, this);
     if (dialog.exec() != QDialog::Accepted)
         return false;
 
     const QString label = dialog.label();
-    const QString midPath = root + QStringLiteral("/sound/songs/midi/%1.mid").arg(label);
+    const QString midPath = SongRegistry::midPathFor(root, label);
+    // A partly written voicegroup file under the old name: removed with the
+    // rename when nothing uses it (as a Discard would), else left be.
+    const QString oldVgFile = !ownVg.isEmpty() && label != newVoicegroup ? ownVg : QString();
+    const bool removeOldVg =
+        !oldVgFile.isEmpty() && draftVoicegroupLeftover(session) == DraftLeftover::Removed;
     // The voicegroup is named after the song. First, so a failure leaves the
     // draft exactly as it was.
     if (!newVoicegroup.isEmpty() && label != newVoicegroup) {
@@ -3584,10 +3651,24 @@ bool MainWindow::resolveDraftNameConflicts(SongSession &session)
             return false;
         }
     }
+    if (!oldVgFile.isEmpty()) {
+        // Not the renamed draft's file either way.
+        draft->voicegroupFileCreated = false;
+        if (removeOldVg && !QFile::remove(oldVgFile) && QFileInfo::exists(oldVgFile)) {
+            QMessageBox::warning(this, tr("Save Song"),
+                                 tr("Could not delete %1, written partly by an earlier attempt to "
+                                    "save this song. It is not part of the renamed song; delete it "
+                                    "yourself.")
+                                     .arg(QDir::toNativeSeparators(oldVgFile)));
+        }
+        invalidateVgCatalog();
+    }
     // The draft's own earlier .mid would be left behind under the old name.
+    // One the project claims by now stays, and is no longer the draft's.
     if (!draft->wroteMidPath.isEmpty() &&
         QDir::cleanPath(draft->wroteMidPath) != QDir::cleanPath(midPath)) {
-        if (QFile::remove(draft->wroteMidPath) || !QFileInfo::exists(draft->wroteMidPath)) {
+        if (midKept || QFile::remove(draft->wroteMidPath) ||
+            !QFileInfo::exists(draft->wroteMidPath)) {
             draft->wroteMidPath.clear();
         } else {
             // Still the draft's (a rename back waives it again); say so
@@ -3633,8 +3714,8 @@ bool MainWindow::renameDraftVoicegroup(SongSession &session, const QString &newN
                 source->setVoice(slot, *voice);
         }
     }
-    const QString oldFile = draft->folder + QLatin1Char('/') + oldName + QStringLiteral(".inc");
-    const QString newFile = draft->folder + QLatin1Char('/') + newName + QStringLiteral(".inc");
+    const QString oldFile = draft->folderFile(oldName);
+    const QString newFile = draft->folderFile(newName);
     {
         QFile out(newFile);
         const QByteArray content = source ? source->renderPreview() : bytes;
@@ -3705,14 +3786,24 @@ bool MainWindow::commitDraftVoicegroup(SongSession &session, QString *error)
             invalidateVgCatalog();
         }
         // Through the source, so the voice edits are in it; the name check
-        // before this made sure the file doesn't exist.
-        if (!session.vgSource->save(error))
+        // before this made sure the file doesn't exist (or is the draft's
+        // own, from an earlier attempt). save() creates it before writing,
+        // so a failed save can leave it behind: the draft's, like a .mid
+        // (wroteMidPath), whatever the result.
+        const QString target = session.vgSource->filePath();
+        const bool existed = QFileInfo::exists(target);
+        const bool saved = session.vgSource->save(error);
+        if (!existed && QFileInfo::exists(target))
+            draft->voicegroupFileCreated = true;
+        if (!saved)
             return false;
         for (const auto &def : newDefs)
             m_pendingSynths.remove(def.first);
         // An ordinary project voicegroup from here: loads find the project
-        // copy, the folder goes, and the staleness check has an mtime.
+        // copy, the folder goes, and the staleness check has an mtime. Its
+        // pristine bytes are never parsed again.
         draft->voicegroupWritten = true;
+        draft->voicegroupBytes.clear();
         draft->removeFolder();
         session.vgFileTime = QFileInfo(session.vgSource->filePath()).lastModified();
         invalidateVgCatalog();
@@ -3739,6 +3830,19 @@ void MainWindow::abandonDraftVoicegroup(SongSession &session)
     // from the abandoned one becomes a -G no-op); the voice edits made on
     // it stay behind as inert entries (no voicegroup has their load name).
     session.doc.renameDraftVoicegroupArg(draft->voicegroupArg(), session.doc.cfg().voicegroupArg);
+    // A file an earlier attempt created but failed to finish: nothing will
+    // complete it now. Removed unless something uses it (as a Discard would).
+    if (draft->voicegroupFileCreated) {
+        if (draftVoicegroupLeftover(session) == DraftLeftover::Removed &&
+            !QFile::remove(draft->voicegroupTarget) && QFileInfo::exists(draft->voicegroupTarget)) {
+            statusBar()->showMessage(
+                tr("Could not delete %1, written partly by an earlier attempt to save this song")
+                    .arg(QDir::toNativeSeparators(draft->voicegroupTarget)),
+                10000);
+        }
+        draft->voicegroupFileCreated = false;
+        invalidateVgCatalog();
+    }
     // No longer choosable, reserved, or searched by the loader.
     draft->newVoicegroup.clear();
     draft->voicegroupTarget.clear();
@@ -3842,7 +3946,8 @@ MainWindow::DraftLeftover MainWindow::draftMidLeftover(const SongSession &sessio
 MainWindow::DraftLeftover MainWindow::draftVoicegroupLeftover(const SongSession &session) const
 {
     const SongDraft *draft = session.draft.get();
-    if (!draft || !draft->voicegroupWritten || draft->newVoicegroup.isEmpty())
+    if (!draft || !(draft->voicegroupWritten || draft->voicegroupFileCreated) ||
+        draft->newVoicegroup.isEmpty())
         return DraftLeftover::None;
     // Gone already, and no include line of the commit's left to take back.
     if (!draft->includeLineAdded &&
@@ -3859,9 +3964,7 @@ QStringList MainWindow::draftLeftovers(const SongSession &session, QStringList *
     const SongDraft *draft = session.draft.get();
     if (!draft)
         return leftovers;
-    const auto shown = [&session](const QString &path) {
-        return QDir::toNativeSeparators(QDir(session.root).relativeFilePath(path));
-    };
+    const auto shown = [&session](const QString &path) { return displayPath(session.root, path); };
     const DraftLeftover mid = draftMidLeftover(session);
     if (mid == DraftLeftover::Removed)
         leftovers.append(shown(draft->wroteMidPath));
@@ -3926,6 +4029,7 @@ bool MainWindow::removeDraftLeftovers(SongSession &session)
     // so a repeat (the teardown after a project switch's rollback) is a
     // no-op, and nothing it kept stays reserved.
     draft->wroteMidPath.clear();
+    draft->voicegroupFileCreated = false;
     if (draft->voicegroupWritten) {
         draft->voicegroupWritten = false;
         draft->includeLineAdded = false;
@@ -4006,8 +4110,7 @@ void MainWindow::syncDraftVoicegroupFile(SongSession &session)
 {
     if (!session.editsDraftVoicegroup() || session.draft->folder.isEmpty())
         return;
-    QFile out(session.draft->folder + QLatin1Char('/') + session.draft->newVoicegroup +
-              QStringLiteral(".inc"));
+    QFile out(session.draft->folderFile(session.draft->newVoicegroup));
     if (!out.open(QIODevice::WriteOnly) || out.write(session.vgSource->renderPreview()) < 0)
         statusBar()->showMessage(tr("Cannot write the draft's voicegroup file."), 8000);
 }
@@ -4028,6 +4131,8 @@ void MainWindow::sweepStaleDraftFolders(const QString &root)
         lock.unlock();
         QDir(folder).removeRecursively();
     }
+    // drafts/ itself when nothing is left in it (rmdir refuses otherwise).
+    QDir().rmdir(drafts.path());
 }
 
 void MainWindow::refreshSessionIdentity(SongSession &session)
@@ -4044,8 +4149,9 @@ void MainWindow::refreshSessionIdentity(SongSession &session)
     updateWindowTitle();
     m_songLabel->setText(QStringLiteral("  %1").arg(session.doc.label()));
 #ifdef PORYDAW_SCRIPTING
-    // A no-op unless the label changed; then the plugins get song.activated
-    // for the new name and song.changed keeps flowing for this session.
+    // A no-op unless the label or the draft state changed (a rename, the
+    // commit); then the plugins get song.activated for the song as it is
+    // now and song.changed keeps flowing for this session.
     m_scriptHost->setSession(&session);
 #endif
 }
@@ -4090,7 +4196,7 @@ bool MainWindow::registerSongByLabel(const QString &label, const QString &consta
 {
     // A draft's label: the project may list a .mid its failed save left,
     // but the song is the draft's until its Save (which registers it).
-    if (const SongSession *open = sessionForLabel(label); open && open->draft) {
+    if (draftHolding(label)) {
         *error = tr("%1 is an unsaved draft; save it with Add to Project (which registers it) "
                     "or close its tab first")
                      .arg(label);
@@ -4249,7 +4355,7 @@ void MainWindow::deleteSongById(int songId)
     if (songId < 0 || songId >= m_project.songs().size())
         return;
     const SongInfo song = m_project.songs().at(songId);
-    if (const SongSession *open = sessionForLabel(song.label); open && open->draft) {
+    if (draftHolding(song.label)) {
         QMessageBox::warning(this, tr("Delete Song"), draftDeletionRefusal(song.label));
         return;
     }
@@ -4328,7 +4434,7 @@ bool MainWindow::performSongDeletion(const SongInfo &song, const QString &delete
     const QString root = m_project.root();
     // An open draft holds the label (the song listed is a .mid its failed
     // save left): its Discard owns that file, not the trash.
-    if (const SongSession *open = sessionForLabel(song.label); open && open->draft) {
+    if (draftHolding(song.label)) {
         if (error)
             *error = draftDeletionRefusal(song.label);
         return false;

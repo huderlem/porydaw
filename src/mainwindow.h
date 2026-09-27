@@ -152,16 +152,6 @@ class MainWindow : public QMainWindow
     int runBundleImportTabCheck(const QString &bundleZip, const QString &projectRoot,
                                 const QString &scratchDir);
 
-    // Import MIDI / New Song's finish (docs/draft-songs/PLAN.md): opens smf
-    // as a draft tab named label — editable and playable, but nothing is
-    // written to the project until its first save (commitDraft). A non-empty
-    // newVoicegroup (cfg's -G then names "_<newVoicegroup>") is created in
-    // memory and loaded from the draft's own folder under .porydaw/drafts/.
-    // False with *error when it can't open.
-    bool openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
-                       const QString &player, const SongCfg &cfg, const QString &newVoicegroup,
-                       QString *error);
-
     // Draft-song check (--draftcheck; draftcheck.cpp): opening, editing and
     // discarding a draft leave the project untouched; saving one commits
     // it (.mid, flags, registration) in place, undo history included.
@@ -242,6 +232,15 @@ class MainWindow : public QMainWindow
                                  std::unique_ptr<SongDraft> draft,
                                  const std::function<bool(SongDocument &, QString *)> &readDocument,
                                  QString *error);
+    // Import MIDI / New Song's finish (docs/draft-songs/PLAN.md): opens smf
+    // as a draft tab named label — editable and playable, but nothing is
+    // written to the project until its first save (commitDraft). A non-empty
+    // newVoicegroup (cfg's -G then names "_<newVoicegroup>") is created in
+    // memory and loaded from the draft's own folder under .porydaw/drafts/.
+    // False with *error when it can't open.
+    bool openDraftSong(const SmfFile &smf, const QString &label, const QString &constant,
+                       const QString &player, const SongCfg &cfg, const QString &newVoicegroup,
+                       QString *error);
     // New Song / Import finish: a draft tab (openDraftSong), then a status
     // message saying so. imported picks the wording and a failure box's
     // title.
@@ -251,8 +250,10 @@ class MainWindow : public QMainWindow
     // registration still commits, as an unregistered song), and turns the
     // session into an ordinary project song in place — its document, undo
     // history and view survive. Safe to retry after a failure. False with
-    // *error when nothing was committed. The caller (saveSession) has
-    // already settled the names (resolveDraftNameConflicts).
+    // *error when the session is still a draft: a written .inc/.mid may
+    // remain, tracked (voicegroupWritten/voicegroupFileCreated,
+    // wroteMidPath) for the retry and a Discard's rollback. The caller
+    // (saveSession) has already settled the names (resolveDraftNameConflicts).
     bool commitDraft(SongSession &session, QString *error);
     // commitDraft's voicegroup step: the draft's new voicegroup, edits
     // included, through its source's save() plus the hub's include line —
@@ -267,7 +268,8 @@ class MainWindow : public QMainWindow
     // What an earlier, partly failed commit of this draft wrote into the
     // project and a Discard removes again (docs/draft-songs/PLAN.md step 5):
     // its own .mid (wroteMidPath) and its new voicegroup's file + the
-    // include line the commit added (voicegroupWritten, includeLineAdded).
+    // include line the commit added (voicegroupWritten or, for a file a
+    // failed save left, voicegroupFileCreated; includeLineAdded).
     // Display paths, relative to the session's root. *kept (optional) gets
     // what a Discard keeps because the project has taken it over since —
     // the .mid registered or given flags (read from disk), the voicegroup
@@ -288,7 +290,8 @@ class MainWindow : public QMainWindow
     // Removes draftLeftovers from the project (keeping what draftLeftovers
     // puts in *kept); a file that can't be removed gets a warning naming
     // it. Called wherever a draft is dropped unsaved: its tab closed or
-    // replaced, a project switch (before the new project opens), quit. The
+    // replaced, a project switch (after the new project is read, before it
+    // is swapped in), quit. The
     // draft lets go of all of them, so a second call is a no-op. Reloads
     // the project when it removed something; returns whether it did.
     bool removeDraftLeftovers(SongSession &session);
@@ -362,6 +365,8 @@ class MainWindow : public QMainWindow
     SongSession *sessionForWidget(QWidget *widget) const;
     // Project-song tabs only; a bundle tab is found by its file instead.
     SongSession *sessionForLabel(const QString &label) const;
+    // The open draft holding label (sessionForLabel's match, when a draft).
+    SongSession *draftHolding(const QString &label) const;
     SongSession *sessionForBundlePath(const QString &canonicalPath) const;
     // The names open tabs hold that the project's files may not know yet
     // (docs/draft-songs/PLAN.md step 2): every project tab's label, plus

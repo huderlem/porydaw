@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonObject>
 #include <QLockFile>
 #include <QString>
@@ -71,6 +72,11 @@ struct SongDraft {
     // The commit wrote the voicegroup file: from here it is an ordinary
     // project voicegroup (a retry only makes sure of its include line).
     bool voicegroupWritten = false;
+    // The commit created voicegroupTarget itself (it did not exist before
+    // the save): set whatever the save's result, so a file a failed save
+    // left (truncated, half written) is the draft's own like wroteMidPath —
+    // the retry's name check waives it and a Discard's rollback covers it.
+    bool voicegroupFileCreated = false;
     // The commit added the voicegroup's include line to sound/voice_groups.inc
     // itself (the hub may already have had one, e.g. a dangling include the
     // user left): a Discard's rollback removes only a line it added.
@@ -90,6 +96,11 @@ struct SongDraft {
     // The new voicegroup exists only in this draft (not written yet).
     bool voicegroupPending() const { return !newVoicegroup.isEmpty() && !voicegroupWritten; }
     QString voicegroupArg() const { return QStringLiteral("_") + newVoicegroup; }
+    // A voicegroup file named name in the draft folder (the loader's copy).
+    QString folderFile(const QString &name) const
+    {
+        return folder + QLatin1Char('/') + name + QStringLiteral(".inc");
+    }
 
     // Drops the draft folder (and its lock): after the voicegroup commit,
     // and when the draft goes away (discarded, committed, replaced).
@@ -98,8 +109,12 @@ struct SongDraft {
         if (lock)
             lock->unlock();
         lock.reset();
-        if (!folder.isEmpty())
+        if (!folder.isEmpty()) {
             QDir(folder).removeRecursively();
+            // .porydaw/drafts/ itself once no draft is left in it (rmdir
+            // refuses a non-empty directory: another draft's folder stays).
+            QDir().rmdir(QFileInfo(folder).absolutePath());
+        }
         folder.clear();
         folderRelative.clear();
     }
