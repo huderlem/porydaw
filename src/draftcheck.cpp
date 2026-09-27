@@ -2482,6 +2482,104 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
                   "could not remove the planted include line");
             check(reloadProject(&error), "reloading the project failed");
         }
+        // 22h. Another voicegroup on disk names the partly written one as a
+        // drumkit (voice_keysplit_all) or keysplit sub-group (review I):
+        // Discard keeps its .inc and include line, and the prompt says so.
+        // 22i. Another tab switched to it and undid the switch: its undo
+        // history can bring the -G back, so Discard keeps it too.
+        const QString keptText =
+            QStringLiteral("The project uses %1 by now, so Discard keeps that and removes the "
+                           "rest.");
+        for (const bool viaHistory : {false, true}) {
+            const QString name = viaHistory ? QStringLiteral("mus_draftcheck_rb10")
+                                            : QStringLiteral("mus_draftcheck_rb9");
+            const QString vgPath = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            SongSession *s = nullptr;
+            if (!partialVgCommit(name, name.toUpper(), false, &s))
+                continue;
+            check(!draftVoicegroupUsedElsewhere(*s, *s->draft, m_sessions, m_project),
+                  "the guard called the draft's voicegroup used before anything used it");
+            QString referrerPath;
+            QByteArray referrerBytes;
+            SongSession *o = nullptr;
+            if (!viaHistory) {
+                // An existing voicegroup file gains a drumkit line naming it.
+                QDirIterator vgs(root + QStringLiteral("/sound/voicegroups"),
+                                 {QStringLiteral("*.inc")}, QDir::Files);
+                while (vgs.hasNext()) {
+                    const QString path = vgs.next();
+                    if (path != vgPath) {
+                        referrerPath = path;
+                        break;
+                    }
+                }
+                referrerBytes = readBytes(referrerPath);
+                const QByteArray eol = referrerBytes.contains("\r\n") ? "\r\n" : "\n";
+                QByteArray planted = referrerBytes;
+                if (!planted.isEmpty() && !planted.endsWith('\n'))
+                    planted += eol;
+                planted += "\tvoice_keysplit_all voicegroup_" + name.toUtf8() + eol;
+                QFile out(referrerPath);
+                check(!referrerPath.isEmpty() && out.open(QIODevice::WriteOnly) &&
+                          out.write(planted) == planted.size(),
+                      "could not plant the drumkit reference");
+            } else {
+                QString other;
+                for (const SongInfo &song : m_project.songs()) {
+                    if (song.isPlayable() && song.registered && !sessionForLabel(song.label)) {
+                        other = song.label;
+                        break;
+                    }
+                }
+                loadSongByLabel(other, /*newTab=*/true);
+                o = m_active;
+                if (check(o && o != s && o->doc.label() == other,
+                          "the undoing song did not open in its own tab")) {
+                    const QString before = o->doc.cfg().voicegroupArg;
+                    SongCfg taken = o->doc.cfg();
+                    taken.voicegroupArg = QStringLiteral("_") + name;
+                    o->doc.setCfg(taken);
+                    o->doc.undoStack()->undo();
+                    check(o->doc.cfg().voicegroupArg == before &&
+                              o->doc.historyNamesVoicegroupArg(QStringLiteral("_") + name),
+                          "the undone switch is not in the other tab's history");
+                }
+                m_tabs->setCurrentWidget(s->view);
+            }
+            check(draftVoicegroupUsedElsewhere(*s, *s->draft, m_sessions, m_project),
+                  viaHistory ? "the guard missed a -G in another tab's undo history"
+                             : "the guard missed a drumkit reference on disk");
+            {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                QString info;
+                prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                closeTab(m_tabs->indexOf(s->view));
+                check(prompt.answered() && !sessionForLabel(name),
+                      "the referenced-voicegroup draft did not close through the prompt");
+                check(info.contains(keptText.arg(
+                          shownPath(QStringLiteral("sound/voicegroups/%1.inc").arg(name)))),
+                      "the close prompt does not say the referenced voicegroup stays");
+            }
+            check(QFile::exists(vgPath) && includeCount(name) == 1,
+                  viaHistory ? "Discard removed a voicegroup another tab's undo could bring back"
+                             : "Discard removed a voicegroup another voicegroup references");
+            check(!QFile::exists(midiDir + name + QStringLiteral(".mid")),
+                  "Discard kept the referenced-voicegroup draft's own .mid");
+            // Back to how it was.
+            if (!referrerPath.isEmpty()) {
+                QFile out(referrerPath);
+                check(out.open(QIODevice::WriteOnly) &&
+                          out.write(referrerBytes) == referrerBytes.size(),
+                      "could not restore the referring voicegroup");
+            }
+            if (o) {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                closeTab(m_tabs->indexOf(o->view));
+            }
+            check(VoicegroupSource::deleteVoicegroup(root, name, &error),
+                  "could not delete the referenced voicegroup");
+            check(reloadProject(&error), "reloading the project failed");
+        }
         QFile::setPermissions(cfgPath, cfgPerms);
     }
 

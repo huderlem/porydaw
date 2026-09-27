@@ -121,6 +121,10 @@ class SongDocument : public QObject
     // settings edits no longer change it. Drafts only; no revision bump, no
     // undo entry.
     void renameDraftVoicegroupArg(const QString &oldArg, const QString &newArg);
+    // Whether a settings edit in the undo history (either side, macros
+    // included) names arg as its -G voicegroup: an undo or redo could make
+    // the song use it again. Read-only.
+    bool historyNamesVoicegroupArg(const QString &arg) const;
     bool save(QString *error);
 
     const QString &midPath() const { return m_midPath; }

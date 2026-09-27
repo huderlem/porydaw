@@ -3754,8 +3754,10 @@ bool MainWindow::draftVoicegroupUsedElsewhere(
     const std::vector<std::unique_ptr<SongSession>> &sessions, const DecompProject &project)
 {
     const QString arg = draft.voicegroupArg();
+    // Another tab's -G, now or after an undo/redo of a settings edit.
     for (const auto &other : sessions) {
-        if (other.get() != &session && !other->bundle && other->doc.cfg().voicegroupArg == arg)
+        if (other.get() != &session && !other->bundle &&
+            (other->doc.cfg().voicegroupArg == arg || other->doc.historyNamesVoicegroupArg(arg)))
             return true;
     }
     // The project's songs can only be checked in the draft's own project:
@@ -3766,7 +3768,16 @@ bool MainWindow::draftVoicegroupUsedElsewhere(
         if (song.cfg.voicegroupArg == arg)
             return true;
     }
-    return false;
+    // Another voicegroup's keysplit/drumkit sub-group (read from disk, as
+    // Delete Song's SongRegistry::deletableVoicegroup does): deleting it
+    // would leave that reference dangling and break the build.
+    const QString symbol = QStringLiteral("voicegroup") + arg;
+    const VgCatalogScan catalog = VoicegroupSource::catalogScan(session.root);
+    for (const auto &keysplit : catalog.keysplits) {
+        if (keysplit.first == symbol)
+            return true;
+    }
+    return catalog.drumkits.contains(symbol);
 }
 
 namespace {

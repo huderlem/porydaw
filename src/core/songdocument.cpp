@@ -400,6 +400,26 @@ void SongDocument::renameDraftVoicegroupArg(const QString &oldArg, const QString
         visit(m_undoStack.command(i));
 }
 
+bool SongDocument::historyNamesVoicegroupArg(const QString &arg) const
+{
+    const std::function<bool(const QUndoCommand *)> names = [&](const QUndoCommand *cmd) {
+        if (auto *cfgCmd = dynamic_cast<const SongCfgCommand *>(cmd)) {
+            if (cfgCmd->m_new.voicegroupArg == arg || cfgCmd->m_old.voicegroupArg == arg)
+                return true;
+        }
+        for (int c = 0; c < cmd->childCount(); c++) {
+            if (names(cmd->child(c)))
+                return true;
+        }
+        return false;
+    };
+    for (int i = 0; i < m_undoStack.count(); i++) {
+        if (names(m_undoStack.command(i)))
+            return true;
+    }
+    return false;
+}
+
 void SongDocument::adopt(SmfFile smf, const SongInfo &song)
 {
     m_smf = std::move(smf);

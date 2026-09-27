@@ -517,25 +517,26 @@ possible):
       `wroteMidPath`, so the old file falls outside the rollback. A leak
       (a stray unregistered `.mid`, recoverable), never a wrong delete.
       ✅ *(Known limitation, no code change, no harness case.)*
-- [x] **"Used elsewhere" sees only `-G` args** (review 2026-09-27, I;
-      known limitation): `draftVoicegroupUsedElsewhere` compares other
-      tabs' and project songs' `cfg().voicegroupArg` only. It misses
-      another voicegroup referencing `voicegroup_<name>` as a keysplit or
-      drum sub-group, and other tabs' undo history (a settings edit that
-      would switch back to it). The review expected the guard's
-      conservative default (review C) to turn every miss into a kept stray;
-      it does only where the guard can't check at all (no project open,
-      another root). In the draft's own project a miss means the rollback
-      deletes the voicegroup: a keysplit/drumkit made to name it since (the
-      dock lists it after the partial commit's reload) then dangles and
-      breaks the ROM build, and undoing the other tab's switch brings back
-      a `-G` naming a deleted file. Narrow (the user must pick the partly
-      written voicegroup in another voicegroup's keysplit, then Discard the
-      draft), but a wrong delete, not a stray. The cheap fix, if wanted:
-      the keysplit/drumkit half of `SongRegistry::deletableVoicegroup`
-      (`VoicegroupSource::catalogScan`), which Delete Song already uses.
-      ✅ *(Known limitation as recorded by the 2026-09-27 review brief, no
-      code change, no harness case; flagged in the review-fixes entry.)*
+- [x] **"Used elsewhere" sees only `-G` args** (review 2026-09-27, I):
+      `draftVoicegroupUsedElsewhere` compared other tabs' and project
+      songs' `cfg().voicegroupArg` only. It missed another voicegroup
+      referencing `voicegroup_<name>` as a keysplit or drum sub-group, and
+      other tabs' undo history (a settings edit that would switch back to
+      it). The conservative default (review C) covers only a project the
+      guard can't check; in the draft's own project a miss deleted the
+      voicegroup — a keysplit/drumkit made to name it since then dangles
+      and breaks the ROM build, and an undo in the other tab brings back a
+      `-G` naming a deleted file. A wrong delete, not a stray.
+      ✅ *(Fixed, follow-up commit after the review fixes: the guard also
+      counts another voicegroup's `voice_keysplit`/`voice_keysplit_all`
+      line naming it (`VoicegroupSource::catalogScan` on the draft's root,
+      as Delete Song's `SongRegistry::deletableVoicegroup`), and another
+      tab's undo history (`SongDocument::historyNamesVoicegroupArg`, a
+      read-only walk of the `SongCfgCommand`s, macros included).
+      `--draftcheck` 22h (a drumkit line planted in an existing voicegroup
+      file → Discard keeps the `.inc` + include line, the prompt says so)
+      and 22i (another tab switches to it and undoes → kept, same prompt).
+      Mutation-tested: dropping either half fails its section.)*
 
 **Acceptance:** checklist ticked in the progress entry. Full sweep on
 normal and ASAN.
@@ -1225,7 +1226,23 @@ and why, what's still owed.
       project stays open (previously a failed open had already closed it).
     - Finding on I: the brief's claim that a miss "can only cause a kept
       stray" does not hold in the draft's own project — see the checklist
-      item; recorded, not fixed, per the brief.
+      item. First recorded only; then fixed in a follow-up commit at the
+      coordinator's request (below).
+  - **Review fix I (2026-09-27, follow-up).** `draftVoicegroupUsedElsewhere`
+    also keeps the voicegroup when another voicegroup file on disk names it
+    as a keysplit/drumkit sub-group (the `catalogScan` half of
+    `deletableVoicegroup`), or when another open tab's undo history holds
+    a settings edit naming its `-G` (`SongDocument::
+    historyNamesVoicegroupArg`; cheap — the same walk
+    `renameDraftVoicegroupArg` does, read-only). `--draftcheck` 22h
+    (planted `voice_keysplit_all voicegroup_<name>` in an existing
+    voicegroup file, restored afterwards) and 22i (switch + undo in another
+    tab): Discard keeps the `.inc` and include line, removes the `.mid`,
+    the prompt says the voicegroup stays. Mutation-tested: without the
+    catalog check 22h fails, without the history check 22i fails. Results:
+    `--draftcheck` PASS on a fresh scratch (normal and ASAN); full
+    `tools/run_checks.sh` PASS on the normal and ASAN builds (mkcheck
+    skipped, no fork given).
     - Docs: manual (`new-song.md`) — kept files and the browser's
       Register/Delete/click on a draft's entry; CHANGELOG entry; API.md +
       regenerated `docsrc/reference/scripting.md`.

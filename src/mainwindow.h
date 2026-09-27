@@ -276,9 +276,11 @@ class MainWindow : public QMainWindow
     enum class DraftLeftover { None, Removed, Kept };
     DraftLeftover draftMidLeftover(const SongSession &session) const;
     DraftLeftover draftVoicegroupLeftover(const SongSession &session) const;
-    // Whether another tab or a song of the draft's own project names the
-    // draft's written voicegroup. True ("keep") whenever that can't be
-    // checked: no project open, or another project's (a project switch).
+    // Whether something else uses the draft's written voicegroup: another
+    // tab's -G (current, or restorable by its undo history), a song of the
+    // draft's own project, or another voicegroup's keysplit/drumkit line on
+    // disk. True ("keep") whenever the project can't be checked: none open,
+    // or another project's (a project switch).
     static bool
     draftVoicegroupUsedElsewhere(const SongSession &session, const SongDraft &draft,
                                  const std::vector<std::unique_ptr<SongSession>> &sessions,
