@@ -1,6 +1,6 @@
 # Draft Songs — Import MIDI / New Song without touching the project
 
-Status: **decisions confirmed 2026-09-26**; steps 1–4 done 2026-09-26. File/line references verified
+Status: **decisions confirmed 2026-09-26**; steps 1–4 done 2026-09-26, step 5 done 2026-09-27. File/line references verified
 against `main` at `1fc113a`. Work the steps **in order, one agent per step**;
 each step must leave `main` green (`tools/run_checks.sh`) and ends with a
 progress entry at the bottom of this file.
@@ -101,6 +101,9 @@ affects **before** starting the next step.
   `:4034`) writes `.porydaw/<label>.json`; `persistOpenTabs` (`:1577`)
   records labels; `refreshSessionSongIds` (`:1601`) re-matches by label
   after every reload.
+  *(Step 5: scripting's `storage.song` also writes `.porydaw/<label>.json`;
+  for a draft it uses `SongDraft::pluginStore` instead, and
+  `flushDraftPluginStore` writes it at commit.)*
 - `sessionForLabel` (`:1276`) matches every non-bundle session, drafts
   included. That's what we want: it stops a second tab from opening the
   same label.
@@ -133,6 +136,17 @@ affects **before** starting the next step.
   (`sessionForLabel` → `open->doc`, `open->vgSource`), so a draft can
   probably be exported as a `.porysong` with no extra work. It passes
   registration hints only from a project `SongInfo`, and a draft has none.
+  *(Step 5: a draft's hints now come from its `SongDraft`; exporting a
+  draft, new voicegroup included, needed nothing else.)*
+- *(Step 5)* A draft dropped unsaved goes through `removeDraftLeftovers`
+  wherever that happens: `destroySession` (tab close, project-switch
+  teardown, Delete Song of its own leftover `.mid`), `loadSong`'s replace
+  in place (right after the prompt, before `populateSession`), and
+  `closeEvent`. It works from `session.root` and the
+  draft's own absolute paths, because `openProjectDir` opens the new project
+  before `teardownSessions`.
+- *(Step 5)* `DecompProject::open`/`reload` begins with `close()`: a failed
+  reload leaves the project model empty (no root, no songs), not stale.
 - `refreshRegisterAction` (`:3197`) is already disabled when `songId < 0`.
 - `NewSongWizard` checks names at `src/ui/newsongwizard.cpp:97-105`
   (label against `m_project->songs()`, `.mid` existence), and at `:164` /
@@ -392,52 +406,64 @@ and fix it.
 Checklist (each gets a harness assertion, or a written reason why none is
 possible):
 
-- [ ] **Song Settings** on a draft: edits `doc.cfg()`. The commit then
+- [x] **Song Settings** on a draft: edits `doc.cfg()`. The commit then
       writes the flags from the edited cfg (via `m_hadCfgLine=false`).
       `m_project.setSongCfg` stays skipped while `songId<0`.
-- [ ] **Export Bundle** on a draft: exports from memory. Pass the draft's
+      ✅ *(Step 5: `--draftcheck` §21 — `doc.setCfg` (the dialog's accept) on a draft leaves the song list alone, and the commit's flags carry the edited volume/reverb.)*
+- [x] **Export Bundle** on a draft: exports from memory. Pass the draft's
       constant and player as registration hints
       (`exportBundleByLabel`, `:2524`).
-- [ ] **Export WAV** works on a draft.
-- [ ] **Register Song** is disabled on a draft (already true via
+      ✅ *(Step 5: `exportBundleByLabel` passes `draft->constant`/`player` for a draft. `--draftcheck` §21 drives File → Export Song Bundle on a new-voicegroup draft and reads the manifest back: label, constant, a non-default player, the draft's voicegroup.)*
+- [x] **Export WAV** works on a draft.
+      ✅ *(Step 5: `--draftcheck` §21 drives File → Export WAV — options dialog, file dialog, progress — on a draft; the file renders.)*
+- [x] **Register Song** is disabled on a draft (already true via
       `songId<0`; assert it).
-- [ ] **Import Sample for slot** into a draft voicegroup: the sample is
+      ✅ *(Step 5: `--draftcheck` §21 asserts the action is disabled on the draft, and still disabled on the fully registered committed song.)*
+- [x] **Import Sample for slot** into a draft voicegroup: the sample is
       write-through by design (`importSampleForSlot`), but the voice
       assignment rides the draft's voicegroup. Confirm it works and is
       only committed with the draft. The sample file itself is still
       written right away; note this in the manual.
-- [ ] **Project switch** with a draft open: the prompt → Add commits into
+      ✅ *(Step 5: `--draftcheck` §21 drives `importSampleForSlot(2)` — file dialog + Sample Editor — on a new-voicegroup draft: the sample `.wav` is written through, the slot's voice is in the draft source and folder copy only, the `.inc` is absent until Save, and the committed `.inc` has it. Manual wording checked and extended in `docsrc/manual/new-song.md`.)*
+- [x] **Project switch** with a draft open: the prompt → Add commits into
       the **old** project before the switch; Discard drops it.
-- [ ] **Quit** with a draft open: same prompt.
-- [ ] **Scripting** (`src/scripting/scriptapi.cpp`): `song.midPath`
+      ✅ *(Step 5: `--draftcheck` §24 — `openProjectDir` answering Add commits (registered, `.mid` present after the reopen); answering Discard writes nothing. §22c: Discard of a partly committed draft removes its `.mid`. Same root reopened: see the progress entry.)*
+- [x] **Quit** with a draft open: same prompt.
+      ✅ *(Step 5: `--draftcheck` §25 (last section) — `close()` answering Cancel keeps the draft and refuses; Add commits; Discard of a partly committed draft removes its `.mid`.)*
+- [x] **Scripting** (`src/scripting/scriptapi.cpp`): `song.midPath`
       (`:1225`) returns the future path. Add `song.isDraft` (update
       `docs/scripting/API.md` and `porydaw.d.ts`). The view-sidecar path
       API (`:1795-1810`) returns empty for a draft. `openSong(label)`
       (`:2542`) on a draft's label focuses the draft tab. `saveSong`
       commits it. Add a `scriptcheck` case.
-- [ ] **Loading the same label from the browser** while a draft holds it:
+      ✅ *(Step 5: `song.isDraft` (`SongApi`, `prelude.js`, API.md, `porydaw.d.ts`); `midPath` documented as the future path; the song-store path is empty for a draft (in-memory store, below); `project.open(label)` focuses an open draft (the `openSong` binding); `song.save()` commits. `--scriptcheck`'s draft block asserts each.)*
+- [x] **Loading the same label from the browser** while a draft holds it:
       impossible after step 2, since the label is reserved. Assert that
       the wizard rejects it.
       *(Step 2: `--draftcheck` section 7 already asserts the wizard
       rejects an open draft's label and constant; tick this with a
       reference to it.)*
-- [ ] **`cleanupVgPreview`** doesn't touch `drafts/`. *(Step 3:
+      ✅ *(Step 5: covered by `--draftcheck` §7 — the wizard rejects an open draft's label and constant — and §2b, `openDraftSong`'s own refusal.)*
+- [x] **`cleanupVgPreview`** doesn't touch `drafts/`. *(Step 3:
       `--draftcheck` section 13 already asserts the draft folder survives
       `cleanupVgPreview`; tick this with a reference to it.)*
-- [ ] **New Voicegroup (dock) / `project.createVoicegroup` (scripting)**
+      ✅ *(Step 5: covered by `--draftcheck` §13, the draft folder survives `cleanupVgPreview`.)*
+- [x] **New Voicegroup (dock) / `project.createVoicegroup` (scripting)**
       while a draft reserves a voicegroup name (step 3 note): both write
       through and don't consult `reservedSongNames`, so they can create
       the draft's voicegroup name first. The commit's name check then
       catches it (Rename), so nothing is overwritten; decide whether
       either should refuse a reserved name up front.
-- [ ] **New voicegroup vs. other writers and scripts** (step 3 review,
+      ✅ *(Step 5, decided: refuse up front. `createVoicegroupNamed` (the dock's New Voicegroup and `project.createVoicegroup`) runs `checkNewSongNames` with `reservedSongNames()` after its catalog check and fails with the wizard's "A voicegroup named voicegroup_<name> already exists.". `--draftcheck` §23, `--scriptcheck` draft block.)*
+- [x] **New voicegroup vs. other writers and scripts** (step 3 review,
       H; extends the item above): `createVoicegroupNamed`, bundle import,
       scripting `project.voicegroups()` and `edit.setSettings({voicegroup})`
       (`scriptapi.cpp` ~2336, ~2858) use the raw catalog, not
       `voicegroupChoices` — a script can't switch a draft back to its own
       new voicegroup, and the other writers don't refuse a draft-reserved
       name up front (the commit's Rename still catches it).
-- [ ] **Failed commit after the `.mid` write** (review 2026-09-26, E):
+      ✅ *(Step 5: `project.voicegroups()` and `edit.setSettings({voicegroup})` use the new `HostBindings::voicegroupChoices` (the window's `voicegroupChoices(active)`); `--scriptcheck` switches a draft away and back to its own voicegroup. Bundle import: `ImportOptions::reserved` (from `reservedSongNames()`, in `importBundleFile` and the Import dialog) makes the plan skip a draft's label, constant and voicegroup names (next free suffix) and refuse one typed in; `--draftcheck` §21. `createVoicegroupNamed` is the item above.)*
+- [x] **Failed commit after the `.mid` write** (review 2026-09-26, E):
       `commitDraft` calls `doc.save()`, which writes the `.mid` and then the
       flags; if the flags write fails, the `.mid` stays on disk while the
       session is still a draft. A later Discard then leaves a stray,
@@ -454,7 +480,8 @@ possible):
       orphaned. Decide roll-back vs. warn-on-Discard for the `.mid` and the
       `.inc` together; `--draftcheck` section 18 already produces that
       state.)*
-- [ ] **Voicegroup symbols the name check can't see** (step 3 review, G;
+      ✅ *(Step 5, decided: roll back. `removeDraftLeftovers` — from `destroySession`, a replace in place (`loadSong`) and `closeEvent` — deletes `wroteMidPath` and, when `voicegroupWritten`, the `.inc` + include line (`VoicegroupSource::deleteVoicegroup`), then reloads the project; a removal that fails warns ("Discard Draft") naming the file. The close prompt lists them (`draftLeftovers`). `--draftcheck` §22a (both files, prompt text, content fingerprint), §22b (the warning, via a read-only midi directory), §22c/d, §25.)*
+- [x] **Voicegroup symbols the name check can't see** (step 3 review, G;
       known limitation, consistent with `VoicegroupSource::open()` and the
       catalog): `isDeclared` / `declaredSymbols` / the catalog scan only
       `.inc` files and the `voicegroup…::` / `voice_group` forms. They miss
@@ -463,14 +490,16 @@ possible):
       (`bundleimport.cpp:140` accepts them), so such a name can pass the
       check and fail the ROM build on a duplicate symbol. Fix all four
       together if ever.
-- [ ] **Register Song after a failed reload** (review 2026-09-26, F): if
+      ✅ *(Step 5: known limitation, no code change — not trivial (four scanners change together). No harness case.)*
+- [x] **Register Song after a failed reload** (review 2026-09-26, F): if
       `reloadProjectOrWarn()` fails inside `commitDraft`, the committed
       session keeps `songId == -1`, so Register Song stays disabled even
       though the registration-failure warning may just have said "use
       File → Register Song to retry". Either enable Register Song for a
       committed session whose ID is unresolved (by label), or resolve
       `songId` directly from the registration result.
-- [ ] **`storage.song` on a draft** (review 2026-09-26, G; part of the
+      ✅ *(Step 5: `commitDraft` sets `songId` from `registerSong`'s result before the reload, which still re-resolves it by label. No harness case — see the progress entry for why the scenario can't be forced, and why it can't help when the registration itself failed.)*
+- [x] **`storage.song` on a draft** (review 2026-09-26, G; part of the
       Scripting item above, called out because it writes today):
       `storage.song.set`/`remove` (`StorageApi::songSet` →
       `writeSongStore`, `src/scripting/scriptapi.cpp` ~1819–1884) resolve
@@ -480,6 +509,7 @@ possible):
       store in memory and flush it at commit). Reads (`songStore`) can
       also pick up a stale sidecar left by an earlier song of the same
       name; a draft should read an empty (or in-memory) store.
+      ✅ *(Step 5, decided: in memory. `SongDraft::pluginStore`; `songStore`/`writeSongStore` use it for a draft (no sidecar read or written); `flushDraftPluginStore` writes it at commit under the final label, replacing any stale `plugins` object. API.md documents it. `--scriptcheck` draft block.)*
 
 **Acceptance:** checklist ticked in the progress entry. Full sweep on
 normal and ASAN.
@@ -982,3 +1012,108 @@ and why, what's still owed.
       shots env var; full `tools/run_checks.sh` on the normal and ASAN
       builds: PASS (draftcheck, tabcheck, onboardcheck, vgsavecheck,
       bundlecheck and scriptcheck included; mkcheck skipped, no fork given).
+- **2026-09-27 — Step 5 (the rest of the app).** Commit: see `git log` on
+  branch `draft-song` ("Draft songs step 5 …"). Every checklist item above
+  is ticked with its assertion or reason.
+  - Decision E/F (**roll back**): `MainWindow::draftLeftovers` (display
+    paths) and `removeDraftLeftovers`. A Discard — tab close
+    (`destroySession`), replace in place (`loadSong`, right after the
+    prompt), project switch (`teardownSessions` → `destroySession`), quit
+    (`closeEvent`) — deletes `wroteMidPath` and, when `voicegroupWritten`,
+    the `.inc` and its include line through `VoicegroupSource::
+    deleteVoicegroup`, then reloads the project (a reload may already list
+    the `.mid` as an unregistered song). A failed removal warns ("Discard
+    Draft", modal) with the paths. The draft close prompt's informative text
+    gains "An earlier save that failed partway already wrote into the
+    project: <paths>. Discard removes what it wrote." Flags are not touched:
+    `doc.save` only fails after the `.mid` when the single flags write
+    failed, so no flags line of the draft's exists.
+  - Decision (**refuse reserved voicegroup names**): `createVoicegroupNamed`
+    (dock New Voicegroup, `project.createVoicegroup`) adds
+    `checkNewSongNames(…, reservedSongNames(), …, name)` after its catalog
+    check, with the wizard's message. Bundle import: `ImportOptions::reserved`
+    (`importBundleFile` and `BundleImportDialog`, new constructor argument)
+    — the plan's `firstFree` skips a draft's label, constant and voicegroup
+    names; a typed label/constant a draft holds is refused with the
+    existing clash message.
+  - Decision (**Register Song after a failed reload**): `commitDraft` sets
+    `session.songId` from `registerSong`'s result before the reload.
+  - Decision (**`storage.song` in memory**): `SongDraft::pluginStore`
+    (plugin id → store). `StorageApi::songStore`/`writeSongStore` use it
+    for a draft (empty path; no sidecar read, so a stale sidecar is never
+    seen); `MainWindow::flushDraftPluginStore` merges it into
+    `.porydaw/<label>.json` in `commitDraft` (after the registration, before
+    `draft.reset()`), replacing the sidecar's whole `plugins` object; a
+    failed write is a status message (the song is committed). API.md
+    documents it.
+  - Also: `exportBundleByLabel` hints from the draft; the `openSong` binding
+    focuses an open draft's tab; `HostBindings::voicegroupChoices`
+    (`voicegroupChoices(active)`) feeds `project.voicegroups()` and
+    `edit.setSettings`; `song.isDraft` (`SongApi`, `prelude.js`, API.md,
+    `porydaw.d.ts`); API.md notes for `midPath`, `save()`, `open()`,
+    `voicegroups()`, `createVoicegroup`.
+  - Harness (`src/draftcheck.cpp`): `treeFingerprint(root, byContent)`
+    digests listed files by content (the hub, which a rollback rewrites
+    back); `PromptAnswerer::onDialog(title, action, times)` and it lets a
+    `QProgressDialog` be. New sections: 21 — Register Song disabled, Song
+    Settings, File → Export WAV and Export Song Bundle driven through their
+    dialogs (manifest label/constant/non-default player/voicegroup),
+    bundle-import plans with and without the reservation, Import Sample for
+    slot 2 driven through its file dialog and Sample Editor, then the
+    commit. 22a — new-voicegroup draft, read-only `midi.cfg` → `.inc` +
+    include + `.mid` land → close prompt lists both → Discard → all gone,
+    content fingerprint equals the pre-draft one. 22b — read-only midi
+    directory → "Discard Draft" warning naming the `.mid`. 22c project
+    switch and 22d replace in place, Discard → `.mid` gone. 23 — New
+    Voicegroup refused on a reserved name, nothing written. 24 — project
+    switch Add commits, Discard writes nothing. 25 (last) — quit: Cancel,
+    Add, Discard of a partial commit. `--scriptcheck` draft block (in
+    `runScriptHostCheck`): `isDraft`, `midPath`, stale sidecar unseen,
+    in-memory store, `voicegroups()`, `setSettings` away and back,
+    `createVoicegroup` refused, `project.open` focuses, `song.save()`
+    commits (a modal guard fails instead of hanging), sidecar holds exactly
+    the draft's store, cleanup.
+  - Mutation-tested: no-op `removeDraftLeftovers` fails 22a–d and 25;
+    dropping the export hints fails 21; dropping the bundle reservation
+    fails 21; dropping `createVoicegroupNamed`'s check fails 23 and
+    scriptcheck; dropping the draft branch of `songStore`, the
+    `voicegroupChoices` binding or the `openSong` shortcut fails
+    scriptcheck.
+  - No harness case: (1) Register Song after a failed reload — the only way
+    `DecompProject::reload` fails is an unreadable `song_table.inc`, which
+    `registerSong` has just read and written, so it can't be forced between
+    them. More importantly the reviewed scenario can't be helped by either
+    option: when the *registration* failed there is no ID to take, and a
+    failed reload starts with `DecompProject::close()`, so the model has no
+    songs (and no root) — Register Song (`registerSongByLabel`) would find no
+    song to register either way. The decision is implemented as given; it
+    only keeps a successfully registered song's ID if the reload fails. (2)
+    Item G (`.s` files, single-colon labels): documented limitation, no
+    change. (3) The `draftVoicegroupUsedElsewhere` guard (a Discard keeps a
+    partly written voicegroup that another tab or song now names) is not
+    exercised.
+  - Deviations: (1) Bundle import avoids reserved names (next free suffix)
+    instead of refusing, since the voicegroup names are chosen by the plan,
+    not the user; only a typed label/constant is refused. (2) The rollback
+    keeps the voicegroup when something else now uses it (guard above). (3)
+    Project switch was tested by reopening the same root (a second 800 MB
+    project copy is too heavy); the rollback uses `session.root` and the
+    draft's absolute paths, since `openProjectDir` opens the new project
+    before the teardown. (4) Pending synth definitions a partial commit wrote
+    (`writeSynthDefinitions`, shared files) are not rolled back. (5) A
+    replace in place whose load then fails leaves the tab a draft with its
+    leftovers already removed; if that included its voicegroup, a later
+    commit would name a deleted `-G` (needs Discard + an unreadable target
+    `.mid` + a partial voicegroup commit). (6) Song Settings is asserted
+    through `doc.setCfg`, the dialog's accept path, not by driving the
+    dialog.
+  - Docs: `docsrc/manual/new-song.md` (Discard removes what a failed save
+    wrote; Import Sample stays; the prompt on project switch/quit),
+    CHANGELOG "Changed" entry extended, `docsrc/reference/scripting.md`
+    regenerated from API.md (`tools/gen_scripting_docs.py`).
+  - Results: `--draftcheck` and `--scriptcheck` PASS on fresh scratches
+    (sections 22a–d and 25 ran, not skipped); full `tools/run_checks.sh`
+    PASS on the normal and ASAN builds (mkcheck skipped, no fork given). The
+    first normal sweep failed only `gen_scripting_docs` (the reference page
+    was stale after the API.md edits); regenerated, and the rerun passed.
+  - Owed: step 6.

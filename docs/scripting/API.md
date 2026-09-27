@@ -69,14 +69,14 @@ export function deactivate() {}
 | `isOpen`, `root` | whether a project is open, and its folder |
 | `songs()` | `[{id, label, constant, player, midPath, hasMid, registered, registrationGaps, settings}]`, every song of the project. |
 | `song(label)` | one entry of `songs()`, or `null` |
-| `open(label, {newTab?})` | opens the song in the active tab (or a new tab) |
+| `open(label, {newTab?})` | opens the song in the active tab (or a new tab). An open draft's label switches to the draft's tab. |
 | `registration(label)` | `{complete, inSongTable, inSongsH, inLdScript, inCharmap, inDebugMenu, gaps}` |
 | `registerSong(label, {constant?, player?})` | same as `File → Register Songs` |
 | `unregisterSong(label)` | |
 | `reload()` | re-reads the project's music data |
 | `musicPlayers()` | `[{name, number, trackCount}]` |
-| `voicegroups()` | `[{arg, name}]`, every voicegroup, as its `-G` arg (`"_abandoned_ship"`) and display name (`"abandoned_ship"`) |
-| `createVoicegroup(name, {copyFrom?})` | writes `sound/voicegroups/<name>.inc` (can be copied from an existing voicegroup) |
+| `voicegroups()` | `[{arg, name}]`, every voicegroup, as its `-G` arg (`"_abandoned_ship"`) and display name (`"abandoned_ship"`). When the active song is a draft with a new voicegroup, that voicegroup is listed too (it is written when the draft is saved), so `edit.setSettings({voicegroup})` can switch back to it. |
+| `createVoicegroup(name, {copyFrom?})` | writes `sound/voicegroups/<name>.inc` (can be copied from an existing voicegroup). Throws if the name is taken, including by an open draft's new voicegroup. |
 | `exportBundle(label, path)` | writes the song as a `.porysong` song bundle (same as `File → Export Song Bundle`). |
 | `importBundle(path, {label?, constant?, player?})` | imports a `.porysong` file (or bundle folder) into the project and opens the song in a new tab, like the bundle tab's `Import into project…`. |
 
@@ -90,9 +90,10 @@ export function deactivate() {}
 |---|---|
 | `loaded` | whether any song is currently loaded |
 | `readOnly` | whether the song is a read-only song bundle |
+| `isDraft` | whether the song is a draft: a song from `File → Import MIDI…` or `File → New Song…` that isn't in the project yet. Its first `save()` adds it to the project. |
 | `revision` | increments on every edit/undo/redo to the song |
 | `label` | the song's name/label |
-| `midPath` | the filepath to the song's midi file |
+| `midPath` | the filepath to the song's midi file. For a draft, the path its first save will write (the file doesn't exist yet). |
 | `ticksPerBeat` | number of ticks per beat |
 | `ticksPerClock` | |
 | `startTempo` | tempo at the start of the song (beats per minute) |
@@ -100,7 +101,7 @@ export function deactivate() {}
 | `trackBudget` | maximum number of playable tracks |
 | `endTick` | the end-of-song tick, everything in the song lives at ticks before this |
 | `settings()` | the song's `midi.cfg` settings: `{voicegroup, voicegroupName, masterVolume, reverb, priority, exactGate, extendedClocks, noCompression, flags}` — `voicegroup` is the `-G` arg, `reverb` is `null` while the `-R` flag is absent (the build then uses 50), `flags` the raw flag list |
-| `save()` | same as `File → Save` |
+| `save()` | same as `File → Save`. On a draft, this adds the song to the project. |
 | `loop()` | gets the loop region. `{start, end}` or `null` |
 | `timeSigs()` | gets the time signature events `[{tick, numerator, denominator}]` |
 | `tracks()` | gets the current state of the tracks `[{index, name, chunk, channel, muted, soloed, voice}]`. `chunk` is the track's SMF chunk index. |
@@ -462,7 +463,10 @@ The `register` spec:
 `porydaw.storage.song` has the same four calls for values that belong to the
 **song**: they live in the song's sidecar (`<project>/.porydaw/<song>.json`,
 under `plugins` → the plugin id), next to the view state, and are written
-immediately.
+immediately. A draft song (`porydaw.song.isDraft`) has no sidecar yet: its
+values are kept in memory and written to the sidecar when the draft is saved
+into the project, under the name it is saved as. Discarding the draft drops
+them. A draft never reads a sidecar left by an earlier song of the same name.
 
 | Member | |
 |---|---|

@@ -15,10 +15,12 @@ using SongBundle::ImportItem;
 using SongBundle::ImportPlan;
 
 BundleImportDialog::BundleImportDialog(const QString &bundleRoot, const QString &projectRoot,
-                                       const QStringList &players, QWidget *parent)
+                                       const QStringList &players,
+                                       const ReservedSongNames &reserved, QWidget *parent)
     : QDialog(parent)
     , m_bundleRoot(bundleRoot)
     , m_projectRoot(projectRoot)
+    , m_reserved(reserved)
 {
     setWindowTitle(tr("Import Song Bundle"));
 
@@ -72,7 +74,9 @@ BundleImportDialog::BundleImportDialog(const QString &bundleRoot, const QString 
     connect(m_player, &QComboBox::currentTextChanged, this, &BundleImportDialog::replan);
 
     // First plan: the bundle's own choices (suffixed past any clash).
-    m_plan = SongBundle::makeImportPlan(m_bundleRoot, m_projectRoot);
+    SongBundle::ImportOptions options;
+    options.reserved = m_reserved;
+    m_plan = SongBundle::makeImportPlan(m_bundleRoot, m_projectRoot, options);
     {
         const QSignalBlocker blockPlayer(m_player);
         m_label->setText(m_plan.label);
@@ -116,6 +120,7 @@ QString BundleImportDialog::summaryText(const ImportPlan &plan)
 void BundleImportDialog::replan()
 {
     SongBundle::ImportOptions options;
+    options.reserved = m_reserved;
     options.label = m_label->text().trimmed();
     options.player = m_player->currentText();
     if (m_constantEdited)

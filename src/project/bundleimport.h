@@ -6,6 +6,7 @@
 #include <QStringList>
 
 #include "project/songbundle.h"
+#include "project/songregistry.h"
 #include "project/voicegroupsource.h"
 
 // Importing a song bundle into a decomp project (§3.4 of
@@ -42,6 +43,10 @@ struct ImportOptions {
     QString label;
     QString constant;
     QString player;
+    // Names open draft tabs hold but haven't written yet
+    // (MainWindow::reservedSongNames): they count as taken, so the import
+    // never claims a draft's label, constant or new voicegroup.
+    ReservedSongNames reserved;
 };
 
 struct ImportPlan {

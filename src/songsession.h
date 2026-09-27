@@ -2,6 +2,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QJsonObject>
 #include <QLockFile>
 #include <QString>
 #include <QTemporaryDir>
@@ -77,6 +78,10 @@ struct SongDraft {
     // that delete fails, the path stays here (the file is still the draft's,
     // should the user rename back) and the user was told.
     QString wroteMidPath;
+    // Plugins' storage.song values (plugin id -> its store), held here
+    // until the commit: the song's sidecar (.porydaw/<label>.json) is
+    // written only then, under the final label (MainWindow::commitDraft).
+    QJsonObject pluginStore;
 
     // The new voicegroup exists only in this draft (not written yet).
     bool voicegroupPending() const { return !newVoicegroup.isEmpty() && !voicegroupWritten; }

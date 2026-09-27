@@ -264,6 +264,21 @@ class MainWindow : public QMainWindow
     // voicegroup: drop it from the draft and rewrite its -G in the undo
     // history to the committed one.
     void abandonDraftVoicegroup(SongSession &session);
+    // What an earlier, partly failed commit of this draft wrote into the
+    // project and a Discard removes again (docs/draft-songs/PLAN.md step 5):
+    // its own .mid (wroteMidPath) and its new voicegroup's file + include
+    // line (voicegroupWritten), unless another song uses that voicegroup by
+    // now. Display paths, relative to the session's root.
+    QStringList draftLeftovers(const SongSession &session) const;
+    // Removes draftLeftovers from the project; a file that can't be removed
+    // gets a warning naming it. Called wherever a draft is dropped
+    // unsaved: its tab closed or replaced, a project switch, quit. Reloads
+    // the project when it removed something from it.
+    void removeDraftLeftovers(SongSession &session);
+    // Writes the draft's in-memory storage.song values (SongDraft::
+    // pluginStore) into the song's sidecar under its final label; nothing
+    // when neither holds any.
+    void flushDraftPluginStore(SongSession &session);
     // The Rename dialog's voicegroup half: the draft's unwritten voicegroup
     // takes newName — its file in the draft folder, its voice_group/label
     // symbol, the source, the voice edits' target in the undo history and

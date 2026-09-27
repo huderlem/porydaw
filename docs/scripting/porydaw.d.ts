@@ -157,6 +157,8 @@ declare namespace porydaw {
         const loaded: boolean;
         /** True in a read-only song bundle tab **/
         const readOnly: boolean;
+        /** True in a draft tab (Import MIDI / New Song, not saved into the project yet) **/
+        const isDraft: boolean;
         const revision: number;
         const label: string;
         const midPath: string;

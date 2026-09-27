@@ -3608,6 +3608,128 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
                                  QStringLiteral("_plugin.json")),
                   "the import's view sidecar outlived the cleanup");
         }
+        {
+            // A draft tab (docs/draft-songs/PLAN.md step 5): song.isDraft,
+            // midPath is the future path, storage.song lives in memory
+            // (never the stale sidecar of an earlier song of that name) and
+            // lands in the sidecar with the commit; the draft's own new
+            // voicegroup is a voicegroups() / setSettings choice and a name
+            // createVoicegroup refuses; project.open focuses the draft, and
+            // song.save() commits it.
+            SongSession *original = m_active;
+            const auto run = [&](const QString &code) { return host.evalConsole(code); };
+            const QString draftLabel = QStringLiteral("mus_scriptcheck_draft");
+            const QString draftArg = QStringLiteral("_") + draftLabel;
+            const QString originalArg = original->doc.cfg().voicegroupArg;
+            const QString sidecar = ViewSidecar::pathFor(projectRoot, draftLabel);
+            // A previous run on this scratch may have left it behind.
+            removeImportedSong(host, projectRoot, draftLabel, originalArg);
+            QDir().mkpath(QFileInfo(sidecar).path());
+            const QByteArray stale("{\"plugins\": {\"console\": {\"stale\": 1}}}\n");
+            check(writeFile(sidecar, QString::fromUtf8(stale)),
+                  "could not plant a stale sidecar for the draft's label");
+            SongCfg cfg = original->doc.cfg();
+            cfg.voicegroupArg = draftArg;
+            QString error;
+            if (check(openDraftSong(SongRegistry::blankSong(), draftLabel,
+                                    QStringLiteral("MUS_SCRIPTCHECK_DRAFT"),
+                                    QStringLiteral("MUSIC_PLAYER_BGM"), cfg, draftLabel, &error),
+                      "the draft did not open")) {
+                SongSession *draft = m_active;
+                const QString midPath =
+                    projectRoot + QStringLiteral("/sound/songs/midi/%1.mid").arg(draftLabel);
+                check(run(QStringLiteral("porydaw.song.isDraft")) == QStringLiteral("true"),
+                      "song.isDraft is not true on a draft");
+                check(run(QStringLiteral("porydaw.song.midPath")) == midPath &&
+                          !QFile::exists(midPath),
+                      "song.midPath on a draft is not its future (unwritten) path");
+                check(run(QStringLiteral("porydaw.storage.song.get('stale', 'none')")) ==
+                          QStringLiteral("none"),
+                      "storage.song on a draft read a stale sidecar");
+                run(QStringLiteral("porydaw.storage.song.set('mood', 'sunny')"));
+                check(run(QStringLiteral("porydaw.storage.song.get('mood', 'none')")) ==
+                              QStringLiteral("sunny") &&
+                          run(QStringLiteral("porydaw.storage.song.keys().join(',')")) ==
+                              QStringLiteral("mood"),
+                      "storage.song on a draft did not keep a value in memory");
+                QFile sidecarFile(sidecar);
+                check(sidecarFile.open(QIODevice::ReadOnly) && sidecarFile.readAll() == stale,
+                      "storage.song on a draft wrote the sidecar before the commit");
+                sidecarFile.close();
+                check(run(QStringLiteral("porydaw.project.voicegroups().some(function (v) { "
+                                         "return v.arg === '%1'; })")
+                              .arg(draftArg)) == QStringLiteral("true"),
+                      "project.voicegroups() does not list the draft's new voicegroup");
+                const QString setVoicegroup =
+                    QStringLiteral("porydaw.edit.transaction('vg', function () { "
+                                   "porydaw.edit.setSettings({voicegroup: '%1'}); })");
+                run(setVoicegroup.arg(originalArg));
+                const bool switchedAway = draft->doc.cfg().voicegroupArg == originalArg;
+                run(setVoicegroup.arg(draftArg));
+                check(switchedAway && draft->doc.cfg().voicegroupArg == draftArg,
+                      "edit.setSettings could not switch a draft back to its own voicegroup");
+                messages.clear();
+                check(
+                    run(QStringLiteral("porydaw.project.createVoicegroup('%1')").arg(draftLabel))
+                            .isNull() &&
+                        hasMessage(messages, QStringLiteral("console"), 2,
+                                   QStringLiteral("A voicegroup named voicegroup_%1 already "
+                                                  "exists.")
+                                       .arg(draftLabel)) &&
+                        !QFile::exists(projectRoot +
+                                       QStringLiteral("/sound/voicegroups/%1.inc").arg(draftLabel)),
+                    "project.createVoicegroup took a name an open draft reserves");
+                m_tabs->setCurrentWidget(original->view);
+                check(run(QStringLiteral("porydaw.project.open('%1')").arg(draftLabel)) ==
+                              QStringLiteral("true") &&
+                          m_active == draft,
+                      "project.open(label) did not focus the draft's tab");
+                // The commit must not ask anything (a Rename dialog would mean
+                // a name was taken); a surprise dialog fails instead of hanging.
+                bool surpriseModal = false;
+                QTimer modalGuard;
+                modalGuard.setInterval(20);
+                QObject::connect(&modalGuard, &QTimer::timeout, [&surpriseModal] {
+                    if (QWidget *modal = QApplication::activeModalWidget()) {
+                        surpriseModal = true;
+                        if (auto *dialog = qobject_cast<QDialog *>(modal))
+                            dialog->reject();
+                        else
+                            modal->close();
+                    }
+                });
+                modalGuard.start();
+                const QString saved = run(QStringLiteral("porydaw.song.save()"));
+                modalGuard.stop();
+                check(!surpriseModal, "song.save() on a draft showed a dialog");
+                check(saved == QStringLiteral("true") && m_active == draft && !draft->isDraft() &&
+                          QFile::exists(midPath),
+                      "song.save() did not commit the draft");
+                check(run(QStringLiteral("porydaw.song.isDraft")) == QStringLiteral("false"),
+                      "song.isDraft stayed true after the commit");
+                QJsonObject stored;
+                if (sidecarFile.open(QIODevice::ReadOnly))
+                    stored = QJsonDocument::fromJson(sidecarFile.readAll()).object();
+                check(stored.value(QStringLiteral("plugins"))
+                              .toObject()
+                              .value(QStringLiteral("console")) ==
+                          QJsonObject{{QStringLiteral("mood"), QStringLiteral("sunny")}},
+                      "the commit did not write the draft's storage.song values (alone) into "
+                      "the sidecar");
+                check(run(QStringLiteral("porydaw.storage.song.get('mood', 'none')")) ==
+                          QStringLiteral("sunny"),
+                      "storage.song lost the draft's value after the commit");
+                // Still a draft only when a check above failed: no prompt.
+                if (draft->isDraft())
+                    destroySession(draft);
+                else
+                    closeTab(m_tabs->indexOf(draft->view));
+            }
+            m_tabs->setCurrentWidget(original->view);
+            check(m_active == original, "the draft checks lost the original song");
+            removeImportedSong(host, projectRoot, draftLabel, originalArg);
+            check(!QFile::exists(sidecar), "the draft's sidecar outlived the cleanup");
+        }
         runEngineSettingsChecks(check, host, *this, messages);
         // Switching to no song drops the API's view.
         activateSession(nullptr);

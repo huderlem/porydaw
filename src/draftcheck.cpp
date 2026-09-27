@@ -8,12 +8,14 @@
 #include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHash>
 #include <QLabel>
 #include <QLineEdit>
 #include <QLockFile>
 #include <QMessageBox>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSet>
@@ -25,11 +27,14 @@
 #include <QUndoStack>
 #include <QWizardPage>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <memory>
 
 #include "mainwindow.h"
+#include "project/bundlearchive.h"
+#include "project/bundleimport.h"
 #include "project/songregistry.h"
 #include "ui/newsongwizard.h"
 #ifdef PORYDAW_SCRIPTING
@@ -57,7 +62,13 @@
 // is written, so a cancelled Rename writes nothing at all; the Rename
 // dialog lists what a partial commit already wrote, the close prompt names
 // an edited shared voicegroup, and a save started during another is a
-// no-op. QSettings is
+// no-op. The rest of the app (PLAN step 5): Register Song stays disabled,
+// Song Settings edits reach the commit's flags, Export WAV / Export Song
+// Bundle (with the draft's hints) / Import Sample for a slot work on a
+// draft, bundle import and New Voicegroup keep off its names; Discard of a
+// partly committed draft (close, replace, project switch, quit) removes
+// what that commit wrote, and a project switch's Add commits into the old
+// project first. QSettings is
 // redirected into a temp dir; the commit writes into the project — run
 // against a scratch copy. PORYDAW_DRAFTCHECK_SHOTS=<dir> saves screenshots.
 
@@ -66,7 +77,10 @@ namespace {
 // One digest over every file outside .porydaw/: its relative path, size and
 // modification time. Metadata, not contents: any write (even of identical
 // bytes) moves the mtime, and the tree is too big to read four times over.
-QByteArray treeFingerprint(const QString &root)
+// byContent lists files (relative paths) digested by their bytes instead:
+// ones a rollback rewrites back to what they held (an include line added,
+// then removed again).
+QByteArray treeFingerprint(const QString &root, const QStringList &byContent = {})
 {
     QStringList entries;
     QDirIterator it(root, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
@@ -76,6 +90,16 @@ QByteArray treeFingerprint(const QString &root)
         const QString rel = info.filePath().mid(root.size() + 1);
         if (rel.startsWith(QLatin1String(".porydaw/")))
             continue;
+        if (byContent.contains(rel)) {
+            QFile file(info.filePath());
+            entries << QStringLiteral("%1|%2").arg(
+                rel, QString::fromLatin1(QCryptographicHash::hash(file.open(QIODevice::ReadOnly)
+                                                                      ? file.readAll()
+                                                                      : QByteArray(),
+                                                                  QCryptographicHash::Sha1)
+                                             .toHex()));
+            continue;
+        }
         entries << QStringLiteral("%1|%2|%3")
                        .arg(rel)
                        .arg(info.size())
@@ -108,8 +132,8 @@ SmfFile draftSmf()
 // on the active modal widget: any OTHER modal that shows meanwhile (an
 // error box, a second prompt) is recorded as a failure and dismissed, so a
 // surprise dialog fails the section instead of hanging the harness —
-// unless onDialog registered a handler for its title, which then runs once
-// and must close it. The guard's destructor stops the poll, so nothing
+// unless onDialog registered a handler for its title, which then runs (once,
+// or `times` times for a title two dialogs share) and must close it. The guard's destructor stops the poll, so nothing
 // fires into a later section; answered() says whether the expected prompt
 // ever appeared, handled(title) whether a registered dialog did, and
 // inspect(fn) sees the prompt (still open) before it is answered.
@@ -132,11 +156,12 @@ class PromptAnswerer
 
     bool answered() const { return m_answered; }
     void inspect(std::function<void(QMessageBox *)> fn) { m_inspect = std::move(fn); }
-    void onDialog(const QString &title, std::function<void(QDialog *)> action)
+    void onDialog(const QString &title, std::function<void(QDialog *)> action, int times = 1)
     {
         m_handlers.insert(title, std::move(action));
+        m_times.insert(title, times);
     }
-    bool handled(const QString &title) const { return m_handled.contains(title); }
+    bool handled(const QString &title) const { return m_handled.value(title) > 0; }
 
   private:
     void poll()
@@ -146,11 +171,14 @@ class PromptAnswerer
             return;
         auto *dialog = qobject_cast<QDialog *>(modal);
         const QString title = modal->windowTitle();
-        if (dialog && m_handlers.contains(title) && !m_handled.contains(title)) {
-            m_handled.insert(title);
+        if (dialog && m_handlers.contains(title) && m_handled.value(title) < m_times.value(title)) {
+            m_handled[title]++;
             m_handlers.value(title)(dialog);
             return;
         }
+        // A progress dialog (Export WAV's render) closes on its own.
+        if (qobject_cast<QProgressDialog *>(modal))
+            return;
         auto *box = qobject_cast<QMessageBox *>(modal);
         if (!m_answered && box &&
             (box->windowTitle() == QStringLiteral("Unsaved Changes") ||
@@ -178,7 +206,8 @@ class PromptAnswerer
     bool m_answered = false;
     std::function<void(QMessageBox *)> m_inspect;
     QHash<QString, std::function<void(QDialog *)>> m_handlers;
-    QSet<QString> m_handled;
+    QHash<QString, int> m_times;
+    QHash<QString, int> m_handled;
 };
 
 // A PromptAnswerer for code that must not prompt at all: a close prompt
@@ -1825,6 +1854,412 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         closeTab(m_tabs->indexOf(s->view));
         check(prompt.answered() && !sessionForLabel(label),
               "the wizard's draft did not close through the prompt");
+    }
+
+    // 21. The rest of the app on a draft (PLAN step 5): Register Song is
+    // disabled; Song Settings edits the cfg the commit writes; Export WAV
+    // renders it; Export Song Bundle exports it from memory with the draft's
+    // constant and player as hints; Import Sample for a slot writes the
+    // sample through but puts the voice into the draft's own voicegroup,
+    // which reaches the project only with the commit.
+    QTemporaryDir outDir;
+    if (!check(outDir.isValid(), "no temp dir for exports"))
+        return failures;
+    const auto fileDialogPick = [](const QString &path) {
+        return [path](QDialog *dialog) {
+            auto *files = qobject_cast<QFileDialog *>(dialog);
+            if (!files) {
+                dialog->accept(); // an options dialog sharing the title
+                return;
+            }
+            // Typed, as a user would: selectFile only selects what the
+            // dialog's (asynchronously filled) model already lists.
+            if (auto *edit = files->findChild<QLineEdit *>(QStringLiteral("fileNameEdit")))
+                edit->setText(path);
+            else
+                files->selectFile(path);
+            dialog->accept(); // QFileDialog::accept, through QDialog's public one
+        };
+    };
+    {
+        const QString name = QStringLiteral("mus_draftcheck_app");
+        const QString constant = QStringLiteral("MUS_DRAFTCHECK_APP");
+        const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+        // A player other than the default, so the bundle's hint is the
+        // draft's own and not a fallback.
+        QString appPlayer = player;
+        for (const MusicPlayer &p : m_project.musicPlayers()) {
+            if (p.name != player)
+                appPlayer = p.name;
+        }
+        if (!check(
+                openDraftSong(draftSmf(), name, constant, appPlayer, newVgCfg(name), name, &error),
+                "the app draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QString folder = s->draft->folder;
+        const QByteArray before = treeFingerprint(root);
+        check(!m_registerAction->isEnabled(), "Register Song is enabled on a draft");
+
+        // Song Settings: the dialog's accept is doc.setCfg(dialog.cfg()).
+        SongCfg edited = s->doc.cfg();
+        edited.masterVolume = 90;
+        edited.reverb = 37;
+        s->doc.setCfg(edited);
+        check(!songNamed(name) && s->songId == -1,
+              "Song Settings on a draft reached the project's song list");
+
+        // Export WAV, through the menu action's options and file dialogs.
+        const QString wavPath = outDir.filePath(QStringLiteral("draft.wav"));
+        {
+            PromptAnswerer dialogs(QMessageBox::Cancel, modalFail);
+            dialogs.onDialog(QStringLiteral("Export WAV"), fileDialogPick(wavPath), 2);
+            exportWav();
+            check(dialogs.handled(QStringLiteral("Export WAV")),
+                  "Export WAV on a draft showed no dialog");
+        }
+        check(QFileInfo(wavPath).size() > 44 &&
+                  statusBar()->currentMessage().startsWith(QStringLiteral("Exported ")),
+              "Export WAV did not render the draft");
+
+        // Export Song Bundle, from memory, with the draft's hints.
+        const QString bundlePath = outDir.filePath(QStringLiteral("draft.porysong"));
+        {
+            PromptAnswerer dialogs(QMessageBox::Cancel, modalFail);
+            dialogs.onDialog(QStringLiteral("Export Song Bundle"), fileDialogPick(bundlePath));
+            exportBundle();
+            check(dialogs.handled(QStringLiteral("Export Song Bundle")),
+                  "Export Song Bundle on a draft showed no file dialog");
+        }
+        const QString extracted = outDir.filePath(QStringLiteral("bundle"));
+        BundleManifest manifest;
+        SongInfo bundled;
+        if (check(BundleArchive::extractBundle(bundlePath, extracted, &error) &&
+                      SongBundle::readSong(extracted, &manifest, &bundled, &error),
+                  "the draft's bundle does not read back")) {
+            check(manifest.label == name && manifest.constant == constant &&
+                      manifest.player == appPlayer,
+                  "the draft's bundle lacks its constant and player hints");
+            check(manifest.voicegroup == QStringLiteral("voicegroup_") + name,
+                  "the draft's bundle does not carry its new voicegroup");
+            // An import never claims the draft's names: the plan moves past
+            // the reserved label, constant and voicegroup (and, without the
+            // reservation, would take all three).
+            SongBundle::ImportOptions options;
+            const SongBundle::ImportPlan free =
+                SongBundle::makeImportPlan(extracted, root, options);
+            options.reserved = reservedSongNames();
+            const SongBundle::ImportPlan reserved =
+                SongBundle::makeImportPlan(extracted, root, options);
+            check(free.label == name && free.constant == constant && free.voicegroup.name == name,
+                  "bundle import: without the reservation the plan did not take the draft's names");
+            check(reserved.label != name && reserved.constant != constant &&
+                      reserved.voicegroup.name != name,
+                  "bundle import: the plan claimed a name an open draft holds");
+            options.label = name;
+            check(!SongBundle::makeImportPlan(extracted, root, options).ok(),
+                  "bundle import: a label an open draft holds was accepted");
+        }
+
+        // Import Sample into slot 2: file dialog, then the Sample Editor.
+        const QString sampleName = QStringLiteral("draftcheck_tone");
+        const QString sourceWav = outDir.filePath(QStringLiteral("tone.wav"));
+        {
+            // 16-bit mono PCM, a quarter second of a 440 Hz sine.
+            const int rate = 13379;
+            const int frames = rate / 4;
+            QByteArray pcm;
+            for (int i = 0; i < frames; i++) {
+                const qint16 v = qint16(12000.0 * std::sin(2.0 * M_PI * 440.0 * i / rate));
+                pcm.append(char(v & 0xFF));
+                pcm.append(char((v >> 8) & 0xFF));
+            }
+            const auto u32 = [](quint32 v) {
+                return QByteArray(1, char(v & 0xFF)) + char((v >> 8) & 0xFF) +
+                       char((v >> 16) & 0xFF) + char((v >> 24) & 0xFF);
+            };
+            const auto u16 = [](quint16 v) {
+                return QByteArray(1, char(v & 0xFF)) + char((v >> 8) & 0xFF);
+            };
+            QByteArray wav = "RIFF" + u32(36 + pcm.size()) + "WAVEfmt " + u32(16) + u16(1) +
+                             u16(1) + u32(rate) + u32(rate * 2) + u16(2) + u16(16) + "data" +
+                             u32(pcm.size()) + pcm;
+            QFile out(sourceWav);
+            check(out.open(QIODevice::WriteOnly) && out.write(wav) == wav.size(),
+                  "could not write the sample fixture");
+        }
+        const QString symbol = QStringLiteral("DirectSoundWaveData_") + sampleName;
+        {
+            PromptAnswerer dialogs(QMessageBox::Cancel, modalFail);
+            dialogs.onDialog(QStringLiteral("Import Sample"), fileDialogPick(sourceWav));
+            dialogs.onDialog(QStringLiteral("Sample Editor"), [&](QDialog *dialog) {
+                if (auto *edit = dialog->findChild<QLineEdit *>(QStringLiteral("sampleNameEdit")))
+                    edit->setText(sampleName);
+                dialog->accept();
+            });
+            importSampleForSlot(2);
+            check(dialogs.handled(QStringLiteral("Sample Editor")),
+                  "Import Sample for a draft's slot did not reach the Sample Editor");
+        }
+        check(QFile::exists(root +
+                            QStringLiteral("/sound/direct_sound_samples/%1.wav").arg(sampleName)),
+              "Import Sample did not write the sample (write-through by design)");
+        check(s->editsDraftVoicegroup() && s->vgSource->voiceAt(2) &&
+                  s->vgSource->voiceAt(2)->symbol == symbol && s->vgSource->dirty(),
+              "the imported sample was not assigned to the draft voicegroup's slot");
+        check(readBytes(folder + QLatin1Char('/') + name + QStringLiteral(".inc"))
+                  .contains(symbol.toUtf8()),
+              "the draft folder's voicegroup copy lacks the imported sample");
+        check(!QFile::exists(target) && includeCount(name) == 0,
+              "Import Sample into a draft wrote the draft's voicegroup into the project");
+        check(s->isDraft() && !songNamed(name), "the imports before the commit changed the draft");
+        (void)before;
+
+        // The commit: the voicegroup with the sample's voice, the flags as
+        // Song Settings left them, the registration with the draft's names.
+        {
+            NoPromptGuard noPrompt(modalFail, __LINE__);
+            check(saveSession(*s), "saving the app draft failed");
+        }
+        const SongInfo *song = songNamed(name);
+        check(!s->isDraft() && song && song->registered && song->constant == constant &&
+                  song->player == appPlayer,
+              "the app draft did not commit with its names");
+        check(song && song->hasCfg && song->cfg.masterVolume == 90 && song->cfg.reverb == 37,
+              "the commit did not write the flags Song Settings set on the draft");
+        check(readBytes(target).contains(symbol.toUtf8()),
+              "the committed voicegroup lacks the imported sample's voice");
+        check(m_active == s && !m_registerAction->isEnabled(),
+              "Register Song is enabled on a fully registered committed draft");
+    }
+
+    // 22. A partial commit then Discard (PLAN step 5, E/F): everything that
+    // commit wrote — the .mid, the new voicegroup's file and include line —
+    // goes again, and the close prompt says so. Needs the chmod tricks of
+    // sections 11 and 18.
+    const QString hubRel = QStringLiteral("sound/voice_groups.inc");
+    const auto wroteText = QStringLiteral("An earlier save that failed partway already wrote into "
+                                          "the project: ");
+    if (!lockCfg()) {
+        std::printf("draftcheck: note: midi.cfg stays writable after chmod; rollback sections "
+                    "22a-22d skipped\n");
+    } else {
+        QFile::setPermissions(cfgPath, cfgPerms);
+        // 22a. .inc + include line + .mid (the flags write failed), then the
+        // tab closed answering Discard.
+        {
+            const QString name = QStringLiteral("mus_draftcheck_rb1");
+            const QString target = root + QStringLiteral("/sound/voicegroups/%1.inc").arg(name);
+            const QString midPath = midiDir + name + QStringLiteral(".mid");
+            const QByteArray before = treeFingerprint(root, {hubRel});
+            if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_RB1"), player,
+                                     newVgCfg(name), name, &error),
+                       "the rollback draft did not open")) {
+                std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+                return failures;
+            }
+            SongSession *s = m_active;
+            editVoices(s);
+            check(lockCfg(), "midi.cfg could no longer be made unwritable");
+            {
+                PromptAnswerer failBox(QMessageBox::Cancel, modalFail);
+                failBox.onDialog(QStringLiteral("Save Song"),
+                                 [](QDialog *dialog) { dialog->reject(); });
+                check(!saveSession(*s), "saving with an unwritable midi.cfg succeeded");
+            }
+            QFile::setPermissions(cfgPath, cfgPerms);
+            check(s->isDraft() && s->draft->voicegroupWritten &&
+                      s->draft->wroteMidPath == midPath && QFile::exists(target) &&
+                      QFile::exists(midPath) && includeCount(name) == 1,
+                  "the partial commit did not land the .inc, its include line and the .mid");
+            {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                QString info;
+                prompt.inspect([&info](QMessageBox *box) { info = box->informativeText(); });
+                closeTab(m_tabs->indexOf(s->view));
+                check(prompt.answered(), "closing the partly committed draft did not prompt");
+                check(info.startsWith(plainDraftInfo) && info.contains(wroteText) &&
+                          info.contains(QDir::toNativeSeparators(
+                              QStringLiteral("sound/songs/midi/%1.mid").arg(name))) &&
+                          info.contains(QDir::toNativeSeparators(
+                              QStringLiteral("sound/voicegroups/%1.inc (and its include line)")
+                                  .arg(name))) &&
+                          info.endsWith(QStringLiteral("Discard removes what it wrote.")),
+                      "the close prompt does not list what the failed save wrote");
+            }
+            check(!sessionForLabel(name), "Discard did not close the partly committed draft");
+            check(!QFile::exists(midPath) && !QFile::exists(target) && includeCount(name) == 0,
+                  "Discard left the partial commit's .mid, .inc or include line behind");
+            check(treeFingerprint(root, {hubRel}) == before,
+                  "the project after Discard is not what it was before the draft");
+        }
+        // 22b. A leftover that can't be removed (the midi directory made
+        // read-only): the tab still closes, and a warning names the file.
+        SongSession *stuck = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb2"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB2"), &stuck)) {
+            const QString midPath = midiDir + QStringLiteral("mus_draftcheck_rb2.mid");
+            if (!lockMidiDir()) {
+                std::printf("draftcheck: note: the midi directory stays writable after chmod; "
+                            "section 22b's warning skipped\n");
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                closeTab(m_tabs->indexOf(stuck->view));
+            } else {
+                QString warning;
+                {
+                    PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                    prompt.onDialog(QStringLiteral("Discard Draft"), [&](QDialog *dialog) {
+                        if (auto *box = qobject_cast<QMessageBox *>(dialog))
+                            warning = box->text();
+                        dialog->accept();
+                    });
+                    closeTab(m_tabs->indexOf(stuck->view));
+                    check(prompt.answered() && prompt.handled(QStringLiteral("Discard Draft")),
+                          "an unremovable leftover did not warn on Discard");
+                }
+                QFile::setPermissions(midiDirPath, midiPerms);
+                check(warning.contains(QDir::toNativeSeparators(midPath)),
+                      "the Discard warning does not name the file it could not remove");
+                check(!sessionForLabel(QStringLiteral("mus_draftcheck_rb2")),
+                      "a failed removal kept the discarded draft open");
+            }
+            QFile::remove(midPath);
+        }
+        // 22c. A project switch answering Discard.
+        SongSession *switched = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb3"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB3"), &switched)) {
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            check(openProjectDir(root, /*interactive=*/false), "reopening the project failed");
+            check(prompt.answered(), "the project switch did not prompt for the draft");
+            check(!QFile::exists(midiDir + QStringLiteral("mus_draftcheck_rb3.mid")) &&
+                      !songNamed(QStringLiteral("mus_draftcheck_rb3")),
+                  "a project switch answered Discard left the partial commit's .mid");
+        }
+        // 22d. A replace in place answering Discard.
+        SongSession *replaced = nullptr;
+        if (!lockCfg()) {
+            check(false, "midi.cfg could no longer be made unwritable");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_rb4"),
+                                 QStringLiteral("MUS_DRAFTCHECK_RB4"), &replaced)) {
+            QString target;
+            for (const SongInfo &song : m_project.songs()) {
+                if (song.isPlayable() && song.registered && !sessionForLabel(song.label)) {
+                    target = song.label;
+                    break;
+                }
+            }
+            {
+                PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+                loadSongByLabel(target);
+                check(prompt.answered(), "loading a song over a partly committed draft did not "
+                                         "prompt");
+            }
+            check(m_active == replaced && !replaced->isDraft() && replaced->doc.label() == target &&
+                      !QFile::exists(midiDir + QStringLiteral("mus_draftcheck_rb4.mid")),
+                  "a replace in place answered Discard left the partial commit's .mid");
+        }
+        QFile::setPermissions(cfgPath, cfgPerms);
+    }
+
+    // 23. The dock's New Voicegroup (and project.createVoicegroup, through
+    // the same helper) refuses a name an open draft's new voicegroup holds,
+    // with the wizard's message; nothing is written.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_res");
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_RES"), player,
+                                 newVgCfg(name), name, &error),
+                   "the reserving draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        const QByteArray before = treeFingerprint(root);
+        QString refusal;
+        check(!createVoicegroupNamed(name, QString(), &refusal) &&
+                  refusal ==
+                      QStringLiteral("A voicegroup named voicegroup_%1 already exists.").arg(name),
+              "New Voicegroup took a name an open draft reserves (or not with the wizard's "
+              "message)");
+        check(treeFingerprint(root) == before, "the refused New Voicegroup wrote");
+        PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+        closeTab(m_tabs->indexOf(s->view));
+    }
+
+    // 24. A project switch with a draft open: Add commits it into the old
+    // project before the switch; Discard (no partial commit) writes nothing.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_sw");
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_SW"), player, cfg,
+                                 QString(), &error),
+                   "the switch draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        {
+            PromptAnswerer prompt(QMessageBox::Save, modalFail);
+            check(openProjectDir(root, /*interactive=*/false), "reopening the project failed");
+            check(prompt.answered(), "the project switch did not prompt for the draft (Add)");
+        }
+        const SongInfo *song = songNamed(name);
+        check(song && song->registered && QFile::exists(midiDir + name + QStringLiteral(".mid")),
+              "Add on a project switch did not commit the draft into the project");
+        const QString name2 = QStringLiteral("mus_draftcheck_sw2");
+        if (check(openDraftSong(draftSmf(), name2, QStringLiteral("MUS_DRAFTCHECK_SW2"), player,
+                                cfg, QString(), &error),
+                  "the second switch draft did not open")) {
+            const QByteArray before = treeFingerprint(root);
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            check(openProjectDir(root, /*interactive=*/false), "reopening the project failed");
+            check(prompt.answered() && !sessionForLabel(name2) && treeFingerprint(root) == before,
+                  "Discard on a project switch wrote the draft");
+        }
+    }
+
+    // 25. Quit with a draft open (last: the window is closed afterwards):
+    // Cancel keeps it; Add commits it; Discard of a partly committed draft
+    // removes what the failed save wrote.
+    {
+        const QString name = QStringLiteral("mus_draftcheck_q1");
+        if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_Q1"), player, cfg,
+                                 QString(), &error),
+                   "the quit draft did not open")) {
+            std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
+            return failures;
+        }
+        SongSession *s = m_active;
+        {
+            PromptAnswerer prompt(QMessageBox::Cancel, modalFail);
+            check(!close(), "quit went ahead after Cancel");
+            check(prompt.answered() && sessionForLabel(name) == s && s->isDraft(),
+                  "Cancel on quit did not keep the draft");
+        }
+        {
+            PromptAnswerer prompt(QMessageBox::Save, modalFail);
+            check(close(), "quit answered Add did not go ahead");
+            check(prompt.answered() && !s->isDraft() && songNamed(name) &&
+                      songNamed(name)->registered,
+                  "Add on quit did not commit the draft");
+        }
+        SongSession *partial = nullptr;
+        if (!lockCfg()) {
+            std::printf("draftcheck: note: midi.cfg stays writable after chmod; the quit "
+                        "rollback is skipped\n");
+        } else if (partialCommit(QStringLiteral("mus_draftcheck_q2"),
+                                 QStringLiteral("MUS_DRAFTCHECK_Q2"), &partial)) {
+            PromptAnswerer prompt(QMessageBox::Discard, modalFail);
+            check(close(), "quit answered Discard did not go ahead");
+            check(prompt.answered() &&
+                      !QFile::exists(midiDir + QStringLiteral("mus_draftcheck_q2.mid")),
+                  "Discard on quit left the partial commit's .mid");
+        }
+        QFile::setPermissions(cfgPath, cfgPerms);
     }
 
     if (failures == 0)

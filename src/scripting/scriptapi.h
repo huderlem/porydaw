@@ -81,6 +81,7 @@ class SongApi : public ApiObject
     Q_OBJECT
     Q_PROPERTY(bool loaded READ loaded)
     Q_PROPERTY(bool readOnly READ readOnly)
+    Q_PROPERTY(bool isDraft READ isDraft)
     Q_PROPERTY(double revision READ revision)
     Q_PROPERTY(QString label READ label)
     Q_PROPERTY(QString midPath READ midPath)
@@ -96,6 +97,9 @@ class SongApi : public ApiObject
     bool loaded() const;
     // A song bundle tab: edits, song.save() and storage.song writes throw.
     bool readOnly() const;
+    // A draft tab (Import MIDI / New Song before its first save): nothing
+    // of it is in the project yet; midPath is where its save will write.
+    bool isDraft() const;
     // SMF chunks (MTrk), the raw-event address space: tracks() reports
     // each engine track's chunk, and chunkTrack maps back (-1 = a chunk
     // with no channel events, e.g. the seq/tempo chunk).

@@ -19,8 +19,10 @@ class BundleImportDialog : public QDialog
     Q_OBJECT
 
   public:
+    // reserved: names open drafts hold (the plan treats them as taken).
     BundleImportDialog(const QString &bundleRoot, const QString &projectRoot,
-                       const QStringList &players, QWidget *parent = nullptr);
+                       const QStringList &players, const ReservedSongNames &reserved = {},
+                       QWidget *parent = nullptr);
 
     // The plan for the fields as they stand; ok() whenever the dialog was
     // accepted.
@@ -36,6 +38,7 @@ class BundleImportDialog : public QDialog
 
     QString m_bundleRoot;
     QString m_projectRoot;
+    ReservedSongNames m_reserved;
     SongBundle::ImportPlan m_plan;
     bool m_constantEdited = false;
     QLabel *m_summary;

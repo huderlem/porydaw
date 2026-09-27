@@ -894,6 +894,7 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
         base = identifierFrom(base, QStringLiteral("imported"));
         const QString name = firstFree(base, [&](const QString &candidate) {
             return takenGroupNames.contains(candidate) ||
+                   options.reserved.voicegroups.contains(candidate) ||
                    projectGroupSymbols.contains(QStringLiteral("voicegroup_") + candidate) ||
                    QFile::exists(P + QStringLiteral("/sound/voicegroups/%1.inc").arg(candidate));
         });
@@ -991,6 +992,10 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
     const QString midiDir = P + QStringLiteral("/sound/songs/midi/");
     const QByteArray songsH = readAllBytes(P + QStringLiteral("/include/constants/songs.h"));
     const auto labelTaken = [&](const QString &label) {
+        for (const QString &reserved : options.reserved.labels) {
+            if (reserved.compare(label, Qt::CaseInsensitive) == 0)
+                return true;
+        }
         for (const SongInfo &existing : project.songs()) {
             if (existing.label.compare(label, Qt::CaseInsensitive) == 0)
                 return true;
@@ -999,6 +1004,8 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
                QFile::exists(midiDir + label + QStringLiteral(".s"));
     };
     const auto constantTaken = [&](const QString &constant) {
+        if (options.reserved.constants.contains(constant))
+            return true;
         for (const SongInfo &existing : project.songs()) {
             if (existing.constant == constant)
                 return true;

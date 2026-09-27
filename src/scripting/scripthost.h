@@ -140,6 +140,10 @@ struct HostBindings {
         importBundle;
     // The window's cached voicegroup catalog (one scan per project).
     std::function<VoicegroupCatalog()> voicegroupCatalog;
+    // The -G args the active song may pick (porydaw.project.voicegroups(),
+    // edit.setSettings): the catalog's, plus an active draft's own
+    // unwritten new voicegroup. Absent: the catalog's groupArgs.
+    std::function<QStringList()> voicegroupChoices;
     // The project-typical envelope for a voice type and instrument symbol
     // (vgDefaultAdsr over the cached catalog).
     std::function<void(VgMacro macro, const QString &symbol, VgAdsr *out)> typicalAdsr;

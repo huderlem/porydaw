@@ -841,7 +841,7 @@ int MainWindow::runBundleImportTabCheck(const QString &bundleZip, const QString 
     QStringList players;
     for (const MusicPlayer &player : m_project.musicPlayers())
         players.append(player.name);
-    BundleImportDialog dialog(tab->root, m_project.root(), players, this);
+    BundleImportDialog dialog(tab->root, m_project.root(), players, reservedSongNames(), this);
     check(dialog.plan().ok() && dialog.plan().label == QStringLiteral("mus_bundle") &&
               BundleImportDialog::summaryText(dialog.plan()).contains("Samples: 7 new, 0 reused"),
           QStringLiteral("the dialog plans the import: ") +
@@ -884,7 +884,7 @@ int MainWindow::runBundleImportTabCheck(const QString &bundleZip, const QString 
 
     // Importing again from the same tab, the way its Import button does: all
     // reuse, _2 names, and the imported song's tab replaces the bundle tab.
-    BundleImportDialog again(tab->root, m_project.root(), players, this);
+    BundleImportDialog again(tab->root, m_project.root(), players, reservedSongNames(), this);
     check(again.plan().ok() && again.plan().label == QStringLiteral("mus_bundle_2") &&
               BundleImportDialog::summaryText(again.plan()).contains("Samples: 0 new, 7 reused"),
           QStringLiteral("a second import reuses what the first one added"));

@@ -57,6 +57,17 @@ QString storageKey(const Plugin &plugin, const QString &key)
     return QStringLiteral("plugins/") + plugin.manifest.id + QStringLiteral("/data/") + key;
 }
 
+// The -G args a script may pick: the window's choices (an active draft's
+// own unwritten voicegroup included), else the catalog's.
+QStringList voicegroupChoices(const ScriptHost &host)
+{
+    if (host.bindings().voicegroupChoices)
+        return host.bindings().voicegroupChoices();
+    if (host.bindings().voicegroupCatalog)
+        return host.bindings().voicegroupCatalog().groupArgs;
+    return {};
+}
+
 // Script numbers → ticks/ids: NaN/Infinity read as 0 and anything past
 // kMaxTick is clamped, so a wild value never reaches the document (an
 // out-of-range double→uint64 conversion is undefined behaviour).
@@ -1222,6 +1233,12 @@ QString SongApi::label() const
     return d ? d->label() : QString();
 }
 
+bool SongApi::isDraft() const
+{
+    const SongSession *s = session();
+    return s && s->isDraft();
+}
+
 QString SongApi::midPath() const
 {
     const SongDocument *d = doc();
@@ -1807,6 +1824,14 @@ bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api, b
                            .arg(QLatin1String(api)));
         return false;
     }
+    if (const SongSession *s = session(); s && s->draft) {
+        // A draft has no sidecar until its commit (which writes this store
+        // under the final label): the store lives in memory, and a sidecar
+        // an earlier song of the same name left behind is never read.
+        path->clear();
+        *store = s->draft->pluginStore.value(m_plugin.manifest.id).toObject();
+        return true;
+    }
     *path = ViewSidecar::pathFor(p->root(), d->label());
     QJsonObject root;
     QFile file(*path);
@@ -1818,6 +1843,17 @@ bool StorageApi::songStore(QJsonObject *store, QString *path, const char *api, b
 
 void StorageApi::writeSongStore(const QString &path, const QJsonObject &store)
 {
+    if (path.isEmpty()) {
+        // A draft's in-memory store (songStore).
+        SongSession *s = session();
+        if (!s || !s->draft)
+            return;
+        if (store.isEmpty())
+            s->draft->pluginStore.remove(m_plugin.manifest.id);
+        else
+            s->draft->pluginStore.insert(m_plugin.manifest.id, store);
+        return;
+    }
     // Merge: the sidecar also carries the view state and registration
     // metadata, and every writer re-reads before writing.
     QJsonObject root;
@@ -2331,9 +2367,7 @@ QVariantList ProjectApi::musicPlayers() const
 QVariantList ProjectApi::voicegroups() const
 {
     QVariantList out;
-    if (!m_host.bindings().voicegroupCatalog)
-        return out;
-    for (const QString &arg : m_host.bindings().voicegroupCatalog().groupArgs) {
+    for (const QString &arg : voicegroupChoices(m_host)) {
         out.append(QVariantMap{{QStringLiteral("arg"), arg},
                                {QStringLiteral("name"), SongRegistry::voicegroupDisplayName(arg)}});
     }
@@ -2853,9 +2887,7 @@ void EditApi::setSettings(const QVariantMap &spec)
     if (!d)
         return;
     SongCfg cfg = d->cfg();
-    QStringList knownArgs;
-    if (m_host.bindings().voicegroupCatalog)
-        knownArgs = m_host.bindings().voicegroupCatalog().groupArgs;
+    const QStringList knownArgs = voicegroupChoices(m_host);
     QString error;
     if (!applySettingsSpec(spec, knownArgs, &cfg, &error))
         throwError(QStringLiteral("edit.setSettings: ") + error);
