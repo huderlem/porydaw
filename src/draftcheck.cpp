@@ -63,7 +63,7 @@
 // in another file counts as taken; project open sweeps unlocked draft
 // folders. A draft tab shows it (PLAN step 4): a [draft] tab title, tooltip
 // and window title, a banner whose Save to project button commits, and an
-// "Add … to the project?" close prompt; all of it goes with the commit or a
+// discard-only (Discard / Cancel) close prompt; all of it goes with the commit or a
 // replace in place. Names are settled before an edited existing voicegroup
 // is written, so a cancelled Rename writes nothing at all; the Rename
 // dialog lists what a partial commit already wrote, the close prompt names
@@ -159,7 +159,7 @@ SmfFile draftSmf()
 }
 
 // Answers the close/save prompt ("Unsaved Changes", or "Unsaved Draft" for a
-// draft, whose Save button reads "Add to Project") with button from inside
+// draft, which offers only Discard / Cancel) with button from inside
 // its own exec() loop, for as long as the guard is in scope. A 10 ms poll
 // on the active modal widget: any OTHER modal that shows meanwhile (an
 // error box, a second prompt) is recorded as a failure and dismissed, so a
@@ -380,12 +380,11 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
 
     // The draft close prompt's informative text: plain, or naming an edited
     // existing (shared) voicegroup.
-    const QString plainDraftInfo =
-        QStringLiteral("It isn't in the project yet. Discarding it closes the song for good.");
+    const QString plainDraftInfo = QStringLiteral(
+        "It isn't saved to your project yet. Discarding it closes the song for good.");
     const auto vgDirtyDraftInfo = [](const QString &voicegroup) {
-        return QStringLiteral("It isn't in the project yet, but it has edits to voicegroup %1, "
-                              "which other songs may use. Add to Project saves those too; "
-                              "Discard drops them.")
+        return QStringLiteral("It has unsaved edits to voicegroup %1, which other songs may use; "
+                              "discarding drops those edits too.")
             .arg(voicegroup);
     };
     // The Rename dialog's explanation (the label naming the conflicts).
@@ -414,7 +413,8 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     };
     // Visual review: PORYDAW_DRAFTCHECK_SHOTS=<dir> saves the window with a
     // draft tab up (draft-tab.png) and the draft close prompt
-    // (draft-close-prompt.png).
+    // (draft-close-prompt.png, and draft-close-prompt-vg.png naming an edited
+    // shared voicegroup).
     const QString shotsDir = qEnvironmentVariable("PORYDAW_DRAFTCHECK_SHOTS");
 
     const QByteArray pristine = treeFingerprint(root);
@@ -451,9 +451,8 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             banner ? banner->findChild<QLabel *>(QStringLiteral("draftBannerText")) : nullptr;
         QPushButton *save = saveButtonOf(draftA);
         check(banner && banner == draftA->draftBanner, "the draft tab has no banner");
-        check(text && text->text() == QStringLiteral("<i>%1</i> isn't in your project yet. Save "
-                                                     "adds it; closing the tab discards it.")
-                                          .arg(labelA),
+        check(text && text->text() ==
+                          QStringLiteral("<i>%1</i> isn't saved to your project yet.").arg(labelA),
               "the draft banner's text is not the plan's");
         check(save && save->text() == QStringLiteral("Save to project") && save->isEnabled() &&
                   save->focusPolicy() == Qt::NoFocus,
@@ -513,23 +512,24 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         PromptAnswerer prompt(QMessageBox::Discard, modalFail);
         bool promptOk = false;
         prompt.inspect([&](QMessageBox *box) {
-            QAbstractButton *add = box->button(QMessageBox::Save);
             QAbstractButton *discard = box->button(QMessageBox::Discard);
-            promptOk = box->windowTitle() == QStringLiteral("Unsaved Draft") &&
-                       box->text() == QStringLiteral("Add %1 to the project?").arg(labelA) && add &&
-                       add->text() == QStringLiteral("Add to Project") &&
-                       box->defaultButton() == add && discard &&
-                       box->buttonRole(discard) == QMessageBox::DestructiveRole &&
-                       box->button(QMessageBox::Cancel) && box->buttons().size() == 3 &&
-                       box->informativeText() == plainDraftInfo;
+            QAbstractButton *cancel = box->button(QMessageBox::Cancel);
+            promptOk =
+                box->windowTitle() == QStringLiteral("Unsaved Draft") &&
+                box->text() == QStringLiteral("Are you sure you want to discard this draft of %1?")
+                                   .arg(labelA) &&
+                !box->button(QMessageBox::Save) && discard &&
+                box->buttonRole(discard) == QMessageBox::DestructiveRole && cancel &&
+                box->defaultButton() == cancel && box->escapeButton() == cancel &&
+                box->buttons().size() == 2 && box->informativeText() == plainDraftInfo;
             if (!shotsDir.isEmpty())
                 box->grab().toImage().save(shotsDir + QStringLiteral("/draft-close-prompt.png"));
         });
         closeTab(m_tabs->indexOf(draftA->view));
         check(prompt.answered(), "closing a draft did not prompt");
-        check(promptOk, "the draft close prompt is not \"Add … to the project?\" with Add to "
-                        "Project (default) / Discard (destructive) / Cancel and the plain "
-                        "informative text");
+        check(promptOk, "the draft close prompt is not \"Are you sure you want to discard this "
+                        "draft of …?\" with only Discard (destructive) / Cancel (default, "
+                        "escape) and the plain informative text");
     }
     draftA = nullptr;
     check(!sessionForLabel(labelA), "discarding did not close the draft");
@@ -695,9 +695,10 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         return same;
     };
 
-    // 5. A draft replaced in place by a browser load: answering Save
-    // commits it — its project reload renews the song list under the
-    // load — and the requested song lands in the same tab with its ID.
+    // 5. A draft replaced in place by a browser load: the prompt offers no
+    // Save, so Cancel keeps the draft (nothing loads); an explicit save then
+    // commits it, and the load, now unprompted, lands the requested song in
+    // the same tab with its ID.
     const QString labelC = QStringLiteral("mus_draftcheck_c");
     if (!check(openDraftSong(draftSmf(), labelC, QStringLiteral("MUS_DRAFTCHECK_C"), player, cfg,
                              QString(), &error),
@@ -719,9 +720,20 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     const SongView::ViewState freshC = freshViewOf(existing);
     check(m_active == draftC, "the view reference did not return to the third draft");
     {
-        PromptAnswerer prompt(QMessageBox::Save, modalFail);
+        PromptAnswerer prompt(QMessageBox::Cancel, modalFail);
         loadSongByLabel(existing);
         check(prompt.answered(), "loading a song over a draft did not prompt");
+        check(m_active == draftC && draftC->isDraft() && draftC->doc.label() == labelC &&
+                  m_tabs->count() == tabsBefore,
+              "Cancel on loading a song over a draft did not keep the draft");
+    }
+    {
+        NoPromptGuard noPrompt(modalFail, __LINE__);
+        check(saveSession(*draftC) && !draftC->isDraft(), "saving the third draft did not commit");
+    }
+    {
+        NoPromptGuard noPrompt(modalFail, __LINE__);
+        loadSongByLabel(existing);
     }
     QApplication::processEvents();
     check(sameView(draftC->view->viewState(), freshC),
@@ -736,7 +748,7 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         if (song.label == existing)
             check(draftC->songId == song.id, "the song loaded over a draft has a stale ID");
     }
-    check(committedC, "answering Save over a draft did not commit it");
+    check(committedC, "saving a draft before loading over it did not commit it");
     check(!bannerOf(draftC) && !draftC->draftBanner && tabTextOf(draftC) == existing &&
               tabToolTipOf(draftC) == draftC->doc.midPath(),
           "a draft committed and replaced in place kept its banner or draft tab title");
@@ -2849,8 +2861,9 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
         closeTab(m_tabs->indexOf(s->view));
     }
 
-    // 24. A project switch with a draft open: Add commits it into the old
-    // project before the switch; Discard (no partial commit) writes nothing.
+    // 24. A project switch with a draft open: Cancel keeps it (no switch); a
+    // save then commits it into the old project and the switch goes ahead
+    // unprompted; Discard (no partial commit) writes nothing.
     {
         const QString name = QStringLiteral("mus_draftcheck_sw");
         if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_SW"), player, cfg,
@@ -2859,14 +2872,27 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
             std::fprintf(stderr, "draftcheck: %s\n", qUtf8Printable(error));
             return failures;
         }
+        SongSession *s = m_active;
         {
-            PromptAnswerer prompt(QMessageBox::Save, modalFail);
+            const QByteArray before = treeFingerprint(root);
+            PromptAnswerer prompt(QMessageBox::Cancel, modalFail);
+            check(!openProjectDir(root, /*interactive=*/false),
+                  "the project switch went ahead after Cancel");
+            check(prompt.answered(), "the project switch did not prompt for the draft");
+            check(sessionForLabel(name) == s && s->isDraft() && treeFingerprint(root) == before,
+                  "Cancel on a project switch did not keep the draft (or wrote)");
+        }
+        {
+            NoPromptGuard noPrompt(modalFail, __LINE__);
+            check(saveSession(*s) && !s->isDraft(), "saving the switch draft did not commit");
+        }
+        {
+            NoPromptGuard noPrompt(modalFail, __LINE__);
             check(openProjectDir(root, /*interactive=*/false), "reopening the project failed");
-            check(prompt.answered(), "the project switch did not prompt for the draft (Add)");
         }
         const SongInfo *song = songNamed(name);
         check(song && song->registered && QFile::exists(midiDir + name + QStringLiteral(".mid")),
-              "Add on a project switch did not commit the draft into the project");
+              "saving before a project switch did not commit the draft into the project");
         const QString name2 = QStringLiteral("mus_draftcheck_sw2");
         if (check(openDraftSong(draftSmf(), name2, QStringLiteral("MUS_DRAFTCHECK_SW2"), player,
                                 cfg, QString(), &error),
@@ -2880,8 +2906,9 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
     }
 
     // 25. Quit with a draft open (last: the window is closed afterwards):
-    // Cancel keeps it; Add commits it; Discard of a partly committed draft
-    // removes what the failed save wrote.
+    // Cancel keeps it; a save then commits it and the quit goes ahead
+    // unprompted; Discard of a partly committed draft removes what the
+    // failed save wrote.
     {
         const QString name = QStringLiteral("mus_draftcheck_q1");
         if (!check(openDraftSong(draftSmf(), name, QStringLiteral("MUS_DRAFTCHECK_Q1"), player, cfg,
@@ -2898,11 +2925,14 @@ int MainWindow::runDraftCheck(const QString &projectRoot)
                   "Cancel on quit did not keep the draft");
         }
         {
-            PromptAnswerer prompt(QMessageBox::Save, modalFail);
-            check(close(), "quit answered Add did not go ahead");
-            check(prompt.answered() && !s->isDraft() && songNamed(name) &&
+            NoPromptGuard noPrompt(modalFail, __LINE__);
+            check(saveSession(*s) && !s->isDraft() && songNamed(name) &&
                       songNamed(name)->registered,
-                  "Add on quit did not commit the draft");
+                  "saving the quit draft did not commit it");
+        }
+        {
+            NoPromptGuard noPrompt(modalFail, __LINE__);
+            check(close(), "quit after saving the draft did not go ahead");
         }
         SongSession *partial = nullptr;
         if (!lockCfg()) {

@@ -1826,7 +1826,7 @@ bool MainWindow::openProjectDir(const QString &dir, bool interactive)
     // failed re-read after the rollback below (the same root reopened)
     // leaves the tabs open with the Discarded drafts' leftovers already
     // removed — a draft whose written voicegroup went still names it in its
-    // -G, so a later Add to Project would commit a song naming a deleted
+    // -G, so a later save would commit a song naming a deleted
     // voicegroup.
     QString error;
     DecompProject next;
@@ -2348,8 +2348,7 @@ void MainWindow::updateDraftBanner(SongSession &session)
         session.draftBanner = banner;
     }
     if (auto *text = session.draftBanner->findChild<QLabel *>(QStringLiteral("draftBannerText"))) {
-        text->setText(tr("<i>%1</i> isn't in your project yet. Save adds it; closing the tab "
-                         "discards it.")
+        text->setText(tr("<i>%1</i> isn't saved to your project yet.")
                           .arg(session.doc.label().toHtmlEscaped()));
     }
     if (auto *save =
@@ -4197,8 +4196,8 @@ bool MainWindow::registerSongByLabel(const QString &label, const QString &consta
     // A draft's label: the project may list a .mid its failed save left,
     // but the song is the draft's until its Save (which registers it).
     if (draftHolding(label)) {
-        *error = tr("%1 is an unsaved draft; save it with Add to Project (which registers it) "
-                    "or close its tab first")
+        *error = tr("%1 is an unsaved draft; save it (Ctrl+S or the banner's Save to project "
+                    "button, which registers it) or close its tab first")
                      .arg(label);
         return false;
     }
@@ -5019,14 +5018,17 @@ bool MainWindow::maybeSaveSession(SongSession &session)
     if (&session != m_active && m_tabs->indexOf(session.view) >= 0)
         m_tabs->setCurrentWidget(session.view);
     if (session.draft) {
-        // Nothing of a draft is in the project yet: its Save is an Add, and
-        // Discard loses the whole song, not just the latest edits.
-        QMessageBox box(QMessageBox::Question, tr("Unsaved Draft"),
-                        tr("Add %1 to the project?").arg(session.doc.label()),
-                        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, this);
+        // Nothing of a draft is in the project yet: Discard loses the whole
+        // song, not just the latest edits. The prompt only confirms the
+        // discard; to keep a draft the user cancels and saves it (Ctrl+S or
+        // the banner's Save to project).
+        QMessageBox box(
+            QMessageBox::Question, tr("Unsaved Draft"),
+            tr("Are you sure you want to discard this draft of %1?").arg(session.doc.label()),
+            QMessageBox::Discard | QMessageBox::Cancel, this);
         // An existing voicegroup the draft edited is shared with other songs:
-        // Add rewrites it and Discard drops the edits, so say which. (The
-        // draft's own new voicegroup is part of the song, like its notes.)
+        // Discard drops those edits too, so say which. (The draft's own new
+        // voicegroup is part of the song, like its notes.)
         const bool sharedVgDirty = vgDirty && !session.editsDraftVoicegroup();
         if (sharedVgDirty) {
             // A per-file voicegroup loads by its file name, a section of a
@@ -5035,12 +5037,12 @@ bool MainWindow::maybeSaveSession(SongSession &session)
             if (name.startsWith(QStringLiteral("voicegroup_")))
                 name = name.mid(int(qstrlen("voicegroup_")));
             box.setInformativeText(
-                tr("It isn't in the project yet, but it has edits to voicegroup %1, which other "
-                   "songs may use. Add to Project saves those too; Discard drops them.")
+                tr("It has unsaved edits to voicegroup %1, which other songs may use; "
+                   "discarding drops those edits too.")
                     .arg(name));
         } else {
-            box.setInformativeText(tr("It isn't in the project yet. Discarding it closes the "
-                                      "song for good."));
+            box.setInformativeText(tr("It isn't saved to your project yet. Discarding it closes "
+                                      "the song for good."));
         }
         // An earlier save that failed partway left files in the project:
         // Discard takes them back (removeDraftLeftovers), so say which.
@@ -5063,13 +5065,10 @@ bool MainWindow::maybeSaveSession(SongSession &session)
                             .arg(kept.join(QStringLiteral(", ")));
             box.setInformativeText(box.informativeText() + QStringLiteral("\n\n") + text);
         }
-        box.button(QMessageBox::Save)->setText(tr("Add to Project"));
-        box.setDefaultButton(QMessageBox::Save);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.setEscapeButton(QMessageBox::Cancel);
         box.exec();
-        const auto choice = box.standardButton(box.clickedButton());
-        if (choice == QMessageBox::Save)
-            return saveSession(session);
-        return choice == QMessageBox::Discard;
+        return box.standardButton(box.clickedButton()) == QMessageBox::Discard;
     }
     const auto choice = QMessageBox::question(
         this, tr("Unsaved Changes"),

@@ -365,17 +365,20 @@ will do.
 **Changes** *(all done in step 4; see its progress entry)*
 
 1. ✅ A banner strip above the ruler on draft tabs. Reuse the bundle banner
-   code (`:2080-2110`). Text: "*<label>* isn't in your project yet. Save
-   adds it; closing the tab discards it." Include a **Save to project**
-   button.
+   code (`:2080-2110`). Text: "*<label>* isn't saved to your project
+   yet." Include a **Save to project** button. *(Reworded 2026-09-27; see
+   §5.)*
 2. ✅ The tab title gets the same kind of marker a bundle tab has (for
    example `label*` plus an italic font, or a `[draft]` prefix; pick one
    that fits `bundleTabTitle`). The tooltip explains it in place of the
    `.mid` path, which doesn't exist yet. The window title
    (`updateWindowTitle`, `:4007`) follows.
-3. ✅ The `maybeSaveSession` prompt for a draft reads "Add *<label>* to the
-   project?" with the buttons **Add to Project / Discard / Cancel**
-   (Discard stays the destructive action).
+3. ✅ The `maybeSaveSession` prompt for a draft reads "Are you sure you
+   want to discard this draft of *<label>*?" with the buttons **Discard /
+   Cancel** only (Discard destructive, Cancel the default). To keep a
+   draft the user cancels and saves it. *(Changed 2026-09-27 from "Add
+   *<label>* to the project?" with Add to Project / Discard / Cancel; see
+   §5.)*
 4. ✅ After commit, the status message says what the old write-through
    `finishCreateSong` said ("Created and registered … (song ID n)",
    plus " — configure its new voicegroup in the Voicegroup dock" when one
@@ -907,7 +910,8 @@ and why, what's still owed.
   `draft-song` ("Draft songs step 4 …").
   - Banner: `MainWindow::updateDraftBanner(session)` builds a `QFrame`
     `draftBanner` (label `draftBannerText`: "*<label>* isn't in your project
-    yet. Save adds it; closing the tab discards it.", button
+    yet. Save adds it; closing the tab discards it." — reworded 2026-09-27,
+    see the last entry; button
     `draftSaveButton` "Save to project", no focus, queued click →
     `saveSession`) through `SongView::setTopBanner`, like the bundle banner,
     and deletes it once the session is no longer a draft. Held in
@@ -925,7 +929,8 @@ and why, what's still owed.
   - Close prompt for a draft: title "Unsaved Draft", text "Add <label> to
     the project?", informative "It isn't in the project yet. Discarding it
     closes the song for good.", buttons Add to Project (the standard Save
-    button, relabeled, default) / Discard (destructive role) / Cancel. The
+    button, relabeled, default) / Discard (destructive role) / Cancel
+    (superseded 2026-09-27 — Add to Project removed; see the last entry). The
     non-draft "Unsaved Changes" prompt is unchanged.
   - Status messages: `commitDraft` appends " — configure its new
     voicegroup in the Voicegroup dock" when the commit (or an earlier
@@ -989,6 +994,7 @@ and why, what's still owed.
       voicegroup. `maybeSaveSession`'s draft branch now shows "It isn't in
       the project yet, but it has edits to voicegroup <name>, which other
       songs may use. Add to Project saves those too; Discard drops them."
+      (reworded 2026-09-27; see the last entry)
       when `vgSource` is dirty and is not the draft's own new voicegroup
       (`editsDraftVoicegroup`); the plain text otherwise. `<name>` is
       `loadName()` without a `voicegroup_` prefix. Harness: section 3 asserts
@@ -1167,7 +1173,8 @@ and why, what's still owed.
       rest."); `draftLeftovers` takes a `kept` out-list. (2)
       `registerSongByLabel` (browser Register, Register Song,
       `project.registerSong`) refuses a label an open draft holds
-      ("<label> is an unsaved draft; save it with Add to Project …").
+      ("<label> is an unsaved draft; save it with Add to Project …";
+      reworded 2026-09-27 to point at Ctrl+S / Save to project).
       API.md notes the throw.
     - B. `loadSong` focuses the tab of a label an open draft holds, in
       place or in a new tab, instead of replacing the draft with its own
@@ -1371,3 +1378,38 @@ and why, what's still owed.
     the normal and ASAN builds (22k ran, no skip notes); full
     `tools/run_checks.sh` PASS on the normal and ASAN builds
     (`gen_scripting_docs` in sync; mkcheck skipped, no fork given).
+- **2026-09-27 — Post-completion wording change (user request).** Commit:
+  see `git log` on branch `draft-song` ("Draft songs: discard-only close
+  prompt …").
+  - Banner (`updateDraftBanner`): "*<label>* isn't saved to your project
+    yet." — the "Save adds it; closing the tab discards it." half is gone.
+    The **Save to project** button stays.
+  - Close prompt (`maybeSaveSession`, draft branch): title "Unsaved Draft"
+    (unchanged), text "Are you sure you want to discard this draft of
+    <label>?", buttons **Discard** (destructive) and **Cancel** only;
+    Cancel is the default and the escape button. The Add to Project (Save)
+    button is removed, so the prompt has no save path: Discard returns
+    true, Cancel (or Esc / the close box) false. Informative text: plain
+    "It isn't saved to your project yet. Discarding it closes the song for
+    good."; shared-voicegroup-dirty "It has unsaved edits to voicegroup
+    <name>, which other songs may use; discarding drops those edits too.";
+    the partial-save leftovers paragraph is unchanged.
+  - `registerSongByLabel`'s refusal now reads "<label> is an unsaved
+    draft; save it (Ctrl+S or the banner's Save to project button, which
+    registers it) or close its tab first".
+  - Behavioral consequence: closing a draft tab, loading a song over it in
+    place, opening another project, or quitting with a draft open only
+    offers Discard / Cancel. To keep a draft the user cancels, saves it
+    (Ctrl+S or the banner's Save to project), then repeats the action,
+    which no longer prompts for it.
+  - Harness (`src/draftcheck.cpp`): section 1 checks the new banner text;
+    section 3 asserts the new title/text, Discard (destructive) + Cancel
+    (default, escape) only, no Save button; the shared-voicegroup text
+    (§19) is the new one. Sections 5 (replace in place), 24 (project
+    switch) and 25 (quit), which answered the prompt with Save, now Cancel
+    it (asserting the draft is kept, nothing loaded / no switch / no quit),
+    then `saveSession` the draft (no prompt), then repeat the load / switch
+    / quit under a `NoPromptGuard`; their commit assertions are unchanged.
+  - Docs: `docsrc/manual/new-song.md` "Draft songs", the CHANGELOG entry,
+    the Step 4 spec above. Earlier log entries keep the wording they
+    shipped with, annotated as superseded.
