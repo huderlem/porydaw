@@ -196,6 +196,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
 
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
+    m_captureBegun = 0;
     m_muteMask.store(0);
     m_soloMask.store(0);
     m_appliedMute = 0;
@@ -221,6 +222,8 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // race applyPendingSeek.
     const uint64_t pending = m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
     const uint64_t pos = pending != kNoPendingSeek ? pending : m_player.position();
+    if (pos != m_player.position())
+        captureBoundary(m_player.position(), pos);
     m_timeline = timeline;
     m_player.seek(pos, m_timeline);
     m_playhead.store(pos);
@@ -255,8 +258,10 @@ void AudioEngine::applyPendingSeek()
 
     for (int track = 0; track < MAX_TRACKS; track++)
         m4a_engine_all_notes_off(m_engine.get(), track);
+    const uint64_t from = m_player.position();
     clearTimedPreviews();
     m_player.seek(samplePos, m_timeline);
+    captureBoundary(from, samplePos);
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
     m_playhead.store(samplePos);
@@ -389,6 +394,7 @@ void AudioEngine::unloadSong()
     clearTimedPreviews();
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
+    m_captureBegun = 0;
     m_player.reset();
     m_playhead.store(0);
     if (m_deviceStarted)
@@ -673,7 +679,9 @@ void AudioEngine::clearTimedPreviews()
 void AudioEngine::forgetLiveNotes()
 {
     // The keys stay physically down, but nothing of theirs sounds any more:
-    // their note-offs (and pedal-up) must find nothing to release.
+    // their note-offs (and pedal-up) must find nothing to release. A take
+    // records what was heard, so its held notes end here too.
+    pushCapture(CaptureEvent::Cut, m_player.position());
     std::fill(std::begin(m_liveOn), std::end(m_liveOn), false);
     std::fill(std::begin(m_liveDown), std::end(m_liveDown), false);
     m_liveHeldLo.store(0, std::memory_order_relaxed);
@@ -682,6 +690,9 @@ void AudioEngine::forgetLiveNotes()
 
 void AudioEngine::applyMidiInput()
 {
+    // After the transport transition and the seek: a fresh start's Begin
+    // lands on the edit cursor it seeked to.
+    syncCapture();
     // Sound target: none without a song or with live play off; the input is
     // still drained so it never backs up.
     int target = m_liveTarget.load();
@@ -784,6 +795,10 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
 
 void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)
 {
+    // Captured whether or not it sounds: live play off (or no sound target)
+    // still records.
+    pushCapture(velocity > 0 ? CaptureEvent::NoteOn : CaptureEvent::NoteOff, m_player.position(),
+                key, velocity);
     if (m_liveTrack < 0)
         return;
     if (velocity > 0)
@@ -826,6 +841,73 @@ void AudioEngine::publishLiveHeld()
     }
     m_liveHeldLo.store(mask[0], std::memory_order_relaxed);
     m_liveHeldHi.store(mask[1], std::memory_order_relaxed);
+}
+
+bool AudioEngine::capturing() const
+{
+    return m_captureBegun != 0 && m_captureBegun == m_captureGen.load() && m_timeline &&
+           m_appliedTransport == static_cast<int>(Transport::Playing);
+}
+
+void AudioEngine::syncCapture()
+{
+    const uint32_t gen = m_captureGen.load();
+    if (gen == m_captureBegun)
+        return;
+    // A new arm (or a disarm). It begins at the first callback that plays.
+    m_captureBegun = 0;
+    if (gen == 0 || !m_timeline || m_appliedTransport != static_cast<int>(Transport::Playing))
+        return;
+    m_captureBegun = gen;
+    m_captureSegment = 0;
+    pushCapture(CaptureEvent::Begin, m_player.position());
+    publishCaptureClock();
+}
+
+void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
+                              uint64_t resumePos)
+{
+    if (!capturing())
+        return;
+    const uint32_t w = m_captureWrite.load(std::memory_order_relaxed);
+    if (w - m_captureRead.load(std::memory_order_acquire) >= kCaptureRingSize) {
+        m_captureDrops.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    CaptureEvent &ev = m_captureRing[w % kCaptureRingSize];
+    ev.samplePos = samplePos;
+    ev.resumePos = resumePos;
+    ev.generation = m_captureBegun;
+    ev.segment = m_captureSegment;
+    ev.kind = kind;
+    ev.key = key;
+    ev.velocity = velocity;
+    m_captureWrite.store(w + 1, std::memory_order_release);
+}
+
+void AudioEngine::captureBoundary(uint64_t from, uint64_t to)
+{
+    if (!capturing())
+        return;
+    m_captureSegment++;
+    pushCapture(CaptureEvent::Boundary, from, 0, 0, to);
+}
+
+void AudioEngine::publishCaptureClock()
+{
+    m_captureClock.store((uint64_t(m_captureSegment) << kCaptureClockPosBits) |
+                             (m_player.position() & kCaptureClockPosMask),
+                         std::memory_order_release);
+}
+
+bool AudioEngine::popCapture(CaptureEvent *out)
+{
+    const uint32_t r = m_captureRead.load(std::memory_order_relaxed);
+    if (r == m_captureWrite.load(std::memory_order_acquire))
+        return false;
+    *out = m_captureRing[r % kCaptureRingSize];
+    m_captureRead.store(r + 1, std::memory_order_release);
+    return true;
 }
 
 void AudioEngine::holdDeviceForTest(bool hold)
@@ -918,6 +1000,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     M4AEngine *engine = m_engine.get();
     const float gain = m_outputGain.load();
     uint32_t done = 0;
+    const uint32_t wrapsBefore = m_player.wrapCount();
 
     while (done < frameCount) {
         const uint32_t n = std::min(frameCount - done, m_bufCapacity);
@@ -952,6 +1035,11 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     }
     m_tap.write(interleavedOut, frameCount);
 
+    // A take's segment ends at every loop wrap this callback rendered.
+    for (uint32_t w = wrapsBefore; w != m_player.wrapCount(); w++)
+        captureBoundary(m_timeline->loopEndSample, m_timeline->loopStartSample);
+    if (capturing())
+        publishCaptureClock();
     m_playhead.store(m_player.position());
 
     int pcm = 0;

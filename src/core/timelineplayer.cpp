@@ -232,6 +232,7 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
             if (loop && m_pos >= timeline->loopEndSample) {
                 wrapNotes(engine, timeline);
                 m_pos = timeline->loopStartSample;
+                m_wraps++;
                 m_cursor =
                     size_t(std::lower_bound(timeline->events.begin(), timeline->events.end(), m_pos,
                                             [](const TimelineEvent &e, uint64_t pos) {

@@ -154,6 +154,9 @@ qt_add_library(porydaw_app STATIC
     src/core/miditimeline.cpp
     src/core/miditimeline.h
     src/core/noteid.h
+    src/core/captureevent.h
+    src/core/recordingtake.cpp
+    src/core/recordingtake.h
     src/core/ripplescope.h
     src/core/smf.cpp
     src/core/smf.h
@@ -352,6 +355,7 @@ qt_add_executable(porydaw
     src/settingscheck.cpp
     src/keymapcheck.cpp
     src/midicheck.cpp
+    src/reccheck.cpp
     src/velcheck.cpp
     resources/fonts.qrc
 )

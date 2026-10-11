@@ -99,6 +99,9 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, ""},
     {"transport.loop", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Toggle Loop"),
      QKeySequence::UnknownKey, ""},
+    // R is free in every context (the roll's single letters are A/B/M/S/V).
+    {"transport.record", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Record"),
+     QKeySequence::UnknownKey, "R"},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
     {"midi.panic", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("MIDI: All Notes Off"),

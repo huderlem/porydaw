@@ -1,6 +1,6 @@
 # MIDI Input — play and record from a MIDI keyboard
 
-Status: **decisions confirmed 2026-10-11; step 1 done (28aaf34); step 2 done 2026-10-11 (uncommitted)** (written 2026-10-11).
+Status: **decisions confirmed 2026-10-11; step 1 done (28aaf34); step 2 done (ef8a087); step 3 done 2026-10-11 (uncommitted)** (written 2026-10-11).
 File/line references verified against `midi-input` at `6b2e78c`. Work the
 steps **in order, one agent per step**; each step must leave the branch
 green (`tools/run_checks.sh`, normal + ASAN) and ends with a progress entry
@@ -348,6 +348,8 @@ To change a decision later, update this table and every step it affects
   - Target lock: change the selected track mid-take and the notes still
     land on the original track.
   - Negative-test each rule.
+- Ends with a Windows manual checkpoint (user): recorded timing vs. what was
+  played, Auto recording offset, 2-pass loop overdub, punch in/out.
 
 ### Step 4 — Live take display
 
@@ -872,3 +874,227 @@ for the user's Windows pass.
 - **Verified:** all four builds pass; midicheck passes under ASAN; and the
   patched `RtMidi.cpp` cross-compiles with MinGW (`__WINDOWS_MM__`). The
   unplug itself needs the user's Windows pass.
+
+### Step 3 — done 2026-10-11 (uncommitted on `midi-input`)
+
+**Landed**
+
+- `src/core/captureevent.h`: `CaptureEvent{samplePos, resumePos,
+  generation, segment, kind, key, velocity}`. The kinds are `Begin`,
+  `NoteOn`, `NoteOff`, `Cut` and `Boundary`.
+- `src/core/recordingtake.{h,cpp}`: `RecordingTake`, pure logic.
+  - `begin(track, generation)`, `push(ev)`, `clear()`.
+  - `toNotes(timeline, endSample, endSegment, latencySamples)` returns
+    `vector<SongDocument::NewNote>` sorted by tick, then key.
+  - Accessors: `notes()` (raw sample-time notes), `punchInSample()`,
+    `segment()`, `unmatchedOffs()`.
+  - The rules are in the class comment. In short: ticks are nearest-tick
+    through `tickForSample`, with a 1-tick minimum. The offset moves played
+    times earlier but never before the note's segment start. Ends the take
+    imposed (wrap, seek, cut, stop) are not shifted. A note held across one
+    or more wraps ends at the loop end. Unmatched offs are ignored. Later
+    notes win.
+- `TimelinePlayer::wrapCount()`: a never-reset counter bumped at each loop
+  wrap.
+- `AudioEngine` capture:
+  - `armCapture(generation)` (0 disarms), `popCapture`, `captureDropped`,
+    `captureClock(&pos, &segment)` and `outputLatencySamples()`.
+  - The ring is SPSC, 4096 entries, with a drop counter.
+  - `syncCapture()` runs at the top of `applyMidiInput`, after the
+    transition and the seek. It pushes `Begin` at the first Playing callback
+    of a new generation.
+  - `applyLiveNote` pushes NoteOn/NoteOff **above** its early return.
+  - `forgetLiveNotes` (every cut) pushes `Cut`.
+  - `applyPendingSeek` and `updateTimeline` (when the position moves) push a
+    `Boundary`; so does every wrap `process()` rendered.
+  - The clock (segment << 44 | position) is published at the end of each
+    capturing callback.
+- `MainWindow`:
+  - `transport.record`: a checkable toolbar action between Stop and Loop,
+    with a painted dot in `song_view_playhead` red (`recordIcon`). The
+    keymap default is **R**, which is free in every context.
+  - `toggleRecord`, `beginRecording`, `finishRecording`, `drainCapture`,
+    `recordUnavailableReason`, `syncRecordAction` (called from
+    `updateTransportActions`), and `recordingLatencySamples()`.
+  - Commit points: `stopPlayback`, `pausePlayback`, Record again,
+    `activateSession`, `destroySession`, `maybeSaveSession` (every close,
+    replace, project switch and quit prompt), `populateSession` (in-place
+    replace), and `synchronizePlayhead` when the transport is no longer
+    Playing (the song ending by itself).
+  - The status bar says "Recording into 3: Name…", then "Recorded N
+    note(s)." or "Nothing was recorded.".
+- `--reccheck <root> <label>` (`src/reccheck.cpp`), wired into
+  `run_checks.sh` after midicheck.
+  - Pure take cases: basics and generation filtering, rounding and the
+    minimum duration, a tempo change, held-at-stop (and a stop read in
+    another segment), single and double wraps, the offset clamped at
+    punch-in and loop start with forced ends unshifted, later-pass
+    dedup and trims, cut, re-press, a lost Boundary, never-begun.
+  - End to end with the device held: a fresh start (Begin at the cursor,
+    ±1 period, one undo step "Record 2 note(s)", undo restores); an empty
+    take; punch in and out while playing (a key held at punch-in is ignored,
+    the offset is clamped at punch-in); the target lock; sustain; fixed
+    velocity; live play off; Auto and 100 ms offsets; a wrap plus a seek
+    plus a 2-pass overdub in one take; a document edit mid-take; capture
+    ring overflow; the song ending by itself; a tab switch committing to its
+    own tab; Record disabled on a read-only bundle tab.
+
+**Deviations, and why**
+
+- **The capture event carries structure, not only notes.** A wrap counter
+  alone can't place the end of a note held across a seek, or across a wrap
+  whose position is unknown. So the audio thread sends explicit `Boundary`
+  events (end, resume) and stamps every event with a segment index.
+  - A dropped Boundary is still detected from the segment jump.
+  - A generation stamp keeps a late event from an earlier take (a callback
+    in flight at punch-out) out of the next one.
+  - The punch-in is the audio thread's `Begin` position, not a UI guess.
+  - So `finish(timeline, stopSample, latency, loop)` became
+    `toNotes(timeline, endSample, endSegment, latency)`: the loop comes in
+    through the Boundaries.
+- **The lock also covers the sound.** While recording,
+  `publishLiveTarget` publishes the take's track. A selection change
+  mid-take therefore neither moves the sound nor releases the held notes,
+  which would otherwise end them in the take. The target is published
+  again at commit.
+- **Pause punches out and commits**, like Stop: the audio thread captures
+  only while Playing. Record while paused resumes from the pause position;
+  only Stopped starts from the edit cursor.
+- **A seek mid-take** (moving the edit cursor while playing, Go to Start)
+  starts a new segment. Held notes end at the seek point, and recording
+  carries on at the landing.
+- **A document edit mid-take** (an undo, a mouse edit) is allowed. The
+  engine cuts the live notes, so the take ends its held notes there too
+  (`Cut`). The take commits at punch-out against the timeline as it is
+  then, as a separate undo step after the edit's. Positions are in sample
+  time, so a tempo edit mid-take moves where the take lands. **Flag for the
+  manual pass.**
+- **Within-batch overlaps are resolved, not only same-(tick, key).**
+  Different passes can overlap on a key at different ticks, and `addNotes`
+  only resolves against the document. The take applies
+  `resolveNoteOverlaps`' head, tail and cover rules among its own notes,
+  with later notes winning.
+- **Ends the take imposed are not shifted by the offset** (wrap, seek, cut
+  and stop); only played note-offs (including pedal-up) are. So a wrapped
+  note ends exactly at `loopEndTick`.
+- **The status-bar reason** for a disabled Record is the action's status
+  tip and tooltip ("Record (unavailable: …)"). A disabled action's R can't
+  fire, so pressing R on a bundle tab does nothing visible.
+  `beginRecording` itself puts the reason in the status bar when it is
+  reached. **Judgment call for the user.**
+- **The checks are a separate `--reccheck`**: midicheck was already 936
+  lines.
+
+**Gotchas for step 4 (ghost notes)**
+
+- **Reading the take:** `MainWindow::recordingTake()` is non-null while
+  recording. `m_audio.captureClock(&pos, &seg)` then
+  `take->toNotes(*m_active->timeline, pos, seg, recordingLatencySamples())`
+  gives exactly what a commit at that moment would write, held notes grown
+  to the clock.
+  - `toNotes` is per-key and cheap, but it allocates; call it once per
+    playhead tick.
+  - The ring is drained at the top of `synchronizePlayhead` (`drainCapture`)
+    before `setPlayheadSample`, so feed the overlay after that in the same
+    tick.
+- The clock is published only while capturing, at callback ends.
+  `punchInSample()` is valid once `started()`; before the first callback
+  the take has no Begin.
+- For the "REC" tint on the punched span: the take records its current
+  segment's start but not a history. Wraps go back to `loopStartTick`;
+  keep the span from punch-in and union with the loop when `segment() > 0`,
+  or add a segment list to the take.
+- The take always belongs to `m_active` (every path away commits first),
+  so the overlay goes on `m_active->view`.
+- With Follow Playhead off nothing here scrolls; finishRecording's edit is
+  an ordinary document change.
+
+**Negative tests**
+
+Each was broken by a scripted edit, confirmed FAIL with the expected
+message, and reversed by a targeted reverse edit; a grep confirmed no
+marker was left, and `git diff --stat` matched.
+
+- Take:
+  - generation filter;
+  - rounding (truncation);
+  - minimum duration;
+  - tempo map (constant tempo);
+  - stop position;
+  - the stop's segment check;
+  - Boundary closing held notes;
+  - the floor clamp;
+  - forced ends shifted;
+  - later wins (both versions of the loop);
+  - Cut ignored;
+  - re-press leaves the note open;
+  - lost-Boundary detection;
+  - the not-started guard.
+- Window:
+  - Record not on the toolbar;
+  - no R default;
+  - Begin before the seek;
+  - edit-group text removed;
+  - per-note pushes (undo leaves notes);
+  - status texts (both);
+  - stop sample 0;
+  - Record-again stops;
+  - an unmatched off recorded as a note;
+  - sound lock off;
+  - commit to the current selection;
+  - no republish at commit (empty take);
+  - capture at the physical key-up (sustain);
+  - recorded velocity 127 (fixed velocity);
+  - capture below the early return (live play off);
+  - Auto = 0;
+  - ms conversion;
+  - no wrap Boundary;
+  - no seek Boundary;
+  - no Cut;
+  - no drop count;
+  - no auto-stop commit;
+  - read-only gate removed.
+- The Stop and tab-switch commits are each backed up by
+  `synchronizePlayhead`'s safety net, so they were negative-tested together
+  with it removed.
+- Not falsifiable by one edit: "an empty take pushes no undo entry".
+  `addNotes` refuses an empty batch, and the edit group opens lazily.
+
+**Verification**
+
+- Builds: `build`, `build-asan`, `build-nomidi` and `build-dummy` all
+  build. reccheck and midicheck are OK on all four.
+- `tools/format.sh --check` is clean.
+- `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  **PASS (all harnesses)** on both the normal and ASAN builds, reccheck
+  included.
+- Not verified:
+  - real-device timing and the Auto offset by ear;
+  - a real (unparked) device's callback racing punch-out (the
+    clock/drain ordering is reasoned, not exercised);
+  - the icon on a real display (an offscreen toolbar grab looked right).
+
+  These are for the Windows checkpoint.
+
+### Step 3 follow-up — the take follows its track (2026-10-11)
+
+The user confirmed the four judgment calls (Pause commits; a seek ends
+held notes and keeps recording; edits and undo are allowed mid-take; the
+read-only reason shows only on hover). The track-deleted-mid-take gap is
+fixed. The take used to keep a bare engine slot, so a track add, delete
+or move shifted its notes onto a neighbour.
+
+- **Fix:** `MainWindow::followTakeTrack` listens to
+  `SongDocument::tracksRemapped`. That signal covers undo and redo too,
+  which blocking the UI actions would not have.
+  - The take moves with its track (`RecordingTake::setTrack`), and so
+    does the sound, through the documentChanged republish.
+  - If the take's own track is deleted, the recording ends. Playback
+    goes on, the take is dropped with no undo step, and the status bar
+    says "Recording stopped: its track was deleted."
+- **reccheck:** moves the take's track mid-take, then deletes it
+  mid-take.
+  - Negative-tested: without `setTrack` the move checks fail; ignoring
+    the deletion fails the stop and message checks.
+- **Verification:** all 4 builds; format clean; normal and ASAN
+  sweeps **PASS (all harnesses)**.

@@ -8,6 +8,7 @@
 
 #include "audio/audiotap.h"
 #include "audio/auditionslots.h"
+#include "core/captureevent.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
 
@@ -183,6 +184,39 @@ class AudioEngine
         *hi = m_liveHeldHi.load(std::memory_order_relaxed);
     }
 
+    // MIDI recording capture (docs/midi-input/PLAN.md step 3). While an arm
+    // generation is set and the transport is Playing, every keyboard note
+    // on/off the live path applies (after the sustain pedal and Fixed
+    // velocity, whether or not live play sounds it) goes onto the capture
+    // ring, stamped with the player position at the callback's start. So do
+    // the take's structure: a Begin at the first capturing callback (the
+    // punch-in), a Boundary at every loop wrap or seek, and a Cut whenever
+    // the engine cuts the live notes. Arm *before* play() on a fresh start
+    // so the first notes are caught; the Begin lands after the start's
+    // seek. 0 disarms; each arm needs a new nonzero generation, which
+    // stamps its events so a late one from an earlier arm is told apart.
+    void armCapture(uint32_t generation) { m_captureGen.store(generation); }
+    // UI thread: the single consumer. False when empty.
+    bool popCapture(CaptureEvent *out);
+    // Events lost to a full ring. The take tolerates the loss (an orphan
+    // note-off is ignored, an orphan note on ends at the stop).
+    uint32_t captureDropped() const { return m_captureDrops.load(std::memory_order_relaxed); }
+    // The capturing player's position as of the last callback, and the
+    // segment it was in (modulo RecordingTake::kSegmentMask), read together:
+    // the stop position a take's still-held notes end at.
+    void captureClock(uint64_t *samplePos, uint32_t *segment) const
+    {
+        const uint64_t packed = m_captureClock.load(std::memory_order_acquire);
+        *samplePos = packed & kCaptureClockPosMask;
+        *segment = uint32_t(packed >> kCaptureClockPosBits);
+    }
+    // The device's output latency, the "Auto" recording offset: you heard
+    // the song about this long after the player rendered it.
+    uint64_t outputLatencySamples() const
+    {
+        return uint64_t(m_periodFrames) * uint64_t(m_periodCount);
+    }
+
     // Harness only (--midicheck): park the device so a check can drive the
     // callback itself, deterministically and faster than real time.
     // While held, cold operations leave the device stopped; pumpForTest
@@ -328,7 +362,8 @@ class AudioEngine
     void applyMidiInput();
     void handleLiveMessage(const MidiMsg &msg);
     // The one place a keyboard note on (velocity > 0) or off is applied,
-    // after the sustain pedal has had its say: step 3's capture hooks here.
+    // after the sustain pedal has had its say; a recording take captures it here,
+    // before the sound target is consulted.
     void applyLiveNote(uint8_t key, uint8_t velocity);
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
@@ -338,6 +373,14 @@ class AudioEngine
     // cleared the sound they had.
     void forgetLiveNotes();
     void publishLiveHeld();
+    // Audio thread (or a cold op with the device stopped): recording capture.
+    bool capturing() const;
+    void syncCapture();
+    void pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key = 0, uint8_t velocity = 0,
+                     uint64_t resumePos = 0);
+    // The player jumped from `from` to `to`: the take's segment ends.
+    void captureBoundary(uint64_t from, uint64_t to);
+    void publishCaptureClock();
     void applyPreviewVoice();
     void applyPolyDebug();
     void resetPreviewEngine();
@@ -417,7 +460,19 @@ class AudioEngine
     std::atomic<int> m_liveFixedVelocity{0};
     std::atomic<uint32_t> m_livePanicCmd{0};
     std::atomic<uint32_t> m_liveReleaseCmd{0};
-    bool m_deviceHeldForTest = false; // UI thread only
+    // Recording capture: the arm generation (UI writes), and an SPSC ring
+    // from the audio thread to the UI. Cold ops push too, with the device
+    // stopped, which hands the producer side over cleanly.
+    std::atomic<uint32_t> m_captureGen{0};
+    static constexpr uint32_t kCaptureRingSize = 4096;
+    CaptureEvent m_captureRing[kCaptureRingSize];
+    std::atomic<uint32_t> m_captureWrite{0}; // producer increments
+    std::atomic<uint32_t> m_captureRead{0};  // consumer increments
+    std::atomic<uint32_t> m_captureDrops{0};
+    static constexpr int kCaptureClockPosBits = 44;
+    static constexpr uint64_t kCaptureClockPosMask = (uint64_t(1) << kCaptureClockPosBits) - 1;
+    std::atomic<uint64_t> m_captureClock{0}; // segment << 44 | position
+    bool m_deviceHeldForTest = false;        // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -451,6 +506,8 @@ class AudioEngine
     bool m_liveSustain = false;
     bool m_liveBent = false; // bend/mod sent to m_liveTrack since it became the target
     uint32_t m_appliedLivePanic = 0;
+    uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none
+    uint32_t m_captureSegment = 0; // segments since that Begin
     uint32_t m_appliedLiveRelease = 0;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none

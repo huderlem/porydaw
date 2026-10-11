@@ -123,6 +123,11 @@ int runEventViewCheck(const QString &projectRoot, const QString &screenshotSong 
 // itself.
 int runMidiCheck(const QString &projectRoot, const QString &songLabel,
                  const QString &shotPath = QString());
+// reccheck.cpp; MIDI recording check (docs/midi-input/PLAN.md step 3): the
+// RecordingTake rules on fabricated stamps, then Record end to end in the
+// window with the audio device parked. Writes into the project (a bundle
+// export): scratch copy only. Redirects QSettings itself.
+int runRecordCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -233,6 +238,9 @@ int main(int argc, char *argv[])
         const QString shot = midiCheck + 3 < args.size() ? args[midiCheck + 3] : QString();
         return runMidiCheck(args[midiCheck + 1], args[midiCheck + 2], shot);
     }
+    const int recCheck = args.indexOf(QStringLiteral("--reccheck"));
+    if (recCheck >= 0 && recCheck + 2 < args.size())
+        return runRecordCheck(args[recCheck + 1], args[recCheck + 2]);
     if (args.contains(QStringLiteral("--keymapcheck")))
         return runKeymapCheck();
     const int scriptCheck = args.indexOf(QStringLiteral("--scriptcheck"));

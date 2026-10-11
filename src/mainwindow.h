@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "audio/audioengine.h"
+#include "core/recordingtake.h"
 #include "project/decompproject.h"
 #include "project/songregistry.h"
 #include "project/voicegroupsource.h"
@@ -169,6 +170,22 @@ class MainWindow : public QMainWindow
     // song open, the transport's MIDI light and Settings → MIDI. QSettings
     // must be redirected. Returns the number of failed expectations.
     int runMidiWindowCheck(const QString &projectRoot, const QString &songLabel);
+    // MIDI recording check, window half (--reccheck; reccheck.cpp): Record
+    // end to end with the audio device parked and time pumped. Writes into
+    // the project (a bundle export): scratch copy only, QSettings must be
+    // redirected. Returns the number of failed expectations.
+    int runRecordWindowCheck(const QString &projectRoot, const QString &songLabel,
+                             const QString &scratchDir);
+
+    // The take being recorded (docs/midi-input/PLAN.md step 3), null when
+    // not recording. Its notes so far, with held ones grown to the playhead:
+    // take->toNotes(*timeline, pos, segment, latency) with
+    // AudioEngine::captureClock and recordingLatencySamples(). The capture
+    // ring is drained into it on every playhead tick.
+    const RecordingTake *recordingTake() const { return m_takeSession ? &m_take : nullptr; }
+    // The recording offset in samples: Settings → MIDI's, or the device's
+    // output latency for Auto.
+    uint64_t recordingLatencySamples() const;
 
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
@@ -233,6 +250,26 @@ class MainWindow : public QMainWindow
     void pollLiveKeys();
     // runMidiWindowCheck's live-play half (midicheck.cpp).
     void checkLivePlay();
+    // MIDI recording (D5): Record while stopped starts playback from the
+    // edit cursor and records; while playing it punches in; again it punches
+    // out, commits and keeps playing. Stop, Space and Pause commit too, as
+    // does anything that takes the take's tab away (switch, close, replace,
+    // project switch, quit) before it goes.
+    void toggleRecord();
+    void beginRecording();
+    // Commits the take, if one is recording, to its own session as one
+    // undo step "Record %n note(s)" (none for an empty take). Playback is
+    // left as it is.
+    void finishRecording();
+    // tracksRemapped handler: keeps the take on its track through track
+    // adds, deletes, and moves; ends the take (dropped) if its track goes.
+    void followTakeTrack(SongSession &session, const TrackRemap &remap);
+    void drainCapture();
+    // Why Record can't start right now, empty when it can.
+    QString recordUnavailableReason() const;
+    void syncRecordAction();
+    // runRecordWindowCheck's halves (reccheck.cpp).
+    void checkRecordingTakes(const QString &scratchDir);
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -606,6 +643,13 @@ class MainWindow : public QMainWindow
     std::unique_ptr<MidiInput> m_midiInput;
     MidiActivityLed *m_midiLed = nullptr;
     QAction *m_midiPanicAction = nullptr;
+    QAction *m_recordAction = nullptr;
+    // The take being recorded and the session it records into (null when
+    // not recording). The take always belongs to the active session: every
+    // path that leaves or replaces it commits first.
+    RecordingTake m_take;
+    SongSession *m_takeSession = nullptr;
+    uint32_t m_captureGeneration = 0;
     // Polls the live held-key mask while MIDI input is active (the playhead
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;

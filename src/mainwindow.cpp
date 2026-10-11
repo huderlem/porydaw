@@ -219,6 +219,37 @@ QIcon tintedStandardIcon(QWidget &widget, QStyle::StandardPixmap icon, const QSi
     result.addPixmap(tinted(themes::Role::disabled_text), QIcon::Disabled, QIcon::On);
     return result;
 }
+// Record's glyph, painted (no style has a record pixmap): a dot in the
+// playhead's fixed identity red, every theme alike, as on any recorder.
+// Checked (recording) it fills the whole glyph area brighter; disabled it
+// takes the same theme tint as the other transport glyphs.
+QIcon recordIcon(QWidget &widget, const QSize &size)
+{
+    const qreal dpr = widget.devicePixelRatioF();
+    const auto dot = [&](const QColor &color, qreal scale) {
+        QPixmap pixmap(size * dpr);
+        pixmap.setDevicePixelRatio(dpr);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        const qreal d = std::min(size.width(), size.height()) * scale;
+        painter.drawEllipse(QRectF((size.width() - d) / 2, (size.height() - d) / 2, d, d));
+        painter.end();
+        return pixmap;
+    };
+    const QColor red = themes::color(themes::Role::song_view_playhead);
+    QIcon result(dot(red, 0.55));
+    result.addPixmap(dot(red.lighter(115), 0.55), QIcon::Active, QIcon::Off);
+    result.addPixmap(dot(red.lighter(125), 0.65), QIcon::Normal, QIcon::On);
+    result.addPixmap(dot(red.lighter(125), 0.65), QIcon::Active, QIcon::On);
+    result.addPixmap(dot(themes::color(themes::Role::disabled_text), 0.55), QIcon::Disabled,
+                     QIcon::Off);
+    result.addPixmap(dot(themes::color(themes::Role::disabled_text), 0.55), QIcon::Disabled,
+                     QIcon::On);
+    return result;
+}
 } // namespace
 
 // A voicegroup voice edit, on its tab's undo stack: song and voicegroup
@@ -712,6 +743,15 @@ void MainWindow::buildUi()
     keys.attach(QStringLiteral("transport.stop"), m_stopAction);
     connect(m_stopAction, &QAction::triggered, this, [this] { stopPlayback(); });
     transport->addAction(m_stopAction);
+
+    // MIDI recording (docs/midi-input/PLAN.md D5). Checked while a take
+    // records; triggered, not toggled, so syncing the check state from the
+    // take never re-enters it.
+    m_recordAction = new QAction(tr("Record"), this);
+    keys.attach(QStringLiteral("transport.record"), m_recordAction);
+    m_recordAction->setCheckable(true);
+    connect(m_recordAction, &QAction::triggered, this, [this] { toggleRecord(); });
+    transport->addAction(m_recordAction);
 
     m_loopAction = new QAction(tr("Loop"), this);
     keys.attach(QStringLiteral("transport.loop"), m_loopAction);
@@ -1278,6 +1318,7 @@ void MainWindow::refreshTransportIcons()
     m_playAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaPlay, size));
     m_pauseAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaPause, size));
     m_stopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaStop, size));
+    m_recordAction->setIcon(recordIcon(*this, size));
     m_loopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
     m_followPlayheadAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaSeekForward, size));
 }
@@ -1460,6 +1501,8 @@ SongSession *MainWindow::createSession()
             s->view->setPlayheadSample(targetSample, m_audio.transport() == Transport::Playing);
         }
     });
+    connect(&s->doc, &SongDocument::tracksRemapped, this,
+            [this, s](const TrackRemap &remap) { followTakeTrack(*s, remap); });
     connect(&s->doc, &SongDocument::documentChanged, this, [this, s] { onDocumentChanged(*s); });
     connect(s->doc.undoStack(), &QUndoStack::cleanChanged, this, [this, s](bool) {
         updateTabTitle(*s);
@@ -1473,6 +1516,8 @@ SongSession *MainWindow::createSession()
 
 void MainWindow::destroySession(SongSession *session)
 {
+    if (session == m_takeSession)
+        finishRecording();
     // A draft going away unsaved (its tab closed, a project switch) takes
     // back what a failed save wrote. (Delete Song refuses a draft's label.)
     if (session->draft)
@@ -1525,6 +1570,8 @@ void MainWindow::activateSession(SongSession *session, bool force)
 {
     if (session == m_active && !force)
         return;
+    // A take commits to its own tab before the engine lets go of it.
+    finishRecording();
     const SongSession *previous = m_active;
     // Switching tabs stops playback in the tab being left, and lets go of
     // what the MIDI keyboard holds there.
@@ -2047,6 +2094,8 @@ SongSession *MainWindow::populateSession(
     SongSession *session, const SongInfo &song, std::unique_ptr<SongDraft> draft,
     const std::function<bool(SongDocument &, QString *)> &readDocument, QString *error)
 {
+    if (session && session == m_takeSession)
+        finishRecording();
     // The session may not exist yet, and the draft isn't installed until the
     // document is read: load against the incoming draft directly.
     QString tried;
@@ -5087,6 +5136,9 @@ void MainWindow::newVoicegroup()
 
 bool MainWindow::maybeSaveSession(SongSession &session)
 {
+    // Whatever is closing or replacing a tab: a take commits first, so its
+    // tab is dirty when the prompt asks.
+    finishRecording();
     // Voicegroup edits count as the song's unsaved changes: to the user the
     // song and its voicegroup are one document (a normally-clean undo stack
     // can still leave the voicegroup dirty when a save was refused mid-way).
@@ -5296,7 +5348,11 @@ void MainWindow::uiTick()
 void MainWindow::publishLiveTarget()
 {
     const bool songLoaded = m_audioOk && m_active && m_audio.songLoaded();
-    const int track = songLoaded ? m_active->view->selectedTrack() : -1;
+    int track = songLoaded ? m_active->view->selectedTrack() : -1;
+    // A take keeps the keyboard on the track it records into: a selection
+    // change mid-take neither moves the sound nor ends the held notes.
+    if (songLoaded && m_takeSession == m_active)
+        track = m_take.track();
     if (track >= 0)
         m_audio.setLiveModMax(m_active->view->laneDisplayMax(track, 0x01));
     m_audio.setLiveTarget(track);
@@ -5338,6 +5394,14 @@ void MainWindow::synchronizePlayhead()
         return;
     }
 
+    if (m_takeSession) {
+        // The engine stopped on its own (a song's end without a loop): the
+        // take ends with it.
+        if (!playing)
+            finishRecording();
+        else
+            drainCapture();
+    }
     const bool playheadTimerWasActive = m_playheadTimer->isActive();
     const uint64_t playhead = m_audio.playheadSamples();
     m_active->view->setPlayheadSample(playhead, playing);
@@ -5429,6 +5493,7 @@ void MainWindow::startPlayback(bool fromEditCursor)
 
 void MainWindow::pausePlayback()
 {
+    finishRecording();
     m_audio.pause();
     updateTransportActions();
     synchronizePlayhead();
@@ -5436,6 +5501,8 @@ void MainWindow::pausePlayback()
 
 void MainWindow::stopPlayback()
 {
+    // The take commits first, while the engine still holds its song.
+    finishRecording();
     m_audio.stop();
     updateTransportActions();
     synchronizePlayhead();
@@ -5461,6 +5528,150 @@ void MainWindow::updateTransportActions()
     m_pauseAction->setEnabled(loaded && t == Transport::Playing);
     m_stopAction->setEnabled(loaded && t != Transport::Stopped);
     m_loopAction->setEnabled(loaded);
+    syncRecordAction();
+}
+
+QString MainWindow::recordUnavailableReason() const
+{
+    if (!m_audioOk)
+        return tr("Recording needs an audio device.");
+    if (!m_active || !m_audio.songLoaded())
+        return tr("Open a song to record into.");
+    if (m_active->doc.isLocked())
+        return tr("This song is read-only. Import the bundle to record into it.");
+    if (m_active->view->selectedTrack() < 0)
+        return tr("Select a track to record into.");
+    return QString();
+}
+
+void MainWindow::syncRecordAction()
+{
+    if (!m_recordAction)
+        return;
+    const bool recording = m_takeSession != nullptr;
+    const QString why = recording ? QString() : recordUnavailableReason();
+    m_recordAction->setChecked(recording);
+    m_recordAction->setEnabled(recording || why.isEmpty());
+    // The reason shows on hover, in the tooltip and the status bar.
+    const QString tip = why.isEmpty() ? tr("Record from the MIDI keyboard into the selected track")
+                                      : tr("Record (unavailable: %1)").arg(why);
+    if (m_recordAction->toolTip() != tip) {
+        m_recordAction->setToolTip(tip);
+        m_recordAction->setStatusTip(why);
+    }
+}
+
+uint64_t MainWindow::recordingLatencySamples() const
+{
+    const int ms = m_midiInput->latencyMs();
+    if (ms == MidiInput::kLatencyAuto)
+        return m_audioOk ? m_audio.outputLatencySamples() : 0;
+    return uint64_t(std::llround(double(std::max(ms, 0)) * m_audio.sampleRate() / 1000.0));
+}
+
+void MainWindow::toggleRecord()
+{
+    if (m_takeSession)
+        finishRecording();
+    else
+        beginRecording();
+}
+
+void MainWindow::beginRecording()
+{
+    const QString why = recordUnavailableReason();
+    if (!why.isEmpty()) {
+        statusBar()->showMessage(why, 6000);
+        syncRecordAction();
+        return;
+    }
+    const int track = m_active->view->selectedTrack();
+    // A fresh generation, so a late event from an earlier take (a callback
+    // still in flight at its punch-out) is told apart.
+    if (++m_captureGeneration == 0)
+        m_captureGeneration = 1;
+    m_take.begin(track, m_captureGeneration);
+    m_takeSession = m_active;
+    drainCapture(); // leftovers: stale, the take ignores them
+    // Armed before play(), so the first notes after the start are caught.
+    m_audio.armCapture(m_captureGeneration);
+    publishLiveTarget();
+    if (m_audio.transport() != Transport::Playing)
+        startPlayback(); // from the edit cursor when stopped; resumes a pause
+    const QString name = m_active->doc.trackName(track);
+    statusBar()->showMessage(tr("Recording into %1…")
+                                 .arg(name.isEmpty()
+                                          ? tr("Track %1").arg(track + 1)
+                                          : QStringLiteral("%1: %2").arg(track + 1).arg(name)));
+    syncRecordAction();
+}
+
+void MainWindow::drainCapture()
+{
+    CaptureEvent ev;
+    while (m_audioOk && m_audio.popCapture(&ev))
+        m_take.push(ev);
+}
+
+void MainWindow::finishRecording()
+{
+    if (!m_takeSession)
+        return;
+    SongSession *session = m_takeSession;
+    m_takeSession = nullptr;
+    // Disarm, then read where the player is, then drain: everything stamped
+    // before the stop position is in the ring by now. A callback still in
+    // flight may add an event or two of this generation after the drain;
+    // they are a period late and the next take ignores them.
+    m_audio.armCapture(0);
+    uint64_t stopSample = 0;
+    uint32_t stopSegment = 0;
+    m_audio.captureClock(&stopSample, &stopSegment);
+    drainCapture();
+    std::vector<SongDocument::NewNote> notes;
+    if (m_take.started())
+        notes =
+            m_take.toNotes(*session->timeline, stopSample, stopSegment, recordingLatencySamples());
+    const int track = m_take.track();
+    m_take.clear();
+    // Against the timeline as it is now: an edit made mid-take (an undo,
+    // say) moved nothing the take recorded, which is in sample time.
+    if (!notes.empty() && !session->doc.isLocked()) {
+        session->doc.beginEditGroup(tr("Record %n note(s)", nullptr, int(notes.size())));
+        session->doc.addNotes(track, notes);
+        session->doc.endEditGroup();
+    }
+    statusBar()->showMessage(notes.empty() ? tr("Nothing was recorded.")
+                                           : tr("Recorded %n note(s).", nullptr, int(notes.size())),
+                             6000);
+    if (session == m_active)
+        publishLiveTarget();
+    syncRecordAction();
+}
+
+void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
+{
+    if (&session != m_takeSession)
+        return;
+    const int old = m_take.track();
+    const int now = old >= 0 && size_t(old) < remap.engineTrackMap.size()
+                        ? remap.engineTrackMap[size_t(old)]
+                        : -1;
+    if (now >= 0) {
+        // Another track was added, deleted, or moved (an undo or redo
+        // included): the take follows its track to the new slot. The
+        // documentChanged that follows republishes the live target.
+        m_take.setTrack(now);
+        return;
+    }
+    // The take's own track is gone: there is nowhere to put the take, so the
+    // recording stops (playback goes on) and the take is dropped.
+    m_takeSession = nullptr;
+    m_audio.armCapture(0);
+    drainCapture();
+    m_take.clear();
+    statusBar()->showMessage(tr("Recording stopped: its track was deleted."), 6000);
+    syncRecordAction();
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)

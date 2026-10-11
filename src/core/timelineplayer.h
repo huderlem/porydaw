@@ -47,6 +47,9 @@ class TimelinePlayer
     };
 
     uint64_t position() const { return m_pos; }
+    // Loop wraps rendered so far, ever (never reset): a caller compares it
+    // across render() to see the playhead jump back to the loop start.
+    uint32_t wrapCount() const { return m_wraps; }
 
     // Repositions onto (a possibly different) timeline without disturbing the
     // engine: keeps the sample position and finds the matching event cursor.
@@ -112,6 +115,7 @@ class TimelinePlayer
 
     uint64_t m_pos = 0;
     size_t m_cursor = 0;
+    uint32_t m_wraps = 0;
     // Notes keyed on with no note-off dispatched yet, and the tick each
     // started at, so the loop wrap can classify notes crossing the loop end.
     bool m_keyedOn[16][128] = {};
