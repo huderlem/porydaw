@@ -157,6 +157,10 @@ class AudioEngine
     // wheel doesn't stick to a track you've left.
     void setLiveTarget(int track) { m_liveTarget.store(track); }
     int liveTarget() const { return m_liveTarget.load(); }
+    // The mod wheel's full travel (0..127) maps onto 0..modMax: the target
+    // track's MOD lane range as drawn, so the wheel covers what the lane
+    // shows (MOD defaults to 0..16).
+    void setLiveModMax(int modMax) { m_liveModMax.store(std::clamp(modMax, 1, 127)); }
     // Hot: Settings → MIDI mirrors. Live play off drains the input silently
     // (like target -1); a fixed velocity of 1-127 overrides every note-on's,
     // 0 passes the keyboard's through.
@@ -400,6 +404,7 @@ class AudioEngine
     // MIDI keyboard live play (UI writes, audio thread reads).
     std::atomic<MidiInputRing *> m_midiRing{nullptr};
     std::atomic<int> m_liveTarget{-1};
+    std::atomic<int> m_liveModMax{127};
     std::atomic<bool> m_livePlay{true};
     std::atomic<int> m_liveFixedVelocity{0};
     std::atomic<uint32_t> m_livePanicCmd{0};

@@ -192,6 +192,9 @@ class SongView : public QWidget
     // menu's "Value range" choice, exposed for the harnesses. View state
     // only — lane values themselves are untouched.
     void setLaneDisplayRange(int track, uint8_t cc, int maxValue);
+    // The lane's value axis max as currently drawn (the chosen range, or
+    // the auto-fit rung, grown to hold the data); 127 for unzoomable lanes.
+    int laneDisplayMax(int track, uint8_t cc) const;
 
     // Velocity lane: a hidden-by-default pane between the roll and the
     // automation lanes showing the selected track's note velocities. App-wide
@@ -817,6 +820,8 @@ class SongView : public QWidget
     void refreshTimelineViews();
 
   signals:
+    // A lane's "Value range" choice changed (menu, sidecar restore).
+    void laneRangesChanged();
     void muteMaskChanged(uint32_t mask);
     void soloMaskChanged(uint32_t mask);
     void selectedTrackChanged(int track);

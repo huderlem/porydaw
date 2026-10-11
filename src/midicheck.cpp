@@ -635,12 +635,32 @@ void MainWindow::checkLivePlay()
     const uint8_t bMod = engine->tracks[b].mod;
     const int8_t aBend = engine->tracks[a].bend;
     const uint8_t aMod = engine->tracks[a].mod;
+    // The wheel's travel maps onto the MOD lane's range as drawn.
+    const auto wheelMod = [&](int track, int wheel) {
+        return (wheel * view->laneDisplayMax(track, 0x01) + 63) / 127;
+    };
     send(0xE0, 0, 96); // bend14 = 96 << 7 = 12288, +4096 from centre
     send(0xB0, 1, 100);
     pumpMs(30);
     check(engine->tracks[a].bend == 32, "live play: pitch bend did not reach the target track");
-    check(engine->tracks[a].mod == 100, "live play: the mod wheel did not reach the target track");
-    check(aBend != 32 && aMod != 100, "live play: the song's own bend/mod hide the restore check");
+    check(engine->tracks[a].mod == wheelMod(a, 100),
+          "live play: the mod wheel did not reach the target track at the lane's scale");
+    check(aBend != 32 && aMod != wheelMod(a, 100),
+          "live play: the song's own bend/mod hide the restore check");
+    // Full travel reaches the lane's top; a new range rescales the wheel.
+    send(0xB0, 1, 127);
+    pumpMs(30);
+    check(engine->tracks[a].mod == view->laneDisplayMax(a, 0x01),
+          "live play: full mod-wheel travel did not reach the MOD lane's displayed max");
+    view->setLaneDisplayRange(a, 0x01, 64);
+    send(0xB0, 1, 127);
+    pumpMs(30);
+    check(view->laneDisplayMax(a, 0x01) >= 64 &&
+              engine->tracks[a].mod == view->laneDisplayMax(a, 0x01),
+          "live play: changing the MOD lane's range did not rescale the mod wheel");
+    view->setLaneDisplayRange(a, 0x01, 0);
+    send(0xB0, 1, 100);
+    pumpMs(30);
     view->selectTrack(b);
     pumpMs(30);
     check(engine->tracks[a].bend == aBend && engine->tracks[a].mod == aMod,

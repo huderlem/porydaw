@@ -710,3 +710,26 @@ To change a decision later, update this table and every step it affects
 
   These are for the Windows manual checkpoint.
 
+
+### Step 2 follow-up — mod wheel scaled to the MOD lane's range (2026-10-11)
+
+- Windows checkpoint (user, 2026-10-11): live play works. The one request
+  was that the mod wheel should scale to the MOD lane's **visible** range
+  (MOD auto-fits from 0..16 by default), not send its raw 0..127.
+- Wheel 0..127 now maps onto 0..`SongView::laneDisplayMax(track, 1)`,
+  rounded. That is the axis max as drawn: the chosen "Value range", or the
+  auto-fit rung, grown to hold the data. The lane-axis logic moved out of
+  `AutomationArea::rowRange` into a public `laneDisplayMax`, so it works
+  for a hidden row too.
+- `MainWindow::publishLiveTarget` publishes it with
+  `AudioEngine::setLiveModMax`, an atomic. It republishes on the new
+  `SongView::laneRangesChanged` signal (menu or sidecar restore) and after
+  every document change, which covers auto-fit growth.
+- midicheck asserts:
+  - the wheel lands on the scaled value;
+  - full travel equals the displayed max;
+  - a range change rescales the wheel.
+- Negatives:
+  - with the engine scaling removed, all three fail;
+  - with the range-changed republish removed, the rescale check fails.
+- Normal and ASAN sweeps both PASS.

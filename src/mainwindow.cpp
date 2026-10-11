@@ -1419,6 +1419,10 @@ SongSession *MainWindow::createSession()
         if (s == m_active)
             publishLiveTarget();
     });
+    connect(s->view, &SongView::laneRangesChanged, this, [this, s] {
+        if (s == m_active)
+            publishLiveTarget();
+    });
     connect(s->view, &SongView::auditionVoice, this, [this, s](int voice, int key, int velocity) {
         if (s == m_active && m_audioOk)
             m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
@@ -5294,7 +5298,10 @@ void MainWindow::uiTick()
 void MainWindow::publishLiveTarget()
 {
     const bool songLoaded = m_audioOk && m_active && m_audio.songLoaded();
-    m_audio.setLiveTarget(songLoaded ? m_active->view->selectedTrack() : -1);
+    const int track = songLoaded ? m_active->view->selectedTrack() : -1;
+    if (track >= 0)
+        m_audio.setLiveModMax(m_active->view->laneDisplayMax(track, 0x01));
+    m_audio.setLiveTarget(track);
 }
 
 void MainWindow::syncLiveSettings()

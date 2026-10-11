@@ -3222,6 +3222,7 @@ class AutomationArea : public TimelineSurface
         for (auto it = ranges.begin(); it != ranges.end(); ++it)
             m_rowRanges.insert(it.key(), std::clamp(it.value(), 0, 127));
         invalidateContent();
+        emit m_sv->laneRangesChanged();
     }
     void setLaneRange(int track, uint8_t cc, int value)
     {
@@ -3230,6 +3231,7 @@ class AutomationArea : public TimelineSurface
         else
             m_rowRanges.insert(laneKey(track, cc), std::clamp(value, 0, 127));
         invalidateContent();
+        emit m_sv->laneRangesChanged();
     }
 
     // Hidden CC lanes (laneKey strings): the rows drop out of rebuildRows,
@@ -5060,20 +5062,31 @@ class AutomationArea : public TimelineSurface
             *minV = -8192;
             *maxV = 8191;
         } else if (row.kind == Row::Lane && laneRangeZoomable(row.cc)) {
-            // Zoomed value axis: the display max shrinks so a small useful
-            // range (MOD's 0..20, say) gets the row's pixels. Data outside
-            // the chosen range always grows the axis back — points never
-            // draw off-scale, and the gutter label shows the live range.
-            int dataMax = 0;
-            if (const AutoLane *lane = rowLane(row)) {
-                for (const LanePoint &pt : lane->points)
-                    dataMax = std::max(dataMax, pt.value);
-            }
-            const int mode = m_rowRanges.value(rowKey(row), laneRangeDefault(row.cc));
-            *maxV = mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
+            *maxV = laneDisplayMax(row.track, row.cc);
         }
     }
 
+  public:
+    // A zoomable CC lane's displayed max, whether or not its row is shown.
+    // Zoomed value axis: the display max shrinks so a small useful range
+    // (MOD's 0..20, say) gets the row's pixels. Data outside the chosen
+    // range always grows the axis back — points never draw off-scale, and
+    // the gutter label shows the live range.
+    int laneDisplayMax(int track, uint8_t cc) const
+    {
+        if (!laneRangeZoomable(cc))
+            return 127;
+        const Row row{Row::Lane, track, cc};
+        int dataMax = 0;
+        if (const AutoLane *lane = rowLane(row)) {
+            for (const LanePoint &pt : lane->points)
+                dataMax = std::max(dataMax, pt.value);
+        }
+        const int mode = m_rowRanges.value(laneKey(track, cc), laneRangeDefault(cc));
+        return mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
+    }
+
+  private:
     QString rowTitle(const Row &row) const
     {
         switch (row.kind) {
@@ -8893,6 +8906,11 @@ void SongView::removeEmptyLane(int track, uint8_t cc)
 void SongView::setLaneDisplayRange(int track, uint8_t cc, int maxValue)
 {
     m_lanes->setLaneRange(track, cc, maxValue);
+}
+
+int SongView::laneDisplayMax(int track, uint8_t cc) const
+{
+    return m_lanes->laneDisplayMax(track, cc);
 }
 
 void SongView::mergeEmptyLanes()

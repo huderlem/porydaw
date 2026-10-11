@@ -741,7 +741,8 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
         switch (msg.d1) {
         case 1: // mod wheel: the whole track's LFO depth
             if (m_liveTrack >= 0) {
-                m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01, msg.d2);
+                m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01,
+                              uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
                 m_liveBent = true;
             }
             break;
