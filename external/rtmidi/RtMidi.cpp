@@ -2915,23 +2915,29 @@ void MidiInWinMM :: closePort( void )
     midiInReset( data->inHandle );
     midiInStop( data->inHandle );
 
+    // porydaw patch: an unplugged device fails midiInUnprepareHeader. Upstream
+    // returned there with buffer 0 already freed, connected_ still true and
+    // the critical section still held, so the destructor's second
+    // closePort() freed it again (crash on every unplug). Free every buffer,
+    // finish the close, then report.
+    bool unprepareFailed = false;
     for ( size_t i=0; i < data->sysexBuffer.size(); ++i ) {
       int result = midiInUnprepareHeader(data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR));
       delete [] data->sysexBuffer[i]->lpData;
       delete [] data->sysexBuffer[i];
-      if ( result != MMSYSERR_NOERROR ) {
-        midiInClose( data->inHandle );
-        data->inHandle = 0;
-        errorString_ = "MidiInWinMM::openPort: error closing Windows MM MIDI input port (midiInUnprepareHeader).";
-        error( RtMidiError::DRIVER_ERROR, errorString_ );
-        return;
-      }
+      if ( result != MMSYSERR_NOERROR )
+        unprepareFailed = true;
     }
+    data->sysexBuffer.clear();
 
     midiInClose( data->inHandle );
     data->inHandle = 0;
     connected_ = false;
     LeaveCriticalSection( &(data->_mutex) );
+    if ( unprepareFailed ) {
+      errorString_ = "MidiInWinMM::closePort: error closing Windows MM MIDI input port (midiInUnprepareHeader).";
+      error( RtMidiError::DRIVER_ERROR, errorString_ );
+    }
   }
 }
 

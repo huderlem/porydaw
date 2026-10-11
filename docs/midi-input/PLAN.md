@@ -849,3 +849,26 @@ Not negative-testable here (no backend on WSL):
 
 Real-device behaviour (WinMM naming, hot-plug, Refresh recovery) is left
 for the user's Windows pass.
+
+### Fix — crash on unplug (Windows, 2026-10-11)
+
+- User report: Porydaw crashed on Windows every time the keyboard was
+  unplugged.
+- **Cause, found by reading the code** (it can't be run here): RtMidi 6.0.0's
+  `MidiInWinMM::closePort`. On an unplugged device,
+  `midiInUnprepareHeader` fails. The loop had already freed sysex buffer 0
+  and then returned early, leaving `connected_` true and the critical
+  section held. `~MidiInWinMM` then ran `closePort()` again and
+  double-freed the buffer. The hot-plug poll closes a vanished port, so
+  every unplug reached this.
+- **Fix:**
+  - `external/rtmidi/RtMidi.cpp` is patched (marked `porydaw patch`, noted
+    in `LICENSES.md`). It frees every buffer, clears the vector, finishes
+    the close, and only then reports the error.
+  - `MidiInput::openQuietly` also calls `setBufferSize(1024, 0)`, so WinMM
+    prepares no sysex buffers at all. Sysex is ignored anyway. This also
+    avoids the upstream window where a late `MIM_LONGDATA` callback can
+    read a freed buffer during close.
+- **Verified:** all four builds pass; midicheck passes under ASAN; and the
+  patched `RtMidi.cpp` cross-compiles with MinGW (`__WINDOWS_MM__`). The
+  unplug itself needs the user's Windows pass.

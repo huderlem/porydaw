@@ -373,6 +373,10 @@ bool MidiInput::openQuietly(const QString &name)
         port->in->setErrorCallback(&onRtMidiError, nullptr);
         // Sysex, clock/timing and active sensing never reach the callback.
         port->in->ignoreTypes(true, true, true);
+        // No WinMM sysex buffers either (the count only matters there):
+        // sysex is ignored anyway, and closing an unplugged device is where
+        // RtMidi's buffer bookkeeping crashed (see external/rtmidi/LICENSES.md).
+        port->in->setBufferSize(1024, 0);
         port->in->setCallback(&MidiInput::onMessage, port.get());
         port->in->openPort(found->index, kPortName);
     } catch (const std::exception &error) {
