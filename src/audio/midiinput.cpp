@@ -1,6 +1,9 @@
 #include "midiinput.h"
 
 #include <QDebug>
+#include <QHash>
+#include <QRegularExpression>
+#include <QSet>
 #include <QSettings>
 #include <QTimer>
 
@@ -9,6 +12,12 @@
 
 #ifdef PORYDAW_MIDI
 #include "RtMidi.h"
+// Port identities rely on WinMM reporting the device's own name, without
+// RtMidi's appended device index (CMakeLists.txt defines this for rtmidi and
+// its users).
+#if defined(_WIN32) && !defined(RTMIDI_DO_NOT_ENSURE_UNIQUE_PORTNAMES)
+#error "RtMidi must be built with RTMIDI_DO_NOT_ENSURE_UNIQUE_PORTNAMES on Windows"
+#endif
 #else
 // Built without RtMidi: the type only has to be complete for unique_ptr.
 class RtMidiIn
@@ -73,13 +82,73 @@ uint32_t MidiInputRing::size() const
 // object), whose callback thread carries this as its user data.
 struct MidiInput::OpenPort {
     MidiInput *owner = nullptr;
-    QString name;
+    QString id;
+    // The raw port list it was opened from (see identityStable).
+    QStringList rawAtOpen;
+    // Set before the client closes; a callback already running on the
+    // driver's thread then drops its message (see shutPort).
+    std::atomic<bool> closing{false};
     std::unique_ptr<RtMidiIn> in;
 };
+
+QString MidiInput::portBaseName(const QString &raw, PortNaming naming)
+{
+    if (naming != PortNaming::Alsa)
+        return raw;
+    // RtMidi's ALSA names end in " client:port"; the numbers are assigned
+    // as devices appear, so a replugged keyboard gets new ones.
+    static const QRegularExpression suffix(QStringLiteral(" \\d+:\\d+$"));
+    QString base = raw;
+    base.remove(suffix);
+    return base.isEmpty() ? raw : base;
+}
+
+QStringList MidiInput::portIdentities(const QStringList &raw, PortNaming naming)
+{
+    QStringList ids;
+    QHash<QString, int> seen;
+    QSet<QString> taken;
+    for (const QString &name : raw) {
+        if (name.isEmpty()) {
+            ids.append(QString());
+            continue;
+        }
+        const QString base = portBaseName(name, naming);
+        int n = seen.value(base) + 1;
+        QString id = n == 1 ? base : QStringLiteral("%1 (%2)").arg(base).arg(n);
+        // A device literally named "Base (2)" keeps its name; the counted
+        // one moves on to the next free number.
+        while (taken.contains(id))
+            id = QStringLiteral("%1 (%2)").arg(base).arg(++n);
+        seen.insert(base, n);
+        taken.insert(id);
+        ids.append(id);
+    }
+    return ids;
+}
+
+bool MidiInput::identityStable(const QStringList &before, const QStringList &now, const QString &id,
+                               PortNaming naming)
+{
+    const int at = portIdentities(now, naming).indexOf(id);
+    if (at < 0)
+        return false;
+    const QString base = portBaseName(now[at], naming);
+    const auto sameNamed = [&](const QStringList &raw) {
+        QStringList ports;
+        for (const QString &name : raw) {
+            if (!name.isEmpty() && portBaseName(name, naming) == base)
+                ports.append(name);
+        }
+        return ports;
+    };
+    return sameNamed(before) == sameNamed(now);
+}
 
 MidiInput::MidiInput(QObject *parent) : QObject(parent)
 {
     QSettings settings;
+    m_disabled = settings.value(kDisabledPortsKey).toStringList();
     m_livePlay = settings.value(kLivePlayKey, true).toBool();
     m_fixedVelocity = std::clamp(settings.value(kFixedVelocityKey, 0).toInt(), 0, 127);
     m_latencyMs =
@@ -97,10 +166,10 @@ MidiInput::MidiInput(QObject *parent) : QObject(parent)
     connect(m_poll, &QTimer::timeout, this, [this] { rescan(/*userAsked=*/false); });
 
     if (startBackend()) {
-        m_ports = scanPorts();
-        for (const QString &name : m_ports) {
-            if (isPortEnabled(name))
-                openQuietly(name);
+        m_scan = scanPorts();
+        for (const ScannedPort &port : m_scan) {
+            if (isPortEnabled(port.id))
+                openQuietly(port.id);
         }
         m_poll->start();
     }
@@ -108,9 +177,28 @@ MidiInput::MidiInput(QObject *parent) : QObject(parent)
 
 MidiInput::~MidiInput()
 {
-    // Closing joins each port's callback thread, so nothing produces into
-    // the ring (or touches this) past here.
+    // See shutPort for what closing guarantees per backend.
+    for (auto &port : m_open)
+        shutPort(port);
     m_open.clear();
+}
+
+void MidiInput::shutPort(std::unique_ptr<OpenPort> &port)
+{
+    if (!port)
+        return;
+    // ALSA's closePort joins its input thread, so no callback runs once it
+    // returns. WinMM (midiInReset/midiInClose) and CoreMIDI
+    // (MIDIPortDispose) only stop new callbacks; one already running on the
+    // driver's thread is not waited for. The flag makes such a callback
+    // drop its message instead of producing, which narrows (but cannot
+    // close) the window in which it still reads this port.
+    port->closing.store(true, std::memory_order_release);
+#ifdef PORYDAW_MIDI
+    if (port->in)
+        port->in->closePort();
+#endif
+    port.reset();
 }
 
 bool MidiInput::startBackend()
@@ -134,6 +222,7 @@ bool MidiInput::startBackend()
         }
         in->setErrorCallback(&onRtMidiError, nullptr);
         m_api = int(in->getCurrentApi());
+        m_naming = m_api == int(RtMidi::LINUX_ALSA) ? PortNaming::Alsa : PortNaming::Plain;
         m_backendName = QString::fromStdString(RtMidi::getApiDisplayName(RtMidi::Api(m_api)));
         m_backend = std::move(in);
         m_backendStatus.clear();
@@ -160,67 +249,89 @@ bool MidiInput::startBackend()
 #endif
 }
 
-QStringList MidiInput::scanPorts() const
+std::vector<MidiInput::ScannedPort> MidiInput::scanPorts() const
 {
-    QStringList names;
+    QStringList raw;
 #ifdef PORYDAW_MIDI
     if (!m_backend)
-        return names;
+        return {};
     try {
+        // A port that vanished between the count and the name reads back
+        // empty and is skipped.
         const unsigned int count = m_backend->getPortCount();
-        for (unsigned int i = 0; i < count; ++i) {
-            // A port that vanished between the count and the name reads
-            // back empty. Two identical names (rare: Windows and ALSA both
-            // number their ports) are one identity; the first one opens.
-            const QString name = QString::fromStdString(m_backend->getPortName(i));
-            if (!name.isEmpty() && !names.contains(name))
-                names.append(name);
-        }
+        for (unsigned int i = 0; i < count; ++i)
+            raw.append(QString::fromStdString(m_backend->getPortName(i)));
     } catch (const std::exception &error) {
         qWarning("MIDI: listing ports failed: %s", error.what());
     }
 #endif
-    return names;
+    return scanned(raw, m_naming);
+}
+
+std::vector<MidiInput::ScannedPort> MidiInput::scanned(const QStringList &raw, PortNaming naming)
+{
+    std::vector<ScannedPort> ports;
+    const QStringList ids = portIdentities(raw, naming);
+    for (int i = 0; i < raw.size(); ++i) {
+        if (!ids[i].isEmpty())
+            ports.push_back({unsigned(i), raw[i], ids[i]});
+    }
+    return ports;
+}
+
+QStringList MidiInput::rawNames(const std::vector<ScannedPort> &scan)
+{
+    QStringList raw;
+    for (const ScannedPort &port : scan)
+        raw.append(port.raw);
+    return raw;
+}
+
+QStringList MidiInput::ports() const
+{
+    QStringList ids;
+    for (const ScannedPort &port : m_scan)
+        ids.append(port.id);
+    return ids;
 }
 
 QStringList MidiInput::openPorts() const
 {
     QStringList names;
     for (const auto &port : m_open)
-        names.append(port->name);
+        names.append(port->id);
     return names;
 }
 
 bool MidiInput::isPortOpen(const QString &name) const
 {
     return std::any_of(m_open.begin(), m_open.end(),
-                       [&name](const auto &port) { return port->name == name; });
-}
-
-QStringList MidiInput::disabledPorts() const
-{
-    return QSettings().value(kDisabledPortsKey).toStringList();
+                       [&name](const auto &port) { return port->id == name; });
 }
 
 bool MidiInput::isPortEnabled(const QString &name) const
 {
-    return !disabledPorts().contains(name);
+    return !m_disabled.contains(name);
+}
+
+void MidiInput::saveDisabledPorts()
+{
+    QSettings settings;
+    if (m_disabled.isEmpty())
+        settings.remove(kDisabledPortsKey);
+    else
+        settings.setValue(kDisabledPortsKey, m_disabled);
 }
 
 void MidiInput::setPortEnabled(const QString &name, bool enabled)
 {
-    QStringList disabled = disabledPorts();
-    const bool wasEnabled = !disabled.contains(name);
+    const bool wasEnabled = !m_disabled.contains(name);
     if (wasEnabled != enabled) {
         if (enabled)
-            disabled.removeAll(name);
+            m_disabled.removeAll(name);
         else
-            disabled.append(name);
-        QSettings settings;
-        if (disabled.isEmpty())
-            settings.remove(kDisabledPortsKey);
-        else
-            settings.setValue(kDisabledPortsKey, disabled);
+            m_disabled.append(name);
+        saveDisabledPorts();
     }
     m_failed.removeAll(name);
     if (enabled)
@@ -246,32 +357,43 @@ bool MidiInput::openQuietly(const QString &name)
 #ifdef PORYDAW_MIDI
     if (!m_backend || isPortOpen(name))
         return false;
-    int index = -1;
-    try {
-        const unsigned int count = m_backend->getPortCount();
-        for (unsigned int i = 0; i < count && index < 0; ++i) {
-            if (QString::fromStdString(m_backend->getPortName(i)) == name)
-                index = int(i);
-        }
-    } catch (const std::exception &error) {
-        qWarning("MIDI: listing ports failed: %s", error.what());
-    }
-    if (index < 0)
+    // Looked up afresh: a hot-plug since the last scan moves indices.
+    const std::vector<ScannedPort> now = scanPorts();
+    const auto found = std::find_if(now.begin(), now.end(),
+                                    [&name](const ScannedPort &port) { return port.id == name; });
+    if (found == now.end())
         return false;
 
     auto port = std::make_unique<OpenPort>();
     port->owner = this;
-    port->name = name;
+    port->id = name;
+    port->rawAtOpen = rawNames(now);
     try {
         port->in = std::make_unique<RtMidiIn>(RtMidi::Api(m_api), kClientName);
         port->in->setErrorCallback(&onRtMidiError, nullptr);
         // Sysex, clock/timing and active sensing never reach the callback.
         port->in->ignoreTypes(true, true, true);
         port->in->setCallback(&MidiInput::onMessage, port.get());
-        port->in->openPort(unsigned(index), kPortName);
+        port->in->openPort(found->index, kPortName);
     } catch (const std::exception &error) {
         qWarning("MIDI: opening \"%s\" failed: %s", qUtf8Printable(name), error.what());
         port->in.reset();
+    }
+    if (port->in && port->in->isPortOpen()) {
+        // A device plugged or unplugged between the lookup and the open
+        // shifts the indices: make sure the index opened is still the port
+        // looked up. Not marked failed, so the next poll tries again.
+        QString opened;
+        try {
+            opened = QString::fromStdString(m_backend->getPortName(found->index));
+        } catch (const std::exception &) {
+        }
+        if (opened != found->raw) {
+            qWarning("MIDI: \"%s\" moved while it was being opened; retrying",
+                     qUtf8Printable(name));
+            shutPort(port);
+            return false;
+        }
     }
     if (!port->in || !port->in->isPortOpen()) {
         if (!m_failed.contains(name))
@@ -297,18 +419,25 @@ void MidiInput::closePort(const QString &name)
 bool MidiInput::closeQuietly(const QString &name)
 {
     const auto it = std::find_if(m_open.begin(), m_open.end(),
-                                 [&name](const auto &port) { return port->name == name; });
+                                 [&name](const auto &port) { return port->id == name; });
     if (it == m_open.end())
         return false;
-    m_open.erase(it); // joins the port's callback thread
+    shutPort(*it);
+    m_open.erase(it);
+    emit portsClosed();
     return true;
 }
 
-void MidiInput::closeAll()
+void MidiInput::closeAll(bool quietly)
 {
     if (m_open.empty())
         return;
+    for (auto &port : m_open)
+        shutPort(port);
     m_open.clear();
+    if (quietly)
+        return;
+    emit portsClosed();
     emit portsChanged();
 }
 
@@ -319,9 +448,11 @@ bool MidiInput::portFailed(const QString &name) const
 
 void MidiInput::refresh()
 {
-    if (!m_backend) {
-        if (!startBackend())
+    if (!backendAvailable()) {
+        if (!startBackend()) {
+            emit portsChanged(); // the reason may read differently now
             return;
+        }
         m_poll->start();
     }
     rescan(/*userAsked=*/true);
@@ -329,25 +460,44 @@ void MidiInput::refresh()
 
 void MidiInput::rescan(bool userAsked)
 {
-    if (userAsked)
+    bool closed = false;
+    if (userAsked) {
         m_failed.clear();
-    const QStringList now = scanPorts();
-    bool changed = userAsked || now != m_ports;
-    m_ports = now;
-    for (auto it = m_failed.begin(); it != m_failed.end();)
-        it = m_ports.contains(*it) ? std::next(it) : m_failed.erase(it);
+        // Reopen everything: a device replugged at the same index between
+        // two polls lists exactly as before, but its old handle hears
+        // nothing.
+        closed = !m_open.empty();
+        for (auto &port : m_open)
+            shutPort(port);
+        m_open.clear();
+    }
+    std::vector<ScannedPort> now = scanPorts();
+    const QStringList before = rawNames(m_scan);
+    const QStringList raw = rawNames(now);
+    bool changed = userAsked || raw != before;
+    // An open port stays open while its identity still names the device
+    // it opened (identityStable). With two identical keyboards, unplugging
+    // either closes both, and the one still there reopens below.
     for (auto it = m_open.begin(); it != m_open.end();) {
-        if (m_ports.contains((*it)->name)) {
+        if (identityStable((*it)->rawAtOpen, raw, (*it)->id, m_naming)) {
             ++it;
         } else {
-            it = m_open.erase(it); // unplugged
-            changed = true;
+            shutPort(*it);
+            it = m_open.erase(it);
+            closed = changed = true;
         }
     }
-    for (const QString &name : m_ports) {
-        if (isPortEnabled(name) && !isPortOpen(name) && !m_failed.contains(name))
-            changed |= openQuietly(name);
+    // A failed identity that vanished, or may be another device now, is
+    // forgotten: it is tried again.
+    for (auto it = m_failed.begin(); it != m_failed.end();)
+        it = identityStable(before, raw, *it, m_naming) ? std::next(it) : m_failed.erase(it);
+    m_scan = std::move(now);
+    for (const QString &id : ports()) {
+        if (isPortEnabled(id) && !isPortOpen(id) && !m_failed.contains(id))
+            changed |= openQuietly(id);
     }
+    if (closed)
+        emit portsClosed();
     if (changed)
         emit portsChanged();
 }
@@ -412,7 +562,9 @@ bool MidiInput::parse(const unsigned char *bytes, size_t size, MidiMsg *out)
 void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *userData)
 {
     auto *port = static_cast<OpenPort *>(userData);
-    if (port && message && !message->empty())
+    if (!port || port->closing.load(std::memory_order_acquire))
+        return;
+    if (message && !message->empty())
         port->owner->receive(message->data(), message->size());
 }
 
@@ -424,7 +576,19 @@ void MidiInput::injectForTest(const MidiMsg &msg)
 
 void MidiInput::setPortListForTest(const QStringList &names)
 {
-    m_ports = names;
+    m_scan = scanned(names, PortNaming::Plain);
+    emit portsChanged();
+}
+
+void MidiInput::setBackendForTest(const QString &name)
+{
+    m_testBackend = !name.isEmpty();
+    if (m_testBackend) {
+        m_backendName = name;
+        m_backendStatus.clear();
+    } else if (!m_backend && startBackend()) {
+        m_poll->start();
+    }
     emit portsChanged();
 }
 
@@ -442,9 +606,12 @@ void MidiInput::receive(const unsigned char *bytes, size_t size)
 
 void MidiInput::deliverActivity()
 {
-    if (m_sinceActivity.isValid() && m_sinceActivity.elapsed() < kActivityIntervalMs) {
+    // Read once: a second read can pass the interval and start the timer
+    // with a negative wait, which never fires and strands the posted flag.
+    const qint64 since = m_sinceActivity.isValid() ? m_sinceActivity.elapsed() : -1;
+    if (since >= 0 && since < kActivityIntervalMs) {
         if (!m_activityTimer->isActive())
-            m_activityTimer->start(int(kActivityIntervalMs - m_sinceActivity.elapsed()));
+            m_activityTimer->start(int(std::max<qint64>(1, kActivityIntervalMs - since)));
         return;
     }
     m_sinceActivity.start();

@@ -610,7 +610,6 @@ class MainWindow : public QMainWindow
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;
     int m_liveKeysIdleTicks = 0;
-    QStringList m_openMidiPorts; // to notice a port closing under held keys
     // False during harness runs so they don't overwrite the session.
     bool m_persistSession = true;
     EngineSettings m_engineSettings;

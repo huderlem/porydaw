@@ -143,7 +143,8 @@ class AudioEngine
     // as a "held" entry that never counts down: it sounds until its note-off
     // (deferred while the sustain pedal is down). Pitch bend and the mod
     // wheel (CC1) act on the whole target track, song notes included; other
-    // CCs are ignored except 64 (sustain) and 120/123 (all notes off).
+    // CCs are ignored except 64 (sustain), 120/123 (all notes off, which
+    // also lifts the pedal) and 121 (reset controllers: the pedal lifts).
     //
     // Borrowed: the ring's owner must outlive the audio thread (shutdown()
     // before destroying it). Null drains nothing.
@@ -166,8 +167,13 @@ class AudioEngine
     // 0 passes the keyboard's through.
     void setLivePlay(bool on) { m_livePlay.store(on); }
     void setLiveFixedVelocity(int velocity) { m_liveFixedVelocity.store(velocity); }
-    // Hot: release every live note (held and sustained) at the next callback.
+    // Hot: panic at the next callback: release every live note (held and
+    // sustained) and lift the sustain pedal, whose pedal-up may never come
+    // (a port that vanished with the pedal down).
     void liveAllNotesOff() { m_livePanicCmd.fetch_add(1); }
+    // Hot: release every live note at the next callback, but keep the
+    // pedal's state: it is still physically down (a tab switch).
+    void liveReleaseNotes() { m_liveReleaseCmd.fetch_add(1); }
     // Telemetry: the keys sounding from the keyboard on the live target, as
     // a 128-bit mask (bit k of lo for keys 0-63, of hi for 64-127). Every
     // cut clears it with the notes.
@@ -326,6 +332,8 @@ class AudioEngine
     void applyLiveNote(uint8_t key, uint8_t velocity);
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
+    // The pedal lifts: keys sounding only because of it release.
+    void liftLivePedal();
     // Forgets the keyboard's keys without note-offs: the caller cut or
     // cleared the sound they had.
     void forgetLiveNotes();
@@ -408,6 +416,7 @@ class AudioEngine
     std::atomic<bool> m_livePlay{true};
     std::atomic<int> m_liveFixedVelocity{0};
     std::atomic<uint32_t> m_livePanicCmd{0};
+    std::atomic<uint32_t> m_liveReleaseCmd{0};
     bool m_deviceHeldForTest = false; // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
@@ -442,6 +451,7 @@ class AudioEngine
     bool m_liveSustain = false;
     bool m_liveBent = false; // bend/mod sent to m_liveTrack since it became the target
     uint32_t m_appliedLivePanic = 0;
+    uint32_t m_appliedLiveRelease = 0;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;

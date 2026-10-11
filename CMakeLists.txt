@@ -66,6 +66,10 @@ if(PORYDAW_MIDI)
     target_include_directories(rtmidi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/rtmidi)
     if(WIN32)
         target_compile_definitions(rtmidi PRIVATE __WINDOWS_MM__)
+        # Port names without RtMidi's appended device index, which shifts as
+        # devices come and go; MidiInput numbers same-named ports itself.
+        # PUBLIC so midiinput.cpp can check it.
+        target_compile_definitions(rtmidi PUBLIC RTMIDI_DO_NOT_ENSURE_UNIQUE_PORTNAMES)
         target_link_libraries(rtmidi PUBLIC winmm)
     elseif(APPLE)
         target_compile_definitions(rtmidi PRIVATE __MACOSX_CORE__)

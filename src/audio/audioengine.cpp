@@ -692,6 +692,12 @@ void AudioEngine::applyMidiInput()
     if (panic != m_appliedLivePanic) {
         m_appliedLivePanic = panic;
         releaseLiveNotes();
+        m_liveSustain = false;
+    }
+    const uint32_t release = m_liveReleaseCmd.load();
+    if (release != m_appliedLiveRelease) {
+        m_appliedLiveRelease = release;
+        releaseLiveNotes();
     }
     if (target != m_liveTrack) {
         releaseLiveNotes(); // on the old track
@@ -746,22 +752,21 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
                 m_liveBent = true;
             }
             break;
-        case 64: { // sustain pedal
-            const bool down = msg.d2 >= 64;
-            if (m_liveSustain && !down) {
-                for (int k = 0; k < 128; k++) {
-                    if (m_liveOn[k] && !m_liveDown[k]) {
-                        m_liveOn[k] = false;
-                        applyLiveNote(uint8_t(k), 0);
-                    }
-                }
-            }
-            m_liveSustain = down;
+        case 64: // sustain pedal
+            if (msg.d2 >= 64)
+                m_liveSustain = true;
+            else
+                liftLivePedal();
             break;
-        }
+        case 121: // reset all controllers: the pedal is up
+            liftLivePedal();
+            break;
         case 120: // all sound off
         case 123: // all notes off
+            // A panic: a pedal-up lost with them must not defer every later
+            // note-off.
             releaseLiveNotes();
+            m_liveSustain = false;
             break;
         }
         break;
@@ -796,6 +801,19 @@ void AudioEngine::releaseLiveNotes()
         }
         m_liveDown[k] = false;
     }
+}
+
+void AudioEngine::liftLivePedal()
+{
+    if (m_liveSustain) {
+        for (int k = 0; k < 128; k++) {
+            if (m_liveOn[k] && !m_liveDown[k]) {
+                m_liveOn[k] = false;
+                applyLiveNote(uint8_t(k), 0);
+            }
+        }
+    }
+    m_liveSustain = false;
 }
 
 void AudioEngine::publishLiveHeld()

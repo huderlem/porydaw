@@ -15,9 +15,10 @@ class QSpinBox;
 // every Settings page it applies as controls change; the MidiInput service
 // owns persisting (midi/* keys) and reopening ports.
 //
-// Without a MIDI backend the page is a single explanatory label. The
-// harness can ask for the controls anyway (showWithoutBackend) to drive
-// the preference plumbing on a machine with no MIDI system (WSL, CI).
+// Without a MIDI backend the page is an explanatory label and a "Try Again"
+// button; once the backend starts the full controls show. The harness can
+// ask for the controls anyway (showWithoutBackend) to drive the preference
+// plumbing on a machine with no MIDI system (WSL, CI).
 class MidiSettingsPage : public QWidget
 {
     Q_OBJECT
@@ -28,10 +29,16 @@ class MidiSettingsPage : public QWidget
 
   private:
     void rebuildPorts();
+    // Shows the controls or the no-backend message, whichever applies.
+    void syncBackend();
     void portItemChanged(QListWidgetItem *item);
     void loadPreferences();
 
     MidiInput &m_midi;
+    bool m_showWithoutBackend = false;
+    QWidget *m_controls = nullptr;
+    QWidget *m_unavailable = nullptr;
+    QLabel *m_unavailableLabel = nullptr;
     QListWidget *m_ports = nullptr;
     QLabel *m_portsStatus = nullptr;
     QCheckBox *m_livePlay = nullptr;

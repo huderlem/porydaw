@@ -521,10 +521,10 @@ MainWindow::~MainWindow()
         m_uiTimer->stop();
     if (m_playheadTimer)
         m_playheadTimer->stop();
-    // No more MIDI input (closing joins the ports' callback threads), then
-    // stop the audio thread before the sessions free the timeline and
-    // voicegroup it borrows.
-    m_midiInput->closeAll();
+    // No more MIDI input (quietly: no slot of a half-destroyed window may
+    // run), then stop the audio thread before the sessions free the
+    // timeline and voicegroup it borrows.
+    m_midiInput->closeAll(/*quietly=*/true);
     m_audio.shutdown();
     voicegroup_free_samples(m_sampleSet);
 }
@@ -758,15 +758,10 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::activity, m_midiLed, &MidiActivityLed::flash);
     connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::updateMidiLed);
     updateMidiLed();
-    // A port closing (unplugged, disabled) can never send the note-offs for
-    // the keys it held.
-    m_openMidiPorts = m_midiInput->openPorts();
-    connect(m_midiInput.get(), &MidiInput::portsChanged, this, [this] {
-        const QStringList open = m_midiInput->openPorts();
-        const bool closed = std::any_of(m_openMidiPorts.begin(), m_openMidiPorts.end(),
-                                        [&](const QString &name) { return !open.contains(name); });
-        m_openMidiPorts = open;
-        if (closed && m_audioOk)
+    // A port closing (unplugged, disabled, reopened) can never send the
+    // note-offs, or the pedal-up, for what it held.
+    connect(m_midiInput.get(), &MidiInput::portsClosed, this, [this] {
+        if (m_audioOk)
             m_audio.liveAllNotesOff();
     });
     // Live keys light the roll's keyboard: polled while input is arriving
@@ -1535,7 +1530,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     // what the MIDI keyboard holds there.
     if (m_audioOk) {
         m_audio.stop();
-        m_audio.liveAllNotesOff();
+        m_audio.liveReleaseNotes();
     }
     if (previous)
         previous->view->setLiveHeldKeys(0, 0);
@@ -3117,12 +3112,15 @@ void MainWindow::updateMidiLed()
 {
     const QStringList open = m_midiInput->openPorts();
     m_midiLed->setListening(!open.isEmpty());
-    if (!m_midiInput->backendAvailable())
-        m_midiLed->setToolTip(tr("No MIDI input.\n%1").arg(m_midiInput->backendStatus()));
-    else if (open.isEmpty())
-        m_midiLed->setToolTip(tr("No MIDI input. Connect a keyboard, or check Settings → MIDI."));
-    else
+    if (!open.isEmpty())
         m_midiLed->setToolTip(tr("MIDI input from:\n%1").arg(open.join(QLatin1Char('\n'))));
+    else if (!m_midiInput->ports().isEmpty())
+        m_midiLed->setToolTip(tr("No MIDI input. Every MIDI port is turned off or could not be "
+                                 "opened; check Settings → MIDI."));
+    else if (!m_midiInput->backendAvailable())
+        m_midiLed->setToolTip(tr("No MIDI input.\n%1").arg(m_midiInput->backendStatus()));
+    else
+        m_midiLed->setToolTip(tr("No MIDI input. Connect a keyboard, or check Settings → MIDI."));
 }
 
 SongSettings MainWindow::songSettingsFor(const SongSession &session) const

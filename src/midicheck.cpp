@@ -44,7 +44,10 @@
 // has (without asserting that any device exists), the injector reaching the
 // ring and the throttled activity signal, the Settings → MIDI page
 // persisting its controls and port toggles, and the window's MIDI light and
-// Settings section with a song open.
+// Settings section with a song open. Port identities (the stable names that
+// survive hot-plug renumbering, every backend's spelling) are checked through
+// the pure helpers, and the no-backend page's Try Again through a simulated
+// backend.
 //
 // Step 2 (live play) parks the audio device and drives the real callback
 // itself (AudioEngine::pumpForTest), so time is simulated and every check is
@@ -54,7 +57,8 @@
 // act on the whole target track and are re-chased when it is left, held
 // notes win steal pressure from timed previews, a cut clears the published
 // held mask and a key released after it sends no stray note-off, and live
-// play off / no target / panic drain silently.
+// play off / no target / panic drain silently. Panic, CC123 and CC121 lift
+// the sustain pedal, so a lost pedal-up can't defer every later note-off.
 
 namespace {
 
@@ -182,6 +186,52 @@ void checkRing()
     check(ordered, "concurrent producers' messages arrived out of order");
     std::printf("midicheck: concurrent ring: %ld popped, %llu dropped\n", popped,
                 static_cast<unsigned long long>(shared.dropped()));
+}
+
+// Port identities (stable across hot-plug renumbering), as the pure
+// helpers resolve them; no backend needed, so every platform's naming is
+// covered here.
+void checkPortIdentities()
+{
+    using Naming = MidiInput::PortNaming;
+    const QString keys = QStringLiteral("Keystation 49");
+    // WinMM (built without RtMidi's appended index) and CoreMIDI: the
+    // device's own name, digits and all; same-named ports are counted.
+    check(MidiInput::portIdentities({keys, QStringLiteral("Other"), keys}, Naming::Plain) ==
+              QStringList({keys, QStringLiteral("Other"), keys + QStringLiteral(" (2)")}),
+          "same-named plain ports were not numbered by occurrence");
+    check(MidiInput::portBaseName(keys, Naming::Plain) == keys,
+          "a plain port name lost its own trailing number");
+    // A device literally named "X (2)" keeps its name; the counted one moves on.
+    check(MidiInput::portIdentities({"X (2)", "X", "X"}, Naming::Plain) ==
+              QStringList({"X (2)", "X", "X (3)"}),
+          "a counted identity collided with a device's literal name");
+    // A port that vanished mid-scan reads back empty and is not counted.
+    check(MidiInput::portIdentities({"X", "", "X"}, Naming::Plain) ==
+              QStringList({"X", "", "X (2)"}),
+          "an empty port name was counted or given an identity");
+    // ALSA: RtMidi's " client:port" suffix is dropped, so a replug (new
+    // numbers) keeps its identity.
+    const QString usb = QStringLiteral("USB Keys:USB Keys MIDI 1");
+    check(MidiInput::portIdentities(
+              {usb + " 20:0", "Midi Through:Midi Through Port-0 14:0", usb + " 24:0"},
+              Naming::Alsa) == QStringList({usb, "Midi Through:Midi Through Port-0", usb + " (2)"}),
+          "ALSA port names kept their client:port suffix");
+    check(MidiInput::portBaseName(usb + " 28:0", Naming::Alsa) == usb &&
+              MidiInput::portBaseName(usb + " 20:0", Naming::Alsa) == usb,
+          "a replugged ALSA port changed identity");
+
+    // Whether an open identity still names the device it opened.
+    check(!MidiInput::identityStable({"K", "K"}, {"K"}, "K", Naming::Plain) &&
+              !MidiInput::identityStable({"K", "K"}, {"K"}, "K (2)", Naming::Plain),
+          "unplugging one of two identical ports left an identity thought stable");
+    check(MidiInput::identityStable({"K", "Other"}, {"K"}, "K", Naming::Plain) &&
+              MidiInput::identityStable({"K"}, {"Other", "K"}, "K", Naming::Plain),
+          "another device coming or going unsettled a port");
+    check(!MidiInput::identityStable({"K", "Other"}, {"Other"}, "K", Naming::Plain),
+          "an unplugged port was thought stable");
+    check(!MidiInput::identityStable({usb + " 20:0"}, {usb + " 24:0"}, usb, Naming::Alsa),
+          "an ALSA port replugged under new numbers was thought stable");
 }
 
 void checkService()
@@ -337,6 +387,60 @@ void checkSettingsPage()
             page.resize(560, 480);
             shoot(&page, "page");
         }
+
+        // Two identical keyboards are two identities; a toggle persists the
+        // one shown, not a position.
+        midi.setPortListForTest({QStringLiteral("Twin"), QStringLiteral("Twin")});
+        QApplication::processEvents();
+        if (check(ports->count() == 2 && ports->item(0)->text() == QStringLiteral("Twin") &&
+                      ports->item(1)->text() == QStringLiteral("Twin (2)") &&
+                      midi.ports() == QStringList({"Twin", "Twin (2)"}),
+                  "two same-named ports were not listed as Name and Name (2)")) {
+            ports->item(1)->setCheckState(Qt::Unchecked);
+            QApplication::processEvents();
+            check(!midi.isPortEnabled(QStringLiteral("Twin (2)")) &&
+                      midi.isPortEnabled(QStringLiteral("Twin")) &&
+                      QSettings()
+                          .value(QStringLiteral("midi/disabledPorts"))
+                          .toStringList()
+                          .contains(QStringLiteral("Twin (2)")),
+                  "disabling the second same-named port did not persist its identity");
+            midi.setPortEnabled(QStringLiteral("Twin (2)"), true);
+        }
+    }
+
+    // Without a backend the window's page explains why and offers to try
+    // again; a backend that comes up turns it into the full page.
+    {
+        MidiInput midi;
+        if (!midi.backendAvailable()) {
+            MidiSettingsPage page(midi);
+            auto *label = page.findChild<QLabel *>(QStringLiteral("settingsMidiUnavailable"));
+            auto *retry = page.findChild<QPushButton *>(QStringLiteral("settingsMidiRetry"));
+            auto *ports = page.findChild<QListWidget *>(QStringLiteral("settingsMidiPorts"));
+            if (check(label && retry && ports, "the no-backend MIDI page's widgets not found")) {
+                check(label->isVisibleTo(&page) && retry->isVisibleTo(&page) &&
+                          !ports->isVisibleTo(&page) && label->text() == midi.backendStatus(),
+                      "without a backend the MIDI page is not the reason and Try Again");
+                retry->click();
+                QApplication::processEvents();
+                check(midi.backendAvailable()
+                          ? ports->isVisibleTo(&page)
+                          : label->isVisibleTo(&page) && !ports->isVisibleTo(&page),
+                      "Try Again did not leave the MIDI page matching the backend");
+                if (!midi.backendAvailable()) {
+                    midi.setBackendForTest(QStringLiteral("midicheck MIDI"));
+                    QApplication::processEvents();
+                    check(ports->isVisibleTo(&page) && !label->isVisibleTo(&page),
+                          "the MIDI page did not show its controls once the backend came up");
+                    midi.setBackendForTest(QString());
+                    QApplication::processEvents();
+                    check(!ports->isVisibleTo(&page) && label->isVisibleTo(&page) &&
+                              !label->text().isEmpty(),
+                          "the MIDI page did not return to the reason when the backend left");
+                }
+            }
+        }
     }
 
     // A relaunch reads every preference back, into the service and the page.
@@ -371,16 +475,16 @@ void checkSettingsPage()
 // Settings window's MIDI section.
 int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &songLabel)
 {
-    if (!openProjectDir(projectRoot, /*interactive=*/false)) {
-        std::fprintf(stderr, "midicheck: project failed to open\n");
-        return 1;
-    }
+    const int before = g_failures;
+    // Counted as failures: "OK" must mean the window half ran.
+    if (!check(openProjectDir(projectRoot, /*interactive=*/false), "the project failed to open"))
+        return g_failures - before;
     loadSongByLabel(songLabel);
     if (!m_active || m_active->doc.label() != songLabel) {
         std::fprintf(stderr, "midicheck: song '%s' did not load\n", qUtf8Printable(songLabel));
-        return 1;
+        check(false, "the song did not load");
+        return g_failures - before;
     }
-    const int before = g_failures;
     MidiInput &midi = midiInput();
 
     // The light sits on the transport toolbar and says what it listens to.
@@ -410,7 +514,10 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
         shoot(m_transportToolbar, "toolbar-lit");
         wait(MidiActivityLed::kFlashMs * 2);
         check(!led->isLit(), "the MIDI light stayed lit after input stopped");
+        // The audio callback is the ring's one consumer: park it to drain.
+        m_audio.holdDeviceForTest(true);
         drain(midi.ring());
+        m_audio.holdDeviceForTest(false);
     }
 
     // Settings → MIDI is the second section; without a backend it is one
@@ -425,13 +532,29 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     auto *label = page->findChild<QLabel *>(QStringLiteral("settingsMidiUnavailable"));
     auto *ports = page->findChild<QListWidget *>(QStringLiteral("settingsMidiPorts"));
     if (midi.backendAvailable()) {
-        check(!label && ports && ports->count() == int(midi.ports().size()),
+        check(label && ports && !label->isVisibleTo(page) && ports->isVisibleTo(page) &&
+                  ports->count() == int(midi.ports().size()),
               "the MIDI page does not list the backend's ports");
     } else {
-        check(label && !ports && label->text() == midi.backendStatus() && !label->text().isEmpty(),
-              "without a backend the MIDI page is not one explanatory label");
+        check(label && ports && label->isVisibleTo(page) && !ports->isVisibleTo(page) &&
+                  label->text() == midi.backendStatus() && !label->text().isEmpty(),
+              "without a backend the MIDI page does not explain why");
     }
     dialog->reject();
+
+    // Ports listed but none open (all turned off, or failing): the light
+    // says so instead of asking for a keyboard.
+    if (led && midi.ports().isEmpty() && midi.openPorts().isEmpty()) {
+        midi.setPortListForTest({QStringLiteral("midicheck keys")});
+        midi.setPortEnabled(QStringLiteral("midicheck keys"), false);
+        check(led->toolTip().contains(QStringLiteral("turned off")),
+              "with every port off the MIDI light's tooltip does not say so");
+        midi.setPortEnabled(QStringLiteral("midicheck keys"), true);
+        midi.setPortListForTest({});
+        check(led->toolTip().startsWith(QStringLiteral("No MIDI input")) &&
+                  !led->toolTip().contains(QStringLiteral("turned off")),
+              "the MIDI light's tooltip did not return to no ports");
+    }
 
     checkLivePlay();
     return g_failures - before;
@@ -639,13 +762,18 @@ void MainWindow::checkLivePlay()
     const auto wheelMod = [&](int track, int wheel) {
         return (wheel * view->laneDisplayMax(track, 0x01) + 63) / 127;
     };
-    send(0xE0, 0, 96); // bend14 = 96 << 7 = 12288, +4096 from centre
-    send(0xB0, 1, 100);
+    // Values the song's chased ones can't equal, so the restore below is
+    // seen: a quarter bend up (MSB 96, bend14 = 96 << 7, +4096 from centre:
+    // engine bend 32) unless the song sits there, then a quarter down.
+    const int bendTo = aBend == 32 ? -32 : 32;
+    const int wheel = wheelMod(a, 100) != aMod ? 100 : 50;
+    send(0xE0, 0, uint8_t(64 + bendTo));
+    send(0xB0, 1, uint8_t(wheel));
     pumpMs(30);
-    check(engine->tracks[a].bend == 32, "live play: pitch bend did not reach the target track");
-    check(engine->tracks[a].mod == wheelMod(a, 100),
+    check(engine->tracks[a].bend == bendTo, "live play: pitch bend did not reach the target track");
+    check(engine->tracks[a].mod == wheelMod(a, wheel),
           "live play: the mod wheel did not reach the target track at the lane's scale");
-    check(aBend != 32 && aMod != wheelMod(a, 100),
+    check(aBend != bendTo && aMod != wheelMod(a, wheel),
           "live play: the song's own bend/mod hide the restore check");
     // Full travel reaches the lane's top; a new range rescales the wheel.
     send(0xB0, 1, 127);
@@ -659,7 +787,7 @@ void MainWindow::checkLivePlay()
               engine->tracks[a].mod == view->laneDisplayMax(a, 0x01),
           "live play: changing the MOD lane's range did not rescale the mod wheel");
     view->setLaneDisplayRange(a, 0x01, 0);
-    send(0xB0, 1, 100);
+    send(0xB0, 1, uint8_t(wheel));
     pumpMs(30);
     view->selectTrack(b);
     pumpMs(30);
@@ -720,15 +848,40 @@ void MainWindow::checkLivePlay()
     pumpMs(30);
     check(keyed(a).empty() && held() == bits({}),
           "live play: MIDI: All Notes Off did not release held and sustained keys");
+    // The panic lifts the pedal too (its pedal-up may never come, as when
+    // the port vanished): a later note-off releases at once. No pedal-up is
+    // sent from here on.
     send(0x80, 60, 0);
     send(0x90, 62, 100);
     pumpMs(30);
+    send(0x80, 62, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: after a panic the pedal still held a released key");
+    // CC123 the same, with the pedal down again.
+    send(0xB0, 64, 127);
+    send(0x90, 62, 100);
+    send(0x80, 62, 0);
+    pumpMs(30);
+    check(keyed(a) == std::vector<int>{62}, "live play: the sustain pedal did not hold a key");
     send(0xB3, 123, 0);
     pumpMs(30);
     check(keyed(a).empty(), "live play: CC123 did not release the sustained keys");
-    send(0xB0, 64, 0);
+    send(0x90, 63, 100);
+    send(0x80, 63, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: after CC123 the pedal still held a released key");
+    // CC121 (reset all controllers) lifts the pedal, releasing what it held.
+    send(0xB0, 64, 127);
+    send(0x90, 62, 100);
     send(0x80, 62, 0);
     pumpMs(30);
+    send(0xB0, 121, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: CC121 did not lift the sustain pedal");
+    send(0x90, 63, 100);
+    send(0x80, 63, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: after CC121 the pedal still held a released key");
 
     // Live play off, or no target: the input drains and nothing sounds.
     midi.setLivePlay(false);
@@ -760,11 +913,15 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
         std::fprintf(stderr, "midicheck: no temp dir for settings\n");
         return 1;
     }
+    // IniFormat by default: NativeFormat's path is ignored on Windows (the
+    // registry) and macOS (plists), where the user's real midi/* keys live.
     QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, settingsDir.path());
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    QSettings::setDefaultFormat(QSettings::IniFormat);
     QStandardPaths::setTestModeEnabled(true);
 
     checkParseTable();
+    checkPortIdentities();
     checkRing();
     checkService();
     checkSettingsPage();

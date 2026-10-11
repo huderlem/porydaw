@@ -733,3 +733,119 @@ To change a decision later, update this table and every step it affects
   - with the engine scaling removed, all three fail;
   - with the range-changed republish removed, the rescale check fails.
 - Normal and ASAN sweeps both PASS.
+
+### Review fixes (2026-10-11, uncommitted on `midi-input`)
+
+A code review of 28aaf34, ef8a087 and 096c667 was verified finding by finding.
+Every finding checked out, and all were fixed.
+
+- **A, the midicheck early exits.** When the project failed to open or the
+  song didn't load, `runMidiWindowCheck` returned 1, but the caller ignored
+  it and the run still printed "OK". Both exits now count a failure.
+  Running with a bad label or a bad root now FAILs with exit 1.
+- **B, stable port identity.**
+  - The pure helpers are `MidiInput::portBaseName`, `portIdentities` and
+    `identityStable`, with `PortNaming::{Plain, Alsa}`.
+  - **Identity** is the base name plus the port's count among same-named
+    ports: "Name", "Name (2)", and so on. A device whose real name is
+    "X (2)" keeps it, and the counted port moves on to the next number.
+  - **WinMM**: CMake defines `RTMIDI_DO_NOT_ENSURE_UNIQUE_PORTNAMES` PUBLIC
+    on `rtmidi`, and `midiinput.cpp` `#error`s on Windows without it.
+  - **ALSA**: the trailing ` client:port` is stripped.
+  - **CoreMIDI**: names are used as reported.
+  - `midi/disabledPorts` stores identities. Old suffixed entries just go
+    stale.
+  - Each open port records the raw list it opened from. The poll keeps a
+    port only while `identityStable` holds: the identity is still listed
+    and the ports sharing its base name are unchanged. So unplugging
+    either of two identical keyboards closes both, and the remaining one
+    reopens as "Name".
+  - A failed identity that is no longer stable is forgotten, so it is
+    retried.
+  - **Refresh** now closes and reopens every open port, which recovers a
+    handle left dead by a replug at the same place within one poll.
+  - The new `portsClosed()` signal replaces MainWindow's open-list diff, so
+    a reopen also panics: `liveAllNotesOff`.
+- **C, opening at a stale index.** `openQuietly` looks the index up from a
+  fresh scan. After `openPort` it checks that the index still has the
+  expected raw name. If not, it closes the port without marking it failed,
+  so the next poll retries.
+- **D, the stuck activity timer.** `deliverActivity` reads `elapsed()`
+  once and starts the timer with `max(1, interval - since)`.
+- **E, Settings → MIDI with no backend.**
+  - The page now always builds its controls, plus a no-backend panel: the
+    `settingsMidiUnavailable` label and a **Try Again** button,
+    `settingsMidiRetry`.
+  - `syncBackend()` toggles between them on `portsChanged` (queued).
+  - `refresh()` also emits `portsChanged` when starting the backend fails
+    again.
+  - Harness hook: `MidiInput::setBackendForTest(name)`.
+- **F, the harness's settings redirect.** midicheck now calls
+  `QSettings::setDefaultFormat(IniFormat)`, as rollcheck and velcheck do.
+- **G, what closing guarantees.** The comments now say that only ALSA joins
+  its callback thread on close; WinMM and CoreMIDI don't wait for a running
+  callback. `OpenPort::closing`, an atomic, is set in `shutPort` before
+  `closePort`, and `onMessage` returns early when it is set. This narrows
+  the window but does not close it.
+- **H, three small fixes.**
+  - The disabled list is cached in `m_disabled`.
+  - `~MainWindow` calls `closeAll(/*quietly=*/true)`, which emits nothing.
+  - When ports are listed but none is open, the LED tooltip says "Every MIDI
+    port is turned off or could not be opened; check Settings → MIDI."
+- **I, sustain never reset.**
+  - The panic counter (the `midi.panic` command and a port closing), CC120
+    and CC123 now clear `m_liveSustain`.
+  - CC121 lifts the pedal: it releases the keys held only by the pedal.
+  - Tab switching now uses a new `liveReleaseNotes()`, which releases the
+    notes but keeps the pedal state. A plain target change keeps it too.
+  - The harness no longer sends its own pedal-up after the panic tests.
+  - New checks: after a panic, after CC123 and after CC121, a key's note-off
+    releases at once; CC121 releases the keys the pedal was holding.
+- **J, two consumers on the ring.** The window check now holds the device
+  around its LED-test drain.
+- **K, bend and mod values that could match the song's.** The bend
+  (±32) and the wheel (100 or 50) are now picked to differ from the track's
+  chased values.
+
+**Negatives**
+
+Each was broken, confirmed FAIL, and restored by a targeted reverse edit;
+the `git diff` hash was identical afterwards.
+
+- B: no occurrence numbering; no ALSA strip; `identityStable` ignores the
+  group; the literal-name collision loop removed.
+- E: `syncBackend` not driven by `portsChanged`; the no-backend panel never
+  shown.
+- H: the "turned off" tooltip branch skipped; `saveDisabledPorts` not
+  called.
+- I: panic keeps the pedal; CC123 keeps the pedal; CC121 ignored.
+- K: the bend forced to match the song's, which trips the guard.
+
+Not negative-testable here (no backend on WSL):
+
+- **C**: the stale-index check after open.
+- **D**: needs a scheduler race.
+- **F**: Linux has no registry or plists.
+- **G**: the closing flag.
+- **J**: a race.
+
+**Builds and sweeps**
+
+- `build`, `build-asan`, `build-nomidi` and `build-dummy` all build.
+  midicheck reports OK on all four.
+- `tools/format.sh --check` is clean.
+- `tools/run_checks.sh` passes every harness on both the normal and ASAN
+  builds.
+
+**Report-only, not fixed** (pre-existing or consistent with the design)
+
+- The bend/mod re-chase ignores the loop.
+- Lane-range keys go stale after a track is deleted or moved.
+- The two halves of the held mask can tear.
+- CoreMIDI run-loop reentrancy.
+- Unfixable by design: with identical WinMM or CoreMIDI devices, which one
+  is "Name (2)" depends on position, so after an unplug a disabled
+  "Name (2)" can turn into the enabled "Name".
+
+Real-device behaviour (WinMM naming, hot-plug, Refresh recovery) is left
+for the user's Windows pass.
