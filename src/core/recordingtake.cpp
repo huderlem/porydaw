@@ -66,8 +66,11 @@ void RecordingTake::push(const CaptureEvent &ev)
     if (ev.kind == CaptureEvent::Boundary) {
         if (ev.segment > m_segment) {
             // The player jumped (a loop wrap, a seek): notes still held end
-            // where the segment did.
-            closeOpen(ev.samplePos, /*played=*/false);
+            // where the segment did. Past a lost Boundary, the position this
+            // one ended at belongs to a segment the take never saw: the last
+            // position seen is the bound, as below.
+            closeOpen(ev.segment == m_segment + 1 ? ev.samplePos : m_lastSample,
+                      /*played=*/false);
             enterSegment(ev.segment, ev.resumePos);
         }
         return;
@@ -167,8 +170,9 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
 
     // Later notes win (D7/D8), with resolveNoteOverlaps' trims: an earlier
     // note keeps its head when the later one starts inside it, keeps its
-    // tail when the later one ends inside it, and goes when it is covered
-    // or shares the later one's start.
+    // tail when it outlasts the later one (a shared start included), and
+    // goes when it is covered. So one take with two passes lands as two
+    // takes would.
     // Per key, so a live preview of a long take stays cheap.
     std::vector<size_t> byKey[128];
     for (size_t i = 0; i < spans.size(); i++) {
@@ -180,7 +184,7 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
                 continue;
             if (s.tick < w.tick)
                 s.end = w.tick;
-            else if (s.tick > w.tick && s.end > w.end)
+            else if (s.end > w.end)
                 s.tick = w.end;
             else
                 s.kept = false;

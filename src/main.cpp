@@ -118,7 +118,7 @@ int runEventViewCheck(const QString &projectRoot, const QString &screenshotSong 
 
 // midicheck.cpp; MIDI keyboard input check (docs/midi-input/PLAN.md): parse
 // table, input ring, port plumbing without assuming devices, the test
-// injector, Settings → MIDI persistence and the window's MIDI light, with
+// injector, Settings → MIDI persistence and live play in the window, with
 // the song open; the optional path saves screenshots. Redirects QSettings
 // itself.
 int runMidiCheck(const QString &projectRoot, const QString &songLabel,

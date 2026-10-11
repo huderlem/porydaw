@@ -100,8 +100,19 @@ class TimelinePlayer
     void render(M4AEngine *engine, const MidiTimeline *timeline, float *outL, float *outR,
                 uint32_t frames, bool looping, uint32_t muteMask);
 
+    // A position at or past the loop end (a start or seek there, or the
+    // last render ending exactly on it) wraps before the next render plays
+    // a sample: does that wrap now, exactly as render() would first, so a
+    // caller reading position() sees where the sound will come from. A
+    // no-op otherwise.
+    void settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
+                    uint32_t muteMask);
+
   private:
     static void dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask);
+    // Dispatches every event (and gate-carried release) due at the
+    // position, wrapping the loop as needed.
+    void dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop, uint32_t muteMask);
 
     void wrapNotes(M4AEngine *engine, const MidiTimeline *timeline);
 

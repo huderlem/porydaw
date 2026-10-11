@@ -691,8 +691,9 @@ void AudioEngine::forgetLiveNotes()
 
 void AudioEngine::applyMidiInput()
 {
-    // After the transport transition and the seek: a fresh start's Begin
-    // lands on the edit cursor it seeked to.
+    // After the transport transition, the seek and a settled wrap: a fresh
+    // start's Begin lands on the edit cursor it seeked to (the loop start,
+    // when that is at or past the loop end).
     syncCapture();
     // Sound target: none without a song or with live play off; the input is
     // still drained so it never backs up.
@@ -703,16 +704,16 @@ void AudioEngine::applyMidiInput()
     const uint32_t panic = m_livePanicCmd.load();
     if (panic != m_appliedLivePanic) {
         m_appliedLivePanic = panic;
-        releaseLiveNotes();
+        imposeLiveRelease();
         m_liveSustain = false;
     }
     const uint32_t release = m_liveReleaseCmd.load();
     if (release != m_appliedLiveRelease) {
         m_appliedLiveRelease = release;
-        releaseLiveNotes();
+        imposeLiveRelease();
     }
     if (target != m_liveTrack) {
-        releaseLiveNotes(); // on the old track
+        imposeLiveRelease(); // on the old track
         // Hand the old track back to the song: its bend and mod as chased
         // at the playhead, every other track and parameter untouched.
         if (m_liveBent && m_liveTrack >= 0 && m_timeline)
@@ -724,18 +725,20 @@ void AudioEngine::applyMidiInput()
 
     if (MidiInputRing *ring = m_midiRing.load(std::memory_order_acquire)) {
         MidiMsg msg;
-        int64_t now = 0;
+        // Bounded by a few periods (or callbacks, when the backend hands
+        // over more than a period at once), so a stalled callback can't
+        // throw a note far back.
+        const long long cap =
+            std::max(4LL * std::max(m_periodFrames, 1), 2LL * (long long)m_callbackFrames);
         while (ring->pop(&msg)) {
-            // How long the message waited for this callback: the take
-            // places it back where it arrived. Bounded by a few periods, so
-            // a stalled callback can't throw a note far back.
+            // How long the message waited for this callback (measured to
+            // its entry, the moment its stamp stands for): the take places
+            // it back where it arrived.
             m_liveLate = 0;
             if (msg.arrivalNs > 0) {
-                if (now == 0)
-                    now = midiClockNs();
-                const double waited = double(std::max<int64_t>(0, now - msg.arrivalNs)) * 1e-9;
-                m_liveLate = uint32_t(std::min(std::llround(waited * m_sampleRate),
-                                               4LL * std::max(m_periodFrames, 1)));
+                const double waited =
+                    double(std::max<int64_t>(0, m_callbackNs - msg.arrivalNs)) * 1e-9;
+                m_liveLate = uint32_t(std::min(std::llround(waited * m_sampleRate), cap));
             }
             handleLiveMessage(msg);
         }
@@ -822,6 +825,14 @@ void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)
         releaseActive(uint8_t(m_liveTrack), key);
 }
 
+void AudioEngine::imposeLiveRelease()
+{
+    // Nobody played these note-offs: a take ends its held notes here
+    // unshifted, as at a cut, and the offs that follow match nothing.
+    pushCapture(CaptureEvent::Cut, m_player.position());
+    releaseLiveNotes();
+}
+
 void AudioEngine::releaseLiveNotes()
 {
     for (int k = 0; k < 128; k++) {
@@ -875,8 +886,10 @@ void AudioEngine::syncCapture()
         return;
     m_captureBegun = gen;
     m_captureSegment = 0;
-    pushCapture(CaptureEvent::Begin, m_player.position());
+    // The clock first: a commit that reads it once the Begin is visible
+    // must not see the previous take's position.
     publishCaptureClock();
+    pushCapture(CaptureEvent::Begin, m_player.position());
 }
 
 void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
@@ -907,6 +920,20 @@ void AudioEngine::captureBoundary(uint64_t from, uint64_t to)
         return;
     m_captureSegment++;
     pushCapture(CaptureEvent::Boundary, from, 0, 0, to);
+}
+
+void AudioEngine::settleLoopWrap()
+{
+    // Before the input is stamped: a player at or past the loop end renders
+    // nothing of where it is, so what this callback captures belongs after
+    // the wrap.
+    if (m_appliedTransport != static_cast<int>(Transport::Playing) || !m_timeline)
+        return;
+    const uint64_t from = m_player.position();
+    const uint32_t wraps = m_player.wrapCount();
+    m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute);
+    if (m_player.wrapCount() != wraps)
+        captureBoundary(from, m_timeline->loopStartSample);
 }
 
 void AudioEngine::publishCaptureClock()
@@ -995,11 +1022,16 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     // Transition before pending seek: a Stop rewinds the player, so a seek
     // requested after stop() (play-from-cursor) must land on top of the
     // rewind, not under it.
+    // The callback's entry: what applyMidiInput measures a message's wait
+    // against.
+    m_callbackNs = midiClockNs();
+    m_callbackFrames = frameCount;
     applyTransportTransition();
     applyPendingSeek();
     applyMuteTransition();
     applyPreviewNote();
     applyTimedPreviews(frameCount);
+    settleLoopWrap();
     applyMidiInput();
     applyPreviewVoice();
     m_audition.apply(m_previewEngine.get(), kAuditionTrack);

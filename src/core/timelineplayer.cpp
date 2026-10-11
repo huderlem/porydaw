@@ -188,6 +188,64 @@ void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
         timeline->events.begin());
 }
 
+void TimelinePlayer::settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
+                                uint32_t muteMask)
+{
+    const bool loop = looping && timeline->hasLoop();
+    if (loop && m_pos >= timeline->loopEndSample)
+        dispatchDue(engine, timeline, loop, muteMask);
+}
+
+void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop,
+                                 uint32_t muteMask)
+{
+    for (;;) {
+        // Gate-carried releases fire before regular events at the same
+        // position: on hardware the channel gate hits zero as the clock
+        // advances, before the track's commands at that clock run.
+        for (int i = 0; i < m_pendingOffCount;) {
+            if (m_pendingOffs[i].samplePos <= m_pos) {
+                m4a_engine_note_off(engine, m_pendingOffs[i].track, m_pendingOffs[i].key);
+                m_keyedOn[m_pendingOffs[i].track][m_pendingOffs[i].key] = false;
+                m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
+            } else {
+                i++;
+            }
+        }
+        while (m_cursor < timeline->events.size() &&
+               timeline->events[m_cursor].samplePos <= m_pos) {
+            const TimelineEvent &ev = timeline->events[m_cursor];
+            m_cursor++;
+            // While looping, a note starting at the loop end must not
+            // sound: the wrap replaces it with the loop-start events, and
+            // its note-off lies beyond the loop end where playback never
+            // goes (mid2agb orders the GOTO before same-tick note starts,
+            // so it is unreachable on hardware too).
+            if (loop && ev.type == 0x9 && ev.samplePos >= timeline->loopEndSample)
+                continue;
+            if (ev.type == 0x9 && !((muteMask >> ev.track) & 1)) {
+                m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
+                m_keyedOnTick[ev.track][ev.data0 & 0x7F] = ev.tick;
+            } else if (ev.type == 0x8) {
+                m_keyedOn[ev.track][ev.data0 & 0x7F] = false;
+            }
+            dispatchEvent(engine, ev, muteMask);
+        }
+        if (loop && m_pos >= timeline->loopEndSample) {
+            wrapNotes(engine, timeline);
+            m_pos = timeline->loopStartSample;
+            m_wraps++;
+            m_cursor =
+                size_t(std::lower_bound(
+                           timeline->events.begin(), timeline->events.end(), m_pos,
+                           [](const TimelineEvent &e, uint64_t pos) { return e.samplePos < pos; }) -
+                       timeline->events.begin());
+            continue;
+        }
+        break;
+    }
+}
+
 void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, float *outL,
                             float *outR, uint32_t frames, bool looping, uint32_t muteMask)
 {
@@ -197,52 +255,7 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
     while (done < frames) {
         // Dispatch every event due at the current position, wrapping the loop
         // as needed.
-        for (;;) {
-            // Gate-carried releases fire before regular events at the same
-            // position: on hardware the channel gate hits zero as the clock
-            // advances, before the track's commands at that clock run.
-            for (int i = 0; i < m_pendingOffCount;) {
-                if (m_pendingOffs[i].samplePos <= m_pos) {
-                    m4a_engine_note_off(engine, m_pendingOffs[i].track, m_pendingOffs[i].key);
-                    m_keyedOn[m_pendingOffs[i].track][m_pendingOffs[i].key] = false;
-                    m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
-                } else {
-                    i++;
-                }
-            }
-            while (m_cursor < timeline->events.size() &&
-                   timeline->events[m_cursor].samplePos <= m_pos) {
-                const TimelineEvent &ev = timeline->events[m_cursor];
-                m_cursor++;
-                // While looping, a note starting at the loop end must not
-                // sound: the wrap replaces it with the loop-start events, and
-                // its note-off lies beyond the loop end where playback never
-                // goes (mid2agb orders the GOTO before same-tick note starts,
-                // so it is unreachable on hardware too).
-                if (loop && ev.type == 0x9 && ev.samplePos >= timeline->loopEndSample)
-                    continue;
-                if (ev.type == 0x9 && !((muteMask >> ev.track) & 1)) {
-                    m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
-                    m_keyedOnTick[ev.track][ev.data0 & 0x7F] = ev.tick;
-                } else if (ev.type == 0x8) {
-                    m_keyedOn[ev.track][ev.data0 & 0x7F] = false;
-                }
-                dispatchEvent(engine, ev, muteMask);
-            }
-            if (loop && m_pos >= timeline->loopEndSample) {
-                wrapNotes(engine, timeline);
-                m_pos = timeline->loopStartSample;
-                m_wraps++;
-                m_cursor =
-                    size_t(std::lower_bound(timeline->events.begin(), timeline->events.end(), m_pos,
-                                            [](const TimelineEvent &e, uint64_t pos) {
-                                                return e.samplePos < pos;
-                                            }) -
-                           timeline->events.begin());
-                continue;
-            }
-            break;
-        }
+        dispatchDue(engine, timeline, loop, muteMask);
 
         // Render up to the next event, pending release, or the loop end.
         uint64_t next = UINT64_MAX;

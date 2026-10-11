@@ -11,8 +11,15 @@ Upstream files with one porydaw patch (marked `porydaw patch` in
 `midiInUnprepareHeader` fails, which is what happens when the device was
 unplugged. Upstream freed sysex buffer 0, kept `connected_` true and the
 critical section held, and the destructor's second `closePort()` then
-double-freed it, so every unplug crashed. The sha256 values above are of
-the unpatched upstream files. Build configuration lives in `CMakeLists.txt`
+double-freed it, so every unplug crashed. The patch finishes the close
+(handle closed, `connected_` false, critical section left) and leaks any
+header that failed to unprepare, since the driver may still own it. Only
+then does it report `DRIVER_ERROR` through `error()`: with an error
+callback set, as porydaw sets one (`MidiInput`, porydaw opens no sysex
+buffers anyway), that callback gets it; without one, `error()` throws
+`RtMidiError` out of that `closePort()` call, after the port is fully
+closed, so the destructor's own `closePort()` is a no-op and never throws.
+The sha256 values above are of the unpatched upstream files. Build configuration lives in `CMakeLists.txt`
 (option `PORYDAW_MIDI`): one backend define per platform —
 `__WINDOWS_MM__` (links `winmm`), `__MACOSX_CORE__` (links CoreMIDI,
 CoreAudio, CoreFoundation), `__LINUX_ALSA__` (links ALSA; needs

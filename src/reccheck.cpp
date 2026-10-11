@@ -1,11 +1,16 @@
+#include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QKeyEvent>
+#include <QMessageBox>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QToolBar>
 #include <QUndoStack>
 #include <algorithm>
@@ -34,21 +39,27 @@
 // minimum, held-at-stop, a note held across one or more loop wraps ending at
 // the loop end, the latency offset clamped at punch-in and at the loop
 // start (and never moving an end the take imposed), later passes winning
-// same-(tick, key) and overlapping notes, unmatched note-offs, cuts, a lost
-// Boundary, another arm's events.
+// overlapping notes by the document's own rules, unmatched note-offs, cuts,
+// a lost Boundary (and a Boundary after one), another arm's events.
 //
 // Then Record end to end in the window, with the audio device parked and the
 // real callback pumped (AudioEngine::holdDeviceForTest/pumpForTest), every
 // message injected through MidiInput::injectForTest: a fresh start records
-// from the edit cursor and Stop commits one undo step that undo removes; an
-// empty take pushes nothing; punch in and out while playing keeps playing,
+// from the edit cursor and Stop commits one undo step that undo removes; R
+// in the roll toggles Record, which has no window shortcut; Pause commits;
+// a take ended inside an open edit group lands after it as its own step; a
+// track the song doesn't have can't record, and a take that can't be
+// written isn't reported as recorded; an empty take pushes nothing; punch
+// in and out while playing keeps playing,
 // ignores a key held at punch-in and clamps the offset at punch-in; the
 // target stays locked through a selection change; the sustain pedal extends
 // a note; Fixed velocity is recorded; Play incoming notes off still records;
-// Auto takes the device latency; a loop wrap, a seek and a 2-pass overdub;
-// a document edit mid-take; the capture ring overflowing; the song ending
-// by itself; a tab switch committing to the take's own tab; Record disabled
-// on a read-only bundle tab.
+// MIDI: All Notes Off ends a held note unshifted; Auto takes the device
+// latency; a loop wrap, a seek and a 2-pass overdub, and a take started at
+// the loop end; a document edit mid-take; the capture ring overflowing; the
+// song ending by itself; closing another tab, closing, destroying and
+// reloading the take's own; a tab switch committing to the take's own tab;
+// Record disabled on a read-only bundle tab.
 
 namespace {
 
@@ -122,6 +133,38 @@ struct Feed {
         segment++;
         push(CaptureEvent::Boundary, from, 0, 0, to);
     }
+};
+
+// Answers every "Unsaved Changes" prompt that comes up while it lives.
+class PromptAnswer
+{
+  public:
+    explicit PromptAnswer(QMessageBox::StandardButton button)
+    {
+        m_timer.setInterval(10);
+        QObject::connect(&m_timer, &QTimer::timeout, [this, button] {
+            auto *box = qobject_cast<QMessageBox *>(QApplication::activeModalWidget());
+            if (!box)
+                return;
+            QAbstractButton *b = box->button(button);
+            if (!b)
+                b = box->button(QMessageBox::Cancel);
+            if (b) {
+                m_answered++;
+                b->click();
+            } else {
+                box->reject();
+            }
+        });
+        m_timer.start();
+    }
+    PromptAnswer(const PromptAnswer &) = delete;
+    PromptAnswer &operator=(const PromptAnswer &) = delete;
+    int answered() const { return m_answered; }
+
+  private:
+    QTimer m_timer;
+    int m_answered = 0;
 };
 
 // 48 kHz, 24 ticks per beat at 120 bpm: 1000 samples per tick. With
@@ -265,8 +308,10 @@ void checkTakeRules()
                    "take: the latency offset was not applied or not clamped"))
             printNotes("got", notes);
     }
-    // Later passes win: a repeated (tick, key) keeps the last; overlaps trim
-    // the earlier note's head or tail, or remove it when covered.
+    // Later passes win, by SongDocument::resolveNoteOverlaps' rules: overlaps
+    // keep the earlier note's head or tail, or remove it when covered; a
+    // repeated (tick, key) keeps the earlier note's tail when it outlasts the
+    // later one (as a second take over the first would).
     {
         take.begin(0, 8);
         Feed feed{take, 8};
@@ -293,6 +338,7 @@ void checkTakeRules()
                                      {50, 62, 5, 100},
                                      {50, 64, 10, 100},
                                      {50, 65, 10, 100},
+                                     {51, 60, 1, 80},
                                      {55, 62, 3, 100},
                                      {60, 65, 10, 100}}),
                    "take: a later pass did not win over the earlier notes"))
@@ -335,6 +381,25 @@ void checkTakeRules()
         const auto notes = take.toNotes(tl, 50000, 1, 2000);
         if (!check(sameNotes(notes, {{45, 62, 2, 100}, {78, 60, 8, 100}, {83, 61, 1, 100}}),
                    "take: a lost Boundary did not end the held note at the last position"))
+            printNotes("got", notes);
+    }
+    // A Boundary arriving after an earlier one was lost: what was held ends
+    // at the last position seen, not at this Boundary's end (another
+    // segment's position).
+    {
+        take.begin(0, 13);
+        Feed feed{take, 13};
+        feed.begin(10000);
+        feed.on(80000, 60);
+        feed.on(85000, 61);
+        feed.off(86000, 61);
+        feed.segment++;          // a wrap whose Boundary never arrives
+        feed.jump(60000, 40000); // then a seek's, ending at 60000
+        feed.on(45000, 62);
+        feed.off(49000, 62);
+        const auto notes = take.toNotes(tl, 50000, 2, 0);
+        if (!check(sameNotes(notes, {{45, 62, 4, 100}, {80, 60, 6, 100}, {85, 61, 1, 100}}),
+                   "take: a Boundary after a lost one ended the held note at its own position"))
             printNotes("got", notes);
     }
     // A message's wait for its callback moves its time back (the note on's
@@ -451,6 +516,11 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
     };
     const auto recording = [&] { return m_takeSession != nullptr; };
     const auto message = [&] { return statusBar()->currentMessage(); };
+    const auto saysRecordingInto = [&](int track) {
+        const QString m = message();
+        return m.startsWith(QStringLiteral("Recording into %1: ").arg(track + 1)) ||
+               m == QStringLiteral("Recording into Track %1…").arg(track + 1);
+    };
     // One audio period in ticks (at the song's opening tempo): the capture
     // jitter the plan allows. Pumped time is exact, so this only bounds it.
     const double samplesPerTick = double(sampleOf(session->timeline->ticksPerBeat)) /
@@ -524,13 +594,136 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
               "record: a played note did not land on the target track at its ticks");
         check(n62 && n62->tick + n62->duration == tickOf(pStop) && n62->velocity == 90,
               "record: a note held at Stop did not end at the stop position");
-        // Played 50 ms after the start.
+        // Played 50 ms after the start: wherever the new key-60 note
+        // landed, it is within a period of that.
         const uint64_t intended = tickOf(sampleOf(cursor) + uint64_t(rate * 0.05));
-        check(n60 && (n60->tick > intended ? n60->tick - intended : intended - n60->tick) <= slop,
+        std::optional<uint64_t> landed;
+        for (const DocNote &n : doc.notesForTrack(a)) {
+            const std::array<uint64_t, 4> row{n.tick, n.key, n.duration, n.velocity};
+            if (n.key == 60 && std::find(before.begin(), before.end(), row) == before.end())
+                landed = n.tick;
+        }
+        check(landed && (*landed > intended ? *landed - intended : intended - *landed) <= slop,
               "record: a played note is more than one period off its time");
         undo->undo();
         check(noteList(a) == before, "record: undo did not remove every recorded note");
         send(0x80, 62, 0);
+        pumpMs(30);
+    }
+
+    // Record's key is the roll's, like M/S: R in the focused roll starts and
+    // ends a take. The action carries no window shortcut, which would fire
+    // in place of the song list's, the voicegroup tree's, the event list's
+    // or a combo box's type-ahead (none of them claims a plain letter).
+    {
+        check(m_recordAction->shortcuts().isEmpty(),
+              "record: Record carries a window shortcut (it would take R from item views)");
+        auto *roll = view->findChild<QWidget *>(QStringLiteral("pianoRoll"));
+        const auto pressR = [&] {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_R, Qt::NoModifier, QStringLiteral("r"));
+            QApplication::sendEvent(roll, &press);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_R, Qt::NoModifier, QStringLiteral("r"));
+            QApplication::sendEvent(roll, &release);
+        };
+        if (check(roll != nullptr, "record: the song view has no piano roll")) {
+            view->setEditCursorTick(tpb * 4);
+            pressR();
+            check(recording(), "record: R in the focused roll did not start a take");
+            pumpMs(30);
+            pressR();
+            check(!recording(), "record: R in the focused roll did not end the take");
+            m_stopAction->trigger();
+            pumpMs(30);
+        }
+    }
+
+    // Pause commits the take like Stop, and stays paused.
+    {
+        view->setEditCursorTick(tpb * 4);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(30);
+        const uint64_t p1 = playhead();
+        send(0x90, 60, 100);
+        pumpMs(100);
+        m_pauseAction->trigger();
+        check(!recording() && m_audio.transport() == Transport::Paused &&
+                  undo->index() == undoBefore + 1 && find(a, 60, tickOf(p1)).has_value(),
+              "record: Pause did not commit the take (and stay paused)");
+        send(0x80, 60, 0);
+        pumpMs(30);
+        m_stopAction->trigger();
+        undo->undo();
+    }
+
+    // A take ended while the document has an edit group open (a script
+    // transaction that stops the transport) is not written into that group:
+    // it lands once the group has closed, as its own step, even when the
+    // group is rolled back.
+    {
+        view->setEditCursorTick(tpb * 4);
+        m_recordAction->trigger();
+        pumpMs(30);
+        const uint64_t p1 = playhead();
+        send(0x90, 60, 100);
+        pumpMs(100);
+        doc.beginEditGroup(QStringLiteral("Script"));
+        doc.addNote(b, tpb * 64, 30, 6, 100);
+        m_stopAction->trigger();
+        check(!recording() && !find(a, 60, tickOf(p1)).has_value(),
+              "record: a take ended inside an open edit group was written into it");
+        doc.endEditGroup(/*discard=*/true);
+        const int undoAfterGroup = undo->index();
+        QElapsedTimer waited;
+        waited.start();
+        while (undo->index() == undoAfterGroup && waited.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 10);
+        check(undo->index() == undoAfterGroup + 1 &&
+                  lastUndoText() == QStringLiteral("Record 1 note(s)") &&
+                  find(a, 60, tickOf(p1)).has_value() &&
+                  message() == QStringLiteral("Recorded 1 note(s)."),
+              "record: a take ended inside an edit group did not land as its own step after it");
+        send(0x80, 60, 0);
+        pumpMs(30);
+        undo->undo();
+    }
+
+    // A selection on a track the song doesn't have can't record (the notes
+    // would have nowhere to go); a take that can't be written says so
+    // rather than "Recorded".
+    {
+        int missing = -1;
+        for (int t = 0; t < MAX_TRACKS && missing < 0; t++) {
+            if (doc.smfTrackFor(t) < 0)
+                missing = t;
+        }
+        if (missing >= 0) {
+            view->selectTrack(missing);
+            check(!m_recordAction->isEnabled() &&
+                      m_recordAction->toolTip().contains(QStringLiteral("song's tracks")),
+                  "record: Record is available on a track the song doesn't have");
+            beginRecording();
+            check(!recording(), "record: Record began a take on a track the song doesn't have");
+            view->selectTrack(a);
+            check(m_recordAction->isEnabled(),
+                  "record: Record did not come back with a song track selected");
+        } else {
+            std::printf("reccheck: missing-track SKIP (the song uses all 16 tracks)\n");
+        }
+        view->setEditCursorTick(tpb * 4);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(30);
+        send(0x90, 60, 100);
+        pumpMs(100);
+        doc.setLocked(true);
+        m_stopAction->trigger();
+        doc.setLocked(false);
+        check(undo->index() == undoBefore &&
+                  message() ==
+                      QStringLiteral("The 1 recorded note(s) could not be added to the song."),
+              "record: a take that could not be written was reported as recorded");
+        send(0x80, 60, 0);
         pumpMs(30);
     }
 
@@ -644,6 +837,8 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         const int moved = m_take.track();
         check(recording() && moved != a, "record: the take did not follow its track's move");
         check(m_audio.liveTarget() == moved, "record: the sound did not follow the take's track");
+        check(saysRecordingInto(moved),
+              "record: the status bar still names the take's old track after the move");
         send(0x80, 60, 0);
         pumpMs(30);
         m_stopAction->trigger();
@@ -688,6 +883,31 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
               "record: with no keyboard left, the Record button stayed after the take");
         midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
         m_stopAction->trigger();
+    }
+
+    // A release the app imposes (Tools → MIDI: All Notes Off) ends a held
+    // note where it happened: unlike a played note-off, the offset doesn't
+    // move it.
+    {
+        midi.setLatencyMs(100);
+        view->setEditCursorTick(tpb * 4);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(300);
+        const uint64_t pOn = playhead();
+        send(0x90, 60, 100);
+        pumpMs(200);
+        const uint64_t pPanic = playhead();
+        m_midiPanicAction->trigger();
+        pumpMs(50);
+        send(0x80, 60, 0);
+        pumpMs(30);
+        m_stopAction->trigger();
+        const std::optional<DocNote> n = find(a, 60, tickOf(pOn - recordingLatencySamples()));
+        check(undo->index() == undoBefore + 1 && n && n->tick + n->duration == tickOf(pPanic),
+              "record: MIDI: All Notes Off ended a held note shifted, like a played note-off");
+        undo->undo();
+        midi.setLatencyMs(0);
     }
 
     // Auto offset: the device's output latency (period × periods). A fixed
@@ -750,7 +970,10 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         };
         check(tickOf(p1 - waited) < tickOf(p1) && landedIn(60, p1 - waited, p1 - waited - period),
               "record: a message's wait for its callback did not move it back");
-        check(landedIn(62, p2 - 4 * period, p2 - 4 * period - period),
+        // Four periods, or two callbacks (pumpForTest's are 512 frames) when
+        // that is more.
+        const uint64_t cap = std::max<uint64_t>(4 * period, 2 * 512);
+        check(landedIn(62, p2 - cap, p2 - cap - period),
               "record: a stalled callback's wait was not capped at four periods");
         undo->undo();
     }
@@ -827,6 +1050,29 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
               "record: the second pass did not replace the first pass's note");
         undo->undo();
         check(noteList(a) == before, "record: undo after the looped take did not restore");
+
+        // Started with the edit cursor at the loop end, the player wraps
+        // before it plays a sample: the take begins at the loop start, and
+        // a note played at once lands there, not a tick past the loop end.
+        const uint64_t loopStartSample = session->timeline->loopStartSample;
+        view->setEditCursorTick(loopEnd);
+        const int undoAtEnd = undo->index();
+        m_recordAction->trigger();
+        send(0x90, 77, 100);
+        pumpMs(100);
+        const uint64_t pOff = playhead();
+        send(0x80, 77, 0);
+        pumpMs(20);
+        synchronizePlayhead();
+        check(m_take.started() && m_take.punchInSample() == loopStartSample,
+              "record: a take started at the loop end did not begin at the loop start");
+        m_stopAction->trigger();
+        const std::optional<DocNote> first = find(a, 77, tickOf(loopStartSample));
+        check(undo->index() == undoAtEnd + 1 && first &&
+                  first->tick + first->duration == tickOf(pOff),
+              "record: a note played as a take began at the loop end did not land at the loop "
+              "start");
+        undo->undo();
     } else {
         std::printf("reccheck: loop wrap SKIP (the song has no loop of 4+ beats)\n");
     }
@@ -855,8 +1101,8 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         check(undo->index() == undoBefore, "record: the mid-take edit's undo steps are off");
     }
 
-    // The capture ring overflowing: the loss is counted, and the take still
-    // commits sane notes.
+    // The capture ring overflowing: the loss is counted, the take carries on
+    // recording, and the status bar says input was lost.
     {
         view->setEditCursorTick(tpb * 4);
         const int undoBefore = undo->index();
@@ -872,11 +1118,21 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         }
         check(m_audio.captureDropped() > droppedBefore,
               "record: a full capture ring did not count its drops");
+        synchronizePlayhead(); // the drain that makes room again
+        pumpMs(30);
+        const uint64_t pAfter = playhead();
+        send(0x90, 72, 100);
+        pumpMs(100);
+        const uint64_t pAfterOff = playhead();
+        send(0x80, 72, 0);
+        pumpMs(30);
         m_stopAction->trigger();
-        bool sane = undo->index() == undoBefore + 1;
-        for (const DocNote &n : doc.notesForTrack(a))
-            sane &= n.duration >= 1;
-        check(sane, "record: after capture drops the take did not commit sane notes");
+        const std::optional<DocNote> after = find(a, 72, tickOf(pAfter));
+        check(undo->index() == undoBefore + 1 && after &&
+                  after->tick + after->duration == tickOf(pAfterOff),
+              "record: after capture drops the take did not go on recording");
+        check(message().contains(QStringLiteral("MIDI input was lost")),
+              "record: a take with capture drops did not say input was lost");
         undo->undo();
     }
 
@@ -889,17 +1145,140 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         const int undoBefore = undo->index();
         m_recordAction->trigger();
         pumpMs(20);
+        const uint64_t pOn = playhead();
         send(0x90, 60, 100);
-        for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing; i++)
+        uint64_t pLast = pOn;
+        for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing; i++) {
+            pLast = playhead();
             pumpMs(20);
+        }
         check(m_audio.transport() == Transport::Stopped, "record: the song did not end by itself");
         synchronizePlayhead();
         check(!recording() && undo->index() == undoBefore + 1,
               "record: the song ending by itself did not commit the take");
+        // Held to the end: it ends where playback stopped, in the last pump.
+        const std::optional<DocNote> held = find(a, 60, tickOf(pOn));
+        check(held && held->tick + held->duration >= tickOf(pLast) &&
+                  held->tick + held->duration <= tickOf(pLast + uint64_t(rate * 0.02)),
+              "record: a note held as the song ended did not end where playback stopped");
         send(0x80, 60, 0);
         pumpMs(20);
         undo->undo();
         m_loopAction->setChecked(true);
+    }
+
+    // The take's tab going away, on a second song's tab: closing another
+    // (clean) tab mid-take keeps recording; closing the take's own tab
+    // commits before the prompt (answered Cancel, the tab stays, holding
+    // the take); destroying it, or reloading it in place, commits first too.
+    {
+        const auto usedTrack = [](SongSession *s) {
+            for (int t = 0; t < MAX_TRACKS; t++) {
+                if (s->timeline->tracks[t].used && s->doc.smfTrackFor(t) >= 0)
+                    return t;
+            }
+            return -1;
+        };
+        // Another playable song with a track to record into (the first found,
+        // then that one again).
+        const auto openOther = [&](QString *label) -> SongSession * {
+            int tries = 0;
+            for (const SongInfo &song : m_project.songs()) {
+                if (song.label == doc.label() || !song.isPlayable() ||
+                    !song.label.startsWith(QStringLiteral("mus_")) ||
+                    (!label->isEmpty() && song.label != *label))
+                    continue;
+                if (++tries > 10)
+                    break;
+                loadSongByLabel(song.label, /*newTab=*/true);
+                if (!m_active || m_active == session || m_active->doc.label() != song.label)
+                    return nullptr;
+                if (usedTrack(m_active) >= 0) {
+                    *label = song.label;
+                    return m_active;
+                }
+                closeTab(m_tabs->indexOf(m_active->view));
+            }
+            return nullptr;
+        };
+        const auto recordOneNote = [&](SongSession *s) {
+            s->view->selectTrack(usedTrack(s));
+            s->view->setEditCursorTick(0);
+            m_recordAction->trigger();
+            pumpMs(30);
+            send(0x90, 60, 100);
+            pumpMs(100);
+        };
+        QString other;
+        SongSession *tab = openOther(&other);
+        if (!tab) {
+            check(false, "record: a second song did not open in its own tab");
+        } else {
+            m_tabs->setCurrentWidget(view);
+            check(m_active == session, "record: the take's tab did not come back");
+            m_recordAction->trigger();
+            pumpMs(30);
+            closeTab(m_tabs->indexOf(tab->view));
+            check(recording() && m_active == session,
+                  "record: closing another, clean tab punched the take out");
+            m_stopAction->trigger();
+            pumpMs(30);
+
+            tab = openOther(&other);
+            if (check(tab != nullptr, "record: the second song did not open again")) {
+                QUndoStack *tabUndo = tab->doc.undoStack();
+                const int tabBefore = tabUndo->index();
+                recordOneNote(tab);
+                {
+                    PromptAnswer cancel(QMessageBox::Cancel);
+                    closeTab(m_tabs->indexOf(tab->view));
+                    check(cancel.answered() == 1,
+                          "record: closing the take's tab did not ask about the take");
+                }
+                check(!recording() && m_tabs->indexOf(tab->view) >= 0 &&
+                          tabUndo->index() == tabBefore + 1 &&
+                          tabUndo->text(tabUndo->index() - 1) == QStringLiteral("Record 1 note(s)"),
+                      "record: closing the take's own tab did not commit the take first");
+                send(0x80, 60, 0);
+                pumpMs(30);
+                tabUndo->undo();
+
+                recordOneNote(tab);
+                destroySession(tab);
+                check(!recording() && message() == QStringLiteral("Recorded 1 note(s)."),
+                      "record: destroying the take's tab did not commit the take first");
+                send(0x80, 60, 0);
+                pumpMs(30);
+            }
+
+            tab = openOther(&other);
+            if (check(tab != nullptr, "record: the second song did not open a third time")) {
+                recordOneNote(tab);
+                SongInfo info;
+                for (const SongInfo &song : m_project.songs()) {
+                    if (song.label == other)
+                        info = song;
+                }
+                QString error;
+                tab = populateSession(
+                    tab, info, nullptr,
+                    [&info](SongDocument &d, QString *err) { return d.load(info, err); }, &error);
+                // Into the document being replaced: the reloaded one starts
+                // with no history.
+                check(tab && !recording() && message() == QStringLiteral("Recorded 1 note(s).") &&
+                          tab->doc.undoStack()->count() == 0,
+                      "record: reloading the take's song in place did not commit the take first");
+                send(0x80, 60, 0);
+                pumpMs(30);
+                if (tab) {
+                    PromptAnswer discard(QMessageBox::Discard);
+                    closeTab(m_tabs->indexOf(tab->view));
+                }
+            }
+        }
+        m_tabs->setCurrentWidget(view);
+        check(m_active == session, "record: the song's tab did not come back after the tab checks");
+        m_stopAction->trigger();
     }
 
     // A tab switch mid-take commits to the take's own tab; on a read-only

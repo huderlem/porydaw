@@ -2918,15 +2918,18 @@ void MidiInWinMM :: closePort( void )
     // porydaw patch: an unplugged device fails midiInUnprepareHeader. Upstream
     // returned there with buffer 0 already freed, connected_ still true and
     // the critical section still held, so the destructor's second
-    // closePort() freed it again (crash on every unplug). Free every buffer,
-    // finish the close, then report.
+    // closePort() freed it again (crash on every unplug). Finish the close,
+    // then report. A header that failed to unprepare may still belong to the
+    // driver, so it and its buffer are leaked rather than freed under it.
     bool unprepareFailed = false;
     for ( size_t i=0; i < data->sysexBuffer.size(); ++i ) {
       int result = midiInUnprepareHeader(data->inHandle, data->sysexBuffer[i], sizeof(MIDIHDR));
+      if ( result != MMSYSERR_NOERROR ) {
+        unprepareFailed = true;
+        continue;
+      }
       delete [] data->sysexBuffer[i]->lpData;
       delete [] data->sysexBuffer[i];
-      if ( result != MMSYSERR_NOERROR )
-        unprepareFailed = true;
     }
     data->sysexBuffer.clear();
 

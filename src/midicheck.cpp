@@ -289,7 +289,7 @@ void checkService()
     check(activity == 1, "injected input did not signal activity once");
 
     // A burst is coalesced into one signal, and input right after a signal
-    // waits out the interval: one blink per interval, not per message.
+    // waits out the interval: one signal per interval, not per message.
     activity = 0;
     for (int i = 0; i < 100; ++i) {
         midi.injectForTest({0x90, uint8_t(i), 100});

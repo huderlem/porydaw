@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QPointer>
 
 #include <functional>
 #include <memory>
@@ -68,7 +69,6 @@ class MainWindow : public QMainWindow
     SettingsDialog *settingsDialog() const { return m_settingsDialog.get(); }
     // MIDI keyboard input (docs/midi-input/PLAN.md); never null.
     MidiInput &midiInput() const { return *m_midiInput; }
-    // The transport toolbar's MIDI activity light.
 #ifdef PORYDAW_SCRIPTING
     // The plugin host (docs/scripting/PLAN.md). Plugins are loaded by
     // loadPlugins(), called on interactive launches only, so harnesses
@@ -165,8 +165,8 @@ class MainWindow : public QMainWindow
     int runDraftCheck(const QString &projectRoot);
 
     // MIDI input check, window half (--midicheck; midicheck.cpp): with the
-    // song open, the transport's MIDI light and Settings → MIDI. QSettings
-    // must be redirected. Returns the number of failed expectations.
+    // song open, live play and Settings → MIDI. QSettings must be
+    // redirected. Returns the number of failed expectations.
     int runMidiWindowCheck(const QString &projectRoot, const QString &songLabel);
     // MIDI recording check, window half (--reccheck; reccheck.cpp): Record
     // end to end with the audio device parked and time pumped. Writes into
@@ -238,7 +238,6 @@ class MainWindow : public QMainWindow
   private:
     void buildUi();
     void buildSettingsDialog();
-    // The MIDI light's tooltip and idle look follow the open ports.
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
     void publishLiveTarget();
@@ -258,6 +257,15 @@ class MainWindow : public QMainWindow
     // undo step "Record %n note(s)" (none for an empty take). Playback is
     // left as it is.
     void finishRecording();
+    // finishRecording's write, and the status bar's account of it. While
+    // the document has an edit group open, it retries until the group has
+    // closed, so the take is always its own undo step; by then the
+    // document may be gone (nothing written) or read-only (likewise).
+    void commitTake(const QPointer<SongDocument> &doc, int track,
+                    const std::vector<SongDocument::NewNote> &notes, bool inputLost);
+    static constexpr int kTakeCommitRetryMs = 20;
+    // "Recording into N: Name…", for the take's current track.
+    void showRecordingStatus();
     // tracksRemapped handler: keeps the take on its track through track
     // adds, deletes, and moves; ends the take (dropped) if its track goes.
     void followTakeTrack(SongSession &session, const TrackRemap &remap);
@@ -646,6 +654,7 @@ class MainWindow : public QMainWindow
     RecordingTake m_take;
     SongSession *m_takeSession = nullptr;
     uint32_t m_captureGeneration = 0;
+    uint32_t m_takeDropsAtStart = 0; // AudioEngine::captureDropped at punch-in
     // Polls the live held-key mask while MIDI input is active (the playhead
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;

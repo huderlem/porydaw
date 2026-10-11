@@ -19,8 +19,9 @@ struct CaptureEvent {
         Begin,    // the take's first capturing callback: samplePos is punch-in
         NoteOn,   // a keyboard note on (after the sustain pedal and Fixed velocity)
         NoteOff,  // its note off (a pedal-held note ends at pedal-up)
-        Cut,      // the engine cut every live note at samplePos (a transport
-                  // change or a document edit): open notes end there
+        Cut,      // the engine cut or released every live note at samplePos (a
+                  // transport change, a document edit, a panic): open notes
+                  // end there
         Boundary, // the segment ended at samplePos; segment `segment` starts
                   // at resumePos (a loop wrap: loop end to loop start)
     };

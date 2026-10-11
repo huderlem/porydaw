@@ -856,6 +856,9 @@ class SongView : public QWidget
     // Jump-from-context voice navigation: the main window raises the
     // voicegroup dock and selects this slot.
     void revealVoiceRequested(int program);
+    // The Record key (transport.record) from the focused roll or lanes; the
+    // main window triggers its Record action, if Record is available.
+    void recordRequested();
 
   protected:
     void resizeEvent(QResizeEvent *event) override;

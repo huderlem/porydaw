@@ -10198,6 +10198,13 @@ bool SongView::handleEditKey(QKeyEvent *event, keymap::Context surface)
         event->accept();
         return true;
     }
+    if (keys.matches(event, QStringLiteral("transport.record"))) {
+        // A held key auto-repeats; only the real press starts or ends a take.
+        if (!event->isAutoRepeat())
+            emit recordRequested();
+        event->accept();
+        return true;
+    }
     // Last on purpose: a plugin never shadows a shipped command of the
     // same context (their defaults can't conflict at registration, but a
     // user rebind could).

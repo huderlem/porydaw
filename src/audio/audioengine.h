@@ -191,7 +191,8 @@ class AudioEngine
     // ring, stamped with the player position at the callback's start. So do
     // the take's structure: a Begin at the first capturing callback (the
     // punch-in), a Boundary at every loop wrap or seek, and a Cut whenever
-    // the engine cuts the live notes. Arm *before* play() on a fresh start
+    // the engine cuts the live notes or the app releases them (a panic, the
+    // target changing). Arm *before* play() on a fresh start
     // so the first notes are caught; the Begin lands after the start's
     // seek. 0 disarms; each arm needs a new nonzero generation, which
     // stamps its events so a late one from an earlier arm is told apart.
@@ -367,6 +368,10 @@ class AudioEngine
     void applyLiveNote(uint8_t key, uint8_t velocity);
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
+    // The same on the app's say-so (a panic, a tab switch, the target
+    // changing), not the keyboard's: a take's held notes end there as at a
+    // cut.
+    void imposeLiveRelease();
     // The pedal lifts: keys sounding only because of it release.
     void liftLivePedal();
     // Forgets the keyboard's keys without note-offs: the caller cut or
@@ -381,6 +386,9 @@ class AudioEngine
     // The player jumped from `from` to `to`: the take's segment ends.
     void captureBoundary(uint64_t from, uint64_t to);
     void publishCaptureClock();
+    // TimelinePlayer::settleWrap at the callback's top, with the take's
+    // Boundary.
+    void settleLoopWrap();
     void applyPreviewVoice();
     void applyPolyDebug();
     void resetPreviewEngine();
@@ -507,7 +515,9 @@ class AudioEngine
     // The message being applied waited this long for its callback
     // (pushCapture stamps it on a played note on/off); 0 otherwise.
     uint32_t m_liveLate = 0;
-    bool m_liveBent = false; // bend/mod sent to m_liveTrack since it became the target
+    int64_t m_callbackNs = 0;      // midiClockNs at the callback's entry
+    uint32_t m_callbackFrames = 0; // the callback's length
+    bool m_liveBent = false;       // bend/mod sent to m_liveTrack since it became the target
     uint32_t m_appliedLivePanic = 0;
     uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none
     uint32_t m_captureSegment = 0; // segments since that Begin

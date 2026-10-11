@@ -84,7 +84,7 @@ class MidiInput : public QObject
   public:
     static constexpr int kPollIntervalMs = 2000;
     // Shortest gap between two activity() signals: a fast run of notes is
-    // one blink per gap, not a signal per message.
+    // one signal per gap, not one per message.
     static constexpr int kActivityIntervalMs = 40;
     // latencyMs() value meaning "use the audio device's reported latency".
     static constexpr int kLatencyAuto = -1;

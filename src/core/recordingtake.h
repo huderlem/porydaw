@@ -27,11 +27,12 @@ class MidiTimeline;
 //    note-off matches nothing and is ignored, as is any note-off whose note
 //    on predates the take (a key held at punch-in) or was dropped.
 //  - Notes still open end at the stop position.
-//  - Later notes win: a later note on the same (tick, key) replaces an
-//    earlier one, and a later pass trims or removes the earlier notes it
+//  - Later notes win: a later note trims or removes the earlier notes it
 //    overlaps on the same key exactly as SongDocument::resolveNoteOverlaps
 //    does against the document (addNotes resolves against the document
-//    only, not within its own batch).
+//    only, not within its own batch). So an earlier note that outlasts a
+//    later one on the same (tick, key) keeps its tail, and one take of two
+//    passes lands as two takes would.
 class RecordingTake
 {
   public:

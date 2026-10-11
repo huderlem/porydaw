@@ -103,8 +103,11 @@ To change a decision later, update this table and every step it affects
    notes in sample time.
    - Commit converts to ticks with `MidiTimeline::tickForSample`
      (`miditimeline.h:122-123`), which handles tempo changes.
-   - It applies the loop rule: a note-off stamped before its note-on means
-     the playhead wrapped, so the note ends at `loopEndTick`.
+   - It applies the loop rule: a note held across a loop wrap ends at
+     `loopEndTick`. (As built, the audio thread marks every wrap and seek
+     with an explicit `Boundary` event and stamps each event with a segment
+     index; the original "a note-off stamped before its note-on means the
+     playhead wrapped" inference is superseded. See §5 Step 3.)
    - Each note lasts at least 1 tick.
    - All notes are written in one `beginEditGroup`/`addNotes`/`endEditGroup`,
      with undo text "Record %n note(s)". An empty take pushes nothing.
@@ -320,14 +323,21 @@ To change a decision later, update this table and every step it affects
   no Qt widgets, so it is harness-testable without audio.
   - `begin(track, punchInSample)`, `push(event)`, and
     `finish(timeline, stopSample, latencySamples, loop)` returning
-    `vector<NewNote>`.
+    `vector<NewNote>`. *(Superseded as built: `begin(track, generation)`,
+    `push(CaptureEvent)` and `toNotes(timeline, endSample, endSegment,
+    latencySamples)`; the loop comes in through `Boundary` events. See §5
+    Step 3.)*
   - Rules:
     - Notes still open at finish end at the stop position.
     - The wrap rule from §2.3.
     - Notes with negative ticks after the latency shift are clamped to 0,
-      or to punch-in for a mid-song punch.
+      or to punch-in for a mid-song punch. *(As built: clamped to the start
+      of the note's segment.)*
     - Minimum 1-tick duration.
-    - Same-(tick,key) collapse, last one wins.
+    - Same-(tick,key) collapse, last one wins. *(Superseded: overlaps
+      within the take follow `resolveNoteOverlaps`' rules, so an earlier
+      note that outlasts a later one at the same tick keeps its tail; see
+      §5 "Review fixes 2".)*
 - **Commit.** At punch-out or stop, `MainWindow` drains the remaining
   capture events, then `doc.addNotes` inside an edit group "Record %n
   note(s)". The commit happens **before** `stopPlayback` seeks the cursor,
@@ -1159,3 +1169,132 @@ above are history.
 
 - **Verification:** all 4 builds; format clean; normal and ASAN sweeps
   **PASS (all harnesses)**.
+
+### Review fixes 2 (2026-10-11, uncommitted)
+
+A code review of 5b7e169..bb3a8f9 (the WinMM unplug patch, step 3, the
+Windows-checkpoint fixes and the light's removal) was verified finding by
+finding. All held and were fixed, except where noted.
+
+- **A1, the clock behind the Begin.** `syncCapture` now publishes the
+  clock (segment 0, the punch-in) *before* pushing `Begin`, so a commit
+  that sees the Begin never reads the previous take's position. A race;
+  not deterministically testable.
+- **A2, imposed releases.** Tools → MIDI: All Notes Off (and a port
+  closing, which panics), the tab-switch release and a sound-target change
+  now go through `AudioEngine::imposeLiveRelease`, which pushes a `Cut`
+  first: the take ends its held notes there unshifted, and the note-offs
+  that follow match nothing. A keyboard's own CC120/123 stay played.
+  - **Not fixed, documented:** a second, unrelated port closing still
+    panics every live note, the recording keyboard's included (the input
+    ring is omni and carries no port). The held notes end at the close,
+    unshifted. A per-port held set would be needed; not cheap.
+- **A3, the wait's "now".** `process()` reads `midiClockNs()` once at its
+  entry (`m_callbackNs`), the moment the stamp stands for. Not
+  deterministically testable.
+- **A4, a take starting at/after the loop end.** `TimelinePlayer` gained
+  `settleWrap` (render's dispatch loop is now `dispatchDue`, shared), and
+  `process()` calls `settleLoopWrap()` just before `applyMidiInput`. A
+  player at or past the loop end does the wrap it would have done first
+  thing in render, with a Boundary from where it really was. The Begin
+  and that callback's notes land at the loop start. This also covers a
+  callback that ended exactly on the loop end mid-take.
+- **A5, the cap.** max(4 × period, 2 × the callback's frames).
+- **A6, RtMidi.** A header that fails `midiInUnprepareHeader` is leaked,
+  not freed, since the driver may still own it. LICENSES.md now describes
+  the patch's `error()` path: the callback when one is set, otherwise a
+  throw out of that `closePort()` after a full close. The destructor's
+  `closePort()` is then a no-op. A MinGW `-fsyntax-only` with
+  `__WINDOWS_MM__` is clean.
+- **U1, commit inside an open edit group.** `finishRecording` hands its
+  notes to `commitTake(QPointer<SongDocument>, …)`. While the document has
+  an edit group open, that retries every 20 ms. When it runs, it writes
+  nothing if the document is gone or locked. So a script transaction that
+  stops the transport neither swallows the take nor gets aborted by it.
+  The take lands afterwards as its own "Record N note(s)".
+  - Edge left open: a track move inside that same transaction isn't
+    followed by the pending write.
+- **U2.** `maybeSaveSession` commits only for the take's own session.
+  Quit (`promptToSaveAllSessions`) still reaches it. A project switch
+  still commits through `teardownSessions` → `activateSession`. A dirty
+  other tab's prompt switches to it, which commits too.
+- **U3.** A Boundary arriving after a lost one closes held notes at the
+  last position seen, not at its own (another segment's) position.
+- **U4.** Overlaps within a take now follow `resolveNoteOverlaps` exactly:
+  an earlier note that outlasts a later one at the same start keeps its
+  tail. One take of two passes lands as two takes would. The comments and
+  the reccheck expectation (a new `{51, 60, 1, 80}`) are updated.
+- **U5.** `recordUnavailableReason` refuses a selected track the song
+  doesn't have (`smfTrackFor < 0`), with "Select one of the song's tracks
+  to record into.". `publishLiveTarget` now calls `syncRecordAction`, so
+  a selection change refreshes the button. The status message is based on
+  whether the revision moved. A take that couldn't be written says "The N
+  recorded note(s) could not be added to the song."
+- **U6, R vs type-ahead. It really conflicted.** A probe sent
+  ShortcutOverride R to every item view and combo in the window. The song
+  list, the voicegroup tree, the event-list table, its chunk combo and the
+  songs-dock combos all left it unaccepted, so the window shortcut fired
+  in place of their type-ahead. Following the bare-letter rule (M/S/V/A/B):
+  `transport.record` is now `Context::PianoRoll`, still in the Transport
+  category. `SongView::handleEditKey` emits `recordRequested`, and the main
+  window triggers Record if it is visible and enabled. The QAction carries
+  no shortcut.
+  - **Judgment call for the user:** R now works only with the
+    roll/lanes focused, like M/S. Clicking dead areas refocuses the roll.
+    Step 3's "R is free in every context" and "a disabled action's R can't
+    fire" above are history.
+- **U7, reccheck.**
+  - The one-period check now finds the new key-60 note by key, not at the
+    expected tick.
+  - The overflow check now proves the take keeps recording (a later note
+    at its exact ticks) and that the status bar says input was lost.
+  - The song-ending case checks the held note's end (within the last pump).
+  - New cases: Pause commits; an open edit group defers the commit;
+    track-not-in-song and the unwritable-take message; R in the roll and no
+    window shortcut; All Notes Off unshifted; a take started at the loop
+    end; a Boundary after a lost one.
+  - On a second song's tab: closing another clean tab keeps recording;
+    closing the take's own tab commits before the prompt (answered
+    Cancel); `destroySession` commits; `populateSession` commits into the
+    replaced document.
+  - The aged-message cap check uses the A5 formula.
+- **U8.** Stale light/blink comments fixed in `mainwindow.h`,
+  `mainwindow.cpp`, `main.cpp`, `midiinput.h` and `midicheck.cpp`. Those
+  left mention lit keys, not the removed light.
+- **U9.** `showRecordingStatus()` is used at punch-in and whenever
+  `followTakeTrack` moves the take. A take whose capture dropped events
+  adds "Some MIDI input was lost while recording." to its final message.
+  §2 stance 3 and §4 step 3 now mark the note-off-before-note-on wrap rule,
+  the `finish(...)` signature and "last one wins" as superseded.
+- **Skipped:** the AudioEngine struct size (about 128 KB). Report only.
+
+**Negative tests.** Each was a scripted edit, rebuilt and run with
+reccheck, then reversed. A `git diff` comparison confirmed every revert.
+
+- These FAIL with the expected message: A2 (no Cut), A4 (no settle), U1
+  (no deferral), U2 (unconditional), U3, U4, U5 (no reason; message by
+  notes), U6 (shortcut attached; no roll dispatch), U9 (no refresh; no drop
+  message).
+- U7: notes stamped 20 periods late; a full ring disarming capture; open
+  notes ignoring the stop position; Pause and the auto-stop safety net
+  removed together.
+- U7: maybeSaveSession's commit removed (the take dangled afterwards and
+  the run crashed, exit 139); populateSession's guard removed.
+- U7: destroySession and activateSession and the safety net removed
+  together.
+- A first "full ring disarms" variant (`m_captureBegun = 0`) self-healed
+  through a re-Begin, so a disarm of the generation was used instead.
+- **Not falsifiable here:** A1 and A3 (timing races), and A5. Under this
+  device the four-period cap already exceeds 2 × 512, so pumped callbacks
+  can't tell the formulas apart.
+
+**Verification**
+
+- Builds: `build`, `build-asan`, `build-nomidi` and `build-dummy` all
+  exit 0, with only the existing warnings. reccheck is OK on all four.
+- `tools/format.sh --check` is clean.
+- `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  **PASS (all harnesses)** on both the normal and ASAN builds.
+- Not verified: anything on a real device or on Windows. That covers
+  R-from-the-roll feel, the A2 and A4 timing by ear, and the RtMidi patch
+  beyond a syntax check.

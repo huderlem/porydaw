@@ -99,8 +99,11 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, ""},
     {"transport.loop", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Toggle Loop"),
      QKeySequence::UnknownKey, ""},
-    // R is free in every context (the roll's single letters are A/B/M/S/V).
-    {"transport.record", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Record"),
+    // A bare letter, so like M/S/V/A/B it dispatches through handleEditKey
+    // from the focused roll/lanes surface, never as a window shortcut: one
+    // would fire in place of the type-ahead of the song list, the voicegroup
+    // tree, the event list and combo boxes, which don't claim plain letters.
+    {"transport.record", Context::PianoRoll, QT_TR_NOOP("Transport"), QT_TR_NOOP("Record"),
      QKeySequence::UnknownKey, "R"},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
