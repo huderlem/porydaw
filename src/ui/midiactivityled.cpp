@@ -11,19 +11,26 @@ MidiActivityLed::MidiActivityLed(QWidget *parent) : QWidget(parent)
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_off = new QTimer(this);
     m_off->setSingleShot(true);
-    connect(m_off, &QTimer::timeout, this, qOverload<>(&QWidget::update));
+    // The timer alone turns the light off. Comparing a clock against the
+    // flash length at paint time left it stuck on whenever the (coarse)
+    // timer fired a little early: the repaint still read "lit", and nothing
+    // repainted again until the next message.
+    connect(m_off, &QTimer::timeout, this, [this] {
+        m_lit = false;
+        update();
+    });
 }
 
 void MidiActivityLed::flash()
 {
-    m_litAt.start();
+    m_lit = true;
     m_off->start(kFlashMs);
     update();
 }
 
 bool MidiActivityLed::isLit() const
 {
-    return m_litAt.isValid() && m_litAt.elapsed() < kFlashMs;
+    return m_lit;
 }
 
 void MidiActivityLed::setListening(bool listening)

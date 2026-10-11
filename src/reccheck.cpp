@@ -5,8 +5,8 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTabWidget>
-#include <QToolBar>
 #include <QTemporaryDir>
+#include <QToolBar>
 #include <QUndoStack>
 #include <algorithm>
 #include <array>
@@ -93,6 +93,7 @@ struct Feed {
     RecordingTake &take;
     uint32_t generation;
     uint32_t segment = 0;
+    uint32_t late = 0; // stamped on note ons and offs
 
     void push(uint8_t kind, uint64_t pos, uint8_t key = 0, uint8_t velocity = 0,
               uint64_t resume = 0)
@@ -105,6 +106,8 @@ struct Feed {
         ev.segment = segment;
         ev.key = key;
         ev.velocity = velocity;
+        if (kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff)
+            ev.lateSamples = late;
         take.push(ev);
     }
     void begin(uint64_t pos) { push(CaptureEvent::Begin, pos); }
@@ -256,10 +259,9 @@ void checkTakeRules()
         feed.on(50000, 65);
         feed.off(53000, 65);
         const auto notes = take.toNotes(tl, 60000, 1, 2000);
-        if (!check(sameNotes(notes, {{10, 60, 3, 100},
-                                     {40, 64, 2, 100},
-                                     {48, 65, 3, 100},
-                                     {88, 62, 12, 100}}),
+        if (!check(sameNotes(
+                       notes,
+                       {{10, 60, 3, 100}, {40, 64, 2, 100}, {48, 65, 3, 100}, {88, 62, 12, 100}}),
                    "take: the latency offset was not applied or not clamped"))
             printNotes("got", notes);
     }
@@ -335,6 +337,30 @@ void checkTakeRules()
                    "take: a lost Boundary did not end the held note at the last position"))
             printNotes("got", notes);
     }
+    // A message's wait for its callback moves its time back (the note on's
+    // and the played off's each), on top of the offset and still floored at
+    // the segment start.
+    {
+        take.begin(0, 12);
+        Feed feed{take, 12};
+        feed.begin(10000);
+        feed.late = 3000;
+        feed.on(20000, 60);
+        feed.late = 400;
+        feed.off(30000, 60);
+        feed.late = 5000;
+        feed.on(11000, 61);
+        feed.late = 0;
+        feed.off(13000, 61);
+        auto notes = take.toNotes(tl, 40000, 0, 0);
+        if (!check(sameNotes(notes, {{10, 61, 3, 100}, {17, 60, 13, 100}}),
+                   "take: a message's wait for its callback did not move it back"))
+            printNotes("got", notes);
+        notes = take.toNotes(tl, 40000, 0, 1000);
+        if (!check(sameNotes(notes, {{10, 61, 2, 100}, {16, 60, 13, 100}}),
+                   "take: the wait and the offset did not add up"))
+            printNotes("got", notes);
+    }
     // A take whose Begin never came records nothing.
     {
         take.begin(0, 11);
@@ -362,6 +388,16 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
     check(m_recordAction && m_transportToolbar->actions().contains(m_recordAction) &&
               m_recordAction->isCheckable(),
           "Record is not a checkable action on the transport toolbar");
+    // No keyboard, no Record button; a connected one brings it back.
+    if (!midiInput().openPorts().isEmpty()) {
+        std::printf("reccheck: no-keyboard checks SKIP (a real MIDI port is open)\n");
+    } else {
+        check(!m_recordAction->isVisible(), "with no MIDI input the Record button is shown");
+        toggleRecord();
+        check(m_takeSession == nullptr, "with no MIDI input Record started a take");
+    }
+    midiInput().setOpenPortsForTest({QStringLiteral("Test Keyboard")});
+    check(m_recordAction->isVisible(), "a connected keyboard did not show the Record button");
     if (!m_audioOk) {
         check(m_recordAction && !m_recordAction->isEnabled(),
               "with no audio device Record is enabled");
@@ -579,7 +615,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         m_stopAction->trigger();
         const std::optional<DocNote> n = find(a, 60, tickOf(p1));
         check(n.has_value(), "record: with live play off (or the target changed) nothing landed on "
-                            "the take's track");
+                             "the take's track");
         check(n && n->tick + n->duration == tickOf(pUp),
               "record: the sustain pedal did not extend the recorded note to pedal-up");
         check(n && n->velocity == 40, "record: Fixed velocity was not recorded");
@@ -638,6 +674,22 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
             undo->undo();
     }
 
+    // The keyboard going away mid-take keeps the button (the take can still
+    // be stopped from it); once the take ends it goes.
+    {
+        view->setEditCursorTick(tpb * 4);
+        m_recordAction->trigger();
+        pumpMs(30);
+        midi.setOpenPortsForTest({});
+        check(recording() && m_recordAction->isVisible() && m_recordAction->isEnabled(),
+              "record: the keyboard going away mid-take took the Record button with it");
+        m_recordAction->trigger();
+        check(!recording() && !m_recordAction->isVisible(),
+              "record: with no keyboard left, the Record button stayed after the take");
+        midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
+        m_stopAction->trigger();
+    }
+
     // Auto offset: the device's output latency (period × periods). A fixed
     // offset is that many ms.
     {
@@ -662,6 +714,45 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
               "record: the Auto offset did not move the note earlier by the device latency");
         undo->undo();
         midi.setLatencyMs(0);
+    }
+
+    // A message that waited for its callback is placed where it arrived,
+    // not where the callback found it; a wait longer than a few periods (a
+    // stalled callback) moves it back no further than that.
+    {
+        const uint64_t period = uint64_t(std::max(m_audio.periodSizeFrames(), 1));
+        const uint64_t waited = std::min<uint64_t>(uint64_t(rate * 0.1), 4 * period);
+        const auto sendAged = [&](uint8_t status, uint8_t d1, uint8_t d2, double ageSeconds) {
+            MidiMsg msg{status, d1, d2};
+            msg.arrivalNs = midiClockNs() - int64_t(ageSeconds * 1e9);
+            midi.injectForTest(msg);
+        };
+        view->setEditCursorTick(tpb * 4);
+        m_recordAction->trigger();
+        pumpMs(500);
+        const uint64_t p1 = playhead();
+        sendAged(0x90, 60, 100, double(waited) / rate);
+        pumpMs(200);
+        const uint64_t p2 = playhead();
+        sendAged(0x90, 62, 100, 10.0);
+        pumpMs(100);
+        send(0x80, 60, 0);
+        send(0x80, 62, 0);
+        pumpMs(30);
+        m_stopAction->trigger();
+        // Up to a period of real time passes between the stamp and the pump.
+        const auto landedIn = [&](int key, uint64_t latest, uint64_t earliest) {
+            for (const DocNote &n : doc.notesForTrack(a)) {
+                if (n.key == key && n.tick >= tickOf(earliest) && n.tick <= tickOf(latest))
+                    return true;
+            }
+            return false;
+        };
+        check(tickOf(p1 - waited) < tickOf(p1) && landedIn(60, p1 - waited, p1 - waited - period),
+              "record: a message's wait for its callback did not move it back");
+        check(landedIn(62, p2 - 4 * period, p2 - 4 * period - period),
+              "record: a stalled callback's wait was not capped at four periods");
+        undo->undo();
     }
 
     // A loop wrap, a seek and a 2-pass overdub in one take: a note held

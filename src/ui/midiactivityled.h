@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QElapsedTimer>
 #include <QWidget>
 
 class QTimer;
@@ -30,6 +29,6 @@ class MidiActivityLed : public QWidget
 
   private:
     QTimer *m_off = nullptr;
-    QElapsedTimer m_litAt;
+    bool m_lit = false;
     bool m_listening = false;
 };

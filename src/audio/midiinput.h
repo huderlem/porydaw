@@ -25,7 +25,13 @@ struct MidiMsg {
     uint8_t status = 0;
     uint8_t d1 = 0;
     uint8_t d2 = 0;
+    // When it arrived (midiClockNs), so the audio thread can tell how long
+    // it waited for a callback; 0 = unknown, taken as no wait.
+    int64_t arrivalNs = 0;
 };
+
+// The clock MidiMsg::arrivalNs is read on (steady, any thread).
+int64_t midiClockNs();
 
 // The input ring between the MIDI threads and the audio thread
 // (docs/midi-input/PLAN.md §2 stance 1). Multi-producer: RtMidi runs one
@@ -160,12 +166,16 @@ class MidiInput : public QObject
     static bool parse(const unsigned char *bytes, size_t size, MidiMsg *out);
 
     // Harness entry: the message's bytes take the same path as a port's
-    // callback (parse, ring push, activity).
+    // callback (parse, ring push, activity). Its arrivalNs is kept as
+    // given: 0 (the default) means it waited for no callback.
     void injectForTest(const MidiMsg &msg);
     // Harness entry: replaces the listed ports (raw names, plain naming;
     // opening none), so the Settings page's port list can be driven without
     // MIDI hardware.
     void setPortListForTest(const QStringList &names);
+    // Ports reported as open (openPorts) without a device behind them, so
+    // a harness can show what depends on a keyboard being connected.
+    void setOpenPortsForTest(const QStringList &names);
     // Harness entry: reports a backend as up (named name) without one, so
     // the Settings page's no-backend → backend transition can be driven.
     void setBackendForTest(const QString &name);
@@ -193,7 +203,7 @@ class MidiInput : public QObject
 
     static void onMessage(double timeStamp, std::vector<unsigned char> *message, void *userData);
     // Any thread: parse, push, flag activity.
-    void receive(const unsigned char *bytes, size_t size);
+    void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs);
     void deliverActivity();
     bool startBackend();
     // Lists the ports again, closes vanished ones and opens enabled new
@@ -217,6 +227,7 @@ class MidiInput : public QObject
     QString m_backendName;
     QString m_backendStatus;
     bool m_testBackend = false;
+    QStringList m_testOpen;
     std::vector<ScannedPort> m_scan;
     std::vector<std::unique_ptr<OpenPort>> m_open;
     QStringList m_failed;

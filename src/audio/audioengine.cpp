@@ -3,6 +3,7 @@
 #include <QFile>
 
 #include <algorithm>
+#include <cmath>
 #include <iterator>
 #include <vector>
 
@@ -723,8 +724,22 @@ void AudioEngine::applyMidiInput()
 
     if (MidiInputRing *ring = m_midiRing.load(std::memory_order_acquire)) {
         MidiMsg msg;
-        while (ring->pop(&msg))
+        int64_t now = 0;
+        while (ring->pop(&msg)) {
+            // How long the message waited for this callback: the take
+            // places it back where it arrived. Bounded by a few periods, so
+            // a stalled callback can't throw a note far back.
+            m_liveLate = 0;
+            if (msg.arrivalNs > 0) {
+                if (now == 0)
+                    now = midiClockNs();
+                const double waited = double(std::max<int64_t>(0, now - msg.arrivalNs)) * 1e-9;
+                m_liveLate = uint32_t(std::min(std::llround(waited * m_sampleRate),
+                                               4LL * std::max(m_periodFrames, 1)));
+            }
             handleLiveMessage(msg);
+        }
+        m_liveLate = 0;
     }
     publishLiveHeld();
 }
@@ -882,6 +897,7 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.kind = kind;
     ev.key = key;
     ev.velocity = velocity;
+    ev.lateSamples = kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff ? m_liveLate : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);
 }
 

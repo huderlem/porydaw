@@ -8,6 +8,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 
 #ifdef PORYDAW_MIDI
@@ -300,6 +301,7 @@ QStringList MidiInput::openPorts() const
     QStringList names;
     for (const auto &port : m_open)
         names.append(port->id);
+    names.append(m_testOpen);
     return names;
 }
 
@@ -569,18 +571,24 @@ void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *use
     if (!port || port->closing.load(std::memory_order_acquire))
         return;
     if (message && !message->empty())
-        port->owner->receive(message->data(), message->size());
+        port->owner->receive(message->data(), message->size(), midiClockNs());
 }
 
 void MidiInput::injectForTest(const MidiMsg &msg)
 {
     const unsigned char bytes[3] = {msg.status, msg.d1, msg.d2};
-    receive(bytes, sizeof bytes);
+    receive(bytes, sizeof bytes, msg.arrivalNs);
 }
 
 void MidiInput::setPortListForTest(const QStringList &names)
 {
     m_scan = scanned(names, PortNaming::Plain);
+    emit portsChanged();
+}
+
+void MidiInput::setOpenPortsForTest(const QStringList &names)
+{
+    m_testOpen = names;
     emit portsChanged();
 }
 
@@ -596,11 +604,19 @@ void MidiInput::setBackendForTest(const QString &name)
     emit portsChanged();
 }
 
-void MidiInput::receive(const unsigned char *bytes, size_t size)
+int64_t midiClockNs()
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs)
 {
     MidiMsg msg;
     if (!parse(bytes, size, &msg))
         return;
+    msg.arrivalNs = arrivalNs;
     if (m_ring.push(msg))
         m_received.fetch_add(1, std::memory_order_relaxed);
     // One queued hop at a time; deliverActivity re-arms it.

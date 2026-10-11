@@ -27,6 +27,10 @@ class MidiSettingsPage : public QWidget
     explicit MidiSettingsPage(MidiInput &midi, QWidget *parent = nullptr,
                               bool showWithoutBackend = false);
 
+    // Names the device latency Auto uses in the offset box ("Auto (21 ms)");
+    // a negative value shows plain "Auto".
+    void setAutoLatencyMs(int ms);
+
   private:
     void rebuildPorts();
     // Shows the controls or the no-backend message, whichever applies.

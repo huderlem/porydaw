@@ -16,6 +16,8 @@ class MidiTimeline;
 // Rules, applied when the take is converted to notes:
 //  - Ticks come from MidiTimeline::tickForSample (tempo changes included),
 //    rounded to the nearest tick; every note lasts at least 1 tick.
+//  - A played time first moves back by how long its message waited for
+//    the audio callback that stamped it (CaptureEvent::lateSamples).
 //  - The latency offset moves played times earlier, but never before the
 //    start of the note's segment: punch-in for the first, loop start (or a
 //    seek's landing) for a later one. Ends the take imposed (a wrap, a seek,
@@ -37,6 +39,8 @@ class RecordingTake
         uint64_t onSample = 0;
         uint64_t offSample = 0;   // valid once closed
         uint64_t floorSample = 0; // the start of its segment
+        uint32_t onLate = 0;      // how long the note on waited for its callback
+        uint32_t offLate = 0;     // ditto the played note off
         uint32_t segment = 0;
         uint8_t key = 0;
         uint8_t velocity = 0;
@@ -73,8 +77,7 @@ class RecordingTake
     // segment doesn't match ends at the last position the take saw instead.
     // Sorted by tick, then key.
     std::vector<SongDocument::NewNote> toNotes(const MidiTimeline &timeline, uint64_t endSample,
-                                               uint32_t endSegment,
-                                               uint64_t latencySamples) const;
+                                               uint32_t endSegment, uint64_t latencySamples) const;
 
     static constexpr uint32_t kSegmentMask = 0xFFFFF;
 

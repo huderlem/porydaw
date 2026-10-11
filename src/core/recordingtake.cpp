@@ -88,11 +88,13 @@ void RecordingTake::push(const CaptureEvent &ev)
         if (m_open[key] >= 0) {
             Note &prev = m_notes[size_t(m_open[key])];
             prev.offSample = std::max(ev.samplePos, prev.onSample);
+            prev.offLate = ev.lateSamples;
             prev.open = false;
             prev.playedEnd = true;
         }
         Note note;
         note.onSample = ev.samplePos;
+        note.onLate = ev.lateSamples;
         note.floorSample = m_segmentStart;
         note.segment = m_segment;
         note.key = key;
@@ -109,6 +111,7 @@ void RecordingTake::push(const CaptureEvent &ev)
         {
             Note &note = m_notes[size_t(m_open[key])];
             note.offSample = std::max(ev.samplePos, note.onSample);
+            note.offLate = ev.lateSamples;
             note.open = false;
             note.playedEnd = true;
             m_open[key] = -1;
@@ -146,14 +149,17 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
             // otherwise the segment's last known position.
             const bool sameSegment = (note.segment & kSegmentMask) == (endSegment & kSegmentMask) &&
                                      note.segment == m_segment;
-            off = std::max(note.onSample, sameSegment && endSample >= note.onSample ? endSample
-                                                                                    : m_lastSample);
+            off = std::max(note.onSample,
+                           sameSegment && endSample >= note.onSample ? endSample : m_lastSample);
             played = false;
         }
-        const uint64_t shiftedOn = note.onSample > latencySamples ? note.onSample - latencySamples : 0;
-        const uint64_t on = std::max(note.floorSample, shiftedOn);
+        const auto earlier = [](uint64_t sample, uint64_t by) {
+            return sample > by ? sample - by : 0;
+        };
+        const uint64_t on =
+            std::max(note.floorSample, earlier(note.onSample, latencySamples + note.onLate));
         if (played)
-            off = std::max(on, off > latencySamples ? off - latencySamples : 0);
+            off = std::max(on, earlier(off, latencySamples + note.offLate));
         const uint64_t tick = tickAt(on);
         const uint64_t end = std::max(tick + 1, tickAt(off));
         spans.push_back({tick, end, note.key, note.velocity, true});

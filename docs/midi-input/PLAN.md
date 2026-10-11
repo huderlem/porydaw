@@ -1098,3 +1098,47 @@ or move shifted its notes onto a neighbour.
     the deletion fails the stop and message checks.
 - **Verification:** all 4 builds; format clean; normal and ASAN
   sweeps **PASS (all harnesses)**.
+
+### Windows checkpoint feedback (2026-10-11, uncommitted)
+
+The user tested step 3 on Windows. Everything worked except three
+points, now addressed:
+
+- **Record button shown with no keyboard.** It is now hidden (shortcut
+  off too) while no MIDI port is open.
+  - A take whose keyboard goes away keeps the button until the take ends.
+  - `recordUnavailableReason` refuses first with "Connect a MIDI keyboard
+    to record."
+  - Harness hook: `MidiInput::setOpenPortsForTest`.
+- **Activity light flickered inconsistently.** The light compared a
+  clock against the flash length at paint time, while Qt's coarse
+  off-timer may fire up to 5% early. When it did, the repaint still read
+  "lit" and the light stuck on until the next message. Now the timer
+  alone clears a `m_lit` flag.
+  - Not negative-testable deterministically (needs an early timer).
+  - The existing midicheck light checks pass.
+- **Notes consistently late on Auto; 50 ms was about right.** Two causes:
+  - Every message was stamped at the next audio callback, up to one
+    period after it arrived. That is jitter, plus half a period late on
+    average.
+  - Auto counts only porydaw's own buffer (period × periods), not the
+    OS mixer, driver, DAC or MIDI input path.
+- **Fix for the first cause:** `MidiMsg::arrivalNs` is stamped in the
+  RtMidi callback (`midiClockNs`, steady clock). The audio thread turns
+  the wait into `CaptureEvent::lateSamples`, capped at 4 periods.
+  `RecordingTake::toNotes` subtracts it from the note on and the played
+  note off, on top of the offset, still floored at the segment start.
+  `injectForTest` keeps the given arrival time (0 = no wait).
+- **For the second cause:** Settings → MIDI now shows what Auto stands
+  for, "Auto (N ms)". Calibrating a fixed allowance on top of Auto needs
+  the user's Windows number.
+- **reccheck:**
+  - take rules with waits (on, off, offset and floor);
+  - an engine check with an aged message;
+  - the 4-period cap;
+  - no-keyboard hides and refuses Record;
+  - an unplug mid-take keeps the button until the take ends.
+  - Negative-tested: engine ignores the wait; take ignores `onLate`; no
+    cap; always visible; no refusal reason. Each fails its checks.
+- **Verification:** all 4 builds; format clean; normal and ASAN sweeps
+  **PASS (all harnesses)**.

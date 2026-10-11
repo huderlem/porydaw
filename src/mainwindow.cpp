@@ -89,6 +89,7 @@
 #include "ui/keymap.h"
 #include "ui/layout.h"
 #include "ui/midiactivityled.h"
+#include "ui/midisettingspage.h"
 #include "ui/newsongwizard.h"
 #include "ui/polyphonypanel.h"
 #include "ui/sampleeditordialog.h"
@@ -3098,6 +3099,12 @@ void MainWindow::openSongSettings()
 
 void MainWindow::openSettings()
 {
+    // What Auto stands for on this device, so a manual offset can be
+    // judged against it.
+    m_settingsDialog->midiPage()->setAutoLatencyMs(
+        m_audioOk ? int(std::llround(double(m_audio.outputLatencySamples()) * 1000.0 /
+                                     m_audio.sampleRate()))
+                  : -1);
     m_settingsDialog->present();
 }
 
@@ -3170,6 +3177,7 @@ void MainWindow::updateMidiLed()
         m_midiLed->setToolTip(tr("No MIDI input.\n%1").arg(m_midiInput->backendStatus()));
     else
         m_midiLed->setToolTip(tr("No MIDI input. Connect a keyboard, or check Settings → MIDI."));
+    syncRecordAction();
 }
 
 SongSettings MainWindow::songSettingsFor(const SongSession &session) const
@@ -5533,6 +5541,8 @@ void MainWindow::updateTransportActions()
 
 QString MainWindow::recordUnavailableReason() const
 {
+    if (m_midiInput->openPorts().isEmpty())
+        return tr("Connect a MIDI keyboard to record.");
     if (!m_audioOk)
         return tr("Recording needs an audio device.");
     if (!m_active || !m_audio.songLoaded())
@@ -5552,6 +5562,10 @@ void MainWindow::syncRecordAction()
     const QString why = recording ? QString() : recordUnavailableReason();
     m_recordAction->setChecked(recording);
     m_recordAction->setEnabled(recording || why.isEmpty());
+    // No MIDI input, no button: there is nothing it could record. (A
+    // hidden action's shortcut is off too.) A take whose keyboard went away
+    // keeps it, so the take can still be stopped from it.
+    m_recordAction->setVisible(recording || !m_midiInput->openPorts().isEmpty());
     // The reason shows on hover, in the tooltip and the status bar.
     const QString tip = why.isEmpty() ? tr("Record from the MIDI keyboard into the selected track")
                                       : tr("Record (unavailable: %1)").arg(why);

@@ -504,6 +504,9 @@ class AudioEngine
     bool m_liveDown[128] = {}; // physically held
     bool m_liveOn[128] = {};   // applied on: held, or released under the pedal
     bool m_liveSustain = false;
+    // The message being applied waited this long for its callback
+    // (pushCapture stamps it on a played note on/off); 0 otherwise.
+    uint32_t m_liveLate = 0;
     bool m_liveBent = false; // bend/mod sent to m_liveTrack since it became the target
     uint32_t m_appliedLivePanic = 0;
     uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none

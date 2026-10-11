@@ -197,3 +197,8 @@ void MidiSettingsPage::portItemChanged(QListWidgetItem *item)
     const bool on = item->checkState() == Qt::Checked;
     m_midi.setPortEnabled(name, on);
 }
+
+void MidiSettingsPage::setAutoLatencyMs(int ms)
+{
+    m_latency->setSpecialValueText(ms >= 0 ? tr("Auto (%1 ms)").arg(ms) : tr("Auto"));
+}
