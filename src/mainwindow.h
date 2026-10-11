@@ -28,7 +28,6 @@ class QSpinBox;
 class QToolBar;
 class QToolButton;
 class CompanionWidget;
-class MidiActivityLed;
 class MidiInput;
 class QTimer;
 class QWidget;
@@ -70,7 +69,6 @@ class MainWindow : public QMainWindow
     // MIDI keyboard input (docs/midi-input/PLAN.md); never null.
     MidiInput &midiInput() const { return *m_midiInput; }
     // The transport toolbar's MIDI activity light.
-    MidiActivityLed *midiActivityLed() const { return m_midiLed; }
 #ifdef PORYDAW_SCRIPTING
     // The plugin host (docs/scripting/PLAN.md). Plugins are loaded by
     // loadPlugins(), called on interactive launches only, so harnesses
@@ -241,7 +239,6 @@ class MainWindow : public QMainWindow
     void buildUi();
     void buildSettingsDialog();
     // The MIDI light's tooltip and idle look follow the open ports.
-    void updateMidiLed();
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
     void publishLiveTarget();
@@ -641,7 +638,6 @@ class MainWindow : public QMainWindow
     AudioEngine m_audio;
     bool m_audioOk = false;
     std::unique_ptr<MidiInput> m_midiInput;
-    MidiActivityLed *m_midiLed = nullptr;
     QAction *m_midiPanicAction = nullptr;
     QAction *m_recordAction = nullptr;
     // The take being recorded and the session it records into (null when

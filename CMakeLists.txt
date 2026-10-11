@@ -215,8 +215,6 @@ qt_add_library(porydaw_app STATIC
     src/ui/enginesettings.h
     src/ui/audiosettingspage.cpp
     src/ui/audiosettingspage.h
-    src/ui/midiactivityled.cpp
-    src/ui/midiactivityled.h
     src/ui/midisettingspage.cpp
     src/ui/midisettingspage.h
     src/ui/appearancesettingspage.cpp

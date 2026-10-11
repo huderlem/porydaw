@@ -1142,3 +1142,20 @@ points, now addressed:
     cap; always visible; no refusal reason. Each fails its checks.
 - **Verification:** all 4 builds; format clean; normal and ASAN sweeps
   **PASS (all harnesses)**.
+
+### MIDI activity light removed (2026-10-11, uncommitted)
+
+The user found the light still unreliable on Windows after the stuck-on
+fix (7a0e0ba) and judged it not useful. It is removed:
+
+- the `MidiActivityLed` widget, its toolbar slot and tooltip
+  (`updateMidiLed`);
+- midicheck's light and tooltip checks.
+
+`MidiInput::activity` stays: it still starts the held-key poll for the
+roll's keyboard. `portsChanged` now goes straight to `syncRecordAction`
+(Record shows only while a port is open). Step 1's mentions of the light
+above are history.
+
+- **Verification:** all 4 builds; format clean; normal and ASAN sweeps
+  **PASS (all harnesses)**.

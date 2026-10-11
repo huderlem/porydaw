@@ -23,7 +23,6 @@
 
 #include "audio/midiinput.h"
 #include "mainwindow.h"
-#include "ui/midiactivityled.h"
 #include "ui/midisettingspage.h"
 #include "ui/settingsdialog.h"
 #include "ui/songview.h"
@@ -34,8 +33,8 @@
 // MidiInput::injectForTest, which takes the same path as a port's RtMidi
 // callback. QSettings is redirected into a temp dir first.
 //
-// With a shot path, the MIDI page (with test ports) and the lit transport
-// toolbar are saved as <shot>-page.png and <shot>-toolbar-lit.png.
+// With a shot path, the MIDI page (with test ports) is saved as
+// <shot>-page.png.
 //
 // Step 1 covers: the parse table (a velocity-0 note on is a note off;
 // aftertouch, program change and system messages are dropped), the input
@@ -43,8 +42,8 @@
 // concurrent consumer), port-list plumbing on whatever backend this machine
 // has (without asserting that any device exists), the injector reaching the
 // ring and the throttled activity signal, the Settings → MIDI page
-// persisting its controls and port toggles, and the window's MIDI light and
-// Settings section with a song open. Port identities (the stable names that
+// persisting its controls and port toggles, and the window's Settings
+// section with a song open. Port identities (the stable names that
 // survive hot-plug renumbering, every backend's spelling) are checked through
 // the pure helpers, and the no-backend page's Try Again through a simulated
 // backend.
@@ -471,8 +470,8 @@ void checkSettingsPage()
 
 } // namespace
 
-// The window's side, with the song open: the transport's MIDI light and the
-// Settings window's MIDI section.
+// The window's side, with the song open: the Settings window's MIDI
+// section.
 int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &songLabel)
 {
     const int before = g_failures;
@@ -486,39 +485,6 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
         return g_failures - before;
     }
     MidiInput &midi = midiInput();
-
-    // The light sits on the transport toolbar and says what it listens to.
-    MidiActivityLed *led = midiActivityLed();
-    if (check(led && m_transportToolbar->isAncestorOf(led),
-              "the MIDI light is not on the transport toolbar")) {
-        const QStringList open = midi.openPorts();
-        check(led->isListening() == !open.isEmpty(),
-              "the MIDI light's idle look does not match the open ports");
-        bool named = !led->toolTip().isEmpty();
-        for (const QString &name : open)
-            named &= led->toolTip().contains(name);
-        if (open.isEmpty())
-            named &= led->toolTip().startsWith(QStringLiteral("No MIDI input"));
-        check(named, "the MIDI light's tooltip does not name the open ports");
-
-        check(!led->isLit(), "the MIDI light was lit before any input");
-        midi.injectForTest({0x90, 60, 100});
-        midi.injectForTest({0x80, 60, 0});
-        // Polled, not one fixed wait: a loaded machine (ASAN, CI) may
-        // overshoot the short flash.
-        QElapsedTimer waited;
-        waited.start();
-        while (!led->isLit() && waited.elapsed() < 2000)
-            QApplication::processEvents(QEventLoop::WaitForMoreEvents, 5);
-        check(led->isLit(), "injected input did not light the MIDI light");
-        shoot(m_transportToolbar, "toolbar-lit");
-        wait(MidiActivityLed::kFlashMs * 2);
-        check(!led->isLit(), "the MIDI light stayed lit after input stopped");
-        // The audio callback is the ring's one consumer: park it to drain.
-        m_audio.holdDeviceForTest(true);
-        drain(midi.ring());
-        m_audio.holdDeviceForTest(false);
-    }
 
     // Settings → MIDI is the second section; without a backend it is one
     // explanatory label.
@@ -541,20 +507,6 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
               "without a backend the MIDI page does not explain why");
     }
     dialog->reject();
-
-    // Ports listed but none open (all turned off, or failing): the light
-    // says so instead of asking for a keyboard.
-    if (led && midi.ports().isEmpty() && midi.openPorts().isEmpty()) {
-        midi.setPortListForTest({QStringLiteral("midicheck keys")});
-        midi.setPortEnabled(QStringLiteral("midicheck keys"), false);
-        check(led->toolTip().contains(QStringLiteral("turned off")),
-              "with every port off the MIDI light's tooltip does not say so");
-        midi.setPortEnabled(QStringLiteral("midicheck keys"), true);
-        midi.setPortListForTest({});
-        check(led->toolTip().startsWith(QStringLiteral("No MIDI input")) &&
-                  !led->toolTip().contains(QStringLiteral("turned off")),
-              "the MIDI light's tooltip did not return to no ports");
-    }
 
     checkLivePlay();
     return g_failures - before;

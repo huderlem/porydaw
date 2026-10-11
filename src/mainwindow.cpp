@@ -88,7 +88,6 @@
 #include "ui/companionwidget.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
-#include "ui/midiactivityled.h"
 #include "ui/midisettingspage.h"
 #include "ui/newsongwizard.h"
 #include "ui/polyphonypanel.h"
@@ -790,15 +789,9 @@ void MainWindow::buildUi()
     transport->addAction(m_followPlayheadAction);
     refreshTransportIcons();
 
-    // MIDI activity light: blinks as keyboard input arrives; the tooltip
-    // names the ports porydaw is listening to.
-    m_midiLed = new MidiActivityLed(this);
-    m_midiLed->setObjectName(QStringLiteral("transportMidiLed"));
-    m_midiLed->setAccessibleName(tr("MIDI input activity"));
-    transport->addWidget(m_midiLed);
-    connect(m_midiInput.get(), &MidiInput::activity, m_midiLed, &MidiActivityLed::flash);
-    connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::updateMidiLed);
-    updateMidiLed();
+    // Record shows only while a keyboard is connected.
+    connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::syncRecordAction);
+    syncRecordAction();
     // A port closing (unplugged, disabled, reopened) can never send the
     // note-offs, or the pedal-up, for what it held.
     connect(m_midiInput.get(), &MidiInput::portsClosed, this, [this] {
@@ -3162,22 +3155,6 @@ void MainWindow::buildSettingsDialog()
         typography::applyUseSystemFont(on);
         refreshDerivedFonts();
     });
-}
-
-void MainWindow::updateMidiLed()
-{
-    const QStringList open = m_midiInput->openPorts();
-    m_midiLed->setListening(!open.isEmpty());
-    if (!open.isEmpty())
-        m_midiLed->setToolTip(tr("MIDI input from:\n%1").arg(open.join(QLatin1Char('\n'))));
-    else if (!m_midiInput->ports().isEmpty())
-        m_midiLed->setToolTip(tr("No MIDI input. Every MIDI port is turned off or could not be "
-                                 "opened; check Settings → MIDI."));
-    else if (!m_midiInput->backendAvailable())
-        m_midiLed->setToolTip(tr("No MIDI input.\n%1").arg(m_midiInput->backendStatus()));
-    else
-        m_midiLed->setToolTip(tr("No MIDI input. Connect a keyboard, or check Settings → MIDI."));
-    syncRecordAction();
 }
 
 SongSettings MainWindow::songSettingsFor(const SongSession &session) const
