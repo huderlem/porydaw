@@ -63,6 +63,11 @@ jobs:
           version: '6.9.*'
           cache: true
 
+      - name: Install ALSA headers (MIDI input)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 

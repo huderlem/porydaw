@@ -71,6 +71,7 @@
 #include <cstring>
 #include <functional>
 
+#include "audio/midiinput.h"
 #include "audio/sampleimport.h"
 #include "audio/sf2reader.h"
 #include "audio/wavexport.h"
@@ -87,6 +88,7 @@
 #include "ui/companionwidget.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
+#include "ui/midiactivityled.h"
 #include "ui/newsongwizard.h"
 #include "ui/polyphonypanel.h"
 #include "ui/sampleeditordialog.h"
@@ -315,6 +317,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     typography::setUseSystemFont(m_themeSettings->value(kSystemFontKey, false).toBool());
     m_themeController->restore();
     updateWindowFrameTheme();
+    // Before buildUi: the transport's MIDI light and the Settings window's
+    // MIDI page bind to it. Opens every enabled port right away.
+    m_midiInput = std::make_unique<MidiInput>();
 #ifdef PORYDAW_SCRIPTING
     // Before buildUi: the Script Console dock and the Plugins page bind to
     // the host. Nothing loads until loadPlugins().
@@ -510,8 +515,10 @@ MainWindow::~MainWindow()
         m_uiTimer->stop();
     if (m_playheadTimer)
         m_playheadTimer->stop();
-    // Stop the audio thread before the sessions free the timeline and
+    // No more MIDI input (closing joins the ports' callback threads), then
+    // stop the audio thread before the sessions free the timeline and
     // voicegroup it borrows.
+    m_midiInput->closeAll();
     m_audio.shutdown();
     voicegroup_free_samples(m_sampleSet);
 }
@@ -727,6 +734,16 @@ void MainWindow::buildUi()
     });
     transport->addAction(m_followPlayheadAction);
     refreshTransportIcons();
+
+    // MIDI activity light: blinks as keyboard input arrives; the tooltip
+    // names the ports porydaw is listening to.
+    m_midiLed = new MidiActivityLed(this);
+    m_midiLed->setObjectName(QStringLiteral("transportMidiLed"));
+    m_midiLed->setAccessibleName(tr("MIDI input activity"));
+    transport->addWidget(m_midiLed);
+    connect(m_midiInput.get(), &MidiInput::activity, m_midiLed, &MidiActivityLed::flash);
+    connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::updateMidiLed);
+    updateMidiLed();
 
     m_timeLabel = new QLabel(QStringLiteral("--:--.- / --:--.-"), this);
     m_timeLabel->setContentsMargins(::layout::space(::layout::Space::Three), 0,
@@ -3004,7 +3021,7 @@ void MainWindow::buildSettingsDialog()
 #endif
     m_settingsDialog = std::make_unique<SettingsDialog>(
         *m_themeController, outputLevel, m_engineSettings,
-        m_themeSettings->value(kSystemFontKey, false).toBool(), pluginsPage, this);
+        m_themeSettings->value(kSystemFontKey, false).toBool(), *m_midiInput, pluginsPage, this);
     connect(m_settingsDialog.get(), &SettingsDialog::outputLevelChanged, this, [this](int percent) {
         m_audio.setOutputGain(float(percent) / 100.0f);
         if (m_persistSession)
@@ -3041,6 +3058,18 @@ void MainWindow::buildSettingsDialog()
         typography::applyUseSystemFont(on);
         refreshDerivedFonts();
     });
+}
+
+void MainWindow::updateMidiLed()
+{
+    const QStringList open = m_midiInput->openPorts();
+    m_midiLed->setListening(!open.isEmpty());
+    if (!m_midiInput->backendAvailable())
+        m_midiLed->setToolTip(tr("No MIDI input.\n%1").arg(m_midiInput->backendStatus()));
+    else if (open.isEmpty())
+        m_midiLed->setToolTip(tr("No MIDI input. Connect a keyboard, or check Settings → MIDI."));
+    else
+        m_midiLed->setToolTip(tr("MIDI input from:\n%1").arg(open.join(QLatin1Char('\n'))));
 }
 
 SongSettings MainWindow::songSettingsFor(const SongSession &session) const

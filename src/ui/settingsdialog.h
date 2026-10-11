@@ -7,6 +7,8 @@
 class AppearanceSettingsPage;
 class AudioSettingsPage;
 class KeyboardShortcutsPage;
+class MidiInput;
+class MidiSettingsPage;
 class QListWidget;
 class QStackedWidget;
 
@@ -24,12 +26,13 @@ class SettingsDialog : public QDialog
     Q_OBJECT
 
   public:
-    enum class Page { Audio, Appearance, Shortcuts, Plugins };
+    enum class Page { Audio, Midi, Appearance, Shortcuts, Plugins };
 
     // pluginsPage: the scripting host's Settings page, or nullptr when the
     // build has no scripting (then there is no Plugins section).
     SettingsDialog(themes::ThemeController &themes, int outputLevel, const EngineSettings &engine,
-                   bool useSystemFont, QWidget *pluginsPage, QWidget *parent = nullptr);
+                   bool useSystemFont, MidiInput &midi, QWidget *pluginsPage,
+                   QWidget *parent = nullptr);
 
     // Shows (or raises) the window on the remembered section.
     void present();
@@ -37,6 +40,7 @@ class SettingsDialog : public QDialog
     Page currentPage() const;
 
     AudioSettingsPage *audioPage() const { return m_audio; }
+    MidiSettingsPage *midiPage() const { return m_midi; }
     AppearanceSettingsPage *appearancePage() const { return m_appearance; }
     KeyboardShortcutsPage *shortcutsPage() const { return m_shortcuts; }
     QWidget *pluginsPage() const { return m_plugins; }
@@ -58,6 +62,7 @@ class SettingsDialog : public QDialog
     QListWidget *m_sections = nullptr;
     QStackedWidget *m_stack = nullptr;
     AudioSettingsPage *m_audio = nullptr;
+    MidiSettingsPage *m_midi = nullptr;
     AppearanceSettingsPage *m_appearance = nullptr;
     KeyboardShortcutsPage *m_shortcuts = nullptr;
     QWidget *m_plugins = nullptr;

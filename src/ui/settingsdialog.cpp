@@ -4,6 +4,7 @@
 #include "audiosettingspage.h"
 #include "keyboardshortcutspage.h"
 #include "layout.h"
+#include "midisettingspage.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -26,6 +27,8 @@ QString pageId(SettingsDialog::Page page)
     switch (page) {
     case SettingsDialog::Page::Audio:
         return QStringLiteral("audio");
+    case SettingsDialog::Page::Midi:
+        return QStringLiteral("midi");
     case SettingsDialog::Page::Appearance:
         return QStringLiteral("appearance");
     case SettingsDialog::Page::Shortcuts:
@@ -41,7 +44,7 @@ constexpr int kPageRole = Qt::UserRole;
 } // namespace
 
 SettingsDialog::SettingsDialog(themes::ThemeController &themes, int outputLevel,
-                               const EngineSettings &engine, bool useSystemFont,
+                               const EngineSettings &engine, bool useSystemFont, MidiInput &midi,
                                QWidget *pluginsPage, QWidget *parent)
     : QDialog(parent)
 {
@@ -60,11 +63,14 @@ SettingsDialog::SettingsDialog(themes::ThemeController &themes, int outputLevel,
 
     m_audio = new AudioSettingsPage(outputLevel, engine, this);
     m_audio->setObjectName(QStringLiteral("settingsAudioPage"));
+    m_midi = new MidiSettingsPage(midi, this);
+    m_midi->setObjectName(QStringLiteral("settingsMidiPage"));
     m_appearance = new AppearanceSettingsPage(themes, useSystemFont, this);
     m_appearance->setObjectName(QStringLiteral("settingsAppearancePage"));
     m_shortcuts = new KeyboardShortcutsPage(this);
     m_shortcuts->setObjectName(QStringLiteral("settingsShortcutsPage"));
     addPage(Page::Audio, tr("Audio"), m_audio);
+    addPage(Page::Midi, tr("MIDI"), m_midi);
     addPage(Page::Appearance, tr("Appearance"), m_appearance);
     addPage(Page::Shortcuts, tr("Keyboard Shortcuts"), m_shortcuts);
     if (pluginsPage) {

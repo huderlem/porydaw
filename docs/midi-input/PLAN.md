@@ -1,6 +1,6 @@
 # MIDI Input — play and record from a MIDI keyboard
 
-Status: **decisions confirmed 2026-10-11; no steps started** (written 2026-10-11).
+Status: **decisions confirmed 2026-10-11; step 1 done 2026-10-11 (uncommitted)** (written 2026-10-11).
 File/line references verified against `midi-input` at `6b2e78c`. Work the
 steps **in order, one agent per step**; each step must leave the branch
 green (`tools/run_checks.sh`, normal + ASAN) and ends with a progress entry
@@ -397,4 +397,160 @@ To change a decision later, update this table and every step it affects
 
 ## 5. Progress
 
-(none yet)
+### Step 1 — done 2026-10-11 (uncommitted on `midi-input`)
+
+**Landed**
+
+- `external/rtmidi/` holds the unmodified RtMidi 6.0.0 `RtMidi.h`, `RtMidi.cpp`
+  and `LICENSE`, fetched from the `6.0.0` tag.
+  - Version, URL and sha256 are in `external/rtmidi/LICENSES.md`, following
+    the miniz/dr_libs convention rather than a README.
+  - CMake builds it as the static library `rtmidi` when `PORYDAW_MIDI` is ON
+    (the default). It defines `PORYDAW_MIDI` (PUBLIC) on `porydaw_app`.
+  - Per-platform defines and link libraries: `__WINDOWS_MM__` + `winmm`;
+    `__MACOSX_CORE__` + CoreMIDI/CoreAudio/CoreFoundation; `__LINUX_ALSA__`
+    + `ALSA::ALSA` + Threads.
+  - Without ALSA it falls back to `__RTMIDI_DUMMY__` and prints a
+    `message(WARNING)`.
+  - `libasound2-dev` was added to every Linux job that compiles: the
+    `build` matrix (as an `if: runner.os == 'Linux'` step), `asan-checks`,
+    and release.yml's Linux AppImage job.
+  - The README's License section credits RtMidi. Nothing credits miniaudio
+    anywhere (no About-box or docs notice exists), so the README is the
+    only place a notice could go.
+- `src/audio/midiinput.{h,cpp}`:
+  - `MidiMsg{status,d1,d2}`.
+  - `MidiInputRing`: 256 entries, multi-producer through a mutex,
+    lock-free single consumer, with a drop counter.
+  - `MidiInput` (QObject, owned by MainWindow through
+    `std::unique_ptr`, accessor `midiInput()`):
+    - one enumerating `RtMidiIn` plus one `RtMidiIn` per open port;
+    - a 2 s hot-plug poll;
+    - `midi/disabledPorts`, `midi/livePlay`, `midi/fixedVelocity` and
+      `midi/latencyMs` (`kLatencyAuto` = -1);
+    - a static `parse()`, `injectForTest()`, and a throttled `activity()`
+      signal (at most one queued hop in flight, at least 40 ms apart).
+- `src/ui/midisettingspage.{h,cpp}` adds Settings → MIDI as the second
+  section (`SettingsDialog::Page::Midi`, id `"midi"`).
+  - It holds the port list (checkable items), a Refresh button, "Play
+    incoming notes", Fixed velocity (0 shows "Off") and Recording offset
+    (-1 shows "Auto").
+  - objectNames: `settingsMidiPorts`, `settingsMidiRefresh`,
+    `settingsMidiPortsStatus`, `settingsMidiLivePlay`,
+    `settingsMidiFixedVelocity`, `settingsMidiLatency`, and
+    `settingsMidiUnavailable` for the no-backend label.
+  - The page talks to `MidiInput` directly, as the Plugins page talks to
+    `ScriptHost`; `MidiInput` persists.
+- `src/ui/midiactivityled.{h,cpp}` is the painted dot on the transport
+  toolbar after Follow Playhead, objectName `transportMidiLed`.
+  - It is dim when no port is open, a ring while listening, and filled
+    with `polyphony_cell_active_background` for 120 ms on activity.
+  - `MainWindow::updateMidiLed` sets the tooltip from the open ports, or
+    "No MIDI input" plus the reason.
+- `--midicheck <root> <label> [shot.png]` lives in `src/midicheck.cpp` and
+  `MainWindow::runMidiWindowCheck`, and is wired into `run_checks.sh` after
+  velcheck. It checks:
+  - the parse table;
+  - ring FIFO, overflow and drop count;
+  - 4 producer threads against a concurrent consumer: nothing lost or
+    duplicated, per-producer order kept;
+  - port plumbing on whatever backend exists;
+  - the injector reaching the ring;
+  - activity coalescing and throttling;
+  - page persistence and relaunch reload, and port toggles through
+    `setPortListForTest`;
+  - the LED and the Settings section with mus_abandoned_ship open.
+- settingscheck now expects 5 sections (4 without scripting), with MIDI at
+  row 1.
+
+**Deviations**
+
+- The page's controls exist only when a backend is up; with none it is the
+  single label, as planned.
+  - The harness drives the controls through
+    `MidiSettingsPage(midi, parent, /*showWithoutBackend=*/true)` and
+    `MidiInput::setPortListForTest`, because WSL and CI have no backend.
+- Program change (0xCn) is dropped by `parse()` along with aftertouch.
+  - D2/D3 play the selected track's voice, so a keyboard's program change
+    has nothing to drive.
+  - Step 6's scripting fan-out would need parse() widened if plugins want
+    it.
+- A port that fails to open (for example held by another program) is not
+  retried by the 2 s poll. Refresh, toggling its checkbox, or the port
+  reappearing retries it. This avoids a log line every 2 s; the page marks
+  such a port "(unavailable)".
+- Two ports with an identical name count as one identity, and only the
+  first opens. Names are as RtMidi reports them: WinMM appends the device
+  index and ALSA the `client:port` pair, so in practice names are unique.
+
+**Gotchas for step 2**
+
+- **Consumer API:** call `MidiInputRing::pop(MidiMsg *out)` in a loop at
+  the top of `AudioEngine::process`; it returns false when empty and never
+  locks.
+  - Hand the engine a `MidiInputRing *` (for example
+    `setMidiInputRing(&m_midiInput->ring())`).
+  - `MainWindow::~MainWindow` already calls `m_midiInput->closeAll()`
+    before `m_audio.shutdown()`. The ring lives inside `MidiInput`, so
+    keep `m_audio.shutdown()` before `m_midiInput` is destroyed. Member
+    order makes `m_midiInput` die before `m_audio`, which is safe only
+    because shutdown runs first in the destructor body.
+- **Nothing drains the ring in step 1.** In the app it fills after 256
+  messages and every later message is dropped and counted. Step 2's
+  consumer fixes that.
+  - Harness checks that inject must `pop` or drain the ring first, or
+    they hit the full ring.
+- Messages in the ring are already normalised:
+  - a velocity-0 note on arrives as 0x8n with d2 = 0;
+  - the channel stays in the low nibble (omni: mask it off);
+  - pitch bend is d1 = LSB, d2 = MSB, so `bend14 = d1 | d2 << 7`, centre
+    8192.
+- `livePlay()` and `fixedVelocity()` live on `MidiInput`, and
+  `settingsChanged()` fires on each change. Mirror them into atomics on
+  `AudioEngine` from MainWindow.
+- RtMidi throws only when no error callback is installed. Every client
+  porydaw makes installs `onRtMidiError` (which only logs) right after
+  construction, so later calls report through `isPortOpen()` and empty
+  names instead of exceptions.
+  - Construction itself still throws; it is caught.
+  - With only the dummy API compiled, `RtMidiIn(UNSPECIFIED)` throws
+    "no compiled API support found". `startBackend` checks
+    `RtMidi::getCompiledApi` first for that case.
+- On WSL every `MidiInput` construction prints ALSA's
+  `snd_seq_hw_open ... /dev/snd/seq failed` line plus RtMidi's own stderr
+  line. This happens in every harness that builds a MainWindow; it is
+  harmless noise. The Refresh button retries the backend, but the poll
+  does not.
+
+**Verification**
+
+- Builds: normal `build`, `build-asan`, `build-nomidi`
+  (`-DPORYDAW_MIDI=OFF`) and `build-dummy`
+  (`-DCMAKE_DISABLE_FIND_PACKAGE_ALSA=ON`, which shows the CMake warning)
+  all build.
+  - `--midicheck` passes on all four. The dummy and OFF builds report "This
+    build of porydaw has no MIDI support…".
+- `tools/format.sh --check` is clean, and the new files pass
+  `clang-format --dry-run`.
+- Negative tests: each assertion failed with the code broken and passed
+  once it was restored.
+  - Velocity-0 conversion removed.
+  - Drop counter removed.
+  - `setLivePlay` persistence removed.
+  - Activity hop never posted.
+  - Activity interval check removed.
+  - LED `activity` connect removed.
+  - Port-toggle `setPortEnabled` call removed.
+- Sweep `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  every harness passes on both the normal and ASAN builds except
+  `editcheck`, including midicheck and settingscheck.
+  - `editcheck` fails on `mus_bw_surf: a '['-named track lost its name in
+    the move`.
+  - That failure is **pre-existing and unrelated**. HEAD `b385746`, built
+    in a scratch worktree, fails identically. The song was added to the
+    local `~/pokeemerald` on 2026-10-04, and editcheck touches no file this
+    step changed.
+- Not verified: real devices. WSL has no `/dev/snd`, so no port has ever
+  opened. Open/close, hot-plug, the WinMM/CoreMIDI backends and the
+  callback thread delivering into the ring all wait for the user's manual
+  pass on Windows.

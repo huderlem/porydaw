@@ -37,7 +37,8 @@ tools/format.sh --check  # what CI runs
 ## License
 
 Porydaw is licensed under [GPL-3.0](LICENSE). The embedded poryaaaa engine is
-licensed under MIT.
+licensed under MIT. MIDI keyboard input uses [RtMidi](https://github.com/thestk/rtmidi)
+(MIT-style license, see [external/rtmidi/LICENSE](external/rtmidi/LICENSE)).
 
 ## AI Disclaimer
 

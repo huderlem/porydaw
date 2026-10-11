@@ -20,6 +20,7 @@
 #include "ui/appearancesettingspage.h"
 #include "ui/audiosettingspage.h"
 #include "ui/keyboardshortcutspage.h"
+#include "ui/midisettingspage.h"
 #include "ui/settingsdialog.h"
 #include "ui/typography.h"
 #ifdef PORYDAW_SCRIPTING
@@ -83,9 +84,9 @@ int runSettingsCheck(const QString &shotPath)
         QApplication::processEvents();
         check(dialog->isVisible(), "Edit → Settings did not open the window");
 #ifdef PORYDAW_SCRIPTING
-        check(sections->count() == 4, "Settings window does not have four sections");
+        check(sections->count() == 5, "Settings window does not have five sections");
 #else
-        check(sections->count() == 3, "Settings window does not have three sections");
+        check(sections->count() == 4, "Settings window does not have four sections");
 #endif
         check(dialog->currentPage() == SettingsDialog::Page::Audio &&
                   stack->currentWidget() == dialog->audioPage(),
@@ -106,17 +107,22 @@ int runSettingsCheck(const QString &shotPath)
         // 3. The section list drives the stack; the choice is remembered
         // across close/reopen.
         sections->setCurrentRow(1);
+        check(dialog->currentPage() == SettingsDialog::Page::Midi &&
+                  stack->currentWidget() == dialog->midiPage(),
+              "selecting MIDI did not switch the page");
+        shoot("midi");
+        sections->setCurrentRow(2);
         check(dialog->currentPage() == SettingsDialog::Page::Appearance &&
                   stack->currentWidget() == dialog->appearancePage(),
               "selecting Appearance did not switch the page");
         shoot("appearance");
-        sections->setCurrentRow(2);
+        sections->setCurrentRow(3);
         check(stack->currentWidget() == dialog->shortcutsPage() &&
                   dialog->shortcutsPage()->findChild<QTreeWidget *>() != nullptr,
               "selecting Keyboard Shortcuts did not show the shortcuts editor");
         shoot("shortcuts");
 #ifdef PORYDAW_SCRIPTING
-        sections->setCurrentRow(3);
+        sections->setCurrentRow(4);
         check(dialog->currentPage() == SettingsDialog::Page::Plugins &&
                   stack->currentWidget() == dialog->pluginsPage() &&
                   dialog->pluginsPage()->findChild<QTreeWidget *>() != nullptr,
@@ -193,7 +199,7 @@ int runSettingsCheck(const QString &shotPath)
             }
         }
 #endif
-        sections->setCurrentRow(1);
+        sections->setCurrentRow(2);
         closeButton->click();
         QApplication::processEvents();
         check(!dialog->isVisible(), "Close did not hide the Settings window");

@@ -27,6 +27,8 @@ class QSpinBox;
 class QToolBar;
 class QToolButton;
 class CompanionWidget;
+class MidiActivityLed;
+class MidiInput;
 class QTimer;
 class QWidget;
 class QUndoGroup;
@@ -64,6 +66,10 @@ class MainWindow : public QMainWindow
     const AudioEngine &audio() const { return m_audio; }
     // The Settings window (built with the main window, shown on demand).
     SettingsDialog *settingsDialog() const { return m_settingsDialog.get(); }
+    // MIDI keyboard input (docs/midi-input/PLAN.md); never null.
+    MidiInput &midiInput() const { return *m_midiInput; }
+    // The transport toolbar's MIDI activity light.
+    MidiActivityLed *midiActivityLed() const { return m_midiLed; }
 #ifdef PORYDAW_SCRIPTING
     // The plugin host (docs/scripting/PLAN.md). Plugins are loaded by
     // loadPlugins(), called on interactive launches only, so harnesses
@@ -159,6 +165,11 @@ class MainWindow : public QMainWindow
     // redirected. Returns the number of failed expectations.
     int runDraftCheck(const QString &projectRoot);
 
+    // MIDI input check, window half (--midicheck; midicheck.cpp): with the
+    // song open, the transport's MIDI light and Settings → MIDI. QSettings
+    // must be redirected. Returns the number of failed expectations.
+    int runMidiWindowCheck(const QString &projectRoot, const QString &songLabel);
+
     // Reopens the last session's project and open song tabs, if they still
     // exist. Called after show() on interactive launches only, so the
     // harnesses never inherit (or overwrite) the user's session.
@@ -212,6 +223,8 @@ class MainWindow : public QMainWindow
   private:
     void buildUi();
     void buildSettingsDialog();
+    // The MIDI light's tooltip and idle look follow the open ports.
+    void updateMidiLed();
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -582,6 +595,8 @@ class MainWindow : public QMainWindow
 
     AudioEngine m_audio;
     bool m_audioOk = false;
+    std::unique_ptr<MidiInput> m_midiInput;
+    MidiActivityLed *m_midiLed = nullptr;
     // False during harness runs so they don't overwrite the session.
     bool m_persistSession = true;
     EngineSettings m_engineSettings;

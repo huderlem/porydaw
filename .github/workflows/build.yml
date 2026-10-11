@@ -40,6 +40,12 @@ jobs:
           version: '6.9.*'
           cache: true
 
+      - name: Install ALSA headers (MIDI input)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
@@ -68,10 +74,12 @@ jobs:
       - name: Start a dummy audio server
         # The engine prefers PulseAudio; a headless daemon with a null sink
         # keeps every audio-dependent harness happy. Best-effort: without
-        # it, miniaudio's own null backend is the fallback.
+        # it, miniaudio's own null backend is the fallback. libasound2-dev
+        # builds RtMidi's ALSA backend (MIDI input); the runner has no
+        # sequencer, so --midicheck runs on the injector.
         run: |
           sudo apt-get update
-          sudo apt-get install -y pulseaudio
+          sudo apt-get install -y pulseaudio libasound2-dev
           pulseaudio -D --exit-idle-time=-1 || true
           pactl load-module module-null-sink sink_name=ci || true
 

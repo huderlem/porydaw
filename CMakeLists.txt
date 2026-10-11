@@ -52,6 +52,45 @@ if(UNIX)
     target_link_libraries(poryaaaa_engine PUBLIC m)
 endif()
 
+# MIDI keyboard input (docs/midi-input/PLAN.md): vendored RtMidi 6.0.0
+# (external/rtmidi/LICENSES.md) with one native backend per platform. A
+# missing backend (Linux without libasound2-dev) still builds, on RtMidi's
+# dummy API, and the Settings → MIDI page says so. OFF compiles RtMidi out
+# entirely; MidiInput then reports no backend.
+option(PORYDAW_MIDI "MIDI keyboard input (vendored RtMidi)" ON)
+if(PORYDAW_MIDI)
+    add_library(rtmidi STATIC
+        external/rtmidi/RtMidi.cpp
+        external/rtmidi/RtMidi.h
+    )
+    target_include_directories(rtmidi PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/external/rtmidi)
+    if(WIN32)
+        target_compile_definitions(rtmidi PRIVATE __WINDOWS_MM__)
+        target_link_libraries(rtmidi PUBLIC winmm)
+    elseif(APPLE)
+        target_compile_definitions(rtmidi PRIVATE __MACOSX_CORE__)
+        find_library(COREMIDI_FRAMEWORK CoreMIDI REQUIRED)
+        find_library(COREAUDIO_FRAMEWORK CoreAudio REQUIRED)
+        find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+        target_link_libraries(rtmidi PUBLIC
+            ${COREMIDI_FRAMEWORK}
+            ${COREAUDIO_FRAMEWORK}
+            ${COREFOUNDATION_FRAMEWORK}
+        )
+    else()
+        find_package(ALSA)
+        if(ALSA_FOUND)
+            target_compile_definitions(rtmidi PRIVATE __LINUX_ALSA__)
+            find_package(Threads REQUIRED)
+            target_link_libraries(rtmidi PUBLIC ALSA::ALSA Threads::Threads)
+        else()
+            message(WARNING "ALSA development files not found (install libasound2-dev); "
+                            "building without MIDI input devices (RtMidi dummy API)")
+            target_compile_definitions(rtmidi PRIVATE __RTMIDI_DUMMY__)
+        endif()
+    endif()
+endif()
+
 # ---- porydaw application ----
 qt_add_library(porydaw_app STATIC
     src/mainwindow.cpp
@@ -89,6 +128,8 @@ qt_add_library(porydaw_app STATIC
     src/audio/audioengine.h
     src/audio/auditionslots.cpp
     src/audio/auditionslots.h
+    src/audio/midiinput.cpp
+    src/audio/midiinput.h
     src/audio/miniaudio_impl.c
     src/audio/stb_vorbis_impl.c
     src/audio/wavexport.cpp
@@ -167,6 +208,10 @@ qt_add_library(porydaw_app STATIC
     src/ui/enginesettings.h
     src/ui/audiosettingspage.cpp
     src/ui/audiosettingspage.h
+    src/ui/midiactivityled.cpp
+    src/ui/midiactivityled.h
+    src/ui/midisettingspage.cpp
+    src/ui/midisettingspage.h
     src/ui/appearancesettingspage.cpp
     src/ui/appearancesettingspage.h
     src/ui/settingsdialog.cpp
@@ -253,6 +298,10 @@ if(PORYDAW_SCRIPTING)
         FILES src/scripting/prelude.js
     )
 endif()
+if(PORYDAW_MIDI)
+    target_compile_definitions(porydaw_app PUBLIC PORYDAW_MIDI)
+    target_link_libraries(porydaw_app PRIVATE rtmidi)
+endif()
 if(WIN32)
     target_sources(porydaw_app PRIVATE src/ui/playheadrenderer_dcomp.cpp)
     target_compile_definitions(porydaw_app PUBLIC PORYDAW_USE_DIRECT_PLAYHEAD)
@@ -298,6 +347,7 @@ qt_add_executable(porydaw
     src/sessioncheck.cpp
     src/settingscheck.cpp
     src/keymapcheck.cpp
+    src/midicheck.cpp
     src/velcheck.cpp
     resources/fonts.qrc
 )

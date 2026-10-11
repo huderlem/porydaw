@@ -116,6 +116,14 @@ int runVelocityLaneCheck(const QString &projectRoot, const QString &songLabel,
 int runEventViewCheck(const QString &projectRoot, const QString &screenshotSong = QString(),
                       const QString &screenshotPath = QString());
 
+// midicheck.cpp; MIDI keyboard input check (docs/midi-input/PLAN.md): parse
+// table, input ring, port plumbing without assuming devices, the test
+// injector, Settings → MIDI persistence and the window's MIDI light, with
+// the song open; the optional path saves screenshots. Redirects QSettings
+// itself.
+int runMidiCheck(const QString &projectRoot, const QString &songLabel,
+                 const QString &shotPath = QString());
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
@@ -220,6 +228,11 @@ int main(int argc, char *argv[])
         return runTransportCheck();
     if (args.contains(QStringLiteral("--audiocheck")))
         return runAudioCheck();
+    const int midiCheck = args.indexOf(QStringLiteral("--midicheck"));
+    if (midiCheck >= 0 && midiCheck + 2 < args.size()) {
+        const QString shot = midiCheck + 3 < args.size() ? args[midiCheck + 3] : QString();
+        return runMidiCheck(args[midiCheck + 1], args[midiCheck + 2], shot);
+    }
     if (args.contains(QStringLiteral("--keymapcheck")))
         return runKeymapCheck();
     const int scriptCheck = args.indexOf(QStringLiteral("--scriptcheck"));

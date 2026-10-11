@@ -124,6 +124,7 @@ run draftcheck       base --draftcheck SCRATCH
 run eventviewcheck   base --eventviewcheck SCRATCH
 run rollcheck        base --rollcheck SCRATCH mus_abandoned_ship
 run velcheck         base --velcheck SCRATCH mus_abandoned_ship
+run midicheck        base --midicheck SCRATCH mus_abandoned_ship
 run loopcheck        -    --loopcheck
 run ignorecheck      -    --ignorecheck SCRATCH
 run bundlecheck      -    --bundlecheck SCRATCH
