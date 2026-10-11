@@ -260,6 +260,11 @@ class SongView : public QWidget
 
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
+    // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
+    // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
+    void setLiveHeldKeys(uint64_t lo, uint64_t hi);
+    uint64_t liveHeldKeysLo() const { return m_liveHeldKeys[0]; }
+    uint64_t liveHeldKeysHi() const { return m_liveHeldKeys[1]; }
     // Reveal a polyphony-overflow event's note: select its track, select the
     // last note on (track, key) starting at or before tick — the lost note (a
     // dropped note starts exactly there, a stolen one spans it, a cut tail
@@ -904,6 +909,7 @@ class SongView : public QWidget
     double m_scrollY = 0.0;
     double m_keyHeight = songview::kVelHandleMinKeyH;
     int m_selectedTrack = 0;
+    uint64_t m_liveHeldKeys[2] = {0, 0};
     double m_playheadTick = 0.0;
     uint64_t m_editCursorTick = 0;
     bool m_playing = false;

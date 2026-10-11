@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QImage>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -25,6 +26,7 @@
 #include "ui/midiactivityled.h"
 #include "ui/midisettingspage.h"
 #include "ui/settingsdialog.h"
+#include "ui/songview.h"
 
 // --midicheck <projectRoot> <songLabel> [shot.png]: MIDI keyboard input
 // (docs/midi-input/PLAN.md). No MIDI hardware is ever assumed — WSL and CI
@@ -43,6 +45,16 @@
 // ring and the throttled activity signal, the Settings → MIDI page
 // persisting its controls and port toggles, and the window's MIDI light and
 // Settings section with a song open.
+//
+// Step 2 (live play) parks the audio device and drives the real callback
+// itself (AudioEngine::pumpForTest), so time is simulated and every check is
+// deterministic: held keys sound on the selected track and outlive the
+// band-sweep's timed cap, note-off and the sustain pedal release them, fixed
+// velocity applies, a selection change releases and follows, bend and mod
+// act on the whole target track and are re-chased when it is left, held
+// notes win steal pressure from timed previews, a cut clears the published
+// held mask and a key released after it sends no stray note-off, and live
+// play off / no target / panic drain silently.
 
 namespace {
 
@@ -420,7 +432,304 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
               "without a backend the MIDI page is not one explanatory label");
     }
     dialog->reject();
+
+    checkLivePlay();
     return g_failures - before;
+}
+
+// Step 2: live play on the selected track (see the file comment).
+void MainWindow::checkLivePlay()
+{
+    if (!m_audioOk) {
+        std::printf("midicheck: live play SKIP (no audio device)\n");
+        return;
+    }
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const MidiTimeline *timeline = m_active->timeline.get();
+    m_audio.holdDeviceForTest(true);
+    drain(midi.ring());
+    const M4AEngine *engine = m_audio.engineForTest();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    // Keys of the channels keyed on (sounding, not yet released) on a track.
+    const auto keyed = [&](int track) {
+        std::vector<int> keys;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+            const M4APCMChannel &ch = engine->pcmChannels[i];
+            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                ch.trackIndex == track)
+                keys.push_back(ch.midiKey);
+        }
+        for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+            const M4ACGBChannel &ch = engine->cgbChannels[i];
+            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                ch.trackIndex == track)
+                keys.push_back(ch.midiKey);
+        }
+        std::sort(keys.begin(), keys.end());
+        return keys;
+    };
+    const auto has = [](const std::vector<int> &keys, int key) {
+        return std::find(keys.begin(), keys.end(), key) != keys.end();
+    };
+    const auto held = [&] {
+        uint64_t lo = 0, hi = 0;
+        m_audio.liveHeldKeys(&lo, &hi);
+        return std::pair<uint64_t, uint64_t>(lo, hi);
+    };
+    const auto bits = [](std::initializer_list<int> keys) {
+        std::pair<uint64_t, uint64_t> mask{0, 0};
+        for (int k : keys)
+            (k < 64 ? mask.first : mask.second) |= uint64_t(1) << (k & 63);
+        return mask;
+    };
+    const auto pcmVelocity = [&](int track, int key) {
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+            const M4APCMChannel &ch = engine->pcmChannels[i];
+            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                ch.trackIndex == track && ch.midiKey == key)
+                return int(ch.velocity);
+        }
+        return -1;
+    };
+
+    // Two used tracks playing a plain DirectSound voice at the playhead (a
+    // chord needs PCM channels: a PSG voice has one channel), the first
+    // preferably with a looping sample, so it is still sounding after the
+    // timed-preview cap.
+    int a = -1, b = -1;
+    bool aLoops = false;
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        const ToneData &voice = engine->tracks[t].currentVoice;
+        if (!timeline->tracks[t].used || (voice.type & 0xC7) != 0 || !voice.wav)
+            continue;
+        const bool loops = (voice.wav->status & 0x4000) != 0 && voice.sustain > 0;
+        if (a < 0 || (loops && !aLoops)) {
+            if (a >= 0 && b < 0)
+                b = a;
+            a = t;
+            aLoops = loops;
+        } else if (b < 0) {
+            b = t;
+        }
+    }
+    if (!check(a >= 0 && b >= 0, "live play: the song has no two DirectSound tracks to play on")) {
+        m_audio.holdDeviceForTest(false);
+        return;
+    }
+    std::printf("midicheck: live play on tracks %d%s and %d\n", a, aLoops ? " (looping)" : "", b);
+    view->selectTrack(a);
+    check(m_audio.liveTarget() == a, "live play: the selected track is not the live target");
+
+    // Three held keys sound as three channels on the target track.
+    send(0x90, 60, 100);
+    send(0x90, 64, 100);
+    send(0x92, 67, 100); // omni: any channel
+    pumpMs(30);
+    check(midi.ring().size() == 0, "live play: the audio callback did not drain the input");
+    check(keyed(a) == std::vector<int>{60, 64, 67},
+          "live play: three held keys are not three channels on the target track");
+    check(held() == bits({60, 64, 67}), "live play: the held mask does not show the held keys");
+    // The input's activity starts the poll that lights the roll's keyboard.
+    QElapsedTimer lit;
+    lit.start();
+    while (view->liveHeldKeysLo() == 0 && lit.elapsed() < 2000)
+        QApplication::processEvents(QEventLoop::WaitForMoreEvents, 5);
+    check(std::pair(view->liveHeldKeysLo(), view->liveHeldKeysHi()) == bits({60, 64, 67}),
+          "live play: the roll's keyboard did not light the held keys");
+    // The roll paints them: every key lit versus none changes the keyboard
+    // column, whatever rows are scrolled into view.
+    if (auto *roll = view->findChild<QWidget *>(QStringLiteral("pianoRoll"))) {
+        const auto column = [&] {
+            return roll->grab(QRect(0, 0, 12, roll->height()))
+                .toImage()
+                .convertToFormat(QImage::Format_RGB32);
+        };
+        view->setLiveHeldKeys(~uint64_t(0), ~uint64_t(0));
+        const QImage allLit = column();
+        view->setLiveHeldKeys(0, 0);
+        const QImage noneLit = column();
+        // Pixel by pixel: QImage's operator== can see bytes no pixel shows.
+        int changed = 0;
+        for (int y = 0; y < allLit.height() && y < noneLit.height(); y++)
+            for (int x = 0; x < allLit.width() && x < noneLit.width(); x++)
+                changed += allLit.pixel(x, y) != noneLit.pixel(x, y);
+        check(!allLit.isNull() && changed > 0,
+              "live play: the roll's keyboard column does not paint MIDI-held keys");
+        pollLiveKeys();
+    }
+
+    // Held entries never count down: still there past the 10 s timed cap.
+    pumpMs(11000);
+    check(held() == bits({60, 64, 67}), "live play: held keys expired like a timed preview");
+    if (aLoops)
+        check(keyed(a) == std::vector<int>{60, 64, 67},
+              "live play: held keys stopped sounding before their note-off");
+
+    // Note-off releases them, and the keyboard column goes dark.
+    send(0x80, 60, 0);
+    send(0x80, 64, 0);
+    send(0x82, 67, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: note-off did not release the held keys");
+    check(held() == bits({}), "live play: the held mask kept released keys");
+    pollLiveKeys();
+    check(view->liveHeldKeysLo() == 0 && view->liveHeldKeysHi() == 0,
+          "live play: the roll's keyboard kept released keys lit");
+
+    // A selection change releases the old track's notes and follows.
+    send(0x90, 60, 100);
+    pumpMs(30);
+    view->selectTrack(b);
+    check(m_audio.liveTarget() == b, "live play: a selection change did not move the live target");
+    pumpMs(30);
+    check(!has(keyed(a), 60), "live play: a selection change left the old track's note sounding");
+    check(held() == bits({}), "live play: the held mask kept the old track's key");
+    send(0x80, 60, 0); // its late note-off reaches nothing
+    send(0x90, 62, 100);
+    pumpMs(30);
+    check(keyed(b) == std::vector<int>{62} && !has(keyed(a), 62),
+          "live play: after a selection change the new track did not play");
+    send(0x80, 62, 0);
+    pumpMs(30);
+    view->selectTrack(a);
+    pumpMs(30);
+
+    // Sustain: a released key keeps sounding until pedal-up; a key still
+    // held at pedal-up keeps sounding.
+    send(0xB0, 64, 127);
+    send(0x90, 60, 100);
+    send(0x80, 60, 0);
+    send(0x90, 64, 100);
+    pumpMs(30);
+    check(keyed(a) == std::vector<int>{60, 64},
+          "live play: the sustain pedal did not hold a released key");
+    send(0xB0, 64, 0);
+    pumpMs(30);
+    check(keyed(a) == std::vector<int>{64},
+          "live play: pedal-up did not release only the keys no longer held");
+    send(0x80, 64, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: a key held through pedal-up did not release");
+
+    // Fixed velocity overrides the keyboard's; off passes it through.
+    midi.setFixedVelocity(40);
+    send(0x90, 60, 127);
+    pumpMs(30);
+    check(pcmVelocity(a, 60) == 40, "live play: the fixed velocity was not applied");
+    send(0x80, 60, 0);
+    midi.setFixedVelocity(0);
+    send(0x90, 61, 90);
+    pumpMs(30);
+    check(pcmVelocity(a, 61) == 90, "live play: the keyboard's velocity was not passed through");
+    send(0x80, 61, 0);
+    pumpMs(30);
+
+    // Bend and mod act on the whole target track; leaving the track
+    // re-chases them at the playhead and leaves the new one alone.
+    const int8_t bBend = engine->tracks[b].bend;
+    const uint8_t bMod = engine->tracks[b].mod;
+    const int8_t aBend = engine->tracks[a].bend;
+    const uint8_t aMod = engine->tracks[a].mod;
+    send(0xE0, 0, 96); // bend14 = 96 << 7 = 12288, +4096 from centre
+    send(0xB0, 1, 100);
+    pumpMs(30);
+    check(engine->tracks[a].bend == 32, "live play: pitch bend did not reach the target track");
+    check(engine->tracks[a].mod == 100, "live play: the mod wheel did not reach the target track");
+    check(aBend != 32 && aMod != 100, "live play: the song's own bend/mod hide the restore check");
+    view->selectTrack(b);
+    pumpMs(30);
+    check(engine->tracks[a].bend == aBend && engine->tracks[a].mod == aMod,
+          "live play: leaving a track did not restore its chased bend and mod");
+    check(engine->tracks[b].bend == bBend && engine->tracks[b].mod == bMod,
+          "live play: the new target's bend and mod were disturbed");
+    view->selectTrack(a);
+    pumpMs(30);
+
+    // Held keys survive steal pressure from a 26-note band sweep, which
+    // steals its own timed previews instead.
+    send(0x90, 60, 100);
+    send(0x90, 64, 100);
+    send(0x90, 67, 100);
+    pumpMs(30);
+    for (int k = 30; k < 56; k++)
+        m_audio.previewNoteTimed(uint8_t(b), uint8_t(k), 100, uint32_t(rate * 5));
+    pumpMs(30);
+    check(held() == bits({60, 64, 67}), "live play: band-sweep previews stole held keys");
+    send(0x80, 60, 0);
+    send(0x80, 64, 0);
+    send(0x80, 67, 0);
+    for (int k = 30; k < 56; k++)
+        m_audio.previewNoteTimed(uint8_t(b), uint8_t(k), 0, 0);
+    pumpMs(30);
+
+    // A transport cut silences held keys and clears the published mask; the
+    // key's later note-off finds nothing to release, so it can't stop
+    // another note on the same track and key.
+    send(0x90, 60, 100);
+    pumpMs(30);
+    m_audio.play();
+    pumpMs(10);
+    check(held() == bits({}), "live play: a transport cut left the held mask set");
+    pollLiveKeys();
+    check(view->liveHeldKeysLo() == 0 && view->liveHeldKeysHi() == 0,
+          "live play: a transport cut left the roll's key lit");
+    m_audio.stop();
+    pumpMs(10);
+    m_audio.previewNote(uint8_t(a), 60, 100);
+    pumpMs(30);
+    const bool previewSounds = has(keyed(a), 60);
+    send(0x80, 60, 0);
+    pumpMs(30);
+    check(previewSounds && has(keyed(a), 60),
+          "live play: a key released after a cut sent a stray note-off");
+    m_audio.previewNote(uint8_t(a), 60, 0);
+    pumpMs(30);
+
+    // Panic (the command, and CC123) releases held and sustained keys.
+    send(0xB0, 64, 127);
+    send(0x90, 60, 100);
+    send(0x90, 64, 100);
+    send(0x80, 64, 0);
+    pumpMs(30);
+    m_midiPanicAction->trigger();
+    pumpMs(30);
+    check(keyed(a).empty() && held() == bits({}),
+          "live play: MIDI: All Notes Off did not release held and sustained keys");
+    send(0x80, 60, 0);
+    send(0x90, 62, 100);
+    pumpMs(30);
+    send(0xB3, 123, 0);
+    pumpMs(30);
+    check(keyed(a).empty(), "live play: CC123 did not release the sustained keys");
+    send(0xB0, 64, 0);
+    send(0x80, 62, 0);
+    pumpMs(30);
+
+    // Live play off, or no target: the input drains and nothing sounds.
+    midi.setLivePlay(false);
+    send(0x90, 60, 100);
+    pumpMs(30);
+    check(midi.ring().size() == 0 && keyed(a).empty(),
+          "live play: with Play incoming notes off a note still sounded");
+    send(0x80, 60, 0);
+    midi.setLivePlay(true);
+    m_audio.setLiveTarget(-1);
+    send(0x90, 60, 100);
+    pumpMs(30);
+    check(midi.ring().size() == 0 && keyed(a).empty() && held() == bits({}),
+          "live play: with no target a note still sounded");
+    send(0x80, 60, 0);
+    publishLiveTarget();
+    pumpMs(30);
+    check(m_audio.liveTarget() == a, "live play: the live target was not republished");
+
+    drain(midi.ring());
+    m_audio.holdDeviceForTest(false);
 }
 
 int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QString &shotPath)

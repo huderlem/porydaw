@@ -462,6 +462,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                                settings.value(QStringLiteral("songFilterCategory")).toString());
 
     QString audioError;
+    // Before init: the audio thread drains the MIDI input from its first
+    // callback. MidiInput outlives the audio thread (~MainWindow shuts the
+    // engine down first).
+    m_audio.setMidiInputRing(&m_midiInput->ring());
+    syncLiveSettings();
+    connect(m_midiInput.get(), &MidiInput::settingsChanged, this, &MainWindow::syncLiveSettings);
     m_audioOk = m_audio.init(&audioError);
     if (!m_audioOk) {
         QMessageBox::warning(this, tr("Audio Error"),
@@ -608,6 +614,14 @@ void MainWindow::buildUi()
         toolsMenu->addAction(tr("Import &Sample..."), this, &MainWindow::importSample);
     keys.attach(QStringLiteral("tools.import_sample"), m_importSampleAction);
     m_importSampleAction->setEnabled(false);
+    toolsMenu->addSeparator();
+    // Releases every note a MIDI keyboard holds (stuck after a cable pull,
+    // a lost note-off).
+    m_midiPanicAction = toolsMenu->addAction(tr("MIDI: All &Notes Off"), this, [this] {
+        if (m_audioOk)
+            m_audio.liveAllNotesOff();
+    });
+    keys.attach(QStringLiteral("midi.panic"), m_midiPanicAction);
 
 #ifdef PORYDAW_SCRIPTING
     // Plugins menu: one submenu per plugin that asks for one
@@ -744,6 +758,27 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::activity, m_midiLed, &MidiActivityLed::flash);
     connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::updateMidiLed);
     updateMidiLed();
+    // A port closing (unplugged, disabled) can never send the note-offs for
+    // the keys it held.
+    m_openMidiPorts = m_midiInput->openPorts();
+    connect(m_midiInput.get(), &MidiInput::portsChanged, this, [this] {
+        const QStringList open = m_midiInput->openPorts();
+        const bool closed = std::any_of(m_openMidiPorts.begin(), m_openMidiPorts.end(),
+                                        [&](const QString &name) { return !open.contains(name); });
+        m_openMidiPorts = open;
+        if (closed && m_audioOk)
+            m_audio.liveAllNotesOff();
+    });
+    // Live keys light the roll's keyboard: polled while input is arriving
+    // and until the held set has stayed empty for a moment.
+    m_liveKeysTimer = new QTimer(this);
+    m_liveKeysTimer->setInterval(17);
+    connect(m_liveKeysTimer, &QTimer::timeout, this, &MainWindow::pollLiveKeys);
+    connect(m_midiInput.get(), &MidiInput::activity, this, [this] {
+        m_liveKeysIdleTicks = 0;
+        if (!m_liveKeysTimer->isActive())
+            m_liveKeysTimer->start();
+    });
 
     m_timeLabel = new QLabel(QStringLiteral("--:--.- / --:--.-"), this);
     m_timeLabel->setContentsMargins(::layout::space(::layout::Space::Three), 0,
@@ -1380,6 +1415,10 @@ SongSession *MainWindow::createSession()
                     m_audio.previewNoteTimed(uint8_t(track), uint8_t(key), uint8_t(velocity),
                                              durationSamples, rawVolume, pan);
             });
+    connect(s->view, &SongView::selectedTrackChanged, this, [this, s] {
+        if (s == m_active)
+            publishLiveTarget();
+    });
     connect(s->view, &SongView::auditionVoice, this, [this, s](int voice, int key, int velocity) {
         if (s == m_active && m_audioOk)
             m_audio.previewVoice(uint8_t(voice), uint8_t(key), uint8_t(velocity));
@@ -1488,9 +1527,14 @@ void MainWindow::activateSession(SongSession *session, bool force)
     if (session == m_active && !force)
         return;
     const SongSession *previous = m_active;
-    // Switching tabs stops playback in the tab being left.
-    if (m_audioOk)
+    // Switching tabs stops playback in the tab being left, and lets go of
+    // what the MIDI keyboard holds there.
+    if (m_audioOk) {
         m_audio.stop();
+        m_audio.liveAllNotesOff();
+    }
+    if (previous)
+        previous->view->setLiveHeldKeys(0, 0);
     m_active = session;
     m_undoGroup->setActiveStack(session ? session->doc.undoStack() : nullptr);
     syncMasterVolumeControl();
@@ -1533,6 +1577,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
         updateTransportActions();
         persistOpenTabs();
         synchronizePlayhead();
+        publishLiveTarget();
         return;
     }
 
@@ -1562,6 +1607,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     updateWindowTitle();
     updateTransportActions();
     persistOpenTabs();
+    publishLiveTarget();
 }
 
 void MainWindow::attachEngine(SongSession &session)
@@ -2616,6 +2662,9 @@ void MainWindow::onDocumentChanged(SongSession &session)
     session.view->updateSong(session.timeline.get());
     updateTabTitle(session);
     if (active) {
+        // updateSong may have moved the selection off a track that emptied,
+        // without a selectedTrackChanged.
+        publishLiveTarget();
         // The timeline was rebuilt, track names may have changed, and the
         // voicegroup may have been swapped above.
         updatePolyPanelContext(&session);
@@ -5240,6 +5289,33 @@ void MainWindow::uiTick()
     // stopping on its own while the playhead timer is idle): cheap no-op
     // setEnabled calls at the status cadence.
     updateTransportActions();
+}
+
+void MainWindow::publishLiveTarget()
+{
+    const bool songLoaded = m_audioOk && m_active && m_audio.songLoaded();
+    m_audio.setLiveTarget(songLoaded ? m_active->view->selectedTrack() : -1);
+}
+
+void MainWindow::syncLiveSettings()
+{
+    m_audio.setLivePlay(m_midiInput->livePlay());
+    m_audio.setLiveFixedVelocity(m_midiInput->fixedVelocity());
+}
+
+void MainWindow::pollLiveKeys()
+{
+    uint64_t lo = 0, hi = 0;
+    if (m_audioOk)
+        m_audio.liveHeldKeys(&lo, &hi);
+    if (m_active)
+        m_active->view->setLiveHeldKeys(lo, hi);
+    // About half a second of nothing held and no input: stop polling until
+    // the next activity.
+    if (lo || hi)
+        m_liveKeysIdleTicks = 0;
+    else if (++m_liveKeysIdleTicks >= 30)
+        m_liveKeysTimer->stop();
 }
 
 void MainWindow::synchronizePlayhead()

@@ -225,6 +225,14 @@ class MainWindow : public QMainWindow
     void buildSettingsDialog();
     // The MIDI light's tooltip and idle look follow the open ports.
     void updateMidiLed();
+    // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
+    // target is the active tab's selected track, -1 without one.
+    void publishLiveTarget();
+    void syncLiveSettings();
+    // Mirrors the engine's held-key mask onto the active roll's keyboard.
+    void pollLiveKeys();
+    // runMidiWindowCheck's live-play half (midicheck.cpp).
+    void checkLivePlay();
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -597,6 +605,12 @@ class MainWindow : public QMainWindow
     bool m_audioOk = false;
     std::unique_ptr<MidiInput> m_midiInput;
     MidiActivityLed *m_midiLed = nullptr;
+    QAction *m_midiPanicAction = nullptr;
+    // Polls the live held-key mask while MIDI input is active (the playhead
+    // timer only runs during playback).
+    QTimer *m_liveKeysTimer = nullptr;
+    int m_liveKeysIdleTicks = 0;
+    QStringList m_openMidiPorts; // to notice a port closing under held keys
     // False during harness runs so they don't overwrite the session.
     bool m_persistSession = true;
     EngineSettings m_engineSettings;

@@ -18,6 +18,8 @@ extern "C" {
 
 struct ma_device;
 struct ma_context;
+struct MidiMsg;
+class MidiInputRing;
 
 struct SongSettings {
     uint8_t songVolume = 127;    // mid2agb -V (0-127)
@@ -134,6 +136,51 @@ class AudioEngine
     // The same for PAN. Every value in -64..63 is a real pan, so the
     // no-override marker is the engine's own out-of-range sentinel.
     static constexpr int kPreviewPanNone = M4A_AUDITION_PAN_NONE;
+
+    // MIDI keyboard live play (docs/midi-input/PLAN.md step 2). The audio
+    // thread drains the input ring right after the timed previews and plays
+    // each note on the live target track through the same active-note table,
+    // as a "held" entry that never counts down: it sounds until its note-off
+    // (deferred while the sustain pedal is down). Pitch bend and the mod
+    // wheel (CC1) act on the whole target track, song notes included; other
+    // CCs are ignored except 64 (sustain) and 120/123 (all notes off).
+    //
+    // Borrowed: the ring's owner must outlive the audio thread (shutdown()
+    // before destroying it). Null drains nothing.
+    void setMidiInputRing(MidiInputRing *ring)
+    {
+        m_midiRing.store(ring, std::memory_order_release);
+    }
+    // Hot: the track live notes play on; -1 (or no song loaded) drains the
+    // input silently. A change releases the held and sustained notes on the
+    // old track and re-chases its bend and mod at the playhead, so a parked
+    // wheel doesn't stick to a track you've left.
+    void setLiveTarget(int track) { m_liveTarget.store(track); }
+    int liveTarget() const { return m_liveTarget.load(); }
+    // Hot: Settings → MIDI mirrors. Live play off drains the input silently
+    // (like target -1); a fixed velocity of 1-127 overrides every note-on's,
+    // 0 passes the keyboard's through.
+    void setLivePlay(bool on) { m_livePlay.store(on); }
+    void setLiveFixedVelocity(int velocity) { m_liveFixedVelocity.store(velocity); }
+    // Hot: release every live note (held and sustained) at the next callback.
+    void liveAllNotesOff() { m_livePanicCmd.fetch_add(1); }
+    // Telemetry: the keys sounding from the keyboard on the live target, as
+    // a 128-bit mask (bit k of lo for keys 0-63, of hi for 64-127). Every
+    // cut clears it with the notes.
+    void liveHeldKeys(uint64_t *lo, uint64_t *hi) const
+    {
+        *lo = m_liveHeldLo.load(std::memory_order_relaxed);
+        *hi = m_liveHeldHi.load(std::memory_order_relaxed);
+    }
+
+    // Harness only (--midicheck): park the device so a check can drive the
+    // callback itself, deterministically and faster than real time.
+    // While held, cold operations leave the device stopped; pumpForTest
+    // renders `frames` frames through the real callback into scratch.
+    void holdDeviceForTest(bool hold);
+    void pumpForTest(uint32_t frames);
+    // Harness only: the main engine's state, read with the device held.
+    const M4AEngine *engineForTest() const { return m_engine.get(); }
 
     // Hot: audition a voicegroup entry by program number (SPEC §6.1 voicegroup
     // browser). Runs on a second engine instance (SPEC §3) so the program
@@ -257,7 +304,28 @@ class AudioEngine
     // Audio thread: key an audition note at a specific track VOL (0xFF = the
     // track's current one), through TimelinePlayer::auditionNoteOn.
     void previewNoteOn(uint8_t track, uint8_t key, uint8_t velocity, uint8_t volume, uint8_t pan);
+    // Audio thread: the active-note table shared by timed previews and live
+    // MIDI notes. startActive retriggers a sounding track+key in place,
+    // else takes a free slot, else steals (a timed preview closest to its
+    // note-off first, the oldest held note only when every slot is held).
+    // releaseActive sends the note-off only for a key the table still
+    // holds, so a key released after a cut can't stop a playback note.
+    void startActive(uint8_t track, uint8_t key, uint8_t velocity, uint8_t volume, uint8_t pan,
+                     int64_t remaining, bool held);
+    bool releaseActive(uint8_t track, uint8_t key);
     void clearTimedPreviews();
+    // Audio thread: MIDI keyboard input (see setMidiInputRing).
+    void applyMidiInput();
+    void handleLiveMessage(const MidiMsg &msg);
+    // The one place a keyboard note on (velocity > 0) or off is applied,
+    // after the sustain pedal has had its say: step 3's capture hooks here.
+    void applyLiveNote(uint8_t key, uint8_t velocity);
+    // Applies a note-off for every key the keyboard has on.
+    void releaseLiveNotes();
+    // Forgets the keyboard's keys without note-offs: the caller cut or
+    // cleared the sound they had.
+    void forgetLiveNotes();
+    void publishLiveHeld();
     void applyPreviewVoice();
     void applyPolyDebug();
     void resetPreviewEngine();
@@ -329,11 +397,20 @@ class AudioEngine
     // Polyphony-overflow debug: desired invert state + reset command.
     std::atomic<bool> m_polyInvert{false};
     std::atomic<uint32_t> m_polyResetCmd{0};
+    // MIDI keyboard live play (UI writes, audio thread reads).
+    std::atomic<MidiInputRing *> m_midiRing{nullptr};
+    std::atomic<int> m_liveTarget{-1};
+    std::atomic<bool> m_livePlay{true};
+    std::atomic<int> m_liveFixedVelocity{0};
+    std::atomic<uint32_t> m_livePanicCmd{0};
+    bool m_deviceHeldForTest = false; // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
     std::atomic<int> m_activePcm{0};
     std::atomic<int> m_activeCgb{0};
+    std::atomic<uint64_t> m_liveHeldLo{0};
+    std::atomic<uint64_t> m_liveHeldHi{0};
 
     // Audio-thread-only sequencer state
     int m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -341,14 +418,25 @@ class AudioEngine
     uint64_t m_appliedPreview = 0;
     int m_previewTrack = -1; // sounding preview note, -1 when none
     int m_previewKey = -1;
-    // Sounding timed previews, counting down to their note-offs.
+    // Sounding timed previews, counting down to their note-offs, and live
+    // MIDI notes (held: no countdown, released by their note-off).
     struct ActiveTimed {
         uint8_t track;
         uint8_t key;
-        int64_t remaining; // samples until note-off
+        bool held;
+        uint32_t order;    // start order, for stealing the oldest held note
+        int64_t remaining; // samples until note-off; unused when held
     };
     ActiveTimed m_timedActive[kTimedMaxActive];
     int m_timedActiveCount = 0;
+    uint32_t m_activeOrder = 0;
+    // Live MIDI state (audio thread), per key of the omni keyboard.
+    int m_liveTrack = -1;      // applied target; -1 sounds nothing
+    bool m_liveDown[128] = {}; // physically held
+    bool m_liveOn[128] = {};   // applied on: held, or released under the pedal
+    bool m_liveSustain = false;
+    bool m_liveBent = false; // bend/mod sent to m_liveTrack since it became the target
+    uint32_t m_appliedLivePanic = 0;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;

@@ -117,6 +117,34 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         m4a_engine_set_tempo_bpm(engine, 150); // engine reset default
 }
 
+void TimelinePlayer::chaseBendMod(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
+                                  int track)
+{
+    if (track < 0 || track >= 16)
+        return;
+    const TimelineEvent *mod = nullptr;
+    const TimelineEvent *bend = nullptr;
+    for (const TimelineEvent &ev : timeline->events) {
+        if (ev.samplePos > pos)
+            break;
+        if (ev.track != track)
+            continue;
+        if (ev.type == 0xB && ev.data0 == 0x01)
+            mod = &ev;
+        else if (ev.type == 0xE)
+            bend = &ev;
+    }
+    // Defaults as in chase(): the engine's track-init values.
+    if (mod)
+        dispatchEvent(engine, *mod, 0);
+    else
+        m4a_engine_cc(engine, track, 0x01, 0);
+    if (bend)
+        dispatchEvent(engine, *bend, 0);
+    else
+        m4a_engine_pitch_bend(engine, track, 0);
+}
+
 void TimelinePlayer::primeVoices(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos)
 {
     bool chased[16] = {}; // program at or before pos: chase already applied it

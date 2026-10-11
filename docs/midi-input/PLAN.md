@@ -1,6 +1,6 @@
 # MIDI Input — play and record from a MIDI keyboard
 
-Status: **decisions confirmed 2026-10-11; step 1 done 2026-10-11 (uncommitted)** (written 2026-10-11).
+Status: **decisions confirmed 2026-10-11; step 1 done (28aaf34); step 2 done 2026-10-11 (uncommitted)** (written 2026-10-11).
 File/line references verified against `midi-input` at `6b2e78c`. Work the
 steps **in order, one agent per step**; each step must leave the branch
 green (`tools/run_checks.sh`, normal + ASAN) and ends with a progress entry
@@ -300,6 +300,7 @@ To change a decision later, update this table and every step it affects
     A target change restores the old track's chased bend and mod.
   - Held entries survive steal pressure from 24+ band-sweep previews ahead
     of non-held ones.
+- Ends with a Windows manual checkpoint (user): latency feel, chords, sustain, bend/mod, track following, hot-plug.
 
 ### Step 3 — Recording: capture, Record action, commit
 
@@ -554,3 +555,158 @@ To change a decision later, update this table and every step it affects
   opened. Open/close, hot-plug, the WinMM/CoreMIDI backends and the
   callback thread delivering into the ring all wait for the user's manual
   pass on Windows.
+
+### Step 2 — done 2026-10-11 (uncommitted on `midi-input`)
+
+**Landed**
+
+- `AudioEngine` (`src/audio/audioengine.{h,cpp}`):
+  - `setMidiInputRing` (MainWindow hands it `&m_midiInput->ring()` before
+    `init`), `setLiveTarget`/`liveTarget`, `setLivePlay`,
+    `setLiveFixedVelocity`, `liveAllNotesOff` (a counter applied at the next
+    callback), and `liveHeldKeys(lo, hi)` (two relaxed `uint64_t` atomics).
+  - One active-note table for timed previews and live notes. `ActiveTimed`
+    gained `held` and `order`; `startActive` (retrigger in place, else a
+    free slot, else steal: the non-held entry closest to its note-off, the
+    oldest held entry only when every slot is held) and `releaseActive`
+    (note-off **only** when the table still has that track+key) are shared
+    by `applyTimedPreviews` and the live path. Held entries skip the
+    countdown.
+  - `applyMidiInput()` runs in `process()` right after
+    `applyTimedPreviews`: effective target (-1 when live play is off, no
+    song is loaded, or the target is out of range), panic counter, target
+    change (release on the old track, then `TimelinePlayer::chaseBendMod`
+    on it at `m_player.position()` if the keyboard's bend/mod touched it),
+    then drains the ring through `handleLiveMessage`, then
+    `publishLiveHeld()` (mask from the table's held entries on the current
+    target).
+  - `handleLiveMessage`: omni; note on (fixed velocity override; a key
+    already on retriggers), note off (deferred while CC64 ≥ 64), CC64
+    pedal-up releases keys on but not physically down, CC120/123 release
+    everything, CC1 → `m4a_engine_cc(track, 1, v)`, pitch bend →
+    `m4a_engine_pitch_bend(track, int16_t(bend14 - 8192))`. All other CCs
+    are ignored (CC7/CC10 are not forwarded).
+  - `cutAllSound` and `clearTimedPreviews` (so loadSong, unloadSong,
+    updateTimeline, updateVoicegroup and seeks) also call
+    `forgetLiveNotes()`: the keyboard's on/down sets and the published mask
+    are cleared without note-offs.
+  - Harness hooks: `holdDeviceForTest(bool)` (stops the device and keeps
+    cold ops from restarting it), `pumpForTest(frames)` (the real
+    `process()` into scratch, 512-frame chunks), `engineForTest()`.
+- `TimelinePlayer::chaseBendMod(engine, timeline, pos, track)`: the latest
+  bend and CC1 on that one track at or before `pos`, else the engine
+  defaults (bend 0, mod 0). Nothing else is touched.
+- `MainWindow`: `publishLiveTarget()` (selected track of the active tab, -1
+  without a loaded song or `!m_audioOk`) on `selectedTrackChanged`, at the
+  end of both `activateSession` branches, and after `updateSong` in
+  `onDocumentChanged`. `syncLiveSettings()` on `MidiInput::settingsChanged`.
+  `activateSession` also calls `liveAllNotesOff()` and clears the previous
+  view's lit keys. A port vanishing from `openPorts()` (on `portsChanged`)
+  calls `liveAllNotesOff()`. Tools → "MIDI: All Notes Off", keymap
+  `midi.panic` (category Transport, no default key).
+- Roll feedback: `SongView::setLiveHeldKeys(lo, hi)` (+ getters) forwards
+  to `PianoRoll::setLiveKeys`, which repaints only the keyboard column on a
+  change. `keyLit(key)` (mouse-held key **or** live mask) drives both
+  `drawKeyboard` and the hover geometry, so a live key gets the same
+  highlight as a mouse-held one.
+- `--midicheck` live-play block (`MainWindow::checkLivePlay` in
+  `src/midicheck.cpp`): picks two used tracks with a plain DirectSound voice
+  at the playhead (the first with a looping sample if there is one: on
+  mus_abandoned_ship tracks 0 (looping) and 1), parks the device and pumps
+  simulated time. It checks every item of the Step 2 list, plus: the ring
+  is drained by the callback; the activity-driven poll lights the roll;
+  a pixel probe of the keyboard column (all keys lit vs none); fixed
+  velocity off passes the keyboard's through; the new target's bend/mod are
+  untouched by the old one's re-chase; panic command and CC123; live play
+  off and target -1 drain silently; the target republishes.
+
+**Deviations**
+
+- Pitch bend: `m4a_engine_pitch_bend` takes the signed 14-bit value
+  (-8192..8191) and does the `>> 7` itself (`m4a_engine.c:1192-1204`), as
+  `TimelinePlayer::dispatchEvent` already calls it, so live play passes
+  `int16_t(bend14 - 8192)` unshifted. Shifting first would make it 128×
+  too small.
+- Held-key polling uses its own 17 ms `m_liveKeysTimer`, started by
+  `MidiInput::activity` and stopped after ~0.5 s with nothing held. The
+  playhead timer only runs while playing, so it can't light keys at rest.
+- The held mask shows what the table **sounds** on the target (pedal-held
+  keys stay lit until pedal-up; a key cut by a transport change goes dark
+  although it's still physically down).
+- Two guards stop a stray note-off after a cut: `forgetLiveNotes` clears the
+  keyboard's on-set, and `releaseActive` sends no note-off for a key the
+  table no longer has. The negative test had to break both.
+- A timed preview on the same track+key as a held live note retriggers it
+  as a timed entry (one entry per track+key, as before); the user's
+  note-off still releases it. This is rare, so it was left alone.
+- App quit needs no extra code: `~MainWindow` closes the ports, then
+  `m_audio.shutdown()` destroys the engines.
+
+**Gotchas for step 3**
+
+- **Capture hook:** `AudioEngine::applyLiveNote(key, velocity)` is the
+  single place an applied note on (velocity > 0) or off (0) lands, after
+  sustain processing and the fixed-velocity override. Today it returns early
+  when `m_liveTrack < 0`. Capture must sit **above** that early return, so
+  that live play off still records.
+  - But live play off currently also makes the effective target -1, and a
+    target change runs `releaseLiveNotes()`. For capture with live play
+    off, split the "sound target" (-1 when live play is off) from the
+    "capture target" (the selected track, locked at punch-in).
+- **Timestamps:** `m_player.position()` read at the top of `process()`,
+  before `m_player.render`, is the "player position at the start of the
+  callback" from §2.4. `applyMidiInput` already runs before render, so that
+  value is current there. Within one callback every message gets the same
+  stamp, which is the planned one-period jitter.
+- `forgetLiveNotes()` runs on every cut, including the Stopped→Playing
+  transition that starts a take. Keys held across Record therefore produce
+  no capture event at all, neither on nor off. `RecordingTake` must still
+  tolerate a note-off without a note-on.
+- Test driving: `holdDeviceForTest(true)` plus `pumpForTest` gives
+  deterministic sample time. `m_audio.play()` takes effect at the next pump.
+  `engineForTest()->pcmChannels[i]` has `trackIndex`, `midiKey`, `velocity`
+  and `status`; "keyed" means `CHN_ON` without `CHN_STOP|CHN_IEC`.
+  `QImage::operator==` reported two pixel-identical grabs as different, so
+  compare pixels.
+
+**Verification**
+
+- Builds: `build`, `build-asan` and `build-nomidi` all build.
+  `tools/format.sh --check` is clean.
+- `--midicheck` passes on all three. On build-nomidi the injector still
+  feeds the ring, so live play works there too.
+- Negative tests: each was broken, confirmed FAIL, and restored by a
+  targeted reverse edit; the `git diff` hash was checked afterwards. They
+  were:
+  - held flag dropped;
+  - steal ignores held;
+  - note-off ignored;
+  - no release on target change;
+  - selection not published;
+  - sustain ignored;
+  - fixed velocity not mirrored;
+  - bend not sent;
+  - mod not sent;
+  - no re-chase;
+  - mask not cleared;
+  - stray note-off (both guards);
+  - panic action inert;
+  - CC123 ignored;
+  - live play ignored;
+  - view mask not stored;
+  - activity doesn't start the poll;
+  - roll ignores the live mask (pixel probe);
+  - ring not drained.
+- Sweep `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  **PASS (all harnesses)** on both the normal and ASAN builds. That
+  includes `editcheck`: the `mus_bw_surf` failure noted in step 1 did not
+  reproduce this time, and this step does not touch editcheck's code path.
+- Not verified:
+  - real devices and latency feel (WSL has no `/dev/snd`);
+  - the port-close panic (needs a real port to vanish);
+  - live notes during playback by ear, including the §2.2 overdub edge
+    cases;
+  - the visual highlight on a real display.
+
+  These are for the Windows manual checkpoint.
+

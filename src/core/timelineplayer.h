@@ -61,6 +61,14 @@ class TimelinePlayer
     // the playhead) so deleted or moved automation can't stay latched.
     static void chase(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos);
 
+    // The narrow version for one track's pitch bend and mod depth (CC1)
+    // only: what a MIDI keyboard's wheels change live
+    // (docs/midi-input/PLAN.md step 2). Every other parameter, and every
+    // other track, is left exactly as it is, so playback carries on
+    // undisturbed.
+    static void chaseBendMod(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
+                             int track);
+
     // Primes voices for auditioning: each track with no program change at or
     // before `pos` gets its first program change from later in the timeline,
     // so notes previewed outside playback (piano-key clicks, note-draw) sound

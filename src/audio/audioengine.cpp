@@ -3,7 +3,10 @@
 #include <QFile>
 
 #include <algorithm>
+#include <iterator>
+#include <vector>
 
+#include "audio/midiinput.h"
 #include "miniaudio.h"
 
 #ifdef __linux__
@@ -512,6 +515,7 @@ void AudioEngine::cutAllSound()
     m4a_engine_all_sound_off(m_engine.get());
     m_timedActiveCount = 0;
     m_timedRead.store(m_timedWrite.load(std::memory_order_acquire), std::memory_order_release);
+    forgetLiveNotes();
     m_previewTrack = -1;
     m_previewKey = -1;
 }
@@ -570,56 +574,25 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
 {
     const uint32_t w = m_timedWrite.load(std::memory_order_acquire);
     uint32_t r = m_timedRead.load(std::memory_order_relaxed);
-    // Auditions are live notes: no timeline position for overflow events,
-    // and they stay audible in the solo-overflow invert mode.
-    if (r != w) {
-        m_engine->polyEventClock = M4A_POLY_TICK_NONE;
-        m_engine->auditionNote = true;
-    }
     for (; r != w; r++) {
         const TimedPreview cmd = m_timedRing[r % kTimedRingSize];
         if (cmd.velocity == 0) {
             // Early release: the band no longer covers the note.
-            for (int i = 0; i < m_timedActiveCount; i++) {
-                if (m_timedActive[i].track == cmd.track && m_timedActive[i].key == cmd.key) {
-                    m4a_engine_note_off(m_engine.get(), cmd.track, cmd.key);
-                    m_timedActive[i] = m_timedActive[--m_timedActiveCount];
-                    break;
-                }
-            }
+            releaseActive(cmd.track, cmd.key);
             continue;
         }
-        // Retrigger a still-sounding key (note-off first — the engine stops
-        // channels by track+key, so duplicates must never stack) and reuse
-        // its slot; otherwise take a free slot, or steal the preview closest
-        // to its own note-off.
-        int slot = -1;
-        for (int i = 0; i < m_timedActiveCount; i++) {
-            if (m_timedActive[i].track == cmd.track && m_timedActive[i].key == cmd.key) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0 && m_timedActiveCount < kTimedMaxActive) {
-            slot = m_timedActiveCount++;
-        } else {
-            if (slot < 0) {
-                slot = 0;
-                for (int i = 1; i < m_timedActiveCount; i++) {
-                    if (m_timedActive[i].remaining < m_timedActive[slot].remaining)
-                        slot = i;
-                }
-            }
-            m4a_engine_note_off(m_engine.get(), m_timedActive[slot].track, m_timedActive[slot].key);
-        }
-        previewNoteOn(cmd.track, cmd.key, cmd.velocity, cmd.volume, cmd.pan);
-        m_timedActive[slot] = {cmd.track, cmd.key, int64_t(cmd.durationSamples)};
+        startActive(cmd.track, cmd.key, cmd.velocity, cmd.volume, cmd.pan,
+                    int64_t(cmd.durationSamples), /*held=*/false);
     }
     m_timedRead.store(r, std::memory_order_release);
 
     // Count down and release. Expiry lands at callback granularity, which is
-    // plenty for an audition.
+    // plenty for an audition. Held (live) notes wait for their note-off.
     for (int i = 0; i < m_timedActiveCount;) {
+        if (m_timedActive[i].held) {
+            i++;
+            continue;
+        }
         m_timedActive[i].remaining -= frameCount;
         if (m_timedActive[i].remaining <= 0) {
             m4a_engine_note_off(m_engine.get(), m_timedActive[i].track, m_timedActive[i].key);
@@ -630,6 +603,62 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
     }
 }
 
+void AudioEngine::startActive(uint8_t track, uint8_t key, uint8_t velocity, uint8_t volume,
+                              uint8_t pan, int64_t remaining, bool held)
+{
+    // Retrigger a still-sounding key (note-off first — the engine stops
+    // channels by track+key, so duplicates must never stack) and reuse its
+    // slot; otherwise take a free slot, or steal: the timed preview closest
+    // to its own note-off, and a held note (the oldest) only when every slot
+    // is held — a band sweep must not cut what the keyboard plays.
+    int slot = -1;
+    for (int i = 0; i < m_timedActiveCount; i++) {
+        if (m_timedActive[i].track == track && m_timedActive[i].key == key) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 && m_timedActiveCount < kTimedMaxActive) {
+        slot = m_timedActiveCount++;
+    } else {
+        if (slot < 0) {
+            slot = 0;
+            for (int i = 1; i < m_timedActiveCount; i++) {
+                const ActiveTimed &a = m_timedActive[i];
+                const ActiveTimed &best = m_timedActive[slot];
+                bool better;
+                if (a.held != best.held)
+                    better = !a.held;
+                else if (!a.held)
+                    better = a.remaining < best.remaining;
+                else // older, wrap-safe
+                    better = int32_t(a.order - best.order) < 0;
+                if (better)
+                    slot = i;
+            }
+        }
+        m4a_engine_note_off(m_engine.get(), m_timedActive[slot].track, m_timedActive[slot].key);
+    }
+    // Auditions are live notes: no timeline position for overflow events,
+    // and they stay audible in the solo-overflow invert mode.
+    m_engine->polyEventClock = M4A_POLY_TICK_NONE;
+    m_engine->auditionNote = true;
+    previewNoteOn(track, key, velocity, volume, pan);
+    m_timedActive[slot] = {track, key, held, m_activeOrder++, remaining};
+}
+
+bool AudioEngine::releaseActive(uint8_t track, uint8_t key)
+{
+    for (int i = 0; i < m_timedActiveCount; i++) {
+        if (m_timedActive[i].track == track && m_timedActive[i].key == key) {
+            m4a_engine_note_off(m_engine.get(), track, key);
+            m_timedActive[i] = m_timedActive[--m_timedActiveCount];
+            return true;
+        }
+    }
+    return false;
+}
+
 // Cold: drop queued and sounding timed previews. Callers have already cut or
 // released the engine's sound (or destroyed the engine), so no note-offs are
 // owed; stale entries would otherwise cut a later playback note that lands on
@@ -638,6 +667,172 @@ void AudioEngine::clearTimedPreviews()
 {
     m_timedRead.store(m_timedWrite.load());
     m_timedActiveCount = 0;
+    forgetLiveNotes();
+}
+
+void AudioEngine::forgetLiveNotes()
+{
+    // The keys stay physically down, but nothing of theirs sounds any more:
+    // their note-offs (and pedal-up) must find nothing to release.
+    std::fill(std::begin(m_liveOn), std::end(m_liveOn), false);
+    std::fill(std::begin(m_liveDown), std::end(m_liveDown), false);
+    m_liveHeldLo.store(0, std::memory_order_relaxed);
+    m_liveHeldHi.store(0, std::memory_order_relaxed);
+}
+
+void AudioEngine::applyMidiInput()
+{
+    // Sound target: none without a song or with live play off; the input is
+    // still drained so it never backs up.
+    int target = m_liveTarget.load();
+    if (!m_livePlay.load() || !m_timeline || target < 0 || target >= MAX_TRACKS)
+        target = -1;
+
+    const uint32_t panic = m_livePanicCmd.load();
+    if (panic != m_appliedLivePanic) {
+        m_appliedLivePanic = panic;
+        releaseLiveNotes();
+    }
+    if (target != m_liveTrack) {
+        releaseLiveNotes(); // on the old track
+        // Hand the old track back to the song: its bend and mod as chased
+        // at the playhead, every other track and parameter untouched.
+        if (m_liveBent && m_liveTrack >= 0 && m_timeline)
+            TimelinePlayer::chaseBendMod(m_engine.get(), m_timeline, m_player.position(),
+                                         m_liveTrack);
+        m_liveBent = false;
+        m_liveTrack = target;
+    }
+
+    if (MidiInputRing *ring = m_midiRing.load(std::memory_order_acquire)) {
+        MidiMsg msg;
+        while (ring->pop(&msg))
+            handleLiveMessage(msg);
+    }
+    publishLiveHeld();
+}
+
+void AudioEngine::handleLiveMessage(const MidiMsg &msg)
+{
+    // Omni (D2): the channel nibble is ignored. MidiInput::parse already
+    // turned a velocity-0 note on into a note off.
+    const uint8_t key = msg.d1 & 0x7F;
+    switch (msg.status & 0xF0) {
+    case 0x90: {
+        const int fixed = m_liveFixedVelocity.load();
+        const uint8_t velocity = fixed > 0 ? uint8_t(std::min(fixed, 127)) : msg.d2;
+        // A re-press (a sustained key, or a doubled note on) retriggers.
+        if (m_liveOn[key])
+            applyLiveNote(key, 0);
+        m_liveDown[key] = true;
+        m_liveOn[key] = true;
+        applyLiveNote(key, velocity);
+        break;
+    }
+    case 0x80:
+        m_liveDown[key] = false;
+        // Under the pedal the note-off waits for pedal-up.
+        if (m_liveOn[key] && !m_liveSustain) {
+            m_liveOn[key] = false;
+            applyLiveNote(key, 0);
+        }
+        break;
+    case 0xB0:
+        switch (msg.d1) {
+        case 1: // mod wheel: the whole track's LFO depth
+            if (m_liveTrack >= 0) {
+                m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01, msg.d2);
+                m_liveBent = true;
+            }
+            break;
+        case 64: { // sustain pedal
+            const bool down = msg.d2 >= 64;
+            if (m_liveSustain && !down) {
+                for (int k = 0; k < 128; k++) {
+                    if (m_liveOn[k] && !m_liveDown[k]) {
+                        m_liveOn[k] = false;
+                        applyLiveNote(uint8_t(k), 0);
+                    }
+                }
+            }
+            m_liveSustain = down;
+            break;
+        }
+        case 120: // all sound off
+        case 123: // all notes off
+            releaseLiveNotes();
+            break;
+        }
+        break;
+    case 0xE0:
+        // The whole track's bend, song notes included; the engine scales
+        // the signed 14-bit value to its -64..63 and BENDR sets the range.
+        if (m_liveTrack >= 0) {
+            m4a_engine_pitch_bend(m_engine.get(), m_liveTrack,
+                                  int16_t(((int(msg.d2) << 7) | msg.d1) - 8192));
+            m_liveBent = true;
+        }
+        break;
+    }
+}
+
+void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)
+{
+    if (m_liveTrack < 0)
+        return;
+    if (velocity > 0)
+        startActive(uint8_t(m_liveTrack), key, velocity, 0xFF, 0xFF, 0, /*held=*/true);
+    else
+        releaseActive(uint8_t(m_liveTrack), key);
+}
+
+void AudioEngine::releaseLiveNotes()
+{
+    for (int k = 0; k < 128; k++) {
+        if (m_liveOn[k]) {
+            m_liveOn[k] = false;
+            applyLiveNote(uint8_t(k), 0);
+        }
+        m_liveDown[k] = false;
+    }
+}
+
+void AudioEngine::publishLiveHeld()
+{
+    uint64_t mask[2] = {0, 0};
+    for (int i = 0; i < m_timedActiveCount; i++) {
+        const ActiveTimed &a = m_timedActive[i];
+        if (a.held && int(a.track) == m_liveTrack)
+            mask[a.key >> 6] |= uint64_t(1) << (a.key & 63);
+    }
+    m_liveHeldLo.store(mask[0], std::memory_order_relaxed);
+    m_liveHeldHi.store(mask[1], std::memory_order_relaxed);
+}
+
+void AudioEngine::holdDeviceForTest(bool hold)
+{
+    if (!m_device || hold == m_deviceHeldForTest)
+        return;
+    m_deviceHeldForTest = hold;
+    if (hold) {
+        ma_device_stop(m_device);
+        m_deviceStarted = false;
+    } else {
+        m_deviceStarted = ma_device_start(m_device) == MA_SUCCESS;
+    }
+}
+
+void AudioEngine::pumpForTest(uint32_t frames)
+{
+    if (!m_deviceHeldForTest || !m_engine)
+        return;
+    constexpr uint32_t kChunk = 512;
+    std::vector<float> out(kChunk * 2);
+    while (frames > 0) {
+        const uint32_t n = std::min(frames, kChunk);
+        process(out.data(), n);
+        frames -= n;
+    }
 }
 
 void AudioEngine::applyPreviewVoice()
@@ -688,6 +883,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyMuteTransition();
     applyPreviewNote();
     applyTimedPreviews(frameCount);
+    applyMidiInput();
     applyPreviewVoice();
     m_audition.apply(m_previewEngine.get(), kAuditionTrack);
     applyPolyDebug();

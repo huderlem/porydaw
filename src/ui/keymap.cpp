@@ -101,6 +101,8 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, ""},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
+    {"midi.panic", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("MIDI: All Notes Off"),
+     QKeySequence::UnknownKey, ""},
     // Songs dock
     {"songs.find", Context::Global, QT_TR_NOOP("Songs"), QT_TR_NOOP("Find Song"),
      QKeySequence::Find, ""},

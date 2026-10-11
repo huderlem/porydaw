@@ -1520,6 +1520,18 @@ class PianoRoll : public TimelineSurface
         return uint8_t(std::clamp(int(note.velocity) + m_dVel, 1, 127));
     }
 
+    // Keys held on a MIDI keyboard (docs/midi-input/PLAN.md step 2), lit
+    // like the mouse-held key. Repaints only the keyboard column, and only
+    // on a change: MainWindow polls this at the playhead cadence.
+    void setLiveKeys(uint64_t lo, uint64_t hi)
+    {
+        if (lo == m_liveKeys[0] && hi == m_liveKeys[1])
+            return;
+        m_liveKeys[0] = lo;
+        m_liveKeys[1] = hi;
+        invalidateContent(QRegion(0, 0, kKeyboardW, height()));
+    }
+
   protected:
     void paintContent(QPainter &p) override
     {
@@ -2370,10 +2382,18 @@ class PianoRoll : public TimelineSurface
                                        qreal(std::max(0, height() - chipHeight)));
         const QRectF chip(kKeyboardW - 2 - chipWidth, chipY, chipWidth, chipHeight);
         QRegion paintRegion(chip.toAlignedRect());
-        if (key != m_soundingKey)
+        if (!keyLit(key))
             paintRegion |= QRegion(highlight.toAlignedRect());
         paintRegion &= QRegion(0, 0, kKeyboardW, height());
         return KeyboardHoverGeometry{highlight, name, chipFont, chip, paintRegion};
+    }
+
+    // A key lit as sounding on the keyboard column: the mouse-held audition
+    // or a key held on a MIDI keyboard.
+    bool keyLit(int key) const
+    {
+        return key == m_soundingKey ||
+               (key >= 0 && key < 128 && ((m_liveKeys[key >> 6] >> (key & 63)) & 1));
     }
 
     // Key row under the cursor: the keyboard column mirrors it with a tint
@@ -2954,7 +2974,7 @@ class PianoRoll : public TimelineSurface
             const QRectF keyRect = this->keyRect(key, 0, kKeyboardW);
             if (keyRect.bottom() <= 0 || keyRect.top() >= height())
                 continue;
-            const bool sounding = key == m_soundingKey;
+            const bool sounding = keyLit(key);
             if (isBlackKey(key)) {
                 p.fillRect(keyRect,
                            sounding
@@ -3106,6 +3126,7 @@ class PianoRoll : public TimelineSurface
                                                          // transpose/nudge re-keys the selection
     int m_kbdKey = -1;                         // key sounding from a keyboard-column press
     int m_soundingKey = -1;                    // auditioned key highlighted on the keyboard
+    uint64_t m_liveKeys[2] = {0, 0};           // MIDI-keyboard keys lit on the keyboard
     int m_soundingVol = -1;                    // VOL byte it was sounded under (-1 = track's)
     int m_soundingPan = M4A_AUDITION_PAN_NONE; // PAN it was sounded under
     int m_hoverKey = -1;                       // key row under the cursor; -1 = no mark
@@ -10343,6 +10364,13 @@ qreal SongView::displayX(double tick, qreal origin, qreal dpr) const
 double SongView::pxPerBeat() const
 {
     return m_pxPerTick * double(songTicksPerBeat());
+}
+
+void SongView::setLiveHeldKeys(uint64_t lo, uint64_t hi)
+{
+    m_liveHeldKeys[0] = lo;
+    m_liveHeldKeys[1] = hi;
+    m_roll->setLiveKeys(lo, hi);
 }
 
 void SongView::selectTrack(int track)
