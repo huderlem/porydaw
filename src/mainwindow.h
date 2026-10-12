@@ -264,7 +264,9 @@ class MainWindow : public QMainWindow
     // The take's ghost notes stay on view (the session's view) until the
     // write lands or is given up on, then clear: the real notes replace them.
     // take is its capture generation: only a preview still showing this take
-    // is cleared, not a newer take's.
+    // is cleared, not a newer take's. While the view shows it, the write
+    // goes where the view keeps it through track adds, deletes, and moves,
+    // and each retry re-reads its lane ghosts against the song as it is.
     void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
                     uint32_t take, int track, const std::vector<SongDocument::NewNote> &notes,
                     const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost);
@@ -280,6 +282,10 @@ class MainWindow : public QMainWindow
     // clock must be in the take's segment: when a callback crossed a wrap or
     // seek since the drain, it drains again; still not, the frame stays.
     void syncRecordingPreview();
+    // The take's track's MOD (0x01) or BEND points as the song has them,
+    // for syncRecordingPreview's lane ghosts: rescanned only when the song
+    // (its revision) or the take's track changes, not every playhead tick.
+    const std::vector<DocLanePoint> &takeLaneBefore(const SongDocument &doc, int track, uint8_t cc);
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
     void syncRecordAction();
@@ -667,6 +673,13 @@ class MainWindow : public QMainWindow
     SongSession *m_takeSession = nullptr;
     uint32_t m_captureGeneration = 0;
     uint32_t m_takeDropsAtStart = 0; // AudioEngine::captureDropped at punch-in
+    struct TakeLaneBefore {          // takeLaneBefore's cache
+        const SongDocument *doc = nullptr;
+        uint64_t revision = 0;
+        int track = -1;
+        std::vector<DocLanePoint> mod, bend;
+    };
+    TakeLaneBefore m_takeLaneBefore;
     // Polls the live held-key mask while MIDI input is active (the playhead
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;

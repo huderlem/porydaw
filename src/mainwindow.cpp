@@ -5597,6 +5597,7 @@ void MainWindow::beginRecording()
         m_captureGeneration = 1;
     m_take.begin(track, m_captureGeneration);
     m_takeSession = m_active;
+    m_takeLaneBefore = TakeLaneBefore(); // another document may sit at the same address
     m_takeDropsAtStart = m_audio.captureDropped();
     drainCapture(); // leftovers: stale, the take ignores them
     // Armed before play(), so the first notes after the start are caught.
@@ -5630,9 +5631,11 @@ void MainWindow::drainCapture()
 namespace {
 
 // The take's moved lanes as the view shows them (RecordingPreview::lanes):
-// each curve as a commit now would leave it.
-std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track,
-                                              const std::vector<RecordingTake::LaneWrite> &writes)
+// each curve as a commit now would leave it. before(cc) is the lane's points
+// as the song has them now.
+template <typename Before>
+std::vector<RecordingPreview::Lane> takeLanes(const std::vector<RecordingTake::LaneWrite> &writes,
+                                              Before &&before)
 {
     std::vector<RecordingPreview::Lane> lanes;
     for (const uint8_t cc : {uint8_t(0x01), DOC_CC_BEND}) {
@@ -5645,14 +5648,34 @@ std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track
         if (lane.ranges.empty())
             continue;
         for (const SongDocument::LanePointValue &pt :
-             RecordingTake::applyLaneWrites(doc.lanePoints(track, cc), writes, cc))
+             RecordingTake::applyLaneWrites(before(cc), writes, cc))
             lane.points.push_back({uint32_t(std::min<uint64_t>(pt.tick, UINT32_MAX)), pt.value});
         lanes.push_back(std::move(lane));
     }
     return lanes;
 }
 
+std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track,
+                                              const std::vector<RecordingTake::LaneWrite> &writes)
+{
+    return takeLanes(writes, [&](uint8_t cc) { return doc.lanePoints(track, cc); });
+}
+
 } // namespace
+
+const std::vector<DocLanePoint> &MainWindow::takeLaneBefore(const SongDocument &doc, int track,
+                                                            uint8_t cc)
+{
+    TakeLaneBefore &cache = m_takeLaneBefore;
+    if (cache.doc != &doc || cache.revision != doc.revision() || cache.track != track) {
+        cache.doc = &doc;
+        cache.revision = doc.revision();
+        cache.track = track;
+        cache.mod = doc.lanePoints(track, 0x01);
+        cache.bend = doc.lanePoints(track, DOC_CC_BEND);
+    }
+    return cc == DOC_CC_BEND ? cache.bend : cache.mod;
+}
 
 void MainWindow::syncRecordingPreview()
 {
@@ -5682,8 +5705,10 @@ void MainWindow::syncRecordingPreview()
     preview.take = m_take.generation();
     preview.notes = m_take.toNotes(timeline, pos, segment, recordingLatencySamples());
     preview.lanes =
-        takeLanes(m_takeSession->doc, m_take.track(),
-                  m_take.toLaneWrites(timeline, pos, segment, recordingLatencySamples()));
+        takeLanes(m_take.toLaneWrites(timeline, pos, segment, recordingLatencySamples()),
+                  [&](uint8_t cc) -> const std::vector<DocLanePoint> & {
+                      return takeLaneBefore(m_takeSession->doc, m_take.track(), cc);
+                  });
     const auto tickAt = [&](uint64_t sample) {
         return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
     };
@@ -5746,7 +5771,21 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
                             const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost)
 {
     const bool empty = notes.empty() && lanes.empty();
+    // The view keeps a shown take on its track through track adds,
+    // deletes, and moves (SongView::onTracksRemapped); the write follows
+    // it there. -1: the track is gone, nothing is written.
+    const bool shown = view && view->recordingPreview().take == take;
+    if (shown)
+        track = view->recordingPreview().track;
     if (doc && doc->editGroupDepth() > 0 && !empty) {
+        // The frozen ghosts were read against the song at Stop; an edit
+        // since (the group's own) moves what the commit will restore and
+        // keep.
+        if (shown && track >= 0 && !lanes.empty()) {
+            RecordingPreview ghosts = view->recordingPreview();
+            ghosts.lanes = takeLanes(*doc, track, lanes);
+            view->setRecordingPreview(std::move(ghosts));
+        }
         // Something holds an edit group open (a script transaction that
         // stopped the transport, say): written now, the take would join
         // that group's step under its name, and go if it is rolled back.
@@ -5770,7 +5809,7 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
                                       : tr("mod");
     const int count = int(notes.size());
     bool written = false;
-    if (doc && !empty && !doc->isLocked()) {
+    if (doc && !empty && !doc->isLocked() && track >= 0) {
         const uint64_t revision = doc->revision();
         doc->beginEditGroup(lanes.empty() ? tr("Record %n note(s)", nullptr, count)
                             : notes.empty()

@@ -945,6 +945,10 @@ class SongView : public QWidget
     // Document trackMoved handler: rotates the per-track view state with the
     // renumbered engine slots on apply, undo, and redo alike.
     void onTrackMoved(int fromChunk, int toChunk, const QVector<int> &map);
+    // Document tracksRemapped handler: the recording preview follows its
+    // track to the new slot (before the documentChanged that rebuilds the
+    // rows), and shows nothing once the track is gone.
+    void onTracksRemapped(const TrackRemap &remap);
     // A mouse gesture is live in the ruler, roll, or lanes (pan, drag,
     // sweep); playhead follow-scroll pauses while one runs.
     bool userGestureActive() const;
@@ -957,7 +961,9 @@ class SongView : public QWidget
     double maxRollScroll() const;
     void updateScrollbars();
     void rebuildAfterSongChange();
-    void mergeEmptyLanes();
+    // Adds the empty lanes (and the take's lanes) the model lacks; true
+    // when it added one.
+    bool mergeEmptyLanes();
     // Engine tracks a track-scoped time selection resolves to (used and
     // document-mapped), and the copyable lane identities of one track (its
     // model lanes plus the voice changes).

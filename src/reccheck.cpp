@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -2182,10 +2183,15 @@ void MainWindow::checkRecordingDisplay()
 
 // The take's bend and mod ghosts (the lanes' half of plan step 4): the
 // BEND row shows the take's curve as a commit would leave it while the take
-// runs, its row appearing for the take when the track had none; the
-// rewritten stretch is painted in the track's colour at the ghost notes'
-// alpha and turns solid at Stop; a row the take alone showed goes with the
-// take (undo, or a dropped take).
+// runs, its row appearing for the take when the track had none (and staying
+// through "Remove empty lane" until the take ends); the rewritten stretch is
+// painted in the track's colour at the ghost notes' alpha and turns solid at
+// Stop; the ghosts follow their track at once when a track is inserted
+// before it; a row the take alone showed goes with the take (undo, or a
+// dropped take). On a row the track already had, the take's bend joins
+// without rebuilding the rows, and the row is read-only while the ghost
+// shows (no hover, no click-delete of a node it hides); a take waiting on an
+// open edit group re-reads its ghosts against the song.
 void MainWindow::checkRecordingLaneDisplay(int track)
 {
     MidiInput &midi = midiInput();
@@ -2215,10 +2221,26 @@ void MainWindow::checkRecordingLaneDisplay(int track)
                std::abs(got.green() - ch(fill.green(), under.green())) <= 3 &&
                std::abs(got.blue() - ch(fill.blue(), under.blue())) <= 3;
     };
+    const auto mouse = [&](QEvent::Type type, QPointF at, Qt::MouseButton button) {
+        QMouseEvent ev(type, at, QPointF(lanes->mapToGlobal(at.toPoint())), button,
+                       type == QEvent::MouseButtonPress ? Qt::MouseButtons(button) : Qt::NoButton,
+                       Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &ev);
+    };
+    const auto hoverNodeTick = [&] { return lanes->property("hoverNodeTick").toLongLong(); };
+    const auto rebuilds = [&] { return lanes->property("rowRebuilds").toInt(); };
+    // The shapes below are in ticks of the injected messages' arrival.
+    check(recordingLatencySamples() == 0, "lane display: the checks assume no latency offset");
     const bool lanesWere = view->automationLanesVisible();
+    const int selectedWas = view->selectedTrack();
     view->setAutomationLanesVisible(true);
     view->selectTrack(track);
-    // No bend on the track, so its row is the take's alone.
+    // No bend on the track, so its row is the take's alone. An empty BEND
+    // row the view state holds goes too, and comes back at the end.
+    const std::vector<std::pair<int, uint8_t>> emptyLanes = view->viewState().emptyLanes;
+    const bool emptyBendWas =
+        std::find(emptyLanes.begin(), emptyLanes.end(),
+                  std::pair<int, uint8_t>(track, LANE_CC_BEND)) != emptyLanes.end();
     const int undoBefore = undo->index();
     if (const std::vector<DocLanePoint> bends = doc.lanePoints(track, DOC_CC_BEND); !bends.empty())
         doc.deleteLanePoints(track, DOC_CC_BEND, bends);
@@ -2273,6 +2295,65 @@ void MainWindow::checkRecordingLaneDisplay(int track)
                                                                     QStringLiteral("-lanes.png")));
     }
 
+    // Growing: the next frame lengthens the ghost to the clock, the row
+    // repainted from around the old end on, not whole.
+    if (auto *surface = dynamic_cast<songview::TimelineSurface *>(lanes); at && surface) {
+        const std::optional<QPointF> top = view->recordingPreviewLanePoint(LANE_CC_BEND, to, 8191);
+        const std::optional<QPointF> bottom =
+            view->recordingPreviewLanePoint(LANE_CC_BEND, to, -8192);
+        (void)lanes->grab();
+        const songview::TimelineSurfaceDiagnostics before = surface->diagnostics();
+        pumpMs(150);
+        synchronizePlayhead();
+        const QImage grown = lanes->grab().toImage();
+        const songview::TimelineSurfaceDiagnostics after = surface->diagnostics();
+        const RecordingPreview::Lane *g = view->recordingPreview().lane(track, LANE_CC_BEND);
+        const uint64_t grownTo = g && g->ranges.size() == 1 ? g->ranges.front().second : to;
+        const std::optional<QPointF> tail =
+            view->recordingPreviewLanePoint(LANE_CC_BEND, (to + grownTo) / 2, 4096);
+        check(grownTo > to + 4 && tail &&
+                  blendsTo(pixel(grown, *tail), color, songview::kRecordingGhostAlpha,
+                           pixel(grown, *tail + QPointF(0, 6))) &&
+                  pixel(grown, *tail) != pixel(grown, *tail + QPointF(0, 6)),
+              "lane display: the grown part of the bend ghost is not painted");
+        // The row is its plot (top to bottom of the value axis) and 10 px of
+        // margin; the old end's step and a node's reach to its left.
+        const qreal rowH = top && bottom ? bottom->y() - top->y() + 10 : 0;
+        const qreal fromX = std::max<qreal>(songview::kGutterW, top ? top->x() - 16 : 0);
+        const quint64 allowed = quint64((lanes->width() - fromX + 4) * dpr * (rowH + 2) * dpr);
+        const quint64 repainted = after.contentPaintPixelCount - before.contentPaintPixelCount;
+        if (!check(repainted > 0 && repainted <= allowed,
+                   "lane display: a growing bend ghost repainted more than the row past its end"))
+            std::fprintf(stderr, "reccheck:   repainted %llu, allowed %llu device pixels\n",
+                         (unsigned long long)repainted, (unsigned long long)allowed);
+    }
+
+    // "Remove empty lane" on the take's row: the take is about to write it.
+    view->removeEmptyLane(track, LANE_CC_BEND);
+    check(view->model().findLane(track, LANE_CC_BEND) != nullptr &&
+              view->recordingPreviewLanePoint(LANE_CC_BEND, from, 4096).has_value(),
+          "lane display: removing the take's empty BEND row took it away mid-take");
+
+    // A track inserted before the take's (added, moved into its slot): the
+    // ghosts are on the take's track at once, before the next frame, and
+    // the slot it left gets no BEND row.
+    if (check(doc.canAddTrack(), "lane display: no free track slot to insert")) {
+        const int undoAtInsert = undo->index();
+        const int added = doc.addTrack(0);
+        const bool moved = added >= 0 && doc.moveTrack(added, track);
+        check(moved && view->recordingPreview().track == track + 1 &&
+                  view->model().findLane(track + 1, LANE_CC_BEND) != nullptr &&
+                  !view->model().findLane(track, LANE_CC_BEND),
+              "lane display: the bend ghost did not follow its track when one was inserted "
+              "before it");
+        while (undo->index() > undoAtInsert)
+            undo->undo();
+        check(view->recordingPreview().track == track &&
+                  view->model().findLane(track, LANE_CC_BEND) != nullptr &&
+                  !view->model().findLane(track + 1, LANE_CC_BEND),
+              "lane display: the bend ghost did not follow its track back on undo");
+    }
+
     // Stop: the ghost turns into the real curve, painted solid where it was.
     send(0xE0, 0x00, 0x40);
     pumpMs(30);
@@ -2282,12 +2363,102 @@ void MainWindow::checkRecordingLaneDisplay(int track)
           "lane display: after Stop the ghost stayed, or the bend did not land");
     if (at) {
         const QImage committed = lanes->grab().toImage();
-        check(pixel(committed, probe) == color,
+        check(blendsTo(pixel(committed, probe), color, 255, color),
               "lane display: after Stop the bend is not painted solid where its ghost was");
     }
     undo->undo();
     check(!view->model().findLane(track, LANE_CC_BEND),
           "lane display: undoing the take left its BEND row");
+
+    // A row the track already has, with a node where the take will move:
+    // the take's bend joins it without a rebuild (which would end a gesture,
+    // hover, or point menu there), and while the ghost shows the row is
+    // read-only, the node it hides neither hoverable nor click-deletable.
+    {
+        const int undoAtRow = undo->index();
+        m_recordAction->trigger();
+        pumpMs(30);
+        synchronizePlayhead();
+        const uint64_t node = tickOf(m_audio.playheadSamples()) + 2;
+        doc.writeLanePoints(track, DOC_CC_BEND, node, node, {{node, -2048}});
+        QApplication::processEvents();
+        const std::optional<QPointF> nodeAt =
+            view->recordingPreviewLanePoint(LANE_CC_BEND, node, -2048);
+        if (check(nodeAt.has_value(), "lane display: no BEND row for the node")) {
+            mouse(QEvent::MouseMove, *nodeAt, Qt::NoButton);
+            check(hoverNodeTick() == qlonglong(node),
+                  "lane display: the node is not hoverable before the take moves");
+            const int rebuildsBefore = rebuilds();
+            send(0xE0, 0x00, 0x60);
+            pumpMs(200);
+            synchronizePlayhead();
+            check(view->recordingPreview().lane(track, LANE_CC_BEND) != nullptr &&
+                      rebuilds() == rebuildsBefore,
+                  "lane display: the take's bend joining a BEND row the track had rebuilt the "
+                  "rows");
+            // Back at the clock to the node's value: read against the song
+            // as edited mid-take, not as it was at punch-in.
+            const RecordingPreview::Lane *joined =
+                view->recordingPreview().lane(track, LANE_CC_BEND);
+            check(joined && !joined->points.empty() && joined->points.back().value == -2048,
+                  "lane display: the bend ghost was not read against the song as edited "
+                  "mid-take");
+            check(hoverNodeTick() == -1,
+                  "lane display: the ghost coming to the hovered row left its node hover");
+            mouse(QEvent::MouseMove, *nodeAt, Qt::NoButton);
+            check(hoverNodeTick() == -1, "lane display: a node under the take's ghost hovers");
+            const uint64_t revision = doc.revision();
+            mouse(QEvent::MouseButtonPress, *nodeAt, Qt::LeftButton);
+            mouse(QEvent::MouseButtonRelease, *nodeAt, Qt::LeftButton);
+            check(doc.revision() == revision,
+                  "lane display: a click on a node under the take's ghost edited the lane");
+            // An edit while the ghost shows: the next frame has it.
+            const uint64_t far = tickOf(m_audio.playheadSamples()) + 200;
+            doc.writeLanePoints(track, DOC_CC_BEND, far, far, {{far, 500}});
+            pumpMs(30);
+            synchronizePlayhead();
+            const RecordingPreview::Lane *edited =
+                view->recordingPreview().lane(track, LANE_CC_BEND);
+            check(edited && std::any_of(edited->points.begin(), edited->points.end(),
+                                        [&](const LanePoint &pt) {
+                                            return pt.tick == far && pt.value == 500;
+                                        }),
+                  "lane display: the bend ghost missed an edit made while it shows");
+        }
+
+        // Stopped inside an open edit group, the take waits for it; an
+        // edit in the group meanwhile shows in its ghost.
+        send(0xE0, 0x00, 0x40);
+        pumpMs(30);
+        synchronizePlayhead();
+        const uint64_t later = tickOf(m_audio.playheadSamples()) + 100;
+        doc.beginEditGroup(QStringLiteral("Script"));
+        m_stopAction->trigger();
+        doc.writeLanePoints(track, DOC_CC_BEND, later, later, {{later, 1000}});
+        const auto ghostHasLater = [&] {
+            const RecordingPreview::Lane *lane = view->recordingPreview().lane(track, LANE_CC_BEND);
+            return lane &&
+                   std::any_of(lane->points.begin(), lane->points.end(), [&](const LanePoint &pt) {
+                       return pt.tick == later && pt.value == 1000;
+                   });
+        };
+        QElapsedTimer waited;
+        waited.start();
+        while (!ghostHasLater() && waited.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 10);
+        check(ghostHasLater(),
+              "lane display: a deferred take's ghost did not follow an edit made while it waits");
+        doc.endEditGroup(/*discard=*/true);
+        const int undoAfterGroup = undo->index();
+        waited.restart();
+        while (undo->index() == undoAfterGroup && waited.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 10);
+        check(undo->index() == undoAfterGroup + 1 && view->recordingPreview().empty() &&
+                  !ghostHasLater(),
+              "lane display: the deferred take did not land after its edit group");
+        while (undo->index() > undoAtRow)
+            undo->undo();
+    }
 
     // A dropped take takes its row with it.
     m_recordAction->trigger();
@@ -2310,6 +2481,9 @@ void MainWindow::checkRecordingLaneDisplay(int track)
     while (undo->index() > undoBefore)
         undo->undo();
     check(undo->index() == undoBefore, "lane display: undo did not restore the song");
+    if (emptyBendWas)
+        view->addEmptyLane(track, LANE_CC_BEND);
+    view->selectTrack(selectedWas);
     view->setAutomationLanesVisible(lanesWere);
 }
 
