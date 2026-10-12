@@ -5632,13 +5632,27 @@ void MainWindow::syncRecordingPreview()
         return;
     uint64_t pos = 0;
     uint32_t segment = 0;
+    const auto sameSegment = [&] {
+        return (segment & RecordingTake::kSegmentMask) ==
+               (m_take.segment() & RecordingTake::kSegmentMask);
+    };
     m_audio.captureClock(&pos, &segment);
+    if (!sameSegment()) {
+        // A callback crossed a wrap or seek since the drain: the engine
+        // pushes the Boundary before it publishes the clock, so it is in the
+        // ring now. Read in a segment the take hasn't seen, the clock would
+        // end held notes and the current span at the last position seen
+        // (a frame snapping back).
+        drainCapture();
+        m_audio.captureClock(&pos, &segment);
+        if (!sameSegment())
+            return; // another one crossed (or its Boundary was lost): keep the last frame
+    }
     const MidiTimeline &timeline = *m_takeSession->timeline;
     RecordingPreview preview;
     preview.track = m_take.track();
-    for (const SongDocument::NewNote &n :
-         m_take.toNotes(timeline, pos, segment, recordingLatencySamples()))
-        preview.notes.push_back({n.tick, n.duration, n.key, n.velocity});
+    preview.take = m_take.generation();
+    preview.notes = m_take.toNotes(timeline, pos, segment, recordingLatencySamples());
     const auto tickAt = [&](uint64_t sample) {
         return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
     };
@@ -5672,17 +5686,18 @@ void MainWindow::finishRecording()
         notes =
             m_take.toNotes(*session->timeline, stopSample, stopSegment, recordingLatencySamples());
     const int track = m_take.track();
+    const uint32_t take = m_take.generation();
     m_take.clear();
     // The ghosts hold still at what is being written (the REC tint goes:
     // the take has ended) until commitTake swaps them for the real notes.
     RecordingPreview ghosts;
     ghosts.track = track;
-    for (const SongDocument::NewNote &n : notes)
-        ghosts.notes.push_back({n.tick, n.duration, n.key, n.velocity});
+    ghosts.take = take;
+    ghosts.notes = notes;
     session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.
-    commitTake(&session->doc, session->view, track, notes,
+    commitTake(&session->doc, session->view, take, track, notes,
                m_audio.captureDropped() != m_takeDropsAtStart);
     if (session == m_active)
         publishLiveTarget();
@@ -5690,21 +5705,23 @@ void MainWindow::finishRecording()
 }
 
 void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
-                            int track, const std::vector<SongDocument::NewNote> &notes,
-                            bool inputLost)
+                            uint32_t take, int track,
+                            const std::vector<SongDocument::NewNote> &notes, bool inputLost)
 {
     if (doc && doc->editGroupDepth() > 0 && !notes.empty()) {
         // Something holds an edit group open (a script transaction that
         // stopped the transport, say): written now, the take would join
         // that group's step under its name, and go if it is rolled back.
         // It lands as its own step once the group has closed.
-        QTimer::singleShot(kTakeCommitRetryMs, this, [this, doc, view, track, notes, inputLost] {
-            commitTake(doc, view, track, notes, inputLost);
-        });
+        QTimer::singleShot(kTakeCommitRetryMs, this,
+                           [this, doc, view, take, track, notes, inputLost] {
+                               commitTake(doc, view, take, track, notes, inputLost);
+                           });
         return;
     }
-    // A newer take recording on the same view owns its preview now.
-    if (view && !(m_takeSession && m_takeSession->view == view))
+    // A newer take on the same view (recording, or itself waiting to land)
+    // owns its preview now.
+    if (view && view->recordingPreview().take == take)
         view->clearRecordingPreview();
     bool written = false;
     if (doc && !notes.empty() && !doc->isLocked()) {

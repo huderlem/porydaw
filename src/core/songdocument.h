@@ -184,6 +184,12 @@ class SongDocument : public QObject
         uint8_t key;
         uint32_t duration;
         uint8_t velocity;
+        bool operator==(const NewNote &o) const
+        {
+            return tick == o.tick && key == o.key && duration == o.duration &&
+                   velocity == o.velocity;
+        }
+        bool operator!=(const NewNote &o) const { return !(*this == o); }
     };
     void addNotes(int engineTrack, const std::vector<NewNote> &notes);
     void deleteNotes(const std::vector<DocNote> &notes);

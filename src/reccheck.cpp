@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <initializer_list>
 #include <optional>
+#include <random>
 #include <vector>
 
 #include "audio/midiinput.h"
@@ -98,6 +99,67 @@ void printNotes(const char *what, const std::vector<NewNote> &notes)
         std::fprintf(stderr, " {%llu k%d d%u v%d}", (unsigned long long)n.tick, n.key, n.duration,
                      n.velocity);
     std::fprintf(stderr, "\n");
+}
+
+// RecordingTake::toNotes as step 4 first wrote it, with a plain O(n^2)
+// later-wins pass a key: the reference the indexed pass must match exactly.
+std::vector<NewNote> referenceToNotes(const RecordingTake &take, const MidiTimeline &timeline,
+                                      uint64_t endSample, uint32_t endSegment,
+                                      uint64_t latencySamples)
+{
+    const auto tickAt = [&](uint64_t sample) {
+        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
+    };
+    struct Span {
+        uint64_t tick, end;
+        uint8_t key, velocity;
+        bool kept;
+    };
+    std::vector<Span> spans;
+    const uint32_t mask = RecordingTake::kSegmentMask;
+    for (const RecordingTake::Note &note : take.notes()) {
+        uint64_t off = note.offSample;
+        bool played = note.playedEnd;
+        if (note.open) {
+            const bool same =
+                (note.segment & mask) == (endSegment & mask) && note.segment == take.segment();
+            off = std::max(note.onSample,
+                           same && endSample >= note.onSample ? endSample : take.lastSample());
+            played = false;
+        }
+        const auto earlier = [](uint64_t sample, uint64_t by) {
+            return sample > by ? sample - by : 0;
+        };
+        const uint64_t on =
+            std::max(note.floorSample, earlier(note.onSample, latencySamples + note.onLate));
+        if (played)
+            off = std::max(on, earlier(off, latencySamples + note.offLate));
+        const uint64_t tick = tickAt(on);
+        spans.push_back({tick, std::max(tick + 1, tickAt(off)), note.key, note.velocity, true});
+    }
+    for (size_t i = 0; i < spans.size(); i++) {
+        const Span &w = spans[i];
+        for (size_t j = 0; j < i; j++) {
+            Span &s = spans[j];
+            if (s.key != w.key || !s.kept || s.end <= w.tick || s.tick >= w.end)
+                continue;
+            if (s.tick < w.tick)
+                s.end = w.tick;
+            else if (s.end > w.end)
+                s.tick = w.end;
+            else
+                s.kept = false;
+        }
+    }
+    std::vector<NewNote> out;
+    for (const Span &s : spans) {
+        if (s.kept)
+            out.push_back({s.tick, s.key, uint32_t(s.end - s.tick), s.velocity});
+    }
+    std::stable_sort(out.begin(), out.end(), [](const NewNote &a, const NewNote &b) {
+        return a.tick != b.tick ? a.tick < b.tick : a.key < b.key;
+    });
+    return out;
 }
 
 // Feeds one arm's events into a take, the way the audio thread stamps them.
@@ -451,6 +513,100 @@ void checkTakeRules()
                    "take: the wait and the offset did not add up"))
             printNotes("got", notes);
     }
+    // The later-wins pass is indexed (a live preview runs it every playhead
+    // tick): on randomized takes (loop passes, seeks, lost Boundaries,
+    // re-presses, cuts, shared starts, callback waits, held notes, a clock
+    // in another segment) it matches the plain pass exactly.
+    {
+        std::mt19937 rng(20261011);
+        const auto pick = [&](uint32_t n) { return uint32_t(rng() % n); };
+        int mismatches = 0;
+        for (int trial = 0; trial < 400 && mismatches == 0; trial++) {
+            take.begin(0, uint32_t(1000 + trial));
+            Feed feed{take, uint32_t(1000 + trial)};
+            uint64_t pos = 10000 + pick(5000);
+            feed.begin(pos);
+            const int events = 5 + int(pick(250));
+            for (int e = 0; e < events; e++) {
+                pos += pick(4) == 0 ? 0 : pick(3000);
+                feed.late = pick(4) == 0 ? pick(4000) : 0;
+                const uint8_t key = uint8_t(60 + pick(3));
+                switch (pick(16)) {
+                case 0: // a loop wrap back to an earlier start
+                case 1: {
+                    const uint64_t to = 5000 + pick(uint32_t(std::max<uint64_t>(pos, 6000) - 5000));
+                    feed.jump(pos, to);
+                    pos = to;
+                    break;
+                }
+                case 2: // a seek anywhere
+                    pos = 5000 + pick(200000);
+                    feed.jump(pos + pick(3000), pos);
+                    break;
+                case 3: // a Boundary lost to a full ring
+                    feed.segment++;
+                    pos = 5000 + pick(100000);
+                    break;
+                case 4:
+                    feed.cut(pos);
+                    break;
+                case 5:
+                case 6:
+                case 7:
+                case 8:
+                case 9:
+                    feed.on(pos, key, uint8_t(1 + pick(127)));
+                    break;
+                default:
+                    feed.off(pos, key);
+                    break;
+                }
+            }
+            const uint64_t end = pos + pick(20000);
+            const uint32_t endSegment = feed.segment + (pick(4) == 0 ? 1 : 0);
+            const uint64_t latency = std::array<uint64_t, 3>{0, 700, 3000}[pick(3)];
+            const MidiTimeline &timeline = pick(2) ? tl : tempo;
+            const auto got = take.toNotes(timeline, end, endSegment, latency);
+            const auto want = referenceToNotes(take, timeline, end, endSegment, latency);
+            if (got != want) {
+                mismatches++;
+                std::fprintf(stderr, "reccheck:   trial %d\n", trial);
+                printNotes("got", got);
+                printNotes("want", want);
+            }
+        }
+        check(mismatches == 0, "take: the indexed later-wins pass differs from the plain one");
+    }
+    // A long loop take on one key (5000 notes over 50 passes, each pass
+    // shifted a little): the pass still matches, and it visits a few notes
+    // per note, not every earlier note on the key.
+    {
+        take.begin(0, 30);
+        Feed feed{take, 30};
+        feed.begin(10000);
+        int count = 0;
+        for (int pass = 0; pass < 50; pass++) {
+            const uint64_t start = 10000 + uint64_t(pass % 7) * 300;
+            for (int i = 0; i < 100; i++) {
+                const uint64_t on = start + uint64_t(i) * 4000;
+                feed.on(on, 60, uint8_t(1 + (count % 127)));
+                feed.off(on + 2500 + uint64_t(i % 5) * 1000, 60);
+                count++;
+            }
+            feed.jump(start + 100 * 4000, 10000);
+        }
+        // and one held pass at the end, in one segment
+        for (int i = 0; i < 50; i++)
+            feed.on(10000 + uint64_t(i) * 7000, 60);
+        count += 50;
+        const auto got = take.toNotes(tl, 600000, feed.segment, 0);
+        const size_t steps = take.overlapSteps();
+        check(got == referenceToNotes(take, tl, 600000, feed.segment, 0),
+              "take: the long take's later-wins pass differs from the plain one");
+        if (!check(steps <= size_t(4 * count),
+                   "take: the later-wins pass visited more than a few notes per note"))
+            std::fprintf(stderr, "reccheck:   %zu steps for %d notes\n", steps, count);
+    }
     // A take whose Begin never came records nothing.
     {
         take.begin(0, 11);
@@ -718,6 +874,52 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         send(0x80, 60, 0);
         pumpMs(30);
         undo->undo();
+    }
+
+    // Two takes ended inside one open edit group both wait for it: the
+    // first landing leaves the second's ghosts on view, and they clear when
+    // the second lands.
+    {
+        view->setEditCursorTick(tpb * 4);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(30);
+        send(0x90, 60, 100);
+        pumpMs(60);
+        send(0x80, 60, 0);
+        pumpMs(20);
+        doc.beginEditGroup(QStringLiteral("Script"));
+        m_stopAction->trigger();
+        view->setEditCursorTick(tpb * 12);
+        m_recordAction->trigger();
+        pumpMs(30);
+        send(0x90, 62, 100);
+        pumpMs(60);
+        send(0x80, 62, 0);
+        pumpMs(20);
+        synchronizePlayhead();
+        m_stopAction->trigger();
+        const RecordingPreview second = view->recordingPreview();
+        check(!recording() && second.notes.size() == 1 && second.notes.front().key == 62,
+              "record: the second deferred take's ghosts are not on view");
+        doc.endEditGroup(/*discard=*/true);
+        const int undoAfterGroup = undo->index();
+        std::vector<RecordingPreview> atLanding;
+        const QMetaObject::Connection watch =
+            QObject::connect(undo, &QUndoStack::indexChanged, undo,
+                             [&] { atLanding.push_back(view->recordingPreview()); });
+        QElapsedTimer waited;
+        waited.start();
+        while (undo->index() < undoAfterGroup + 2 && waited.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 10);
+        QObject::disconnect(watch);
+        check(undo->index() == undoAfterGroup + 2 && !atLanding.empty() &&
+                  atLanding.front().take == second.take && atLanding.front().notes == second.notes,
+              "record: the first deferred take's landing cleared the second take's ghosts");
+        check(view->recordingPreview().empty(),
+              "record: deferred ghosts stayed after both takes landed");
+        while (undo->index() > undoBefore)
+            undo->undo();
     }
 
     // A selection on a track the song doesn't have can't record (the notes
@@ -1113,6 +1315,66 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
               "record: a note played as a take began at the loop end did not land at the loop "
               "start");
         undo->undo();
+
+        // The preview read across a wrap the drain hasn't seen (a callback
+        // crossed it between the playhead timer's drain and the clock read):
+        // the held note's ghost and the first pass's span still end at the
+        // loop end, not snapped back to where the take last saw the player.
+        // Past a lost Boundary (a full ring), the frame stays as it was until
+        // the take catches up.
+        view->setEditCursorTick(cursor);
+        const int undoAtWrap = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        send(0x90, 70, 100);
+        pumpMs(20);
+        synchronizePlayhead();
+        const uint64_t pHeld = playhead();
+        for (int i = 0; i < 1000 && playhead() >= pHeld; i++)
+            pumpMs(10); // no drain: the wrap's Boundary waits in the ring
+        check(playhead() < pHeld, "record: the loop never wrapped (preview)");
+        syncRecordingPreview();
+        {
+            const RecordingPreview &preview = view->recordingPreview();
+            const auto held = std::find_if(preview.notes.begin(), preview.notes.end(),
+                                           [](const NewNote &n) { return n.key == 70; });
+            check(held != preview.notes.end() && held->tick + held->duration == loopEnd &&
+                      std::any_of(preview.spans.begin(), preview.spans.end(),
+                                  [&](const auto &span) { return span.second == loopEnd; }),
+                  "record: a preview read across an undrained wrap snapped the held note or the "
+                  "pass's span back");
+        }
+        send(0x80, 70, 0);
+        pumpMs(20);
+        synchronizePlayhead();
+        for (int i = 0; i < 24; i++) {
+            for (int j = 0; j < int(MidiInputRing::kCapacity) / 2; j++) {
+                send(0x90, 60, 100);
+                send(0x80, 60, 0);
+            }
+            m_audio.pumpForTest(512); // one callback, no drain in between
+        }
+        m_audio.seek(sampleOf(cursor));
+        m_audio.pumpForTest(512); // the seek's Boundary is lost to the full ring
+        {
+            const RecordingPreview before = view->recordingPreview();
+            syncRecordingPreview();
+            const RecordingPreview &after = view->recordingPreview();
+            check(after.notes == before.notes && after.spans == before.spans,
+                  "record: a preview read past a lost Boundary did not keep the last frame");
+        }
+        send(0x90, 72, 100);
+        pumpMs(20);
+        synchronizePlayhead();
+        check(std::any_of(view->recordingPreview().notes.begin(),
+                          view->recordingPreview().notes.end(),
+                          [](const NewNote &n) { return n.key == 72; }),
+              "record: the preview did not resume once the take caught up");
+        send(0x80, 72, 0);
+        pumpMs(20);
+        m_stopAction->trigger();
+        while (undo->index() > undoAtWrap)
+            undo->undo();
     } else {
         std::printf("reccheck: loop wrap SKIP (the song has no loop of 4+ beats)\n");
     }
@@ -1456,19 +1718,19 @@ void MainWindow::checkRecordingDisplay()
         m_audio.captureClock(&pos, &segment);
         const auto notes =
             m_take.toNotes(*session->timeline, pos, segment, recordingLatencySamples());
-        bool same = first.notes.size() == notes.size();
-        for (size_t i = 0; same && i < notes.size(); i++)
-            same = first.notes[i] == RecordingPreview::Note{notes[i].tick, notes[i].duration,
-                                                            notes[i].key, notes[i].velocity};
-        check(first.track == a && same && first.notes.size() == 1 &&
-                  first.notes.front().key == key &&
+        check(first.track == a && first.take == m_take.generation() && first.notes == notes &&
+                  first.notes.size() == 1 && first.notes.front().key == key &&
                   first.notes.front().tick + first.notes.front().duration ==
                       tickOf(m_audio.playheadSamples()),
               "display: the ghost notes are not the take as a commit would write it, held to "
               "the clock");
     }
     if (first.notes.size() != 1) {
+        send(0x80, uint8_t(key), 0);
+        pumpMs(30);
         m_stopAction->trigger();
+        while (undo->index() > undoBefore)
+            undo->undo();
         m_followPlayheadAction->setChecked(followWas);
         return;
     }
@@ -1486,8 +1748,8 @@ void MainWindow::checkRecordingDisplay()
     view->clearRecordingPreview();
     const QImage withoutGhost = roll->grab().toImage();
     view->setRecordingPreview(first);
-    check(blendsTo(pixel(withGhost, ghostProbe), view->noteFillColor(a, ghost.velocity), 110,
-                   pixel(withoutGhost, ghostProbe)) &&
+    check(blendsTo(pixel(withGhost, ghostProbe), view->noteFillColor(a, ghost.velocity),
+                   songview::kRecordingGhostAlpha, pixel(withoutGhost, ghostProbe)) &&
               pixel(withGhost, ghostProbe) != pixel(withoutGhost, ghostProbe),
           "display: the held note's ghost is not painted in its track's colour at reduced alpha");
     const QRectF spanRect = view->recordingPreviewSpanRect(first.spans.front());
@@ -1496,6 +1758,18 @@ void MainWindow::checkRecordingDisplay()
                     QPointF(view->displayX(double(cursor), songview::kGutterW, dpr) - 4, 0.0)) !=
                   rec,
           "display: the ruler shows no REC tint over the punched span alone");
+    // The top strip stays solid over the ruler's bands: a time selection
+    // across the span paints its fill there first.
+    {
+        SongView::TimeSelection sel;
+        sel.startTick = first.spans.front().first;
+        sel.endTick = first.spans.front().second + 1;
+        view->setTimeSelection(sel);
+        const QImage rulerSelected = ruler->grab().toImage();
+        view->clearTimeSelection();
+        check(pixel(rulerSelected, QPointF(spanRect.center().x(), 0.0)) == rec,
+              "display: a time selection painted over the REC strip");
+    }
 
     // Growing: the next ticks lengthen the ghost to the clock, and the
     // roll re-rasterizes only around its moving end.
@@ -1518,8 +1792,8 @@ void MainWindow::checkRecordingDisplay()
         const QImage grownWithout = roll->grab().toImage();
         view->setRecordingPreview(second);
         check(grownRect.right() > ghostRect.right() + 8 &&
-                  blendsTo(pixel(grown, tailProbe), view->noteFillColor(a, ghost.velocity), 110,
-                           pixel(grownWithout, tailProbe)) &&
+                  blendsTo(pixel(grown, tailProbe), view->noteFillColor(a, ghost.velocity),
+                           songview::kRecordingGhostAlpha, pixel(grownWithout, tailProbe)) &&
                   pixel(grown, tailProbe) != pixel(grownWithout, tailProbe),
               "display: the grown part of the ghost is not painted");
     }
@@ -1558,7 +1832,7 @@ void MainWindow::checkRecordingDisplay()
           "display: after Stop the ghost notes stayed, or the take did not land");
     if (landed) {
         const QRectF real = view->recordingPreviewNoteRect(
-            {landed->tick, landed->duration, landed->key, landed->velocity});
+            {landed->tick, landed->key, landed->duration, landed->velocity});
         const QPointF at(real.left() + (ghostProbe.x() - ghostRect.left()), real.center().y());
         check(pixel(committed, at) == view->noteFillColor(a, landed->velocity),
               "display: after Stop the recorded note is not painted where its ghost was");

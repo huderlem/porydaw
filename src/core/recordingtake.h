@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -88,6 +89,13 @@ class RecordingTake
     std::vector<std::pair<uint64_t, uint64_t>> recordedSpans(uint64_t endSample,
                                                              uint32_t endSegment) const;
 
+    // The latest position the take saw in its current segment (where an
+    // open note read in another segment ends).
+    uint64_t lastSample() const { return m_lastSample; }
+    // Harness only: how many overlap steps (a kept note visited, a note
+    // placed) the last toNotes took; bounded by a few per note.
+    size_t overlapSteps() const { return m_overlapSteps; }
+
     static constexpr uint32_t kSegmentMask = 0xFFFFF;
 
   private:
@@ -108,4 +116,5 @@ class RecordingTake
     // The segments left so far, merged (see recordedSpans).
     std::vector<std::pair<uint64_t, uint64_t>> m_spans;
     int m_open[128];
+    mutable size_t m_overlapSteps = 0;
 };

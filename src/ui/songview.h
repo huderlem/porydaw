@@ -20,6 +20,7 @@
 
 #include "core/miditimeline.h"
 #include "core/ripplescope.h"
+#include "core/songdocument.h"
 #include "core/velocitymodel.h"
 #include "ui/songviewmodel.h"
 #include "ui/timelinesurface.h"
@@ -36,7 +37,6 @@ class QScrollBar;
 class QSplitter;
 class QStackedWidget;
 class QWheelEvent;
-class SongDocument;
 struct DocNote;
 struct DocLanePoint;
 
@@ -56,6 +56,9 @@ class TrackHeaderPanel;
 constexpr int kHeaderW = 210;
 constexpr int kKeyboardW = 52;
 constexpr int kGutterW = kHeaderW + kKeyboardW;
+// A recording take's ghost notes (docs/midi-input/PLAN.md step 4): the
+// track's fill at the range-duplicate preview's alpha.
+constexpr int kRecordingGhostAlpha = 110;
 // Velocity bar handle: with at least this much vertical zoom, or while the
 // roll.velocity_drag modifier chord (Ctrl by default, Ableton-style) is
 // held, each note shows a thin horizontal bar at its velocity level (bottom
@@ -132,19 +135,11 @@ struct RollOverlayGeometry {
 // spans the take has punched. View-only; the document is untouched until
 // the take commits.
 struct RecordingPreview {
-    struct Note {
-        uint64_t tick = 0;
-        uint32_t duration = 0;
-        uint8_t key = 0;
-        uint8_t velocity = 0;
-        bool operator==(const Note &o) const
-        {
-            return tick == o.tick && duration == o.duration && key == o.key &&
-                   velocity == o.velocity;
-        }
-        bool operator!=(const Note &o) const { return !(*this == o); }
-    };
+    // As RecordingTake::toNotes returns them, so a playhead tick moves its
+    // result in without a copy.
+    using Note = SongDocument::NewNote;
     int track = -1;          // engine track the notes go to
+    uint32_t take = 0;       // which take it shows (its capture generation)
     std::vector<Note> notes; // sorted by tick, then key
     // Punched [start, end) tick spans, sorted and merged: the ruler's REC
     // tint. Empty once the take has ended (a commit still pending).

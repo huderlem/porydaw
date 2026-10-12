@@ -1324,7 +1324,8 @@ reccheck, then reversed. A `git diff` comparison confirmed every revert.
   - **Ruler:** `TimeRuler::drawRecordingSpans` paints each span in
     `song_view_playhead` (the record dot's red) at alpha 56 across the
     ruler, under the labels and loop/cursor overlays, with an opaque
-    `Space::Half` strip along the top edge. Only the slivers between old
+    `Space::Half` strip along the top edge (drawn over those overlays since
+    the step 4 review fixes). Only the slivers between old
     and new span ends are updated while a span grows.
 - `RecordingTake::recordedSpans(endSample, endSegment)`: the take now keeps
   a merged list of the segments it left (punch-in, each loop pass, each seek
@@ -1334,8 +1335,9 @@ reccheck, then reversed. A `git diff` comparison confirmed every revert.
   `segment() > 0`" approximation from the step 3 gotchas, and is exact
   for seeks too.
 - `MainWindow::syncRecordingPreview()`: called in `synchronizePlayhead`
-  right after `setPlayheadSample` (so after `drainCapture`). Reads
-  `captureClock`, then `toNotes` (once per tick) and `recordedSpans`,
+  right after `setPlayheadSample`. Reads `captureClock` (re-draining when
+  it is in a segment the take hasn't seen; see "Step 4 review fixes"),
+  then `toNotes` (once per tick) and `recordedSpans`,
   converts spans to ticks (nearest tick, merged again) and feeds
   `m_takeSession->view`. Nothing is shown before the take's Begin.
 - **Clearing:**
@@ -1447,3 +1449,90 @@ original byte for byte.
 - The snap grid is the roll's zoom-dependent one; read it at commit (the
   plan says so) and at each preview tick, so a zoom mid-take shows what
   will be written.
+
+### Step 4 review fixes (2026-10-11, uncommitted)
+
+A code review of cc0c1f8 (step 4) was verified finding by finding. All
+held and were fixed.
+
+- **1, a frame collapsing at a wrap or seek.** `syncRecordingPreview`
+  reads `captureClock` after the playhead timer's drain. A callback that
+  crossed a wrap in between left a clock one segment ahead of the take
+  (the engine pushes the Boundary before it publishes the clock), so held
+  ghosts snapped back to their note-on for a frame and the pass's REC
+  tint went. Now, when the clock's segment (masked) isn't the take's, it
+  drains again and re-reads; still mismatched (another crossing, or a
+  Boundary lost to a full ring), the tick is skipped and the last frame
+  stays. Comments in `mainwindow.h` and the step 4 text above updated.
+  - Past a lost Boundary the frame stays frozen until the next captured
+    event brings the take into the new segment (a ring-overflow state
+    only).
+- **2, the overlap pass.** `toNotes`' later-wins pass was O(n²) a key at
+  the playhead cadence. Each trim leaves a key's kept notes disjoint, so
+  they now sit in one `std::map` by (key, start): a note visits only its
+  predecessor and the notes starting inside it, each trimmed (at most two)
+  or removed for good. O(n log n), the same results (commit included: it
+  is the same function). `overlapSteps()` and `lastSample()` were added
+  for the harness.
+- **3, the REC strip.** `drawRecordingSpans` is split: the tint under the
+  overlays, the solid top strip after `drawOverlays` (loop band, time
+  selection, cursor). Markers and loop brackets still draw over it, like
+  the labels.
+- **4, two deferred takes on one view.** `RecordingPreview::take` (the
+  capture generation) is stamped by `syncRecordingPreview` and
+  `finishRecording`; `commitTake(…, take, …)` clears the view only if it
+  still shows that take. This replaces the "a newer take is recording on
+  this view" test.
+- **5.** `kRecordingGhostAlpha` moved to `songview.h` (namespace
+  `songview`); reccheck uses it.
+- **6.** reccheck's early exit in the display check releases the key,
+  stops, and undoes back to its start.
+- **7.** `RecordingPreview::Note` is now `SongDocument::NewNote` (which
+  gained `operator==`/`!=`); `songview.h` includes `songdocument.h`. The
+  toNotes result moves into the preview without a copy per tick.
+
+**reccheck additions**
+
+- Take rules: 400 randomized takes (fixed seed; loop wraps, seeks, lost
+  Boundaries, re-presses, cuts, shared starts, callback waits, held notes,
+  a clock in another segment, both timelines, three latencies) compared
+  with a reference copy of the old O(n²) `toNotes`; a 5050-note one-key
+  take over 50 shifted passes matches the reference and takes at most 4
+  overlap steps a note.
+- Window (loop block): a preview read across an undrained wrap keeps the
+  held ghost and the first pass's span ending at the loop end; past a
+  lost Boundary (ring overflowed, then a seek) the frame is unchanged; it
+  resumes once a note brings the take up to date.
+- Two takes ended in one open edit group: when the first lands, the view
+  still shows the second's ghosts (captured on the undo stack's
+  `indexChanged`); both landed, the view is empty.
+- Display: a time selection across the punched span leaves the strip
+  record red; the preview's `take` is the take's generation.
+
+**Negative tests.** Each was a scripted edit, rebuilt, run with reccheck,
+then restored by the script, which asserted the file matched byte for
+byte.
+
+- No re-drain → the undrained-wrap check FAILs (and the resume check: the
+  ring stays full).
+- No skip on a second mismatch → the lost-Boundary check FAILs.
+- No predecessor in the overlap walk → the existing later-pass rule, the
+  randomized and the long-take comparisons FAIL.
+- Walking every kept note on the key (same results) → only the step bound
+  FAILs (370036 steps for 5050 notes).
+- Strip drawn before `drawOverlays` → the time-selection strip check FAILs.
+- `commitTake` back on the old condition → the two-deferred-takes check
+  FAILs.
+- **Not falsifiable by one edit:** 5 (the painter and the check now share
+  the constant), 6 (the early exit runs only when the display check
+  already failed), 7 (a refactor; covered by the existing preview checks).
+
+**Verification**
+
+- Builds: `build`, `build-asan`, `build-nomidi` and `build-dummy` all exit
+  0, with only the existing warnings.
+- `tools/format.sh --check` is clean.
+- reccheck on a fresh copy of pokeemerald (`mus_abandoned_ship`): OK.
+- Sweeps (`tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`):
+  **PASS (all harnesses)** on both the normal and ASAN builds. The fix
+  agent stalled before reporting them, so these were run separately.

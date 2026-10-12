@@ -263,8 +263,11 @@ class MainWindow : public QMainWindow
     // document may be gone (nothing written) or read-only (likewise).
     // The take's ghost notes stay on view (the session's view) until the
     // write lands or is given up on, then clear: the real notes replace them.
-    void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view, int track,
-                    const std::vector<SongDocument::NewNote> &notes, bool inputLost);
+    // take is its capture generation: only a preview still showing this take
+    // is cleared, not a newer take's.
+    void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
+                    uint32_t take, int track, const std::vector<SongDocument::NewNote> &notes,
+                    bool inputLost);
     static constexpr int kTakeCommitRetryMs = 20;
     // "Recording into N: Name…", for the take's current track.
     void showRecordingStatus();
@@ -273,7 +276,9 @@ class MainWindow : public QMainWindow
     void followTakeTrack(SongSession &session, const TrackRemap &remap);
     void drainCapture();
     // The take as the roll's ghost notes and REC ruler tint (plan step 4):
-    // what a commit now would write. Once per playhead tick, after the drain.
+    // what a commit now would write. Once per playhead tick. The capture
+    // clock must be in the take's segment: when a callback crossed a wrap or
+    // seek since the drain, it drains again; still not, the frame stays.
     void syncRecordingPreview();
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;

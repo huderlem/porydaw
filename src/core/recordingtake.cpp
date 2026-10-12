@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <map>
 
 #include "core/miditimeline.h"
 
@@ -215,24 +216,44 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
     // tail when it outlasts the later one (a shared start included), and
     // goes when it is covered. So one take with two passes lands as two
     // takes would.
-    // Per key, so a live preview of a long take stays cheap.
-    std::vector<size_t> byKey[128];
+    // Each trim leaves what is kept on a key disjoint, so the kept notes sit
+    // in one map by (key, start) and a later note visits only those it
+    // overlaps: its predecessor and the ones starting inside it. Each is
+    // trimmed (at most two) or removed for good, so a long take stays
+    // O(n log n) at the playhead cadence (a live preview), not O(n^2) a key.
+    std::map<std::pair<uint8_t, uint64_t>, size_t> kept;
+    size_t steps = 0;
     for (size_t i = 0; i < spans.size(); i++) {
         const Span &w = spans[i];
-        std::vector<size_t> &earlier = byKey[w.key];
-        for (size_t j : earlier) {
-            Span &s = spans[j];
-            if (!s.kept || s.end <= w.tick || s.tick >= w.end)
-                continue;
-            if (s.tick < w.tick)
-                s.end = w.tick;
-            else if (s.end > w.end)
-                s.tick = w.end;
-            else
-                s.kept = false;
+        auto it = kept.lower_bound({w.key, w.tick});
+        if (it != kept.begin()) {
+            const auto prev = std::prev(it);
+            if (prev->first.first == w.key && spans[prev->second].end > w.tick)
+                it = prev;
         }
-        earlier.push_back(i);
+        while (it != kept.end() && it->first.first == w.key && it->first.second < w.end) {
+            steps++;
+            Span &s = spans[it->second];
+            if (s.tick < w.tick) {
+                s.end = w.tick;
+                ++it;
+            } else if (s.end > w.end) {
+                // Its tail outlasts w: it now starts where w ends, past the
+                // span this loop walks (nothing else starts inside it).
+                const size_t j = it->second;
+                it = kept.erase(it);
+                s.tick = w.end;
+                kept.emplace(std::make_pair(s.key, s.tick), j);
+                break;
+            } else {
+                s.kept = false;
+                it = kept.erase(it);
+            }
+        }
+        steps++;
+        kept.emplace(std::make_pair(w.key, w.tick), i);
     }
+    m_overlapSteps = steps;
 
     std::vector<SongDocument::NewNote> out;
     for (const Span &s : spans) {

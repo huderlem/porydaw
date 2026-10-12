@@ -151,9 +151,8 @@ double cursorAnchoredScroll(double anchor, double oldScale, double oldScroll, do
     return content * newScale - anchor;
 }
 
-// A recording take's live display (docs/midi-input/PLAN.md step 4): ghost
-// notes at the range-duplicate preview's alpha, and the ruler's REC tint.
-constexpr int kRecordingGhostAlpha = 110;
+// The ruler's REC tint over a recording take's punched spans
+// (docs/midi-input/PLAN.md step 4; the ghost notes' alpha is in the header).
 constexpr int kRecordingTintAlpha = 56;
 constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
 constexpr int kVoiceAuditionVel = 112;
@@ -773,12 +772,13 @@ class TimeRuler : public QWidget
         const QRect area(kGutterW, 0, width() - kGutterW, height());
         p.setClipRect(area);
         drawPreRoll(p, m_sv, area, kGutterW, chrome);
-        drawRecordingSpans(p, area);
+        drawRecordingSpans(p, area, /*strip=*/false);
 
         // Loop band across the whole ruler height. The ruler previews every
         // scope (like the landing frame): it shows where in time the edit
         // happens, not which rows it touches.
         drawOverlays(p, m_sv, area, kGutterW, true, true);
+        drawRecordingSpans(p, area, /*strip=*/true);
 
         const qreal physicalPixel = logicalPhysicalPixel(dpr);
         const qreal roundingMargin = physicalPixel / 2.0;
@@ -1165,9 +1165,11 @@ class TimeRuler : public QWidget
     QRect tickRow() const { return QRect(0, m_markerHeight, width(), height() - m_markerHeight); }
 
     // The REC tint over the take's punched spans, in the record dot's red:
-    // translucent across the ruler, under the labels so they stay readable,
-    // with a solid strip along the top edge.
-    void drawRecordingSpans(QPainter &p, const QRect &area)
+    // translucent across the ruler, under the labels and the loop band, time
+    // selection and cursor so they stay readable; then (strip) a solid strip
+    // along the top edge, over those bands (markers and loop brackets, drawn
+    // after, stay on top of it like the labels).
+    void drawRecordingSpans(QPainter &p, const QRect &area, bool strip)
     {
         const auto &spans = m_sv->recordingPreview().spans;
         if (spans.empty())
@@ -1175,13 +1177,15 @@ class TimeRuler : public QWidget
         const QColor rec = themes::color(themes::Role::song_view_playhead);
         QColor tint = rec;
         tint.setAlpha(kRecordingTintAlpha);
-        const qreal strip = lyt::space(Space::Half);
+        const qreal stripHeight = lyt::space(Space::Half);
         for (const auto &span : spans) {
             const QRectF r = recordingSpanRect(span).intersected(QRectF(area));
             if (r.isEmpty())
                 continue;
-            p.fillRect(r, tint);
-            p.fillRect(QRectF(r.left(), r.top(), r.width(), strip), rec);
+            if (strip)
+                p.fillRect(QRectF(r.left(), r.top(), r.width(), stripHeight), rec);
+            else
+                p.fillRect(r, tint);
         }
     }
 
