@@ -280,6 +280,8 @@ porydaw.midi.on("message", function (m) {
 });
 ```
 
+See the example plugin [`plugins/examples/midi-monitor`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/midi-monitor) for a panel that shows the ports, held keys, controllers and a message log.
+
 ### `porydaw.ui`
 
 `porydaw.ui` exposes porydaw's window, status bar, theme colors, images for canvases, and the visual things a plugin can add, like docks, menus, roll overlays and dialogs.

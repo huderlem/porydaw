@@ -1,0 +1,8 @@
+{
+  "id": "midi-monitor",
+  "name": "MIDI Monitor",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js",
+  "description": "A panel that shows what your MIDI keyboard sends (porydaw.midi): the connected ports, the keys you hold, the pitch bend, mod wheel, sustain pedal and other controllers, and a log of the latest messages. Click the panel to clear it."
+}

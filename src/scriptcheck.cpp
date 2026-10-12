@@ -1236,7 +1236,7 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
     // gating below sees only the console's listeners (and unloading them
     // must drop their listener counts).
     QStringList parked;
-    for (const char *id : {"vu-meter", "spectrum", "dancer"}) {
+    for (const char *id : {"vu-meter", "spectrum", "dancer", "midi-monitor"}) {
         const scripting::Plugin *p = host.plugin(QLatin1String(id));
         if (p && p->state == scripting::PluginState::Loaded) {
             parked.append(QLatin1String(id));
@@ -1419,6 +1419,13 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
             QApplication::processEvents();
     };
     settle(); // any port hop left from startup
+    // The midi-monitor example listens for messages; park it so the tap
+    // gating below sees only the console's listeners. It comes back for
+    // its own smoke test at the end.
+    const scripting::Plugin *monitor = host.plugin(QStringLiteral("midi-monitor"));
+    const bool monitorLoaded = monitor && monitor->state == scripting::PluginState::Loaded;
+    if (monitorLoaded)
+        host.setEnabled(QStringLiteral("midi-monitor"), false);
 
     // --- ports ---
     check(runc("typeof porydaw.midi.available") == QStringLiteral("boolean") &&
@@ -1633,6 +1640,43 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
     check(waitFor([&] { return host.plugin(QStringLiteral("midiplug")) == nullptr; }, 4000),
           "the midiplug fixture was not dropped after its folder went");
     check(!midi.tapEnabled(), "a removed plugin left the script tap running");
+
+    // The midi-monitor example: it paints every message type cleanly, and
+    // a picture is kept when asked (PORYDAW_SCRIPTCHECK_SHOTS=<dir>).
+    if (monitorLoaded) {
+        midi.setPortListForTest({QStringLiteral("Keys A"), QStringLiteral("Pads")});
+        midi.setOpenPortsForTest({QStringLiteral("Keys A")});
+        host.setEnabled(QStringLiteral("midi-monitor"), true);
+        monitor = host.plugin(QStringLiteral("midi-monitor"));
+        auto *canvas = monitor && !monitor->docks.empty() && monitor->docks.front()
+                           ? monitor->docks.front()->findChild<scripting::CanvasWidget *>()
+                           : nullptr;
+        if (check(canvas && midi.tapEnabled(), "midi-monitor did not load with its panel")) {
+            canvas->resize(360, 420);
+            const int paintsBefore = canvas->paintCount();
+            for (const MidiMsg &m : std::initializer_list<MidiMsg>{{0x90, 60, 100},
+                                                                   {0x90, 64, 40},
+                                                                   {0x91, 67, 127},
+                                                                   {0xB0, 64, 127},
+                                                                   {0x80, 64, 0},
+                                                                   {0xB0, 1, 90},
+                                                                   {0xE0, 0, 96},
+                                                                   {0xC0, 5, 0},
+                                                                   {0xD0, 70, 0},
+                                                                   {0xA0, 60, 30},
+                                                                   {0x90, 67, 0},
+                                                                   {0xB0, 7, 100}})
+                midi.injectForTest(m);
+            settle();
+            canvas->grab(); // paints now, whether or not the dock is on screen
+            check(canvas->paintCount() > paintsBefore && canvas->errorCount() == 0 &&
+                      !hasMessage(messages, QStringLiteral("midi-monitor"), 2, QStringLiteral("")),
+                  "midi-monitor did not paint the messages cleanly");
+            const QString shotsDir = qEnvironmentVariable("PORYDAW_SCRIPTCHECK_SHOTS");
+            if (!shotsDir.isEmpty())
+                canvas->grab().save(shotsDir + QStringLiteral("/midi-monitor.png"));
+        }
+    }
 
     // Live play saw the note ons above with no note offs: let nothing stay
     // held for later checks.
@@ -3485,6 +3529,7 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
         expectedIds.append(QStringLiteral("project-tools"));
         expectedIds.append(QStringLiteral("scale-snap"));
         expectedIds.append(QStringLiteral("arpeggiate"));
+        expectedIds.append(QStringLiteral("midi-monitor"));
         expectedIds.sort();
         // The Phase 3 examples each open a dock in activate().
         for (const char *id : {"vu-meter", "spectrum", "dancer"}) {

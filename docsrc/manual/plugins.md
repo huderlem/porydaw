@@ -34,6 +34,7 @@ Porydaw has a bunch of example plugins in its  [`plugins/examples`](https://gith
 | Select Same Pitch | a shortcut that selects every note with the selected note's pitch |
 | Note Tools | Legato, Insert chord, Humanize, Strum and Quantize commands |
 | VU Meter, Spectrum, Dancer | Visualization panels that follow the audio and the beat |
+| MIDI Monitor | a panel that shows what your MIDI keyboard sends: its ports, the keys you hold, bend, mod wheel, sustain and a log of the latest messages |
 | Song Report | **Plugins → Song Report**: a text summary of the song, and a WAV render |
 | Range Tools | right-click a time selection: duplicate it after itself, echo it with fading copies, reverse its notes |
 | Scale Guide | shades the piano-roll rows outside the selected scale |
