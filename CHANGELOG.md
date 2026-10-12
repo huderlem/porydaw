@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
-- Added MIDI keyboard support. Play the selected track live from a MIDI keyboard, and record into it with the new `Record` button (`R` in the piano roll). Configure it in `Settings -> MIDI`.
+- Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
+   - Settings are found in `Settings -> MIDI`.
+   - Detects midi input devices/keybaords automatically.
 - Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
 
 ## Fixed
