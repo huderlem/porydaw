@@ -3490,15 +3490,13 @@ class AutomationArea : public TimelineSurface
                 dirty += r;
                 continue;
             }
-            // A new peak can rescale a zoomable row (laneDisplayMax counts
-            // the ghost): all of it, its gutter's range included.
-            const auto peak = [](const RecordingPreview::Lane &lane) {
-                int top = 0;
-                for (const LanePoint &pt : lane.points)
-                    top = std::max(top, pt.value);
-                return top;
-            };
-            if (laneRangeZoomable(row.cc) && peak(*a) != peak(*b)) {
+            // A ghost that rescales a zoomable row (laneDisplayMax counts
+            // it) moves every point: all of it, its gutter's range included.
+            // A new peak under the row's fixed range changes nothing there.
+            if (laneDisplayMaxWith(row.track, row.cc, a) !=
+                laneDisplayMaxWith(row.track, row.cc, b)) {
+                // Counted for the test harness.
+                setProperty("rescaleRepaints", property("rescaleRepaints").toInt() + 1);
                 dirty += r;
                 continue;
             }
@@ -5325,6 +5323,13 @@ class AutomationArea : public TimelineSurface
     // the gutter label shows the live range.
     int laneDisplayMax(int track, uint8_t cc) const
     {
+        return laneDisplayMaxWith(track, cc, m_sv->recordingPreview().lane(track, cc));
+    }
+
+  private:
+    // laneDisplayMax with `take` as the row's recording ghost (null: none).
+    int laneDisplayMaxWith(int track, uint8_t cc, const RecordingPreview::Lane *take) const
+    {
         if (!laneRangeZoomable(cc))
             return 127;
         const Row row{Row::Lane, track, cc};
@@ -5335,7 +5340,7 @@ class AutomationArea : public TimelineSurface
         }
         // A recording take's ghost is data the commit is about to write:
         // a knob turned past a zoomed range grows the axis as it goes.
-        if (const RecordingPreview::Lane *take = m_sv->recordingPreview().lane(track, cc)) {
+        if (take) {
             for (const LanePoint &pt : take->points)
                 dataMax = std::max(dataMax, pt.value);
         }
@@ -5343,7 +5348,6 @@ class AutomationArea : public TimelineSurface
         return mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
     }
 
-  private:
     QString rowTitle(const Row &row) const
     {
         switch (row.kind) {

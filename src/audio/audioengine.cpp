@@ -810,14 +810,16 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             break;
         case 121: // reset all controllers: the pedal is up, bend and lanes at rest
             liftLivePedal();
-            applyLiveBend(0);
+            applyLiveBend(0, /*reset=*/true);
             // J5: every routed lane goes back to the engine's track-init
             // value. A lane routed to none has no control to reset (MOD
-            // included), and the voice stays.
+            // included), and the voice stays. Each reset is captured flagged,
+            // and a take records it only on a lane it already moved.
             for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
                 const uint8_t lane = MidiRoutes::kLanes[size_t(i)];
                 if ((m_liveRoutedLanes >> i) & 1)
-                    applyLiveControl(lane, uint8_t(TimelinePlayer::ccDefault(lane)));
+                    applyLiveControl(lane, uint8_t(TimelinePlayer::ccDefault(lane)),
+                                     /*reset=*/true);
             }
             break;
         case 120: // all sound off
@@ -860,22 +862,24 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
     }
 }
 
-void AudioEngine::applyLiveBend(int16_t bend)
+void AudioEngine::applyLiveBend(int16_t bend, bool reset)
 {
     // The whole track's bend, song notes included; the engine scales the
     // signed 14-bit value to its -64..63 and BENDR sets the range.
-    pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend);
+    pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend,
+                reset ? CaptureEvent::Reset : 0);
     if (m_liveTrack >= 0) {
         m4a_engine_pitch_bend(m_engine.get(), m_liveTrack, bend);
         m_liveTouched.bend = true;
     }
 }
 
-void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value)
+void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value, bool reset)
 {
     // Captured as heard, whether or not it sounds (as notes are): the
     // lane's CC rides in the key.
-    pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value);
+    pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value,
+                reset ? CaptureEvent::Reset : 0);
     if (m_liveTrack >= 0) {
         m4a_engine_cc(m_engine.get(), m_liveTrack, lane, value);
         m_liveTouched.setCc(lane);
@@ -985,7 +989,7 @@ void AudioEngine::syncCapture()
 }
 
 void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
-                              uint64_t resumePos, int16_t value)
+                              uint64_t resumePos, int16_t value, uint8_t flags)
 {
     if (!capturing())
         return;
@@ -1009,6 +1013,7 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.key = key;
     ev.velocity = velocity;
     ev.value = value;
+    ev.flags = flags;
     ev.lateSamples =
         kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff || move ? m_liveLate : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);

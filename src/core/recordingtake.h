@@ -42,6 +42,9 @@ class MidiTimeline;
 //    where the segment they were played in ends (an imposed end, like an
 //    open note's: not shifted), the lane goes back to what the song had
 //    there. See toLaneWrites.
+//  - A Reset All Controllers (CaptureEvent::Reset) is a move only on a lane
+//    the take already moved, in any of its segments; an untouched lane
+//    keeps the song's automation (J5).
 class RecordingTake
 {
   public:
@@ -183,6 +186,9 @@ class RecordingTake
     int m_unmatchedOffs = 0;
     std::vector<Note> m_notes;
     std::vector<Control> m_controls;
+    // The lanes a played move reached so far (by cc, DOC_CC_BEND included):
+    // where a CC121 reset is kept.
+    bool m_moved[256];
     // Where each segment left so far ended, by segment.
     std::map<uint32_t, uint64_t> m_segmentEnds;
     // The segments left so far, merged (see recordedSpans).

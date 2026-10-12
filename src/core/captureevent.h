@@ -30,6 +30,12 @@ struct CaptureEvent {
                   // PAN, 0x14 BENDR, 0x15 LFOS), value what it set, as heard
                   // (scaled to the lane: MOD to its range, BENDR to 0..24)
     };
+    enum Flag : uint8_t {
+        // Bend/Control: a Reset All Controllers (CC121) put the lane back at
+        // rest, not a move the player made. The take keeps it only on a lane
+        // it already moved (J5).
+        Reset = 0x01,
+    };
     uint64_t samplePos = 0;
     uint64_t resumePos = 0;   // Boundary only
     uint32_t generation = 0;  // the arm this belongs to (AudioEngine::armCapture)
@@ -39,4 +45,5 @@ struct CaptureEvent {
     uint8_t kind = NoteOn;
     uint8_t key = 0; // NoteOn/NoteOff: the key; Control: the lane's CC
     uint8_t velocity = 0;
+    uint8_t flags = 0; // Bend/Control: Flag bits
 };

@@ -198,7 +198,7 @@ struct Feed {
             ev.lateSamples = late;
         take.push(ev);
     }
-    void control(uint8_t kind, uint64_t pos, int16_t value, uint8_t cc = 0)
+    void control(uint8_t kind, uint64_t pos, int16_t value, uint8_t cc = 0, uint8_t flags = 0)
     {
         CaptureEvent ev;
         ev.kind = kind;
@@ -208,7 +208,17 @@ struct Feed {
         ev.key = cc;
         ev.value = value;
         ev.lateSamples = late;
+        ev.flags = flags;
         take.push(ev);
+    }
+    // Reset All Controllers with the default routes, as the engine captures
+    // it: the bend centred, then MOD, VOL and PAN at rest, each flagged.
+    void resetAll(uint64_t pos)
+    {
+        control(CaptureEvent::Bend, pos, 0, 0, CaptureEvent::Reset);
+        for (const uint8_t cc : {uint8_t(0x01), uint8_t(0x07), uint8_t(0x0A)})
+            control(CaptureEvent::Control, pos, int16_t(RecordingTake::restValue(cc)), cc,
+                    CaptureEvent::Reset);
     }
     void bend(uint64_t pos, int16_t value) { control(CaptureEvent::Bend, pos, value); }
     // A routed lane's move: cc is the lane's (0x01 MOD, 0x07 VOL, ...).
@@ -881,6 +891,35 @@ void checkTakeRules()
             check(samePoints(volLane, {{0, 100}}) && samePoints(panLane, {{10, 0}, {20, 64}}),
                   "take: a PAN write moved another lane, or did not restore centre with no point");
         }
+        // CC121's resets (J5, refined after step 3's review) are moves only
+        // on a lane the take already moved, in any segment: VOL moved in
+        // pass 1 keeps its resets in both passes, bend's counts once it
+        // moved in pass 2, and MOD and PAN, never moved, keep the song's.
+        take.begin(0, 16);
+        Feed reset{take, 16};
+        reset.begin(0);
+        reset.lane(0x07, 1000, 40);
+        reset.resetAll(2000);
+        reset.jump(3000, 0);
+        reset.bend(500, 4096);
+        reset.resetAll(1000);
+        {
+            std::vector<std::pair<uint8_t, int>> got;
+            for (const RecordingTake::Control &c : take.controls())
+                got.push_back({c.cc, c.value});
+            const std::vector<std::pair<uint8_t, int>> want{
+                {0x07, 40}, {0x07, 127}, {DOC_CC_BEND, 4096}, {DOC_CC_BEND, 0}, {0x07, 127}};
+            check(got == want && take.controls()[1].segment == 0 && take.controls()[4].segment == 1,
+                  "take: a CC121 reset was kept on a lane the take never moved, or dropped on "
+                  "one it moved (in this pass or an earlier one)");
+        }
+        // A new arm starts with no lane moved.
+        take.begin(0, 17);
+        Feed fresh{take, 17};
+        fresh.begin(0);
+        fresh.resetAll(1000);
+        check(take.controls().empty() && take.toLaneWrites(tl, 2000, 0, 0).empty(),
+              "take: a CC121 reset in a take that moved nothing was recorded");
         take.clear();
         check(take.controls().empty(), "take: clear() kept the moves");
     }
@@ -900,6 +939,30 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
                                      const QString &scratchDir)
 {
     const int before = g_failures;
+    // The undo text's lane list: pitch bend first, the CC lanes ascending,
+    // the voice last, and a lane it has no name for still named.
+    {
+        const auto text = [](std::initializer_list<uint8_t> ccs) {
+            std::vector<RecordingTake::LaneWrite> writes;
+            for (const uint8_t cc : ccs) {
+                RecordingTake::LaneWrite w;
+                w.cc = cc;
+                writes.push_back(w);
+            }
+            return takeLanesText(writes);
+        };
+        check(text({}).isEmpty() && text({0x01}) == QStringLiteral("mod") &&
+                  text({0x01, DOC_CC_BEND, 0x01}) == QStringLiteral("pitch bend and mod") &&
+                  text({0x0A, 0x07, DOC_CC_BEND, 0x01}) ==
+                      QStringLiteral("pitch bend, mod, volume and pan") &&
+                  text({DOC_CC_VOICE, 0x15, 0x14}) ==
+                      QStringLiteral("bend range, LFO speed and voice") &&
+                  text({DOC_CC_VOICE}) == QStringLiteral("voice"),
+              "take text: the recorded lanes are not named and ordered as their rows");
+        check(text({0x18}) == QStringLiteral("CC 24") &&
+                  text({DOC_CC_VOICE, 0x18, 0x07}) == QStringLiteral("volume, CC 24 and voice"),
+              "take text: a lane with no name vanished from the list");
+    }
     if (!check(openProjectDir(projectRoot, /*interactive=*/false), "the project failed to open"))
         return g_failures - before;
     loadSongByLabel(songLabel);
@@ -1191,7 +1254,13 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
 
         // Reset All Controllers (CC121) centres the bend and puts every
         // routed lane back at its track-init value (J5: with the default
-        // routes MOD 0, VOL 127 and PAN 64), and the take records them all.
+        // routes MOD 0, VOL 127 and PAN 64). The take records a reset only
+        // on a lane it already moved (bend and VOL here); MOD and PAN,
+        // untouched, keep the song's automation (a PAN point here).
+        const uint64_t resetCursor = tpb * 20;
+        view->setEditCursorTick(resetCursor);
+        const auto panBeforeReset = lane(0x0A);
+        doc.addLanePoint(a, 0x0A, resetCursor, 20);
         const auto bendReset = lane(DOC_CC_BEND);
         const auto modReset = lane(0x01);
         const auto volReset = lane(0x07);
@@ -1202,29 +1271,33 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         pumpMs(20);
         const uint64_t pUp = playhead();
         send(0xE0, 0x00, 0x60); // +4096
-        pumpMs(100);
+        pumpMs(40);
+        const uint64_t pVol = playhead();
+        send(0xB0, 7, 37);
+        pumpMs(60);
         const uint64_t pReset = playhead();
         send(0xB0, 121, 0);
         pumpMs(50);
         const uint64_t pEnd = playhead();
         m_stopAction->trigger();
         check(undo->index() == undoReset + 1 &&
-                  lastUndoText() == QStringLiteral("Record pitch bend, mod, volume and pan"),
-              "record: Reset All Controllers did not record the bend and every routed lane");
+                  lastUndoText() == QStringLiteral("Record pitch bend and volume"),
+              "record: Reset All Controllers did not record exactly the lanes the take moved");
         check(sorted(lane(DOC_CC_BEND)) == expected(DOC_CC_BEND, bendReset,
                                                     {{tickOf(pUp), 4096}, {tickOf(pReset), 0}},
                                                     tickOf(pEnd)),
               "record: Reset All Controllers did not centre the recorded bend");
-        check(sorted(lane(0x01)) == expected(0x01, modReset, {{tickOf(pReset), 0}}, tickOf(pEnd)),
-              "record: Reset All Controllers did not zero the recorded mod");
-        check(sorted(lane(0x07)) ==
-                      expected(0x07, volReset, {{tickOf(pReset), 127}}, tickOf(pEnd)) &&
-                  sorted(lane(0x0A)) ==
-                      expected(0x0A, panReset, {{tickOf(pReset), 64}}, tickOf(pEnd)),
-              "record: Reset All Controllers did not record VOL 127 and PAN 64");
+        check(sorted(lane(0x07)) == expected(0x07, volReset,
+                                             {{tickOf(pVol), 37}, {tickOf(pReset), 127}},
+                                             tickOf(pEnd)),
+              "record: Reset All Controllers did not record the moved VOL's reset to 127");
+        check(lane(0x01) == modReset && lane(0x0A) == panReset,
+              "record: Reset All Controllers wrote MOD or PAN, which the take never moved");
         check(lane(0x14) == bendrReset,
               "record: Reset All Controllers recorded BENDR, which has no route");
         undo->undo();
+        undo->undo(); // the PAN setup point
+        check(lane(0x0A) == panBeforeReset, "record: the CC121 setup point did not undo");
 
         // Every routed lane records (docs/midi-controls/PLAN.md step 3):
         // VOL, PAN, BENDR and LFOS knobs land on their lanes as heard (BENDR
@@ -2806,6 +2879,12 @@ void MainWindow::checkRecordingCcLaneDisplay(int track)
     check(view->laneDisplayMax(track, 0x15) == 32, "cc lane display: LFOS did not zoom to 32");
     check(midi.setRoute(0x14, 20) && midi.setRoute(0x15, 21),
           "cc lane display: BENDR and LFOS could not be routed");
+    // VOL low and flat, so a rising knob raises its ghost's peak (the
+    // restore at the clock is the song's 40, not 127).
+    if (const std::vector<DocLanePoint> pts = doc.lanePoints(track, 0x07); !pts.empty())
+        doc.deleteLanePoints(track, 0x07, pts);
+    doc.addLanePoint(track, 0x07, 0, 40);
+    QApplication::processEvents();
     const auto volBefore = doc.lanePoints(track, 0x07);
 
     const int undoTake = undo->index();
@@ -2819,10 +2898,24 @@ void MainWindow::checkRecordingCcLaneDisplay(int track)
     pumpMs(250);
     synchronizePlayhead();
     (void)lanes->grab(); // painted on the 0..32 axis
+    // VOL rising under its fixed 0..127 axis rescales nothing: no row
+    // repaints whole for it.
+    const auto rescales = [&] { return lanes->property("rescaleRepaints").toInt(); };
+    const int rescalesBefore = rescales();
+    for (int v = 60; v <= 120; v += 10) {
+        send(0xB0, 7, uint8_t(v));
+        pumpMs(20);
+        synchronizePlayhead();
+    }
+    check(rescales() == rescalesBefore,
+          "cc lane display: a VOL ghost rising under its fixed axis repainted its row whole");
+    (void)lanes->grab(); // what the VOL frames left, painted: the LFOS stretch on 0..32
     const uint64_t pLfos = m_audio.playheadSamples();
     send(0xB0, 21, 100); // LFOS 100: past it
     pumpMs(250);
     synchronizePlayhead();
+    check(rescales() > rescalesBefore,
+          "cc lane display: an LFOS ghost growing its zoomed axis did not repaint its row whole");
     const uint64_t pNow = m_audio.playheadSamples();
     const uint64_t from = tickOf(pMove), to = tickOf(pNow), lfosTick = tickOf(pLfos);
     const RecordingPreview preview = view->recordingPreview();
@@ -2993,6 +3086,7 @@ void MainWindow::checkRecordingFlood()
         synchronizePlayhead();
         const uint64_t pEnd = m_audio.playheadSamples();
         const size_t controls = m_take.controls().size();
+        const size_t taken = m_take.notes().size();
         frames.start();
         const size_t writes =
             m_take.toLaneWrites(*session->timeline, pEnd, m_take.segment(), 0).size();
@@ -3001,7 +3095,7 @@ void MainWindow::checkRecordingFlood()
         check(m_audio.captureDropped() == droppedBefore,
               "flood: a drained 3 kHz knob flood lost capture events");
         check(controls == 30000, "flood: the take did not keep every knob move");
-        check(undo->index() == undoBefore + 1 && notes == 100 && countNew(before) == 100,
+        check(taken == 100 && undo->index() == undoBefore + 1 && countNew(before) == 100,
               "flood: the flooded take did not commit every note in one step");
         const uint64_t span = tickOf(pEnd) - tickOf(pStart) + 2;
         bool bounded = true;
@@ -3041,11 +3135,12 @@ void MainWindow::checkRecordingFlood()
         for (int ms = 0; ms < 2000; ms++)
             floodMs(ms, &notes);
         synchronizePlayhead();
+        const size_t taken = m_take.notes().size();
         pumpMs(20);
         m_stopAction->trigger();
         check(m_audio.captureDropped() > droppedBefore,
               "flood: a stalled UI under the flood did not overflow the ring");
-        check(undo->index() == undoBefore + 1 && notes == 20 && countNew(before) == 20,
+        check(taken == 20 && undo->index() == undoBefore + 1 && countNew(before) == 20,
               "flood: notes played while the ring overflowed with moves were lost");
         check(statusBar()->currentMessage().contains(QStringLiteral("MIDI input was lost")),
               "flood: the overflow was not reported");

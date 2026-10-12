@@ -397,9 +397,10 @@ class AudioEngine
     // The same for a bend (-8192..8191) and a routed CC lane (the lane's
     // document CC and the value it takes, already scaled): the whole
     // track's, captured whether or not it sounds (CaptureEvent::Bend and
-    // CaptureEvent::Control).
-    void applyLiveBend(int16_t bend);
-    void applyLiveControl(uint8_t lane, uint8_t value);
+    // CaptureEvent::Control). `reset`: CC121 put it back at rest (captured
+    // with CaptureEvent::Reset).
+    void applyLiveBend(int16_t bend, bool reset = false);
+    void applyLiveControl(uint8_t lane, uint8_t value, bool reset = false);
     // A keyboard program change: the target track's voice. Sound target
     // only, and not captured yet (step 5 records the Voice lane).
     void applyLiveProgram(uint8_t program);
@@ -419,7 +420,7 @@ class AudioEngine
     bool capturing() const;
     void syncCapture();
     void pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key = 0, uint8_t velocity = 0,
-                     uint64_t resumePos = 0, int16_t value = 0);
+                     uint64_t resumePos = 0, int16_t value = 0, uint8_t flags = 0);
     // The player jumped from `from` to `to`: the take's segment ends.
     void captureBoundary(uint64_t from, uint64_t to);
     void publishCaptureClock();

@@ -294,6 +294,12 @@ class MainWindow : public QMainWindow
     // the song (its revision) or the take's track changes, not every
     // playhead tick.
     const std::vector<DocLanePoint> &takeLaneBefore(const SongDocument &doc, int track, uint8_t cc);
+    // The lanes a take's writes move, for its undo step and status message:
+    // "pitch bend", "mod and volume", "pitch bend, mod, volume and pan".
+    // Pitch bend first, then the CC lanes in ascending CC, then the voice,
+    // each named as its row is (in lower case, MOD as "mod"); a lane with no
+    // name here reads "CC n". Empty for no writes.
+    static QString takeLanesText(const std::vector<RecordingTake::LaneWrite> &writes);
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
     void syncRecordAction();

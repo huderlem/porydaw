@@ -27,6 +27,7 @@ void RecordingTake::clear()
     m_unmatchedOffs = 0;
     m_notes.clear();
     m_controls.clear();
+    std::fill(std::begin(m_moved), std::end(m_moved), false);
     m_segmentEnds.clear();
     m_spans.clear();
     std::fill(std::begin(m_open), std::end(m_open), -1);
@@ -179,6 +180,14 @@ void RecordingTake::push(const CaptureEvent &ev)
         control.segment = m_segment;
         // A Control's lane is its key (its 7 bits: never DOC_CC_BEND).
         control.cc = ev.kind == CaptureEvent::Bend ? DOC_CC_BEND : key;
+        // A CC121 reset on a lane this take never moved isn't recorded:
+        // the lane keeps the song's automation (J5).
+        if (ev.flags & CaptureEvent::Reset) {
+            if (!m_moved[control.cc])
+                break;
+        } else {
+            m_moved[control.cc] = true;
+        }
         control.value = ev.kind == CaptureEvent::Bend ? std::clamp<int>(ev.value, -8192, 8191)
                                                       : std::clamp<int>(ev.value, 0, 127);
         m_controls.push_back(control);

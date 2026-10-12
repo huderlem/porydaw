@@ -63,7 +63,7 @@ the take.
 | J2 | Latch scope | Latch applies only while a take is armed **and** the control sounds (live play is on). With live play off, nothing of the knob is heard, so the song plays on untouched. The latch clears at a segment boundary (loop wrap or seek), and the lane is chased back to the song. On pass 2, before you touch the knob again, you hear the song's original events, not pass 1's take, because the timeline can't be rebuilt mid-take. This is a known mismatch with what gets committed there. |
 | J3 | Program numbers | The data byte is used as the voice slot directly (0–127, no bank select). A program change past the voicegroup's last voice is ignored and shown once in the status bar. |
 | J4 | Voice writes at tick 0 | A take that changes voice at tick 0 replaces the tick-0 program change; it never deletes it. The track's keep-alive seed (`appendTrackKeepAliveOps`) still holds. Restore-after-take puts the song's voice back at the segment end, just as it does for other lanes. |
-| J5 | CC121 (reset all controllers) | It resets every routed lane to the engine's track-init default (the table in `TimelinePlayer::chase`) and leaves the voice alone. In a take, that reset is recorded as moves, as it is for bend and mod today. |
+| J5 | CC121 (reset all controllers) | It resets every routed lane to the engine's track-init default (the table in `TimelinePlayer::chase`) and leaves the voice alone. In a take, that reset is recorded as moves only on lanes the take already moved (bend and MOD included); untouched lanes keep the song's automation — refined 2026-10-12 after step 3 review. |
 | J6 | The route table's MOD row | MOD becomes an ordinary row: its default is CC1, and it can be remapped or set to None. Bend stays on pitch-bend messages and can't be routed. |
 | J7 | Channel/omni | Routes match the CC number on any channel, consistent with notes (MIDI input D2). |
 
@@ -759,6 +759,7 @@ build-dummy, and all five trees build cleanly.
 - **CC121 records VOL 127 / PAN 64 (and BENDR 2 / LFOS 22 when routed)**
   as moves, per J5, even on lanes the user never touched in the take.
   Their restores put the song back at the stop, as for bend and MOD.
+  (Superseded by the step 3 review fixes: only lanes the take moved.)
 
 **Flood check (`checkRecordingFlood`)**
 
@@ -872,9 +873,119 @@ drained every 17 ms the way the playhead timer drains.
 7. Turn only one knob in a take (no notes): the undo step says e.g.
    "Record pan".
 8. If your keyboard sends Reset All Controllers (CC121) mid-take, the take
-   records the routed lanes' resets (volume full, pan centre, ...), and
-   they are restored to the song's values at the stop.
+   records the reset only on the lanes you already moved in that take
+   (volume full, pan centre, bend centred, mod 0, ...), restored to the
+   song's values at the stop. A lane you didn't touch keeps the song's
+   automation. Live, every routed lane and the bend still reset.
 9. Pitch bend and the mod wheel still record exactly as before.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--midicheck` and `--reccheck` pass on build-nomidi, build-off and
+build-dummy, and all five trees build cleanly.
+
+### Step 3 review fixes (2026-10-12, uncommitted)
+
+**What changed**
+
+- **CC121 records only on lanes the take moved (J5 refined).** Live
+  behaviour is unchanged: CC121 still lifts the pedal, centres the bend and
+  resets every routed lane audibly. But each of those resets is now
+  captured with the new `CaptureEvent::Reset` flag (a `flags` byte on the
+  event; `applyLiveBend`/`applyLiveControl` take a `reset` argument that
+  `pushCapture` stamps). `RecordingTake::push` keeps a per-take
+  `m_moved[256]` (by cc, BEND included), set by every unflagged move and
+  cleared by `clear()`/`begin()`, and drops a flagged event on a lane not
+  yet moved. The filter lives in the take, not on the audio thread: no
+  per-take state there, and the arm/generation filter that already guards
+  `push` scopes it to the take. `m_moved` spans segments, so a lane moved
+  in pass 1 and reset in pass 2 records the reset. This also changes bend
+  and MOD: their CC121 resets used to be recorded always, and are now
+  recorded only after a move of that lane in the take. Before this, a
+  CC121 wrote a point on every routed lane from the reset to the segment
+  end, wiping the song's VOL/PAN/... automation there and leaving
+  redundant BENDR 2 / LFOS 22 points on lanes that had none.
+- **Full-row ghost repaint only on a rescale.** `recordingLanesChanged`
+  now compares the row's display max with the old and new ghost
+  (`laneDisplayMaxWith`, which `laneDisplayMax` now wraps) instead of the
+  ghosts' peaks. A VOL ghost rising under its fixed 127 axis repaints only
+  from the changed tick, as any other change does. The automation area
+  counts full-row rescale repaints in a `rescaleRepaints` property for the
+  harness.
+- `MainWindow::takeLanes`: the dead `lane.ranges.empty()` skip is gone
+  (each cc comes from the writes, so it always has a range).
+- **`takeLanesText` is a `MainWindow` static** (so reccheck can call it).
+  It now names `DOC_CC_VOICE` "voice", ordered last (after LFO speed), and
+  a cc it has no name for reads "CC n" in CC order instead of vanishing, so
+  the text can't come out "Record ". The joining is translatable piece by
+  piece: `tr("%1 and %2")` for the last pair, then `tr("%1, %2")` for each
+  earlier name, both with disambiguation comments.
+- **Flood checks.** `notes == 100` / `notes == 20` counted only what the
+  harness sent. They are now `m_take.notes().size()` read after the last
+  drain, next to the existing committed-document count.
+
+**Judgment calls**
+
+- **Not `QLocale::createSeparatedList`.** On Qt 6.2.4 its output is
+  "a, b, c" in the C locale (no "and"), "a, b, and c" in en_US (Oxford
+  comma), and "a, b and c" in en_GB. It also follows the user's locale
+  rather than the UI's language. So the existing English strings ("Record
+  pitch bend, mod, volume and pan") would change by locale. Instead each
+  separator is its own `tr()` string, which keeps the wording stable and
+  still lets a translation choose both separators.
+- **The unknown-cc fallback is "CC n"** (e.g. "Record volume, CC 24 and
+  voice"), sorted among the CC lanes by number.
+- **`m_moved` is per take, all segments**, as the review asked. A move
+  dropped by a full ring doesn't mark its lane, so a later reset there is
+  dropped too. That's consistent: neither is in the take.
+
+**Harness (`--reccheck`)**
+
+- Unit (`checkTakeRules`): a VOL moved in pass 1 keeps its CC121 resets in
+  pass 1 and pass 2; bend's reset in pass 1, before any bend move, is
+  dropped, and its pass-2 reset after a bend move is kept; MOD and PAN,
+  never moved, record nothing. A fresh arm whose only input is a CC121
+  records no controls and no writes.
+- Unit (`runRecordWindowCheck`): `takeLanesText` for no lanes, one, two,
+  four (out of order, duplicated), the voice last, voice alone, and an
+  unknown CC 24 ("CC 24", "volume, CC 24 and voice").
+- End to end (`checkRecordingTakes`): with a song PAN point at the cursor,
+  a take moves the bend and VOL, then sends CC121. It commits "Record pitch
+  bend and volume": the bend and VOL lanes hold the moves and their resets
+  (centre, 127) with the song back at the stop, while the MOD, PAN and
+  BENDR lanes are exactly as before.
+- `checkRecordingCcLaneDisplay`: VOL is set to a flat 40 before the take,
+  so a rising VOL knob (60..120) raises its ghost's peak. That causes no
+  full-row repaint (`rescaleRepaints` unchanged), while LFOS 100 past its
+  zoomed 32 does. A grab after the VOL frames flushes their repaints, so
+  the existing "stretch before the growth repainted on the new axis" pixel
+  check keeps its teeth. (Without that grab the VOL frames' pending
+  repaints healed the stale LFOS stretch, and the pixel check passed with
+  the rescale repaint mutated out.)
+- Mutation-tested 13 ways, each failing the expected checks and restored
+  byte for byte (a script `cmp`ed the restore):
+  - no reset filter;
+  - every reset dropped;
+  - `m_moved` cleared per segment;
+  - `m_moved` not cleared on clear/begin;
+  - the engine not stamping the flag;
+  - the old peak comparison for the full-row repaint;
+  - no rescale repaint;
+  - no generic "CC n" name;
+  - no "voice" name;
+  - voice sorted first;
+  - no capture reserve (flood stall check);
+  - flood stall check on the take's notes alone, off by one;
+  - (and, while checking the pixel check, the rescale repaint mutated out
+    with the VOL loop disabled).
+
+**Note for step 4 (latch)**
+
+- A CC121 reset on a lane the take hasn't moved is now not recorded, so
+  it shouldn't latch that lane either: the song's events there are what
+  gets committed. Latch a lane on a reset only when the take already moved
+  it (the audio thread would need its own moved mask per arm for that, or
+  the latch could skip resets entirely and rely on the earlier move having
+  latched the lane already, which is simpler).
 
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--midicheck` and `--reccheck` pass on build-nomidi, build-off and

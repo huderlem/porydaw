@@ -5671,8 +5671,6 @@ std::vector<RecordingPreview::Lane> takeLanes(const std::vector<RecordingTake::L
             if (w.cc == cc)
                 lane.ranges.push_back({w.tickBegin, w.tickEnd});
         }
-        if (lane.ranges.empty())
-            continue;
         for (const SongDocument::LanePointValue &pt :
              RecordingTake::applyLaneWrites(before(cc), writes, cc))
             lane.points.push_back({uint32_t(std::min<uint64_t>(pt.tick, UINT32_MAX)), pt.value});
@@ -5687,33 +5685,62 @@ std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track
     return takeLanes(writes, [&](uint8_t cc) { return doc.lanePoints(track, cc); });
 }
 
-// The lanes a take moved, for its undo step and status message: "pitch
-// bend", "mod and volume", "pitch bend, mod, volume and pan". Pitch bend
-// first, then the CC lanes in ascending CC, each named as its row is (in
-// lower case, MOD as "mod").
-QString takeLanesText(const std::vector<RecordingTake::LaneWrite> &writes)
-{
-    const auto has = [&](uint8_t cc) {
-        return std::any_of(writes.begin(), writes.end(),
-                           [cc](const RecordingTake::LaneWrite &w) { return w.cc == cc; });
-    };
-    QStringList names;
-    for (const auto &[cc, name] : {std::pair{DOC_CC_BEND, MainWindow::tr("pitch bend")},
-                                   std::pair{uint8_t(0x01), MainWindow::tr("mod")},
-                                   std::pair{uint8_t(0x07), MainWindow::tr("volume")},
-                                   std::pair{uint8_t(0x0A), MainWindow::tr("pan")},
-                                   std::pair{uint8_t(0x14), MainWindow::tr("bend range")},
-                                   std::pair{uint8_t(0x15), MainWindow::tr("LFO speed")}}) {
-        if (has(cc))
-            names << name;
-    }
-    if (names.size() < 2)
-        return names.value(0);
-    const QString last = names.takeLast();
-    return MainWindow::tr("%1 and %2").arg(names.join(QStringLiteral(", ")), last);
-}
-
 } // namespace
+
+QString MainWindow::takeLanesText(const std::vector<RecordingTake::LaneWrite> &writes)
+{
+    std::vector<uint8_t> ccs;
+    for (const RecordingTake::LaneWrite &w : writes)
+        ccs.push_back(w.cc);
+    // Pitch bend first, the voice last, the CC lanes between in ascending
+    // CC.
+    const auto rank = [](uint8_t cc) {
+        return cc == DOC_CC_BEND ? -1 : cc == DOC_CC_VOICE ? 256 : int(cc);
+    };
+    std::sort(ccs.begin(), ccs.end(), [&](uint8_t a, uint8_t b) { return rank(a) < rank(b); });
+    ccs.erase(std::unique(ccs.begin(), ccs.end()), ccs.end());
+    QStringList names;
+    for (const uint8_t cc : ccs) {
+        switch (cc) {
+        case DOC_CC_BEND:
+            names << tr("pitch bend");
+            break;
+        case 0x01:
+            names << tr("mod");
+            break;
+        case 0x07:
+            names << tr("volume");
+            break;
+        case 0x0A:
+            names << tr("pan");
+            break;
+        case 0x14:
+            names << tr("bend range");
+            break;
+        case 0x15:
+            names << tr("LFO speed");
+            break;
+        case DOC_CC_VOICE:
+            names << tr("voice");
+            break;
+        default:
+            // A lane this list doesn't know yet still shows.
+            names << tr("CC %1").arg(cc);
+            break;
+        }
+    }
+    if (names.isEmpty())
+        return {};
+    // Joined from the end, each separator its own translation: "a, b and
+    // c". (QLocale::createSeparatedList would follow the user's locale
+    // instead of the UI's language, and its C locale has no "and".)
+    QString text = names.takeLast();
+    if (!names.isEmpty())
+        text = tr("%1 and %2", "the last two recorded lanes").arg(names.takeLast(), text);
+    while (!names.isEmpty())
+        text = tr("%1, %2", "recorded lanes: one, then the rest").arg(names.takeLast(), text);
+    return text;
+}
 
 const std::vector<DocLanePoint> &MainWindow::takeLaneBefore(const SongDocument &doc, int track,
                                                             uint8_t cc)
