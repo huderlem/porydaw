@@ -1146,6 +1146,14 @@ VgLineKind VoicegroupSource::kindAt(int slot) const
     return m_lines.at(m_slotToLine[slot]).kind;
 }
 
+int VoicegroupSource::voiceCount() const
+{
+    for (int slot = VOICEGROUP_SIZE - 1; slot >= 0; slot--)
+        if (kindAt(slot) != VgLineKind::None)
+            return slot + 1;
+    return 0;
+}
+
 const VgVoice *VoicegroupSource::voiceAt(int slot) const
 {
     if (kindAt(slot) != VgLineKind::Editable)

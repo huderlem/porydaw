@@ -4,6 +4,7 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -1467,16 +1468,29 @@ void MainWindow::checkLiveControls()
           "live controls: the routed lanes did not hold, or an unrouted CC moved one");
     check(lanes(b) == songB, "live controls: a routed knob moved a track other than the target");
 
-    // Program change: the target's voice, the data byte as the slot.
-    int voices = VOICEGROUP_SIZE;
-    if (m_active->vgSource) {
-        voices = 0;
-        for (int slot = 0; slot < VOICEGROUP_SIZE; slot++)
-            if (m_active->vgSource->kindAt(slot) != VgLineKind::None)
-                voices = slot + 1;
+    // Program change: the target's voice, the data byte as the slot. The
+    // count to expect comes from the voicegroup file itself, not from the
+    // source model publishLiveTarget reads: the pinned song's is a per-file
+    // voicegroup, one voice macro per line after its voice_group header.
+    int voices = -1;
+    if (m_active->vgSource && !m_active->vgSource->monolithic()) {
+        QFile file(m_active->vgSource->filePath());
+        if (file.open(QIODevice::ReadOnly)) {
+            voices = 0;
+            for (const QByteArray &line : file.readAll().split('\n')) {
+                const QByteArray macro = line.trimmed().split(' ').value(0).trimmed();
+                if (macro.startsWith("voice_") && macro != "voice_group")
+                    voices++;
+            }
+        }
     }
-    check(voices > 1 && m_audio.liveVoiceCount() == voices,
-          "live controls: the voicegroup's voice count was not published");
+    check(voices > 10 && voices < VOICEGROUP_SIZE && m_audio.liveVoiceCount() == voices,
+          qPrintable(QStringLiteral("live controls: the voice count published (%1) is not the "
+                                    "voicegroup file's (%2)")
+                         .arg(m_audio.liveVoiceCount())
+                         .arg(voices)));
+    if (voices <= 10)
+        voices = VOICEGROUP_SIZE; // keep the rest meaningful after a failure
     const int prog = (songA[Program] + 1) % voices;
     program(uint8_t(prog));
     pumpMs(30);
@@ -1495,13 +1509,17 @@ void MainWindow::checkLiveControls()
     program(120);
     pumpMs(30);
     check(lanes(a)[Program] == prog, "live controls: a program past the last voice was applied");
+    // A tab switch publishing another count before the poll: the report
+    // still names the range the changes were ignored against.
+    m_audio.setLiveVoiceCount(voices);
     pollLiveKeys();
     check(m_liveIgnoredReports == reports + 1 &&
               statusBar()->currentMessage().contains(QStringLiteral("120")) &&
-              statusBar()->currentMessage().contains(QStringLiteral("0–9")),
-          "live controls: ignored program changes were not reported once in the status bar");
+              statusBar()->currentMessage().contains(QStringLiteral("voices are 0–9.")),
+          "live controls: ignored program changes were not reported once, against their range");
     pollLiveKeys();
     check(m_liveIgnoredReports == reports + 1, "live controls: an ignored program was re-reported");
+    m_audio.setLiveVoiceCount(10);
     program(uint8_t(inRange)); // the last voice still plays
     pumpMs(30);
     pollLiveKeys();
@@ -1530,6 +1548,37 @@ void MainWindow::checkLiveControls()
     check(lanes(b) == songB, "live controls: CC121 reached another track");
     midi.setRoute(0x0A, 10);
     midi.setRoute(0x01, 1);
+
+    // LFOS mirrors ply_lfos: a nonzero speed only changes the rate, so a
+    // streaming knob keeps the vibrato's phase (lfoSpeedC) and offset
+    // (modM); only 0 is clear_modM. One frame applies the input at the
+    // callback's start and crosses an LFO tick only rarely, in which case
+    // the phase is one step on instead.
+    const M4ATrack &lfoTrack = engine->tracks[a];
+    send(1, 127);
+    send(21, 1);
+    pumpMs(30);
+    for (int i = 0; i < 200 && !(lfoTrack.lfoSpeedC >= 40 && lfoTrack.lfoSpeedC <= 120); i++)
+        pumpMs(30);
+    bool lfoKept = lfoTrack.lfoSpeedC >= 40 && lfoTrack.lfoSpeedC <= 120 && lfoTrack.modM != 0;
+    for (const int speed : {1, 1, 2, 3}) {
+        const int phase = lfoTrack.lfoSpeedC;
+        const int offset = lfoTrack.modM;
+        send(21, uint8_t(speed));
+        m_audio.pumpForTest(1);
+        lfoKept &= lfoTrack.lfoSpeed == speed &&
+                   ((lfoTrack.lfoSpeedC == phase && lfoTrack.modM == offset) ||
+                    lfoTrack.lfoSpeedC == phase + speed);
+    }
+    const int phaseBefore = lfoTrack.lfoSpeedC;
+    pumpMs(30);
+    const int advanced = (lfoTrack.lfoSpeedC - phaseBefore) & 0xFF;
+    lfoKept &= advanced > 0 && advanced <= 30;
+    check(lfoKept, "live controls: a nonzero LFOS restarted the LFO's phase or cleared its offset");
+    send(21, 0);
+    m_audio.pumpForTest(1);
+    check(lfoTrack.lfoSpeed == 0 && lfoTrack.lfoSpeedC == 0 && lfoTrack.modM == 0,
+          "live controls: LFOS 0 did not clear the LFO");
     // Off the song's values again, every lane (the resets may sit on them).
     send(7, uint8_t(vol));
     send(20, songA[BendR] == 24 ? 64 : 127);
@@ -1549,10 +1598,12 @@ void MainWindow::checkLiveControls()
     check(m_audio.liveTarget() == b && lanes(a) == songA,
           "live controls: leaving a track did not hand its touched lanes and voice back");
     check(lanes(b) == songB, "live controls: the new target's lanes were disturbed");
-    // No target: a program change is ignored, not counted.
+    // No target: a program change is ignored, not counted, even one past
+    // the last voice (10, with the count shortened as above).
     const uint32_t ignored = m_audio.liveIgnoredProgram();
     m_audio.setLiveTarget(-1);
-    program(127);
+    m_audio.setLiveVoiceCount(10);
+    program(10);
     send(7, 1);
     pumpMs(30);
     check(lanes(a) == songA && lanes(b) == songB && m_audio.liveIgnoredProgram() == ignored,

@@ -775,7 +775,7 @@ void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrival
             QMetaObject::invokeMethod(this, &MidiInput::deliverActivity, Qt::QueuedConnection);
     }
     // The script tap, independently: it keeps what live play drops
-    // (program change, aftertouch) and the bytes as sent.
+    // (aftertouch, system messages) and the bytes as sent.
     if (m_tapEnabled.load(std::memory_order_acquire)) {
         MidiTapMsg tap;
         if (parseTap(bytes, size, &tap)) {

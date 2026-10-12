@@ -889,11 +889,15 @@ void AudioEngine::applyLiveProgram(uint8_t program)
         return;
     // J3: the data byte is the voice slot. Past the voicegroup's last voice
     // there is nothing to play: ignored, and counted for the status bar.
-    if (int(program) >= m_liveVoiceCount.load()) {
-        m_liveIgnoredSeq = (m_liveIgnoredSeq + 1) & 0xFFFFFF;
+    // The count in effect goes into the report with it, so a tab switch
+    // before the UI polls can't name the wrong range.
+    const int voices = m_liveVoiceCount.load();
+    if (int(program) >= voices) {
+        m_liveIgnoredSeq = (m_liveIgnoredSeq + 1) & 0xFFFF;
         if (m_liveIgnoredSeq == 0)
             m_liveIgnoredSeq = 1; // 0 stays "none yet"
-        m_liveIgnoredProgram.store(m_liveIgnoredSeq << 8 | program, std::memory_order_relaxed);
+        m_liveIgnoredProgram.store(m_liveIgnoredSeq << 16 | uint32_t(voices) << 8 | program,
+                                   std::memory_order_relaxed);
         return;
     }
     m4a_engine_program_change(m_engine.get(), m_liveTrack, program);

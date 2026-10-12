@@ -181,8 +181,9 @@ class AudioEngine
     void setLiveVoiceCount(int count) { m_liveVoiceCount.store(std::clamp(count, 0, 128)); }
     int liveVoiceCount() const { return m_liveVoiceCount.load(); }
     // Telemetry: the last program change ignored for being past the
-    // voicegroup's last voice, as sequence << 8 | program (0 before the
-    // first). The sequence counts them, so a poll that sees the word change
+    // voicegroup's last voice, as sequence << 16 | voice count << 8 |
+    // program (0 before the first), the count being the one it was ignored
+    // against. The sequence counts them, so a poll that sees the word change
     // reports once however many arrived since.
     uint32_t liveIgnoredProgram() const
     {

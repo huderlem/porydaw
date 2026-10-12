@@ -477,6 +477,13 @@ all five trees build cleanly.
   survives a chase, so a later target change re-chases lanes the song
   already holds, which is harmless (same values).
 
+**Known issues**
+
+- Auditions (clicking roll notes) on the target track play with the
+  keyboard's live voice, BENDR and LFOS until a handback, seek or edit,
+  as they already did with a live bend or MOD. They sound on the target
+  track's engine state, which the keyboard has moved.
+
 **Harness**
 
 - `--midicheck` `MainWindow::checkLiveControls`, after `checkLiveRoutes`,
@@ -593,4 +600,72 @@ all five trees build cleanly.
 
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--midicheck` and `--primecheck` pass on build-nomidi, build-off and
+build-dummy, and all five trees build cleanly.
+
+### Step 2 review fixes (2026-10-12, uncommitted)
+
+**Engine (poryaaaa).** A local branch `lfos-phase` in the submodule holds
+commit d440c05, which isn't pushed. Porydaw's submodule pointer is bumped
+but not committed.
+
+- `m4a_engine_cc` case 0x15 (LFOS) zeroed `lfoSpeedC` and `modM` on every
+  message. The GBA's `ply_lfos` only stores `lfoSpeed`, and calls
+  `clear_modM` when the value is 0. So a streaming LFOS knob, or a song
+  that repeats the command, kept restarting the LFO's phase, and the
+  vibrato stalled. A nonzero speed now only changes the rate.
+- poryaaaa's `test_engine.c` gains `test_lfos_keeps_phase`. With the old
+  code it fails 5 of its 9 asserts. `poryaaaa_unit_tests` passes 716/716,
+  and `poryaaaa_render` and `poryaaaa_test` still build. They were built by
+  hand with gcc, because the submodule's own CMake needs the clap-wrapper
+  checkout.
+- Checked against `m4a_1.s`:
+  - `ply_mod`, `ply_vol`, `ply_pan`, `ply_bendr` and `ply_bend` match for
+    streaming. The engine's handlers push the change to channels at once,
+    while the GBA flags it for the end of the tick, which a knob can't
+    tell apart.
+  - Not fixed: `ply_modt`, `ply_tune` and `ply_lfodl` are still TODO
+    no-ops. Because LFODL is ignored, `lfoDelayC` is never set, so the
+    note-on reload of `lfoDelayC` (with its `clear_modM`) never happens.
+
+**Porydaw**
+
+- `VoicegroupSource::voiceCount()` (one past the last slot with a voice
+  line) replaces `publishLiveTarget`'s loop.
+- `m_liveIgnoredProgram` is now `seq << 16 | count << 8 | program`. The
+  count is the one the change was ignored against, so a tab switch before
+  the poll still names the right range. The sequence is 16 bits, there is
+  still a single writer, and 0 still means "none yet".
+- The tap comment in `midiinput.cpp` no longer lists program change among
+  what live play drops.
+
+**Harness (`--midicheck` `checkLiveControls`)**
+
+- The voice count is checked against the voicegroup file itself: voice
+  macro lines after `voice_group`, which is 95 for `abandoned_ship` (not
+  96).
+- The ignored-range report is checked with the real count republished
+  between the ignore and the poll. The check matches "voices are 0–9.",
+  so "0–94" can't pass it.
+- "No target: not counted" sends program 10 against a count of 10, which
+  would definitely be counted with a target.
+- New LFOS block:
+  - with MOD up and LFOS 1, the phase is run to 40..120;
+  - LFOS 1, 1, 2 and 3, each applied in a one-frame pump, keep the phase
+    and `modM`, allowing for one LFO step if a tick falls in the frame;
+  - a 30 ms pump then advances the phase by 1..30 steps, with no reset;
+  - LFOS 0 clears the phase and `modM`.
+- Mutation-tested 7 ways, and each failed the expected checks and was
+  restored:
+  - the old LFOS reset;
+  - only `modM` zeroed;
+  - no `clear_modM` at 0;
+  - the report using the poll-time count, which first passed because
+    "0–94" contains "0–9" (the check was tightened);
+  - `voiceCount` off by one;
+  - a program counted with no target;
+  - plus the poryaaaa unit test against the old code.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each), and no render or roundtrip harness changed with the LFOS fix.
+`--midicheck` and `--primecheck` pass on build-nomidi, build-off and
 build-dummy, and all five trees build cleanly.

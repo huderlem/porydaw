@@ -236,6 +236,9 @@ class VoicegroupSource
     QString sectionLabel() const { return m_sectionLabel; }
 
     VgLineKind kindAt(int slot) const;
+    // One past the last slot with a voice line (kindAt isn't None): the
+    // voices a program change can select. 0 for a voicegroup with none.
+    int voiceCount() const;
     bool isEditable(int slot) const { return kindAt(slot) == VgLineKind::Editable; }
     const VgVoice *voiceAt(int slot) const;
     // Rewrites the slot's line (preserving indentation, per-argument spacing,
