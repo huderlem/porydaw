@@ -261,7 +261,9 @@ class MainWindow : public QMainWindow
     // the document has an edit group open, it retries until the group has
     // closed, so the take is always its own undo step; by then the
     // document may be gone (nothing written) or read-only (likewise).
-    void commitTake(const QPointer<SongDocument> &doc, int track,
+    // The take's ghost notes stay on view (the session's view) until the
+    // write lands or is given up on, then clear: the real notes replace them.
+    void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view, int track,
                     const std::vector<SongDocument::NewNote> &notes, bool inputLost);
     static constexpr int kTakeCommitRetryMs = 20;
     // "Recording into N: Name…", for the take's current track.
@@ -270,11 +272,15 @@ class MainWindow : public QMainWindow
     // adds, deletes, and moves; ends the take (dropped) if its track goes.
     void followTakeTrack(SongSession &session, const TrackRemap &remap);
     void drainCapture();
+    // The take as the roll's ghost notes and REC ruler tint (plan step 4):
+    // what a commit now would write. Once per playhead tick, after the drain.
+    void syncRecordingPreview();
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
     void syncRecordAction();
     // runRecordWindowCheck's halves (reccheck.cpp).
     void checkRecordingTakes(const QString &scratchDir);
+    void checkRecordingDisplay();
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.

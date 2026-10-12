@@ -151,6 +151,10 @@ double cursorAnchoredScroll(double anchor, double oldScale, double oldScroll, do
     return content * newScale - anchor;
 }
 
+// A recording take's live display (docs/midi-input/PLAN.md step 4): ghost
+// notes at the range-duplicate preview's alpha, and the ruler's REC tint.
+constexpr int kRecordingGhostAlpha = 110;
+constexpr int kRecordingTintAlpha = 56;
 constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
 constexpr int kVoiceAuditionVel = 112;
 // Resize hit-zone reach at a note's left/right edges (rollcheck probes
@@ -708,6 +712,43 @@ class TimeRuler : public QWidget
                m_dragSelEdge >= 0 || m_rangeDragging;
     }
 
+    // A recording take's punched span (SongView::setRecordingPreview): the
+    // whole ruler height, the tint and its top strip.
+    QRectF recordingSpanRect(const std::pair<uint64_t, uint64_t> &span) const
+    {
+        const qreal dpr = devicePixelRatioF();
+        const qreal x0 = m_sv->displayX(double(span.first), kGutterW, dpr);
+        const qreal x1 = m_sv->displayX(double(span.second), kGutterW, dpr);
+        return QRectF(x0, 0, std::max<qreal>(0.0, x1 - x0), height());
+    }
+
+    // The spans moved: repaints the slivers between old and new ends when
+    // only the ends moved (a take growing), everything otherwise. The ruler
+    // is not a cached surface; Qt clips the repaint to the update region.
+    void recordingSpansChanged(const std::vector<std::pair<uint64_t, uint64_t>> &before,
+                               const std::vector<std::pair<uint64_t, uint64_t>> &after)
+    {
+        if (before == after)
+            return;
+        bool onlyEnds = before.size() == after.size();
+        for (size_t i = 0; onlyEnds && i < before.size(); i++)
+            onlyEnds = before[i].first == after[i].first;
+        if (!onlyEnds) {
+            update();
+            return;
+        }
+        const int pad = 2;
+        for (size_t i = 0; i < before.size(); i++) {
+            if (before[i].second == after[i].second)
+                continue;
+            const QRectF a = recordingSpanRect(before[i]);
+            const QRectF b = recordingSpanRect(after[i]);
+            const qreal x0 = std::min(a.right(), b.right());
+            const qreal x1 = std::max(a.right(), b.right());
+            update(QRectF(x0, 0, x1 - x0, height()).toAlignedRect().adjusted(-pad, 0, pad, 0));
+        }
+    }
+
   protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -732,6 +773,7 @@ class TimeRuler : public QWidget
         const QRect area(kGutterW, 0, width() - kGutterW, height());
         p.setClipRect(area);
         drawPreRoll(p, m_sv, area, kGutterW, chrome);
+        drawRecordingSpans(p, area);
 
         // Loop band across the whole ruler height. The ruler previews every
         // scope (like the landing frame): it shows where in time the edit
@@ -1121,6 +1163,27 @@ class TimeRuler : public QWidget
     QRect markerRow() const { return QRect(0, 0, width(), m_markerHeight); }
 
     QRect tickRow() const { return QRect(0, m_markerHeight, width(), height() - m_markerHeight); }
+
+    // The REC tint over the take's punched spans, in the record dot's red:
+    // translucent across the ruler, under the labels so they stay readable,
+    // with a solid strip along the top edge.
+    void drawRecordingSpans(QPainter &p, const QRect &area)
+    {
+        const auto &spans = m_sv->recordingPreview().spans;
+        if (spans.empty())
+            return;
+        const QColor rec = themes::color(themes::Role::song_view_playhead);
+        QColor tint = rec;
+        tint.setAlpha(kRecordingTintAlpha);
+        const qreal strip = lyt::space(Space::Half);
+        for (const auto &span : spans) {
+            const QRectF r = recordingSpanRect(span).intersected(QRectF(area));
+            if (r.isEmpty())
+                continue;
+            p.fillRect(r, tint);
+            p.fillRect(QRectF(r.left(), r.top(), r.width(), strip), rec);
+        }
+    }
 
     int textBaseline(const QRect &row, const QFontMetrics &metrics) const
     {
@@ -1532,6 +1595,65 @@ class PianoRoll : public TimelineSurface
         invalidateContent(QRegion(0, 0, kKeyboardW, height()));
     }
 
+    // A recording take's ghost note, where the roll paints it.
+    QRectF recordingNoteRect(const RecordingPreview::Note &note) const
+    {
+        const qreal dpr = devicePixelRatioF();
+        return noteRect(m_sv->displayX(double(note.tick), kKeyboardW, dpr),
+                        m_sv->displayX(double(note.tick + note.duration), kKeyboardW, dpr),
+                        note.key);
+    }
+
+    // The take's ghost notes moved on (SongView::setRecordingPreview, at the
+    // playhead cadence): invalidates only what changed. A held note grows
+    // at its end, so only the sliver between its old and new right edges
+    // (and the border there) is repainted; new, gone, or otherwise changed
+    // notes repaint their own boxes.
+    void recordingPreviewChanged(const RecordingPreview &before, const RecordingPreview &after)
+    {
+        if (before.notes.empty() && after.notes.empty())
+            return;
+        if (!before.notes.empty() && !after.notes.empty() && before.track != after.track) {
+            invalidateContent(); // the colours changed (the take followed its track)
+            return;
+        }
+        const int pad = 2;
+        const auto box = [&](const QRectF &r) { return r.toAlignedRect().adjusted(-1, -1, 1, 1); };
+        QRegion dirty;
+        const auto order = [](const RecordingPreview::Note &n) {
+            return std::make_pair(n.tick, n.key);
+        };
+        size_t i = 0, j = 0;
+        while (i < before.notes.size() || j < after.notes.size()) {
+            if (j == after.notes.size() ||
+                (i < before.notes.size() && order(before.notes[i]) < order(after.notes[j]))) {
+                dirty += box(recordingNoteRect(before.notes[i++]));
+                continue;
+            }
+            if (i == before.notes.size() || order(after.notes[j]) < order(before.notes[i])) {
+                dirty += box(recordingNoteRect(after.notes[j++]));
+                continue;
+            }
+            const RecordingPreview::Note &a = before.notes[i++];
+            const RecordingPreview::Note &b = after.notes[j++];
+            if (a == b)
+                continue;
+            const QRectF ra = recordingNoteRect(a);
+            const QRectF rb = recordingNoteRect(b);
+            if (a.velocity != b.velocity) {
+                dirty += box(ra) | box(rb);
+                continue;
+            }
+            const qreal x0 = std::min(ra.right(), rb.right());
+            const qreal x1 = std::max(ra.right(), rb.right());
+            dirty += QRectF(x0, ra.top(), x1 - x0, ra.height())
+                         .toAlignedRect()
+                         .adjusted(-pad, -1, pad, 1);
+        }
+        if (!dirty.isEmpty())
+            invalidateContent(dirty);
+    }
+
   protected:
     void paintContent(QPainter &p) override
     {
@@ -1574,6 +1696,7 @@ class PianoRoll : public TimelineSurface
         drawNotes(p, model, selected, true);
         drawNotes(p, model, selected, false);
         drawDragPreview(p, model, selected);
+        drawRecordingPreview(p);
 
         if (m_drag == Drag::Band) {
             const QRectF band = QRectF(m_pressPos, m_curPos).normalized();
@@ -2844,6 +2967,27 @@ class PianoRoll : public TimelineSurface
                                    r.height());
             drawPlatedNoteText(p, labelRect, Qt::AlignLeft | Qt::AlignVCenter, keyName(m_drawKey),
                                fill, contrastingTextColor(fill));
+        }
+    }
+
+    // A recording take's notes (docs/midi-input/PLAN.md step 4), over every
+    // real note: the track's fill at the range-duplicate preview's alpha,
+    // with the ordinary border. Real notes the take will trim show through.
+    void drawRecordingPreview(QPainter &p)
+    {
+        const RecordingPreview &preview = m_sv->recordingPreview();
+        if (preview.notes.empty() || preview.track < 0)
+            return;
+        for (const RecordingPreview::Note &note : preview.notes) {
+            const QRectF r = recordingNoteRect(note);
+            if (r.right() < kKeyboardW || r.left() > width() || r.bottom() < 0 ||
+                r.top() > height())
+                continue;
+            const QRectF box = noteBox(r);
+            QColor fill = m_sv->noteFillColor(preview.track, note.velocity);
+            fill.setAlpha(kRecordingGhostAlpha);
+            p.fillRect(box, fill);
+            drawNoteBoxBorder(p, box, false);
         }
     }
 
@@ -8652,6 +8796,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_timeline = timeline;
     m_voicegroup = voicegroup;
     m_model = timeline ? buildSongViewModel(*timeline) : SongViewModel();
+    m_recordingPreview = RecordingPreview(); // another song's take (repainted below)
     m_emptyLanes.clear();
     m_selection.clear();
     m_timeSel = TimeSelection();
@@ -10396,6 +10541,25 @@ void SongView::setLiveHeldKeys(uint64_t lo, uint64_t hi)
     m_liveHeldKeys[0] = lo;
     m_liveHeldKeys[1] = hi;
     m_roll->setLiveKeys(lo, hi);
+}
+
+void SongView::setRecordingPreview(RecordingPreview preview)
+{
+    if (!m_timeline)
+        preview = RecordingPreview();
+    const RecordingPreview before = std::exchange(m_recordingPreview, std::move(preview));
+    m_roll->recordingPreviewChanged(before, m_recordingPreview);
+    m_ruler->recordingSpansChanged(before.spans, m_recordingPreview.spans);
+}
+
+QRectF SongView::recordingPreviewNoteRect(const RecordingPreview::Note &note) const
+{
+    return m_roll->recordingNoteRect(note);
+}
+
+QRectF SongView::recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const
+{
+    return m_ruler->recordingSpanRect(span);
 }
 
 void SongView::selectTrack(int track)

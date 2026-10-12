@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "core/captureevent.h"
@@ -80,11 +81,20 @@ class RecordingTake
     std::vector<SongDocument::NewNote> toNotes(const MidiTimeline &timeline, uint64_t endSample,
                                                uint32_t endSegment, uint64_t latencySamples) const;
 
+    // Where the take has recorded, in sample time: every segment it saw
+    // (punch-in, loop passes, seek landings), the current one running to
+    // endSample under toNotes' segment rule. Sorted, overlaps merged, [start,
+    // end). Empty until started(). The roll's "REC" ruler tint (step 4).
+    std::vector<std::pair<uint64_t, uint64_t>> recordedSpans(uint64_t endSample,
+                                                             uint32_t endSegment) const;
+
     static constexpr uint32_t kSegmentMask = 0xFFFFF;
 
   private:
     void closeOpen(uint64_t samplePos, bool played);
     void enterSegment(uint32_t segment, uint64_t start);
+    // The current segment ended at end: its span joins m_spans.
+    void leaveSegment(uint64_t end);
 
     int m_track = -1;
     uint32_t m_generation = 0;
@@ -95,5 +105,7 @@ class RecordingTake
     uint64_t m_lastSample = 0; // the latest stamp seen in the current segment
     int m_unmatchedOffs = 0;
     std::vector<Note> m_notes;
+    // The segments left so far, merged (see recordedSpans).
+    std::vector<std::pair<uint64_t, uint64_t>> m_spans;
     int m_open[128];
 };

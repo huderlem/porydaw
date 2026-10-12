@@ -1298,3 +1298,152 @@ reccheck, then reversed. A `git diff` comparison confirmed every revert.
 - Not verified: anything on a real device or on Windows. That covers
   R-from-the-roll feel, the A2 and A4 timing by ear, and the RtMidi patch
   beyond a syntax check.
+
+### Step 4 — done 2026-10-11 (uncommitted on `midi-input`)
+
+**Landed**
+
+- `RecordingPreview` (`src/ui/songview.h`): the take's track, its notes
+  (`{tick, duration, key, velocity}`, as `toNotes` returns them) and the
+  punched tick spans (sorted, merged). View-only; no document edit.
+- `SongView::setRecordingPreview` / `clearRecordingPreview` /
+  `recordingPreview()`, plus `recordingPreviewNoteRect` and
+  `recordingPreviewSpanRect` for the harness. `setSong` drops it.
+  - **Roll:** `PianoRoll::drawRecordingPreview` paints the ghosts after
+    both note passes and the draw-gesture preview, under the overlays
+    (loop lines, edit cursor) and plugin overlays: `noteFillColor(track,
+    velocity)` at alpha 110 (the range-duplicate preview's) with the
+    ordinary border.
+  - **Repaint cost:** the roll is a cached `TimelineSurface`, so
+    `recordingPreviewChanged` merge-walks old and new notes by (tick, key)
+    and invalidates only what changed. A held note growing at its end
+    invalidates the sliver between its old and new right edges (±2 px);
+    new, gone or re-velocitied notes invalidate their boxes; a track change
+    (the take followed its track) invalidates the whole roll. Measured by
+    reccheck: one growth tick re-rasterizes well under 1/8 of the roll.
+  - **Ruler:** `TimeRuler::drawRecordingSpans` paints each span in
+    `song_view_playhead` (the record dot's red) at alpha 56 across the
+    ruler, under the labels and loop/cursor overlays, with an opaque
+    `Space::Half` strip along the top edge. Only the slivers between old
+    and new span ends are updated while a span grows.
+- `RecordingTake::recordedSpans(endSample, endSegment)`: the take now keeps
+  a merged list of the segments it left (punch-in, each loop pass, each seek
+  landing) and adds the current one, ended like an open note in `toNotes`
+  (the clock when read in the current segment, else the last position
+  seen). This replaces the "punch-in to playhead, union the loop when
+  `segment() > 0`" approximation from the step 3 gotchas, and is exact
+  for seeks too.
+- `MainWindow::syncRecordingPreview()`: called in `synchronizePlayhead`
+  right after `setPlayheadSample` (so after `drainCapture`). Reads
+  `captureClock`, then `toNotes` (once per tick) and `recordedSpans`,
+  converts spans to ticks (nearest tick, merged again) and feeds
+  `m_takeSession->view`. Nothing is shown before the take's Begin.
+- **Clearing:**
+  - `finishRecording` sets the view's preview to exactly the notes being
+    written, with no spans (the REC tint goes at once), and passes the
+    view to `commitTake`. `commitTake` clears it right before the write,
+    so on the normal path the real notes replace the ghosts in the same
+    turn.
+  - On the deferred path (an open edit group) the ghosts stay, static,
+    until the retry writes them (or gives up: document gone or locked).
+    A newer take recording on the same view by then keeps its own preview.
+  - A dropped take (`followTakeTrack`, track deleted) clears it.
+  - The view never scrolls for the preview: it is fed after
+    `setPlayheadSample`, whose follow-scroll alone moves the camera.
+
+**Judgment calls for the user**
+
+- Ghosts are drawn **on top** of real notes; real notes the take will
+  trim or replace (later wins) show through and are not simulated.
+- The ghost uses `noteFillColor`, so in velocity-colour mode it takes the
+  velocity hue, like the real note will. When the take's track is not the
+  selected one (selection changed mid-take), the ghosts still use that
+  track's full fill, not the recessive unselected-track colour, so the
+  take stays legible.
+- The velocity lane shows nothing for ghosts.
+- A deferred commit keeps the ghosts until the write lands (no gap
+  between ghost and real note); the REC tint goes at punch-out.
+- No new theme role: the tint reuses `song_view_playhead`, as the record
+  icon does.
+
+**reccheck additions**
+
+- Take rules: `recordedSpans` empty before Begin; punch-in to clock; a
+  clock read in another segment stops at the last position; a loop pass
+  is its own span, merging once it overlaps; a seek landing starts a span.
+- Window, existing blocks: the ghost follows a track move; a held note's
+  ghost is shown and cleared when its track is deleted; a deferred take's
+  ghosts stay (without spans) until it lands, then clear.
+- New `checkRecordingDisplay` (window shown at 1400×900, zoomed to 96
+  px/beat, on a pitch no track uses, Follow Playhead off, cursor halfway
+  across the roll):
+  - the REC span starts at the punch-in; the preview equals `toNotes` at
+    the clock, held to the playhead tick;
+  - the ghost is placed at its ticks (`displayX`), and its pixel is the
+    track fill blended at alpha 110 over the same frame without the
+    overlay (A/B grab);
+  - the ruler's top row is the record red over the span, not left of the
+    punch-in;
+  - after 150 ms more, the ghost grew to the playhead, its new tail is
+    painted (A/B again), and the roll re-rasterized more than 0 and less
+    than 1/8 of its device pixels;
+  - the playhead runs past 95% of the roll with the scroll unchanged;
+  - after Stop: the preview is empty, one undo step, the real note is
+    there and painted in the full fill where the ghost was, the tint is
+    gone;
+  - a dropped take (track deleted) clears the ghosts and the tint.
+  - `PORYDAW_RECCHECK_SHOT=<png>` saves the view mid-take.
+
+**Negative tests.** Each was a scripted edit, rebuilt and run with
+reccheck, then reverted by the script, which asserted the file matched its
+original byte for byte.
+
+- Ghost not painted → the ghost and grown-tail probes FAIL.
+- No feed in `synchronizePlayhead` → the track-follow, held-ghost, punch-in
+  span and "as a commit would write it" checks FAIL.
+- Whole-roll invalidation → "repainted more than a sliver" FAIL (503094 of
+  503094 device pixels).
+- No sliver for a growing note → the grown tail is not painted, and 0
+  pixels repainted, FAIL.
+- Follow-scroll ignoring the toggle → "the view scrolled" FAIL.
+- No ruler tint → the REC tint check FAILs; a tint starting 40 px early →
+  the "span alone" check FAILs; a ghost drawn a tick late → "not placed at
+  its ticks" FAILs.
+- `commitTake` not clearing → the deferred and Stop "stayed" checks FAIL;
+  `followTakeTrack` not clearing → both dropped-take checks FAIL; spans
+  kept through the commit (two edits) → the tint-after-Stop check FAILs,
+  with the others.
+- `finishRecording` clearing at once → the deferred "did not stay" check
+  FAILs.
+- The preview pinned to its first track → the track-follow check FAILs
+  (it needed a tick before the move, added).
+- Real notes painted translucent → the "recorded note is not painted"
+  check FAILs.
+- No `leaveSegment`, no merge, no segment rule → the span rules FAIL.
+- **Not falsifiable here:** the ruler's partial `update()`. `grab()`
+  paints the ruler whole, and the ruler has no paint cache.
+
+**Verification**
+
+- Builds: `build`, `build-asan`, `build-nomidi` and `build-dummy` all exit
+  0. reccheck is OK on all four.
+- `tools/format.sh --check` is clean.
+- `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  **PASS (all harnesses)** on both the normal and ASAN builds (exit 0).
+- Not verified: a real device or Windows; fractional display scales (the
+  offscreen harness runs at 1.0); how the ghost alpha reads on the dark
+  themes; feel of the repaint during a long take with many held notes.
+
+**Gotchas for step 5 (recording options)**
+
+- **Quantize must reach the ghosts too.** Apply input quantize in one
+  place used by both `syncRecordingPreview` and `finishRecording` (after
+  `toNotes`), with the same `SongView::snapTick`, or the ghosts will jump
+  at commit. `finishRecording` turns the final notes into the static
+  ghosts for a deferred commit; quantize before that.
+- Quantizing starts after `toNotes`' later-wins pass can create new
+  same-key overlaps (two notes snapped to one tick). Either re-run the
+  overlap rules after snapping, or snap inside `toNotes` before them.
+- The snap grid is the roll's zoom-dependent one; read it at commit (the
+  plan says so) and at each preview tick, so a zoom mid-take shows what
+  will be written.

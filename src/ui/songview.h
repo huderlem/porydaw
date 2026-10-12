@@ -127,6 +127,31 @@ struct RollOverlayGeometry {
     std::function<int(qreal y)> keyAtY;
 };
 
+// A recording take's live display (docs/midi-input/PLAN.md step 4): what a
+// commit at this moment would write, held notes grown to the clock, and the
+// spans the take has punched. View-only; the document is untouched until
+// the take commits.
+struct RecordingPreview {
+    struct Note {
+        uint64_t tick = 0;
+        uint32_t duration = 0;
+        uint8_t key = 0;
+        uint8_t velocity = 0;
+        bool operator==(const Note &o) const
+        {
+            return tick == o.tick && duration == o.duration && key == o.key &&
+                   velocity == o.velocity;
+        }
+        bool operator!=(const Note &o) const { return !(*this == o); }
+    };
+    int track = -1;          // engine track the notes go to
+    std::vector<Note> notes; // sorted by tick, then key
+    // Punched [start, end) tick spans, sorted and merged: the ruler's REC
+    // tint. Empty once the take has ended (a commit still pending).
+    std::vector<std::pair<uint64_t, uint64_t>> spans;
+    bool empty() const { return notes.empty() && spans.empty(); }
+};
+
 class SongView : public QWidget
 {
     Q_OBJECT
@@ -263,6 +288,17 @@ class SongView : public QWidget
 
     int selectedTrack() const { return m_selectedTrack; }
     void selectTrack(int track);
+    // The recording take's ghost notes and REC ruler tint, fed by the main
+    // window once per playhead tick while recording. Repaints only what
+    // changed; never scrolls. clearRecordingPreview drops it (the take
+    // committed or was dropped); a new song clears it too.
+    void setRecordingPreview(RecordingPreview preview);
+    void clearRecordingPreview() { setRecordingPreview({}); }
+    const RecordingPreview &recordingPreview() const { return m_recordingPreview; }
+    // Where the preview's note sits in the piano roll and where its span
+    // sits in the ruler, in those widgets' coordinates (harness probes).
+    QRectF recordingPreviewNoteRect(const RecordingPreview::Note &note) const;
+    QRectF recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const;
     // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
     // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
     void setLiveHeldKeys(uint64_t lo, uint64_t hi);
@@ -918,6 +954,7 @@ class SongView : public QWidget
     double m_keyHeight = songview::kVelHandleMinKeyH;
     int m_selectedTrack = 0;
     uint64_t m_liveHeldKeys[2] = {0, 0};
+    RecordingPreview m_recordingPreview;
     double m_playheadTick = 0.0;
     uint64_t m_editCursorTick = 0;
     bool m_playing = false;

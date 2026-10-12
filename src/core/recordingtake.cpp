@@ -24,6 +24,7 @@ void RecordingTake::clear()
     m_lastSample = 0;
     m_unmatchedOffs = 0;
     m_notes.clear();
+    m_spans.clear();
     std::fill(std::begin(m_open), std::end(m_open), -1);
 }
 
@@ -45,6 +46,45 @@ void RecordingTake::enterSegment(uint32_t segment, uint64_t start)
     m_segment = segment;
     m_segmentStart = start;
     m_lastSample = start;
+}
+
+namespace {
+
+// Adds [start, end) to a sorted, merged span list, merging what it touches.
+void addSpan(std::vector<std::pair<uint64_t, uint64_t>> &spans, uint64_t start, uint64_t end)
+{
+    if (end <= start)
+        return;
+    auto it = std::lower_bound(spans.begin(), spans.end(), std::make_pair(start, start));
+    if (it != spans.begin() && std::prev(it)->second >= start)
+        --it;
+    while (it != spans.end() && it->first <= end) {
+        start = std::min(start, it->first);
+        end = std::max(end, it->second);
+        it = spans.erase(it);
+    }
+    spans.insert(it, {start, end});
+}
+
+} // namespace
+
+void RecordingTake::leaveSegment(uint64_t end)
+{
+    addSpan(m_spans, m_segmentStart, std::max(end, m_segmentStart));
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> RecordingTake::recordedSpans(uint64_t endSample,
+                                                                        uint32_t endSegment) const
+{
+    if (!m_started)
+        return {};
+    std::vector<std::pair<uint64_t, uint64_t>> spans = m_spans;
+    // As toNotes ends an open note: at endSample when it was read in the
+    // current segment, else at the last position the take saw.
+    const bool sameSegment = (endSegment & kSegmentMask) == (m_segment & kSegmentMask);
+    const uint64_t end = sameSegment && endSample >= m_segmentStart ? endSample : m_lastSample;
+    addSpan(spans, m_segmentStart, std::max(end, m_lastSample));
+    return spans;
 }
 
 void RecordingTake::push(const CaptureEvent &ev)
@@ -69,8 +109,9 @@ void RecordingTake::push(const CaptureEvent &ev)
             // where the segment did. Past a lost Boundary, the position this
             // one ended at belongs to a segment the take never saw: the last
             // position seen is the bound, as below.
-            closeOpen(ev.segment == m_segment + 1 ? ev.samplePos : m_lastSample,
-                      /*played=*/false);
+            const uint64_t end = ev.segment == m_segment + 1 ? ev.samplePos : m_lastSample;
+            closeOpen(end, /*played=*/false);
+            leaveSegment(end);
             enterSegment(ev.segment, ev.resumePos);
         }
         return;
@@ -79,6 +120,7 @@ void RecordingTake::push(const CaptureEvent &ev)
         // The segment's Boundary was dropped (a full ring). Its true end is
         // unknown; the last position seen in it is the best bound.
         closeOpen(m_lastSample, /*played=*/false);
+        leaveSegment(m_lastSample);
         enterSegment(ev.segment, ev.samplePos);
     }
     m_lastSample = std::max(m_lastSample, ev.samplePos);

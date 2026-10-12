@@ -27,6 +27,7 @@
 #include "mainwindow.h"
 #include "ui/keymap.h"
 #include "ui/songview.h"
+#include "ui/theme/themeruntime.h"
 
 // --reccheck <projectRoot> <songLabel>: MIDI recording
 // (docs/midi-input/PLAN.md step 3). QSettings is redirected into a temp dir
@@ -286,6 +287,30 @@ void checkTakeRules()
         if (!check(sameNotes(notes, {{80, 60, 20, 100}}),
                    "take: a note held across two wraps did not end at the first loop end"))
             printNotes("got", notes);
+    }
+    // Where the take has recorded (the ruler's REC tint): the punched span,
+    // each loop pass and seek landing, merged where they overlap; the
+    // current one ends at the clock read in its segment, else at the last
+    // position seen. Nothing before the Begin.
+    {
+        using Spans = std::vector<std::pair<uint64_t, uint64_t>>;
+        take.begin(0, 14);
+        Feed feed{take, 14};
+        check(take.recordedSpans(5000, 0).empty(), "take: a take not yet begun has a span");
+        feed.begin(50000);
+        feed.on(60000, 60);
+        check(take.recordedSpans(70000, 0) == Spans{{50000, 70000}},
+              "take: the punched span does not run from the punch-in to the clock");
+        check(take.recordedSpans(70000, 1) == Spans{{50000, 60000}},
+              "take: a clock read in another segment did not stop at the last position");
+        feed.jump(100000, 20000);
+        check(take.recordedSpans(30000, 1) == Spans{{20000, 30000}, {50000, 100000}},
+              "take: a loop pass is not a span of its own beside the first");
+        check(take.recordedSpans(60000, 1) == Spans{{20000, 100000}},
+              "take: overlapping passes did not merge into one span");
+        feed.jump(70000, 5000);
+        check(take.recordedSpans(8000, 2) == Spans{{5000, 8000}, {20000, 100000}},
+              "take: a seek's landing did not start a span of its own");
     }
     // The latency offset moves played times earlier, clamped at punch-in
     // and at the loop start; an end the take imposed (the wrap) stays put.
@@ -672,6 +697,11 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         m_stopAction->trigger();
         check(!recording() && !find(a, 60, tickOf(p1)).has_value(),
               "record: a take ended inside an open edit group was written into it");
+        check(view->recordingPreview().notes.size() == 1 &&
+                  view->recordingPreview().notes.front().key == 60 &&
+                  view->recordingPreview().spans.empty(),
+              "record: a deferred take's ghost notes did not stay (without the REC tint) until "
+              "it lands");
         doc.endEditGroup(/*discard=*/true);
         const int undoAfterGroup = undo->index();
         QElapsedTimer waited;
@@ -683,6 +713,8 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
                   find(a, 60, tickOf(p1)).has_value() &&
                   message() == QStringLiteral("Recorded 1 note(s)."),
               "record: a take ended inside an edit group did not land as its own step after it");
+        check(view->recordingPreview().empty(),
+              "record: a deferred take's ghost notes stayed after it landed");
         send(0x80, 60, 0);
         pumpMs(30);
         undo->undo();
@@ -833,12 +865,16 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         const uint64_t p1 = playhead();
         send(0x90, 60, 100);
         pumpMs(50);
+        synchronizePlayhead(); // the ghost shows on the old slot
         check(doc.moveTrack(a, b), "record: the track move mid-take failed");
         const int moved = m_take.track();
         check(recording() && moved != a, "record: the take did not follow its track's move");
         check(m_audio.liveTarget() == moved, "record: the sound did not follow the take's track");
         check(saysRecordingInto(moved),
               "record: the status bar still names the take's old track after the move");
+        synchronizePlayhead();
+        check(view->recordingPreview().track == moved && view->recordingPreview().notes.size() == 1,
+              "record: the ghost notes did not follow the take's track");
         send(0x80, 60, 0);
         pumpMs(30);
         m_stopAction->trigger();
@@ -852,8 +888,12 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         pumpMs(30);
         send(0x90, 62, 100);
         pumpMs(50);
+        synchronizePlayhead();
+        check(view->recordingPreview().notes.size() == 1,
+              "record: a held note shows no ghost before its track is deleted");
         const int undoAtDelete = undo->index();
         doc.deleteTrack(a);
+        check(view->recordingPreview().empty(), "record: a dropped take left its ghost notes");
         check(!recording() && !m_recordAction->isChecked() &&
                   m_audio.transport() == Transport::Playing,
               "record: deleting the take's track did not end the recording (playback going on)");
@@ -1318,7 +1358,239 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         undo->undo();
     }
 
+    checkRecordingDisplay();
     m_audio.holdDeviceForTest(false);
+}
+
+// The take's live display (plan step 4), on the song's own tab: ghost notes
+// in the roll and a REC tint on the ruler, fed once per playhead tick; a
+// held note grows with the clock, repainting only a sliver of the roll;
+// with Follow Playhead off nothing scrolls; Stop swaps the ghosts for the
+// real notes and the tint goes; a dropped take (its track deleted) clears
+// them. PORYDAW_RECCHECK_SHOT=<file.png> saves the view mid-take.
+void MainWindow::checkRecordingDisplay()
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    auto *roll = dynamic_cast<songview::TimelineSurface *>(view->findChild<QWidget *>("pianoRoll"));
+    auto *ruler = view->findChild<QWidget *>(QStringLiteral("timeRuler"));
+    if (!check(roll && ruler, "display: the song view has no piano roll or ruler"))
+        return;
+    int a = -1;
+    for (int t = 0; t < MAX_TRACKS && a < 0; t++) {
+        if (session->timeline->tracks[t].used && doc.smfTrackFor(t) >= 0)
+            a = t;
+    }
+    // A pitch no track plays, so the probes see only the ghost (or the
+    // recorded note) over the bare row.
+    int key = -1;
+    for (int k = 96; k >= 36 && key < 0; k--) {
+        bool used = false;
+        for (int t = 0; t < MAX_TRACKS && !used; t++) {
+            for (const DocNote &n : doc.notesForTrack(t))
+                used = used || n.key == k;
+        }
+        if (!used)
+            key = k;
+    }
+    if (!check(a >= 0 && key >= 0, "display: no song track, or every pitch is used"))
+        return;
+
+    // A real layout, zoomed in so a short held note is wide.
+    resize(1400, 900);
+    show();
+    QApplication::processEvents();
+    view->selectTrack(a);
+    SongView::ViewState state = view->viewState();
+    state.pxPerBeat = 96.0;
+    state.keyHeight = 16.0;
+    view->applyViewState(state);
+    view->ensureKeyVisible(key);
+    QApplication::processEvents();
+    const qreal dpr = roll->devicePixelRatioF();
+    const auto pixel = [&](const QImage &image, QPointF at) {
+        return image.pixelColor(int(at.x() * dpr), int(at.y() * dpr));
+    };
+    const auto blendsTo = [](const QColor &got, const QColor &fill, int alpha,
+                             const QColor &under) {
+        const auto ch = [&](int f, int u) { return (f * alpha + u * (255 - alpha)) / 255; };
+        return std::abs(got.red() - ch(fill.red(), under.red())) <= 3 &&
+               std::abs(got.green() - ch(fill.green(), under.green())) <= 3 &&
+               std::abs(got.blue() - ch(fill.blue(), under.blue())) <= 3;
+    };
+    const QColor rec = themes::color(themes::Role::song_view_playhead);
+    const int gridWidth = roll->width() - songview::kKeyboardW;
+    // Halfway across the roll: room to grow, and the follow-scroll (which
+    // jumps past 85%) is a short pump away.
+    const uint64_t cursor = uint64_t(std::max(0.0, view->tickAtContentX(gridWidth * 0.5)));
+    const bool followWas = m_followPlayheadAction->isChecked();
+    m_followPlayheadAction->setChecked(false);
+    const double scrollBefore = view->viewState().scrollPx;
+    const int undoBefore = undo->index();
+    view->setEditCursorTick(cursor);
+    m_recordAction->trigger();
+    pumpMs(30);
+    synchronizePlayhead();
+    check(view->recordingPreview().notes.empty() && view->recordingPreview().spans.size() == 1 &&
+              view->recordingPreview().spans.front().first == cursor,
+          "display: a fresh take's REC span does not start at the punch-in");
+
+    send(0x90, uint8_t(key), 100);
+    pumpMs(150);
+    synchronizePlayhead();
+    const RecordingPreview first = view->recordingPreview();
+    {
+        uint64_t pos = 0;
+        uint32_t segment = 0;
+        m_audio.captureClock(&pos, &segment);
+        const auto notes =
+            m_take.toNotes(*session->timeline, pos, segment, recordingLatencySamples());
+        bool same = first.notes.size() == notes.size();
+        for (size_t i = 0; same && i < notes.size(); i++)
+            same = first.notes[i] == RecordingPreview::Note{notes[i].tick, notes[i].duration,
+                                                            notes[i].key, notes[i].velocity};
+        check(first.track == a && same && first.notes.size() == 1 &&
+                  first.notes.front().key == key &&
+                  first.notes.front().tick + first.notes.front().duration ==
+                      tickOf(m_audio.playheadSamples()),
+              "display: the ghost notes are not the take as a commit would write it, held to "
+              "the clock");
+    }
+    if (first.notes.size() != 1) {
+        m_stopAction->trigger();
+        m_followPlayheadAction->setChecked(followWas);
+        return;
+    }
+    const RecordingPreview::Note ghost = first.notes.front();
+    const QRectF ghostRect = view->recordingPreviewNoteRect(ghost);
+    const QPointF ghostProbe = ghostRect.center();
+    check(std::abs(ghostRect.left() -
+                   view->displayX(double(ghost.tick), songview::kKeyboardW, dpr)) < 0.01 &&
+              std::abs(ghostRect.right() - view->displayX(double(ghost.tick + ghost.duration),
+                                                          songview::kKeyboardW, dpr)) < 0.01,
+          "display: the ghost is not placed at its ticks");
+    const QImage withGhost = roll->grab().toImage();
+    const QImage rulerDuring = ruler->grab().toImage();
+    // The same frame without the overlay (the next tick feeds it again).
+    view->clearRecordingPreview();
+    const QImage withoutGhost = roll->grab().toImage();
+    view->setRecordingPreview(first);
+    check(blendsTo(pixel(withGhost, ghostProbe), view->noteFillColor(a, ghost.velocity), 110,
+                   pixel(withoutGhost, ghostProbe)) &&
+              pixel(withGhost, ghostProbe) != pixel(withoutGhost, ghostProbe),
+          "display: the held note's ghost is not painted in its track's colour at reduced alpha");
+    const QRectF spanRect = view->recordingPreviewSpanRect(first.spans.front());
+    check(spanRect.width() > 4 && pixel(rulerDuring, QPointF(spanRect.center().x(), 0.0)) == rec &&
+              pixel(rulerDuring,
+                    QPointF(view->displayX(double(cursor), songview::kGutterW, dpr) - 4, 0.0)) !=
+                  rec,
+          "display: the ruler shows no REC tint over the punched span alone");
+
+    // Growing: the next ticks lengthen the ghost to the clock, and the
+    // roll re-rasterizes only around its moving end.
+    (void)roll->grab();
+    const songview::TimelineSurfaceDiagnostics before = roll->diagnostics();
+    pumpMs(150);
+    synchronizePlayhead();
+    const QImage grown = roll->grab().toImage();
+    const songview::TimelineSurfaceDiagnostics after = roll->diagnostics();
+    const RecordingPreview second = view->recordingPreview();
+    check(second.notes.size() == 1 && second.notes.front().tick == ghost.tick &&
+              second.notes.front().duration > ghost.duration &&
+              second.notes.front().tick + second.notes.front().duration ==
+                  tickOf(m_audio.playheadSamples()),
+          "display: the held note's ghost did not grow to the playhead");
+    if (second.notes.size() == 1) {
+        const QRectF grownRect = view->recordingPreviewNoteRect(second.notes.front());
+        const QPointF tailProbe((ghostRect.right() + grownRect.right()) / 2, ghostProbe.y());
+        view->clearRecordingPreview();
+        const QImage grownWithout = roll->grab().toImage();
+        view->setRecordingPreview(second);
+        check(grownRect.right() > ghostRect.right() + 8 &&
+                  blendsTo(pixel(grown, tailProbe), view->noteFillColor(a, ghost.velocity), 110,
+                           pixel(grownWithout, tailProbe)) &&
+                  pixel(grown, tailProbe) != pixel(grownWithout, tailProbe),
+              "display: the grown part of the ghost is not painted");
+    }
+    const quint64 rollPixels = quint64(roll->width() * dpr) * quint64(roll->height() * dpr);
+    const quint64 repainted = after.contentPaintPixelCount - before.contentPaintPixelCount;
+    if (!check(repainted > 0 && repainted * 8 < rollPixels,
+               "display: a growing ghost repainted more than a sliver of the roll"))
+        std::fprintf(stderr, "reccheck:   repainted %llu of %llu device pixels\n",
+                     (unsigned long long)repainted, (unsigned long long)rollPixels);
+    if (const QByteArray shot = qgetenv("PORYDAW_RECCHECK_SHOT"); !shot.isEmpty())
+        view->grab().save(QString::fromLocal8Bit(shot));
+
+    // Follow Playhead off: the playhead runs past where following would
+    // have scrolled (85% of the roll), and the view stays put.
+    for (int i = 0; i < 200 && view->contentX(view->playheadTick()) < gridWidth * 0.95; i++) {
+        pumpMs(50);
+        synchronizePlayhead();
+    }
+    check(view->contentX(view->playheadTick()) >= gridWidth * 0.95,
+          "display: the playhead never crossed the follow-scroll threshold");
+    check(view->viewState().scrollPx == scrollBefore,
+          "display: with Follow Playhead off the view scrolled during the take");
+
+    // Stop: the ghosts go, the real note is there, and so is the tint.
+    send(0x80, uint8_t(key), 0);
+    pumpMs(30);
+    m_stopAction->trigger();
+    const QImage committed = roll->grab().toImage();
+    const QImage rulerAfter = ruler->grab().toImage();
+    std::optional<DocNote> landed;
+    for (const DocNote &n : doc.notesForTrack(a)) {
+        if (n.key == key && n.tick == ghost.tick)
+            landed = n;
+    }
+    check(view->recordingPreview().empty() && undo->index() == undoBefore + 1 && landed,
+          "display: after Stop the ghost notes stayed, or the take did not land");
+    if (landed) {
+        const QRectF real = view->recordingPreviewNoteRect(
+            {landed->tick, landed->duration, landed->key, landed->velocity});
+        const QPointF at(real.left() + (ghostProbe.x() - ghostRect.left()), real.center().y());
+        check(pixel(committed, at) == view->noteFillColor(a, landed->velocity),
+              "display: after Stop the recorded note is not painted where its ghost was");
+    }
+    check(pixel(rulerAfter, QPointF(spanRect.center().x(), 0.0)) != rec,
+          "display: the REC tint stayed after Stop");
+    undo->undo();
+
+    // A dropped take (its track deleted) clears the display too.
+    m_recordAction->trigger();
+    pumpMs(30);
+    send(0x90, uint8_t(key), 100);
+    pumpMs(100);
+    synchronizePlayhead();
+    const int undoAtDelete = undo->index();
+    check(!view->recordingPreview().empty(), "display: the second take shows nothing");
+    const RecordingPreview dropped = view->recordingPreview();
+    doc.deleteTrack(a);
+    const QImage rulerDropped = ruler->grab().toImage();
+    check(m_takeSession == nullptr && view->recordingPreview().empty() &&
+              (dropped.spans.empty() ||
+               pixel(rulerDropped,
+                     QPointF(view->recordingPreviewSpanRect(dropped.spans.front()).center().x(),
+                             0.0)) != rec),
+          "display: a dropped take left its ghost notes or REC tint");
+    send(0x80, uint8_t(key), 0);
+    pumpMs(30);
+    m_stopAction->trigger();
+    while (undo->index() > undoAtDelete)
+        undo->undo();
+    check(undo->index() == undoBefore, "display: undo did not restore the song");
+    m_followPlayheadAction->setChecked(followWas);
 }
 
 int runRecordCheck(const QString &projectRoot, const QString &songLabel)

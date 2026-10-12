@@ -5399,6 +5399,7 @@ void MainWindow::synchronizePlayhead()
     const bool playheadTimerWasActive = m_playheadTimer->isActive();
     const uint64_t playhead = m_audio.playheadSamples();
     m_active->view->setPlayheadSample(playhead, playing);
+    syncRecordingPreview();
     syncCompanion(playhead, playing);
 #ifdef PORYDAW_SCRIPTING
     m_scriptHost->tick();
@@ -5625,6 +5626,32 @@ void MainWindow::drainCapture()
         m_take.push(ev);
 }
 
+void MainWindow::syncRecordingPreview()
+{
+    if (!m_takeSession || !m_take.started())
+        return;
+    uint64_t pos = 0;
+    uint32_t segment = 0;
+    m_audio.captureClock(&pos, &segment);
+    const MidiTimeline &timeline = *m_takeSession->timeline;
+    RecordingPreview preview;
+    preview.track = m_take.track();
+    for (const SongDocument::NewNote &n :
+         m_take.toNotes(timeline, pos, segment, recordingLatencySamples()))
+        preview.notes.push_back({n.tick, n.duration, n.key, n.velocity});
+    const auto tickAt = [&](uint64_t sample) {
+        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
+    };
+    for (const auto &[start, end] : m_take.recordedSpans(pos, segment)) {
+        const uint64_t from = tickAt(start), to = tickAt(end);
+        if (!preview.spans.empty() && preview.spans.back().second >= from)
+            preview.spans.back().second = std::max(preview.spans.back().second, to);
+        else if (to > from)
+            preview.spans.push_back({from, to});
+    }
+    m_takeSession->view->setRecordingPreview(std::move(preview));
+}
+
 void MainWindow::finishRecording()
 {
     if (!m_takeSession)
@@ -5646,27 +5673,39 @@ void MainWindow::finishRecording()
             m_take.toNotes(*session->timeline, stopSample, stopSegment, recordingLatencySamples());
     const int track = m_take.track();
     m_take.clear();
+    // The ghosts hold still at what is being written (the REC tint goes:
+    // the take has ended) until commitTake swaps them for the real notes.
+    RecordingPreview ghosts;
+    ghosts.track = track;
+    for (const SongDocument::NewNote &n : notes)
+        ghosts.notes.push_back({n.tick, n.duration, n.key, n.velocity});
+    session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.
-    commitTake(&session->doc, track, notes, m_audio.captureDropped() != m_takeDropsAtStart);
+    commitTake(&session->doc, session->view, track, notes,
+               m_audio.captureDropped() != m_takeDropsAtStart);
     if (session == m_active)
         publishLiveTarget();
     syncRecordAction();
 }
 
-void MainWindow::commitTake(const QPointer<SongDocument> &doc, int track,
-                            const std::vector<SongDocument::NewNote> &notes, bool inputLost)
+void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
+                            int track, const std::vector<SongDocument::NewNote> &notes,
+                            bool inputLost)
 {
     if (doc && doc->editGroupDepth() > 0 && !notes.empty()) {
         // Something holds an edit group open (a script transaction that
         // stopped the transport, say): written now, the take would join
         // that group's step under its name, and go if it is rolled back.
         // It lands as its own step once the group has closed.
-        QTimer::singleShot(kTakeCommitRetryMs, this, [this, doc, track, notes, inputLost] {
-            commitTake(doc, track, notes, inputLost);
+        QTimer::singleShot(kTakeCommitRetryMs, this, [this, doc, view, track, notes, inputLost] {
+            commitTake(doc, view, track, notes, inputLost);
         });
         return;
     }
+    // A newer take recording on the same view owns its preview now.
+    if (view && !(m_takeSession && m_takeSession->view == view))
+        view->clearRecordingPreview();
     bool written = false;
     if (doc && !notes.empty() && !doc->isLocked()) {
         const uint64_t revision = doc->revision();
@@ -5708,6 +5747,7 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
     m_audio.armCapture(0);
     drainCapture();
     m_take.clear();
+    session.view->clearRecordingPreview();
     statusBar()->showMessage(tr("Recording stopped: its track was deleted."), 6000);
     syncRecordAction();
 }
