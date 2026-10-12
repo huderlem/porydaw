@@ -13,12 +13,14 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
+#include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <iterator>
@@ -42,7 +44,8 @@
 // <shot>-page.png.
 //
 // Step 1 covers: the parse table (a velocity-0 note on is a note off;
-// aftertouch, program change and system messages are dropped), the input
+// aftertouch and system messages are dropped, a program change is kept),
+// the input
 // ring (FIFO, overflow counted, several producers at once against a
 // concurrent consumer), port-list plumbing on whatever backend this machine
 // has (without asserting that any device exists), the injector reaching the
@@ -72,6 +75,15 @@
 // CC moves at Enter, the wheel needs focus, Learn, a learn started elsewhere
 // shows, second click and Esc cancel inside a dialog that stays open), and MOD following its routed CC live and into the capture
 // ring while the CC it left does nothing.
+//
+// Its step 2 covers live play of every routed lane (VOL, PAN and LFOS at
+// the knob's value, BENDR scaled to 0..24, on the target track only), a
+// program change switching the target's voice, one past the voicegroup's
+// last voice ignored and reported once, CC121 resetting only the routed
+// lanes (and bend) and never the voice, and a target change handing every
+// touched lane and the voice back to the song. The handback's "untouched
+// lanes stay untouched" half is --primecheck's (TimelinePlayer::chaseTouched
+// on a synthetic song).
 
 namespace {
 
@@ -128,7 +140,9 @@ void checkParseTable()
     check(parsed({0x90, 0xBC, 0xE4}, {0x90, 0x3C, 0x64}), "data bytes were not masked to 7 bits");
     check(rejected({0xA0, 60, 10}), "polyphonic aftertouch was not dropped");
     check(rejected({0xD0, 10}), "channel aftertouch was not dropped");
-    check(rejected({0xC0, 5}), "program change was not dropped");
+    check(parsed({0xC5, 0x85}, {0xC5, 0x05, 0}) && parsed({0xC0, 5, 9}, {0xC0, 5, 0}),
+          "a program change did not parse with its one (masked) data byte");
+    check(rejected({0xC0}) && rejected({0xB0, 7}), "a truncated message was accepted");
     check(rejected({0xF8}) && rejected({0xFE}) && rejected({0xF0, 0x7E, 0xF7}),
           "clock, active sensing or sysex was not dropped");
     check(rejected({0x90, 60}) && rejected({}), "a truncated message was accepted");
@@ -951,6 +965,7 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
 
     checkLivePlay();
     checkLiveRoutes();
+    checkLiveControls();
     return g_failures - before;
 }
 
@@ -1368,6 +1383,187 @@ void MainWindow::checkLiveRoutes()
 
     midi.setRoute(0x01, 1);
     check(midi.routes() == MidiRoutes(), "live routes: could not return to the defaults");
+    drain(midi.ring());
+    m_audio.holdDeviceForTest(false);
+}
+
+// docs/midi-controls/PLAN.md step 2: every routed lane, program changes,
+// CC121 and the target-change handback, as engine state.
+void MainWindow::checkLiveControls()
+{
+    if (!m_audioOk) {
+        std::printf("midicheck: live controls SKIP (no audio device)\n");
+        return;
+    }
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const MidiTimeline *timeline = m_active->timeline.get();
+    const int a = m_audio.liveTarget();
+    int b = -1;
+    for (int t = 0; t < MAX_TRACKS && b < 0; t++)
+        if (t != a && timeline->tracks[t].used)
+            b = t;
+    if (!check(a >= 0 && b >= 0, "live controls: no live target and second track"))
+        return;
+    m_audio.holdDeviceForTest(true);
+    drain(midi.ring());
+    const M4AEngine *engine = m_audio.engineForTest();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t d1, uint8_t d2) { midi.injectForTest({0xB0, d1, d2}); };
+    // As a keyboard sends it: two bytes.
+    const auto program = [&](uint8_t p) { midi.injectBytesForTest({0xC0, p}); };
+    enum { Vol, Pan, BendR, Lfos, Mod, Bend, Program };
+    const auto lanes = [&](int t) {
+        const M4ATrack &tr = engine->tracks[t];
+        return std::array<int, 7>{tr.rawVolume, tr.pan,  tr.bendRange,     tr.lfoSpeed,
+                                  tr.mod,       tr.bend, tr.currentProgram};
+    };
+
+    // BENDR on CC20 and LFOS on CC21 (VOL and PAN keep CC7 and CC10).
+    check(midi.setRoute(0x14, 20) && midi.setRoute(0x15, 21),
+          "live controls: BENDR and LFOS could not be routed");
+    // The song's own state at the playhead: a seek chases every track.
+    m_audio.seek(0);
+    pumpMs(30);
+    const std::array<int, 7> songA = lanes(a);
+    const std::array<int, 7> songB = lanes(b);
+
+    // Each lane at its scale (D2), on the target track only. Values the
+    // song's chased ones can't equal, so the handback below is seen.
+    const int vol = songA[Vol] == 50 ? 51 : 50;
+    const int panByte = songA[Pan] == 100 - 64 ? 101 : 100;
+    const int lfos = songA[Lfos] == 90 ? 91 : 90;
+    send(7, uint8_t(vol));
+    pumpMs(30);
+    check(lanes(a)[Vol] == vol &&
+              engine->tracks[a].volume == uint8_t(vol * engine->songMasterVolume / MAX_SONG_VOLUME),
+          "live controls: CC7 did not set the target's VOL to the knob's value");
+    send(10, uint8_t(panByte));
+    pumpMs(30);
+    check(lanes(a)[Pan] == panByte - 64, "live controls: CC10 did not set the target's PAN");
+    send(21, uint8_t(lfos));
+    pumpMs(30);
+    check(lanes(a)[Lfos] == lfos, "live controls: CC21 did not set the target's LFOS");
+    // BENDR: the knob's full travel is 0..24 semitones, rounded.
+    bool bendrScaled = true;
+    for (const auto &[knob, semitones] :
+         {std::pair{0, 0}, std::pair{3, 1}, std::pair{127, 24}, std::pair{64, 12}}) {
+        send(20, uint8_t(knob));
+        pumpMs(30);
+        bendrScaled &= lanes(a)[BendR] == semitones;
+    }
+    check(bendrScaled, "live controls: CC20 did not set BENDR on the 0..24 scale");
+    if (songA[BendR] == 12) { // keep the restore visible
+        send(20, 127);
+        pumpMs(30);
+    }
+    const int bendrNow = lanes(a)[BendR];
+    // An unrouted CC moves nothing.
+    send(22, 99);
+    pumpMs(30);
+    check(lanes(a) == std::array<int, 7>{vol, panByte - 64, bendrNow, lfos, songA[Mod], songA[Bend],
+                                         songA[Program]},
+          "live controls: the routed lanes did not hold, or an unrouted CC moved one");
+    check(lanes(b) == songB, "live controls: a routed knob moved a track other than the target");
+
+    // Program change: the target's voice, the data byte as the slot.
+    int voices = VOICEGROUP_SIZE;
+    if (m_active->vgSource) {
+        voices = 0;
+        for (int slot = 0; slot < VOICEGROUP_SIZE; slot++)
+            if (m_active->vgSource->kindAt(slot) != VgLineKind::None)
+                voices = slot + 1;
+    }
+    check(voices > 1 && m_audio.liveVoiceCount() == voices,
+          "live controls: the voicegroup's voice count was not published");
+    const int prog = (songA[Program] + 1) % voices;
+    program(uint8_t(prog));
+    pumpMs(30);
+    check(lanes(a)[Program] == prog &&
+              engine->tracks[a].currentVoice.type == m_active->voicegroup->voices[prog].type,
+          "live controls: a program change did not switch the target's voice");
+    check(lanes(b) == songB, "live controls: a program change reached another track");
+
+    // Past the voicegroup's last voice: ignored, and reported once per poll
+    // however many arrived. The count is shortened so any song shows it.
+    pollLiveKeys(); // settle anything earlier
+    const int reports = m_liveIgnoredReports;
+    m_audio.setLiveVoiceCount(10);
+    const int inRange = prog == 9 ? 8 : 9;
+    program(10);
+    program(120);
+    pumpMs(30);
+    check(lanes(a)[Program] == prog, "live controls: a program past the last voice was applied");
+    pollLiveKeys();
+    check(m_liveIgnoredReports == reports + 1 &&
+              statusBar()->currentMessage().contains(QStringLiteral("120")) &&
+              statusBar()->currentMessage().contains(QStringLiteral("0–9")),
+          "live controls: ignored program changes were not reported once in the status bar");
+    pollLiveKeys();
+    check(m_liveIgnoredReports == reports + 1, "live controls: an ignored program was re-reported");
+    program(uint8_t(inRange)); // the last voice still plays
+    pumpMs(30);
+    pollLiveKeys();
+    check(lanes(a)[Program] == inRange && m_liveIgnoredReports == reports + 1,
+          "live controls: the voicegroup's last voice was refused");
+    publishLiveTarget();
+    check(m_audio.liveVoiceCount() == voices, "live controls: the voice count was not republished");
+    program(uint8_t(prog));
+    pumpMs(30);
+    check(lanes(a)[Program] == prog, "live controls: the voice count was not lifted again");
+
+    // CC121 (J5): bend and every routed lane go to the engine's track-init
+    // values; a lane routed to none (PAN and MOD here) and the voice stay.
+    send(1, 127);
+    midi.injectForTest({0xE0, 0, 96});
+    pumpMs(30);
+    const int modNow = lanes(a)[Mod];
+    check(modNow > 0 && lanes(a)[Bend] == 32,
+          "live controls: the wheels did not move before CC121");
+    midi.setRoute(0x0A, MidiRoutes::kNone);
+    midi.setRoute(0x01, MidiRoutes::kNone);
+    send(121, 0);
+    pumpMs(30);
+    check(lanes(a) == std::array<int, 7>{127, panByte - 64, 2, 22, modNow, 0, prog},
+          "live controls: CC121 did not reset exactly the routed lanes and bend");
+    check(lanes(b) == songB, "live controls: CC121 reached another track");
+    midi.setRoute(0x0A, 10);
+    midi.setRoute(0x01, 1);
+    // Off the song's values again, every lane (the resets may sit on them).
+    send(7, uint8_t(vol));
+    send(20, songA[BendR] == 24 ? 64 : 127);
+    send(21, uint8_t(lfos));
+    send(1, songA[Mod] == modNow ? 0 : 127);
+    midi.injectForTest({0xE0, 0, uint8_t(songA[Bend] == 32 ? 32 : 96)});
+    pumpMs(30);
+    bool allMoved = true;
+    for (int lane = Vol; lane <= Program; lane++)
+        allMoved &= lanes(a)[size_t(lane)] != songA[size_t(lane)];
+    check(allMoved, "live controls: the song's own values hide the handback check");
+
+    // Leaving the track hands every touched lane and the voice back to the
+    // song, as chased at the playhead; the new target is undisturbed.
+    view->selectTrack(b);
+    pumpMs(30);
+    check(m_audio.liveTarget() == b && lanes(a) == songA,
+          "live controls: leaving a track did not hand its touched lanes and voice back");
+    check(lanes(b) == songB, "live controls: the new target's lanes were disturbed");
+    // No target: a program change is ignored, not counted.
+    const uint32_t ignored = m_audio.liveIgnoredProgram();
+    m_audio.setLiveTarget(-1);
+    program(127);
+    send(7, 1);
+    pumpMs(30);
+    check(lanes(a) == songA && lanes(b) == songB && m_audio.liveIgnoredProgram() == ignored,
+          "live controls: with no target a program change or knob still acted");
+    view->selectTrack(a);
+    publishLiveTarget();
+    pumpMs(30);
+
+    midi.setRoute(0x14, MidiRoutes::kNone);
+    midi.setRoute(0x15, MidiRoutes::kNone);
+    check(midi.routes() == MidiRoutes(), "live controls: could not return to the defaults");
     drain(midi.ring());
     m_audio.holdDeviceForTest(false);
 }

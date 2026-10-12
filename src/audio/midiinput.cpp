@@ -610,30 +610,34 @@ void MidiInput::pollLearn()
 
 bool MidiInput::parse(const unsigned char *bytes, size_t size, MidiMsg *out)
 {
-    if (!bytes || size < 3)
-        return false; // every type porydaw keeps has two data bytes
+    if (!bytes || size < 2)
+        return false; // every type porydaw keeps has a data byte
     const uint8_t status = bytes[0];
-    const uint8_t d1 = bytes[1] & 0x7F;
-    const uint8_t d2 = bytes[2] & 0x7F;
     if (status < 0x80)
         return false; // RtMidi expands running status; a bare data byte is garbage
+    const uint8_t d1 = bytes[1] & 0x7F;
     switch (status & 0xF0) {
+    case 0xC0: // program change: the target track's voice (one data byte)
+        *out = {status, d1, 0};
+        return true;
     case 0x90:
-        if (d2 == 0) { // note on with velocity 0 is a note off
-            *out = {uint8_t(0x80 | (status & 0x0F)), d1, 0};
-            return true;
-        }
-        [[fallthrough]];
     case 0x80:
     case 0xB0:
     case 0xE0:
-        *out = {status, d1, d2};
-        return true;
+        break;
     default:
-        // 0xA0 polyphonic and 0xD0 channel aftertouch, 0xC0 program change
-        // (the selected track's voice is what plays), 0xF0 system.
+        // 0xA0 polyphonic and 0xD0 channel aftertouch, 0xF0 system.
         return false;
     }
+    if (size < 3)
+        return false; // these have two data bytes
+    const uint8_t d2 = bytes[2] & 0x7F;
+    if ((status & 0xF0) == 0x90 && d2 == 0) { // note on with velocity 0 is a note off
+        *out = {uint8_t(0x80 | (status & 0x0F)), d1, 0};
+        return true;
+    }
+    *out = {status, d1, d2};
+    return true;
 }
 
 void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *userData)

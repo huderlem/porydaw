@@ -271,6 +271,94 @@ int runPrimeCheck()
         m4a_engine_destroy(&engine);
     }
 
+    // TimelinePlayer::chaseTouched (docs/midi-controls/PLAN.md step 2): a
+    // track a MIDI keyboard moved gets back exactly the lanes it touched —
+    // the song's value at the position, the engine's track-init default where
+    // the song has none — and every other lane and track keeps what it holds.
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, float(kSampleRate));
+        m4a_engine_set_voicegroup(&engine, vg.voices);
+        const uint64_t early = 4 * kSamplesPerTick;
+        const uint64_t late = (kLaterTick + 4) * kSamplesPerTick;
+        TimelinePlayer::chase(&engine, timeline.get(), early);
+        TimelinePlayer::primeVoices(&engine, timeline.get(), early);
+        // What a keyboard might leave behind, on every lane of tracks 0-2.
+        const auto poke = [&](int track) {
+            m4a_engine_cc(&engine, track, 0x07, 50);
+            m4a_engine_cc(&engine, track, 0x0A, 10);
+            m4a_engine_cc(&engine, track, 0x14, 12);
+            m4a_engine_cc(&engine, track, 0x15, 99);
+            m4a_engine_cc(&engine, track, 0x01, 30);
+            m4a_engine_pitch_bend(&engine, track, 4096);
+            m4a_engine_program_change(&engine, track, 3);
+        };
+        struct Lanes {
+            int vol, pan, bendr, lfos, mod, bend, program;
+            bool operator==(const Lanes &o) const
+            {
+                return vol == o.vol && pan == o.pan && bendr == o.bendr && lfos == o.lfos &&
+                       mod == o.mod && bend == o.bend && program == o.program;
+            }
+        };
+        const auto lanes = [&](int track) {
+            const M4ATrack &t = engine.tracks[track];
+            return Lanes{t.rawVolume, t.pan,  t.bendRange,     t.lfoSpeed,
+                         t.mod,       t.bend, t.currentProgram};
+        };
+        const Lanes poked{50, 10 - 64, 12, 99, 30, 32, 3};
+        const auto expect = [&](bool ok, const char *what) {
+            if (!ok) {
+                std::fprintf(stderr, "primecheck: FAIL: chaseTouched: %s\n", what);
+                failures++;
+            }
+        };
+        for (int t = 0; t < 3; t++)
+            poke(t);
+        expect(lanes(0) == poked && lanes(1) == poked, "the fixture's pokes did not land");
+
+        // VOL (a song event), BENDR (none: the default), the bend (none:
+        // centred) and the voice (at tick 0) on track 0; PAN, LFOS and MOD
+        // stay as poked, and so does track 1.
+        TouchedLanes touched;
+        touched.setCc(0x07);
+        touched.setCc(0x14);
+        touched.bend = true;
+        touched.program = true;
+        TimelinePlayer::chaseTouched(&engine, timeline.get(), early, 0, touched);
+        expect(lanes(0) == Lanes{kVolEarly, 10 - 64, 2, 99, 30, 0, kProgAtZero},
+               "track 0 did not get back exactly VOL, BENDR, bend and voice");
+        expect(lanes(1) == poked, "another track was touched");
+
+        // PAN (a song event, late), LFOS and MOD (defaults) late on track 0.
+        TouchedLanes rest;
+        rest.setCc(0x0A);
+        rest.setCc(0x15);
+        rest.setCc(0x01);
+        TimelinePlayer::chaseTouched(&engine, timeline.get(), late, 0, rest);
+        expect(lanes(0) == Lanes{kVolEarly, kPanLate, 2, 22, 0, 0, kProgAtZero},
+               "track 0's PAN, LFOS and MOD were not chased late, or VOL was re-chased");
+
+        // A voice with none at or before the position: the track's first one
+        // later, as primeVoices gives it. None anywhere: kept.
+        TouchedLanes voice;
+        voice.program = true;
+        TimelinePlayer::chaseTouched(&engine, timeline.get(), early, 1, voice);
+        expect(lanes(1) == Lanes{50, 10 - 64, 12, 99, 30, 32, kProgTrack1},
+               "track 1's voice was not primed from later, or another lane moved");
+        TimelinePlayer::chaseTouched(&engine, timeline.get(), early, 2, voice);
+        expect(lanes(2) == poked, "a track with no voice event lost the keyboard's voice");
+
+        // Nothing touched: nothing moves.
+        TimelinePlayer::chaseTouched(&engine, timeline.get(), late, 2, TouchedLanes());
+        expect(lanes(2) == poked, "an empty mask moved something");
+        expect(TimelinePlayer::ccDefault(0x07) == 127 && TimelinePlayer::ccDefault(0x0A) == 64 &&
+                   TimelinePlayer::ccDefault(0x14) == 2 && TimelinePlayer::ccDefault(0x15) == 22 &&
+                   TimelinePlayer::ccDefault(0x01) == 0 && TimelinePlayer::ccDefault(0x03) == -1,
+               "ccDefault does not match the engine's track-init values");
+        m4a_engine_destroy(&engine);
+    }
+
     // An audition belongs to the note, not to the cursor: with the engine
     // chased past the VOL drop, keying at the early note's own VOL must sound
     // exactly as it would have back there — and must leave the track's real

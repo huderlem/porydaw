@@ -142,11 +142,13 @@ class AudioEngine
     // thread drains the input ring right after the timed previews and plays
     // each note on the live target track through the same active-note table,
     // as a "held" entry that never counts down: it sounds until its note-off
-    // (deferred while the sustain pedal is down). Pitch bend and the CC
-    // routed to MOD (setLiveRoutes; CC1 by default) act on the whole target
-    // track, song notes included; other CCs are ignored except 64 (sustain),
-    // 120/123 (all notes off, which also lifts the pedal) and 121 (reset
-    // controllers: the pedal lifts, bend and mod rest).
+    // (deferred while the sustain pedal is down). Pitch bend, the CCs routed
+    // to the MOD, VOL, PAN, BENDR and LFOS lanes (setLiveRoutes) and program
+    // changes act on the whole target track, song notes included
+    // (docs/midi-controls/PLAN.md §3.2); other CCs are ignored except 64
+    // (sustain), 120/123 (all notes off, which also lifts the pedal) and
+    // 121 (reset controllers: the pedal lifts, and the bend and every routed
+    // lane go back to the engine's track-init values; the voice stays).
     //
     // Borrowed: the ring's owner must outlive the audio thread (shutdown()
     // before destroying it). Null drains nothing.
@@ -156,8 +158,9 @@ class AudioEngine
     }
     // Hot: the track live notes play on; -1 (or no song loaded) drains the
     // input silently. A change releases the held and sustained notes on the
-    // old track and re-chases its bend and mod at the playhead, so a parked
-    // wheel doesn't stick to a track you've left.
+    // old track and re-chases the lanes (and voice) the keyboard moved there
+    // at the playhead (TimelinePlayer::chaseTouched), so a parked wheel or
+    // knob doesn't stick to a track you've left.
     void setLiveTarget(int track) { m_liveTarget.store(track); }
     int liveTarget() const { return m_liveTarget.load(); }
     // The mod wheel's full travel (0..127) maps onto 0..modMax: the target
@@ -168,8 +171,23 @@ class AudioEngine
     // The table is one packed word (MidiRoutes::packed), so it is published
     // whole with a single atomic store and nothing needs retiring; the audio
     // thread unpacks a changed word into its own CC → lane lookup at the next
-    // callback. So far only the MOD row is acted on (step 1).
+    // callback. A routed CC's 0..127 is the lane's value as it is for VOL,
+    // PAN and LFOS; MOD scales onto 0..modMax (setLiveModMax) and BENDR onto
+    // 0..24 semitones (D2).
     void setLiveRoutes(uint64_t packedRoutes) { m_liveRoutes.store(packedRoutes); }
+    // Hot: the active voicegroup's voice count (one past its last voice
+    // line). A keyboard program change at or past it is ignored (J3) and
+    // counted for the UI to report (liveIgnoredProgram).
+    void setLiveVoiceCount(int count) { m_liveVoiceCount.store(std::clamp(count, 0, 128)); }
+    int liveVoiceCount() const { return m_liveVoiceCount.load(); }
+    // Telemetry: the last program change ignored for being past the
+    // voicegroup's last voice, as sequence << 8 | program (0 before the
+    // first). The sequence counts them, so a poll that sees the word change
+    // reports once however many arrived since.
+    uint32_t liveIgnoredProgram() const
+    {
+        return m_liveIgnoredProgram.load(std::memory_order_relaxed);
+    }
     // Hot: Settings → MIDI mirrors. Live play off drains the input silently
     // (like target -1); a fixed velocity of 1-127 overrides every note-on's,
     // 0 passes the keyboard's through.
@@ -375,10 +393,15 @@ class AudioEngine
     // after the sustain pedal has had its say; a recording take captures it here,
     // before the sound target is consulted.
     void applyLiveNote(uint8_t key, uint8_t velocity);
-    // The same for a bend (-8192..8191) and a MOD (the wheel scaled to the
-    // lane's range): the whole track's, captured whether or not it sounds.
+    // The same for a bend (-8192..8191) and a routed CC lane (the lane's
+    // document CC and the value it takes, already scaled): the whole
+    // track's, captured whether or not it sounds. Only MOD is captured so
+    // far (as CaptureEvent::Mod); the other lanes are step 3's.
     void applyLiveBend(int16_t bend);
-    void applyLiveMod(uint8_t mod);
+    void applyLiveControl(uint8_t lane, uint8_t value);
+    // A keyboard program change: the target track's voice. Sound target
+    // only, and not captured yet (step 5 records the Voice lane).
+    void applyLiveProgram(uint8_t program);
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
     // The same on the app's say-so (a panic, a tab switch, the target
@@ -477,6 +500,7 @@ class AudioEngine
     std::atomic<MidiInputRing *> m_midiRing{nullptr};
     std::atomic<int> m_liveTarget{-1};
     std::atomic<int> m_liveModMax{127};
+    std::atomic<int> m_liveVoiceCount{128};
     std::atomic<uint64_t> m_liveRoutes{
         0}; // MidiRoutes::packed(); the defaults from the constructor
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
@@ -505,6 +529,7 @@ class AudioEngine
     std::atomic<int> m_activeCgb{0};
     std::atomic<uint64_t> m_liveHeldLo{0};
     std::atomic<uint64_t> m_liveHeldHi{0};
+    std::atomic<uint32_t> m_liveIgnoredProgram{0};
 
     // Audio-thread-only sequencer state
     int m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -535,11 +560,16 @@ class AudioEngine
     uint32_t m_liveLate = 0;
     int64_t m_callbackNs = 0;      // midiClockNs at the callback's entry
     uint32_t m_callbackFrames = 0; // the callback's length
-    bool m_liveBent = false;       // bend/mod sent to m_liveTrack since it became the target
+    // The lanes sent to m_liveTrack since it became the target: the ones a
+    // target change hands back to the song.
+    TouchedLanes m_liveTouched;
+    uint32_t m_liveIgnoredSeq = 0; // m_liveIgnoredProgram's sequence
     // The routes as last unpacked: the lane (document CC) each MIDI CC
-    // drives, 0xFF for none.
+    // drives, 0xFF for none, and which lanes have a CC at all (bit i for
+    // MidiRoutes::kLanes[i]: the ones CC121 resets).
     uint64_t m_appliedLiveRoutes = 0; // never a valid packing, so the first sync unpacks
     uint8_t m_liveRouteOf[128] = {};
+    uint8_t m_liveRoutedLanes = 0;
     uint32_t m_appliedLivePanic = 0;
     uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none
     uint32_t m_captureSegment = 0; // segments since that Begin

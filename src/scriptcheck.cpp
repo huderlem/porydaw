@@ -1499,9 +1499,9 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
     check(host.midiBatches() == batchesBefore + 1 && tapHops == 1,
           "a burst of messages was not delivered as one batch, through one queued hop");
     QObject::disconnect(hopCounter);
-    // Live play's ring took what it plays (note on/off, CC, bend), as
-    // before; the tap took nothing from it.
-    check(midi.receivedCount() == receivedBefore + 5,
+    // Live play's ring took what it plays (note on/off, CC, bend, program
+    // change), as before; the tap took nothing from it.
+    check(midi.receivedCount() == receivedBefore + 6,
           "the script tap changed what reaches live play's input ring");
 
     // Live play off (Settings → MIDI) changes nothing for listeners.
@@ -1587,19 +1587,19 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
     runc("msOff()");
 
     // Overflow: 1024 fit; the rest are dropped and counted, and delivery
-    // carries on afterwards. Program changes, so live play's ring is
+    // carries on afterwards. Channel pressure, so live play's ring is
     // untouched.
     runc("var moLog = []; var moFn = function (m) { moLog.push(m.data1); }; "
          "porydaw.midi.on('message', moFn)");
     const double droppedBefore = runc("porydaw.midi.dropped").toDouble();
     const int burst = int(MidiTapRing::kCapacity) + 76;
     for (int i = 0; i < burst; ++i)
-        midi.injectBytesForTest({0xC0, uint8_t(i & 0x7F)});
+        midi.injectBytesForTest({0xD0, uint8_t(i & 0x7F)});
     settle();
     check(runc("moLog.length").toInt() == int(MidiTapRing::kCapacity) &&
               runc("porydaw.midi.dropped").toDouble() == droppedBefore + 76,
           "a full script tap did not keep the first 1024 and count the rest as dropped");
-    midi.injectBytesForTest({0xC0, 99});
+    midi.injectBytesForTest({0xD0, 99});
     settle();
     check(runc("moLog[moLog.length - 1]") == QStringLiteral("99") &&
               runc("moLog.length").toInt() == int(MidiTapRing::kCapacity) + 1,

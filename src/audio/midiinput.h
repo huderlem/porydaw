@@ -20,9 +20,9 @@ class RtMidiIn;
 
 // One channel-voice message from a MIDI keyboard, already validated by
 // MidiInput::parse: note off (0x8n; a velocity-0 note on arrives as one),
-// note on (0x9n, d2 >= 1), control change (0xBn) or pitch bend (0xEn,
-// d1 = LSB, d2 = MSB). The channel stays in the status byte; data bytes are
-// 7-bit.
+// note on (0x9n, d2 >= 1), control change (0xBn), program change (0xCn,
+// d2 = 0) or pitch bend (0xEn, d1 = LSB, d2 = MSB). The channel stays in the
+// status byte; data bytes are 7-bit.
 struct MidiMsg {
     uint8_t status = 0;
     uint8_t d1 = 0;
@@ -233,8 +233,8 @@ class MidiInput : public QObject
 
     // One raw message as RtMidi delivers it (complete, running status
     // already expanded) into *out. False for everything porydaw ignores:
-    // polyphonic and channel aftertouch, program change, system messages,
-    // and truncated input.
+    // polyphonic and channel aftertouch, system messages, and truncated
+    // input.
     static bool parse(const unsigned char *bytes, size_t size, MidiMsg *out);
 
     // The script tap (porydaw.midi, docs/midi-input/PLAN.md step 6). While

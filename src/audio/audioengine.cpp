@@ -200,6 +200,8 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     }
     resetPreviewEngine();
     clearTimedPreviews();
+    // The fresh engine holds nothing the keyboard moved.
+    m_liveTouched = TouchedLanes();
 
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -397,6 +399,7 @@ void AudioEngine::unloadSong()
     m_timeline = nullptr;
     m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
+    m_liveTouched = TouchedLanes(); // no song to hand anything back to
     resetPreviewEngine();
     clearTimedPreviews();
     m_transport.store(static_cast<int>(Transport::Stopped));
@@ -704,6 +707,12 @@ void AudioEngine::syncLiveRoutes()
     // Skips anything but a valid packing, so a reserved CC never reaches
     // the routed path.
     MidiRoutes::unpackLaneTable(packed, m_liveRouteOf);
+    m_liveRoutedLanes = 0;
+    for (int cc = 0; cc < 128; cc++) {
+        const int index = m_liveRouteOf[cc] == 0xFF ? -1 : MidiRoutes::laneIndex(m_liveRouteOf[cc]);
+        if (index >= 0)
+            m_liveRoutedLanes |= uint8_t(1u << index);
+    }
 }
 
 void AudioEngine::applyMidiInput()
@@ -731,12 +740,13 @@ void AudioEngine::applyMidiInput()
     }
     if (target != m_liveTrack) {
         imposeLiveRelease(); // on the old track
-        // Hand the old track back to the song: its bend and mod as chased
-        // at the playhead, every other track and parameter untouched.
-        if (m_liveBent && m_liveTrack >= 0 && m_timeline)
-            TimelinePlayer::chaseBendMod(m_engine.get(), m_timeline, m_player.position(),
-                                         m_liveTrack);
-        m_liveBent = false;
+        // Hand the old track back to the song: the lanes and voice the
+        // keyboard moved, as chased at the playhead; every other track and
+        // parameter untouched.
+        if (m_liveTrack >= 0 && m_timeline)
+            TimelinePlayer::chaseTouched(m_engine.get(), m_timeline, m_player.position(),
+                                         m_liveTrack, m_liveTouched);
+        m_liveTouched = TouchedLanes();
         m_liveTrack = target;
     }
 
@@ -798,10 +808,17 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             else
                 liftLivePedal();
             break;
-        case 121: // reset all controllers: the pedal is up, bend and mod at rest
+        case 121: // reset all controllers: the pedal is up, bend and lanes at rest
             liftLivePedal();
             applyLiveBend(0);
-            applyLiveMod(0);
+            // J5: every routed lane goes back to the engine's track-init
+            // value. A lane routed to none has no control to reset (MOD
+            // included), and the voice stays.
+            for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+                const uint8_t lane = MidiRoutes::kLanes[size_t(i)];
+                if ((m_liveRoutedLanes >> i) & 1)
+                    applyLiveControl(lane, uint8_t(TimelinePlayer::ccDefault(lane)));
+            }
             break;
         case 120: // all sound off
         case 123: // all notes off
@@ -810,18 +827,32 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             releaseLiveNotes();
             m_liveSustain = false;
             break;
-        default:
-            // A routed control (reserved CCs never route). Only MOD sounds
-            // so far; the other lanes join in step 2.
-            switch (m_liveRouteOf[msg.d1 & 0x7F]) {
-            case 0x01: // MOD: the whole track's LFO depth, at the lane's scale
-                applyLiveMod(uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
+        default: {
+            // A routed control (reserved CCs never route), scaled per lane
+            // (D2): the knob's full travel covers the lane.
+            const uint8_t lane = m_liveRouteOf[msg.d1 & 0x7F];
+            const int v = msg.d2 & 0x7F;
+            switch (lane) {
+            case 0x01: // MOD: the LFO depth, onto the lane's range as drawn
+                applyLiveControl(lane, uint8_t((v * m_liveModMax.load() + 63) / 127));
+                break;
+            case 0x14: // BENDR: 0..24 semitones
+                applyLiveControl(lane, uint8_t((v * 24 + 63) / 127));
+                break;
+            case 0x07: // VOL
+            case 0x0A: // PAN (64 is centre)
+            case 0x15: // LFOS
+                applyLiveControl(lane, uint8_t(v));
                 break;
             default:
                 break;
             }
             break;
         }
+        }
+        break;
+    case 0xC0:
+        applyLiveProgram(key);
         break;
     case 0xE0:
         applyLiveBend(int16_t((((msg.d2 & 0x7F) << 7) | (msg.d1 & 0x7F)) - 8192));
@@ -836,18 +867,37 @@ void AudioEngine::applyLiveBend(int16_t bend)
     pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend);
     if (m_liveTrack >= 0) {
         m4a_engine_pitch_bend(m_engine.get(), m_liveTrack, bend);
-        m_liveBent = true;
+        m_liveTouched.bend = true;
     }
 }
 
-void AudioEngine::applyLiveMod(uint8_t mod)
+void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value)
 {
-    // Captured as heard, whether or not it sounds (as notes are).
-    pushCapture(CaptureEvent::Mod, m_player.position(), 0, 0, 0, mod);
+    // Captured as heard, whether or not it sounds (as notes are). Only MOD
+    // so far: recording the other lanes is step 3.
+    if (lane == 0x01)
+        pushCapture(CaptureEvent::Mod, m_player.position(), 0, 0, 0, value);
     if (m_liveTrack >= 0) {
-        m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01, mod);
-        m_liveBent = true;
+        m4a_engine_cc(m_engine.get(), m_liveTrack, lane, value);
+        m_liveTouched.setCc(lane);
     }
+}
+
+void AudioEngine::applyLiveProgram(uint8_t program)
+{
+    if (m_liveTrack < 0)
+        return;
+    // J3: the data byte is the voice slot. Past the voicegroup's last voice
+    // there is nothing to play: ignored, and counted for the status bar.
+    if (int(program) >= m_liveVoiceCount.load()) {
+        m_liveIgnoredSeq = (m_liveIgnoredSeq + 1) & 0xFFFFFF;
+        if (m_liveIgnoredSeq == 0)
+            m_liveIgnoredSeq = 1; // 0 stays "none yet"
+        m_liveIgnoredProgram.store(m_liveIgnoredSeq << 8 | program, std::memory_order_relaxed);
+        return;
+    }
+    m4a_engine_program_change(m_engine.get(), m_liveTrack, program);
+    m_liveTouched.program = true;
 }
 
 void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)

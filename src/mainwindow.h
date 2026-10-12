@@ -242,12 +242,16 @@ class MainWindow : public QMainWindow
     // target is the active tab's selected track, -1 without one.
     void publishLiveTarget();
     void syncLiveSettings();
-    // Mirrors the engine's held-key mask onto the active roll's keyboard.
+    // Mirrors the engine's held-key mask onto the active roll's keyboard,
+    // and reports a keyboard program change the engine ignored (J3).
     void pollLiveKeys();
     // runMidiWindowCheck's live-play half (midicheck.cpp).
     void checkLivePlay();
     // Its routed-controls half (docs/midi-controls/PLAN.md step 1).
     void checkLiveRoutes();
+    // Live play of every routed lane, program changes, CC121 and the
+    // target-change handback (docs/midi-controls/PLAN.md step 2).
+    void checkLiveControls();
     // MIDI recording (D5): Record while stopped starts playback from the
     // edit cursor and records; while playing it punches in; again it punches
     // out, commits and keeps playing. Stop, Space and Pause commit too, as
@@ -686,6 +690,10 @@ class MainWindow : public QMainWindow
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;
     int m_liveKeysIdleTicks = 0;
+    // AudioEngine::liveIgnoredProgram as last reported, and how many
+    // reports there have been (for --midicheck).
+    uint32_t m_liveIgnoredSeen = 0;
+    int m_liveIgnoredReports = 0;
     // False during harness runs so they don't overwrite the session.
     bool m_persistSession = true;
     EngineSettings m_engineSettings;

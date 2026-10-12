@@ -8,6 +8,20 @@ extern "C" {
 #include "m4a_engine.h"
 }
 
+// The lanes a MIDI keyboard moved live on one track
+// (docs/midi-controls/PLAN.md §3.2): its pitch bend, any CC lane, and its
+// voice (a program change). TimelinePlayer::chaseTouched hands exactly these
+// back to the song. Plain data: the audio thread keeps one.
+struct TouchedLanes {
+    uint64_t cc[2] = {0, 0}; // CC n is bit (n & 63) of cc[n >> 6]
+    bool bend = false;
+    bool program = false;
+
+    void setCc(uint8_t n) { cc[(n >> 6) & 1] |= uint64_t(1) << (n & 63); }
+    bool hasCc(uint8_t n) const { return (cc[(n >> 6) & 1] >> (n & 63)) & 1; }
+    bool any() const { return cc[0] || cc[1] || bend || program; }
+};
+
 // Walks a MidiTimeline, dispatching events to an M4AEngine and rendering
 // audio between them. Shared by the real-time audio callback (AudioEngine)
 // and the offline render CLI so both play back identically.
@@ -64,13 +78,23 @@ class TimelinePlayer
     // the playhead) so deleted or moved automation can't stay latched.
     static void chase(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos);
 
-    // The narrow version for one track's pitch bend and mod depth (CC1)
-    // only: what a MIDI keyboard's wheels change live
-    // (docs/midi-input/PLAN.md step 2). Every other parameter, and every
-    // other track, is left exactly as it is, so playback carries on
-    // undisturbed.
-    static void chaseBendMod(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
-                             int track);
+    // The narrow version for the lanes a MIDI keyboard moved live on one
+    // track (docs/midi-controls/PLAN.md §3.2): each touched CC and the bend
+    // get their value at or before pos, or the engine's track-init default
+    // (ccDefault; bend centred) when the song has none. A touched voice gets
+    // the program at or before pos, or else the track's first one later in
+    // the song, as primeVoices would give it, so the track isn't left on the
+    // keyboard's voice until playback reaches its own; a track with no
+    // program change anywhere keeps the one it has (no event can stand for
+    // an unset voice). Every other lane, and every other track, is left
+    // exactly as it is, so playback carries on undisturbed.
+    static void chaseTouched(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
+                             int track, const TouchedLanes &touched);
+
+    // The engine's track-init value for a stateful CC (m4a_engine.c), as
+    // chase() restores it where the song has no event; -1 for a CC with no
+    // state to restore.
+    static int ccDefault(uint8_t cc);
 
     // Primes voices for auditioning: each track with no program change at or
     // before `pos` gets its first program change from later in the timeline,

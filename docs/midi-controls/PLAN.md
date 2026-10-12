@@ -398,3 +398,199 @@ and all five trees build cleanly.
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--midicheck` passes on build-nomidi, build-off and build-dummy, and
 all five trees build cleanly.
+
+### Step 2 — live play of routed lanes, program change, touched mask, CC121 (2026-10-12, uncommitted)
+
+**What landed**
+
+- `AudioEngine::applyLiveMod` became `applyLiveControl(lane, value)`, where
+  `lane` is the document CC (0x01, 0x07, 0x0A, 0x14, 0x15) and `value` is
+  already scaled. The 0xB0 `default:` branch scales per lane (D2): MOD onto
+  `0..m_liveModMax` (unchanged), BENDR onto `0..24` as
+  `(v·24 + 63) / 127` (round half up), and VOL, PAN and LFOS take the knob's
+  value. Bend keeps `applyLiveBend`.
+- **Program change.** `MidiInput::parse` now keeps 0xCn (one data byte, `d2`
+  = 0; a 2-byte message, as RtMidi delivers it, and the injector's 3-byte
+  form both parse), so it reaches the input ring. A new 0xC0 case calls
+  `applyLiveProgram(program)`. That function does nothing without a sound
+  target. If `program >= m_liveVoiceCount`, it ignores the change and bumps
+  `m_liveIgnoredProgram` (`sequence << 8 | program`). Otherwise it calls
+  `m4a_engine_program_change` on the target track.
+- **Voice count (J3).** `MainWindow::publishLiveTarget` publishes
+  `AudioEngine::setLiveVoiceCount`. The count is one past the last slot whose
+  `VoicegroupSource::kindAt` isn't `None`, or 128 when the tab has no parsed
+  source (the engine's table always has 128 entries, so nothing reads past
+  it). `publishLiveTarget` already runs on tab activation, after every
+  document change (including a `-G` voicegroup swap) and at take start/end,
+  so the count follows the voicegroup.
+- **The report.** `MainWindow::pollLiveKeys`, which MIDI activity already
+  runs, compares `liveIgnoredProgram()` with what it saw last. When the word
+  changed, it shows one status message per poll, however many changes
+  arrived since: "Program change 120 ignored: this voicegroup's voices are
+  0–9." `m_liveIgnoredReports` counts the reports for the harness.
+- **Touched mask.** `bool m_liveBent` became `TouchedLanes m_liveTouched`,
+  a plain struct in `core/timelineplayer.h` holding 128 CC bits, a bend bit
+  and a program bit. `applyLiveBend`, `applyLiveControl` and
+  `applyLiveProgram` set the mask only when the move sounded on a target.
+  It clears at a target change, as before, and also in
+  `loadSong`/`unloadSong`, where the engine is fresh or songless.
+- `TimelinePlayer::chaseBendMod` is **removed**. The new
+  `chaseTouched(engine, timeline, pos, track, touched)` does one pass over
+  the track's events at or before `pos`:
+  - Each touched CC gets its song value, or `ccDefault(cc)` when the song
+    has none. `ccDefault` is the `kCcDefaults` table, now file-scope and
+    shared with `chase()`.
+  - A touched bend gets its song value, or centre.
+  - A touched voice gets the program at or before `pos`. When there is none
+    there, the scan goes on past `pos` to the track's first later program
+    change, which is what `primeVoices` would have applied.
+  - A track with no program change anywhere keeps the keyboard's voice. No
+    event can stand for "no voice", and an engine track's initial
+    zero voice isn't something to restore by hand.
+  - An empty mask returns before scanning.
+- **CC121 (J5).** `syncLiveRoutes` also computes `m_liveRoutedLanes` (bit i
+  = `MidiRoutes::kLanes[i]` has a CC). CC121 lifts the pedal, centres the
+  bend, then calls `applyLiveControl(lane, ccDefault(lane))` for each routed
+  lane in `kLanes` order. MOD's reset is therefore still captured as a
+  `Mod 0` when MOD is routed, exactly as before. **A lane routed to None is
+  not reset, MOD included** ("every routed lane"). The voice is never
+  touched.
+- **Capture is unchanged.** Only MOD pushes a capture event (still
+  `CaptureEvent::Mod`). VOL/PAN/BENDR/LFOS moves and program changes are
+  heard but not captured. Capturing them is step 3 (and step 5 for the
+  voice), so a take recorded in this step commits only notes, bend and MOD,
+  as before.
+
+**Stuck-value audit (matches bend/mod today):**
+
+- Seek, `updateTimeline` (any document edit) and `updateVoicegroup` run a
+  full `chase()`. All five lanes are in `kCcDefaults`, and the program is
+  chased or primed, so live VOL/PAN/BENDR/LFOS and the live voice are
+  replaced by the song's, as bend and MOD are.
+  - Exception: a track with no program change anywhere keeps a live voice
+    through a chase too, because `chase()` doesn't touch its voice either.
+- A song switch reinitialises the engine.
+- Stop, pause, panic (the command and CC120/123), a port closing and a
+  tab's release don't chase anything. So a parked knob's VOL, like a
+  parked wheel's bend, stays on the track until the next seek, edit or
+  target change. That was already true for bend and mod. The touched mask
+  survives a chase, so a later target change re-chases lanes the song
+  already holds, which is harmless (same values).
+
+**Harness**
+
+- `--midicheck` `MainWindow::checkLiveControls`, after `checkLiveRoutes`,
+  with the device held. It seeks to 0, so both tracks hold their chased
+  song state, then routes BENDR to CC20 and LFOS to CC21. It checks:
+  - VOL (`rawVolume`, and `volume` through the master volume), PAN
+    (byte − 64) and LFOS at the knob's value;
+  - BENDR at 0→0, 3→1, 127→24, 64→12;
+  - an unrouted CC22 moves nothing;
+  - track b's seven lanes (VOL, PAN, BENDR, LFOS, MOD, bend, program) are
+    untouched by any of it;
+  - the published voice count equals the source's;
+  - a 2-byte program change switches the target's `currentProgram` (and
+    voice type) and leaves b alone;
+  - with the count shortened to 10, programs 10 and 120 in one burst are
+    ignored and give exactly one status message (naming 120 and "0–9"); a
+    second poll doesn't re-report, and program 9 still plays;
+  - republishing restores the real count;
+  - CC121 with PAN and MOD routed to None resets VOL 127, BENDR 2, LFOS 22
+    and bend 0, keeps PAN, MOD and the voice, and leaves b alone;
+  - selecting b, after every lane has been moved off its song value
+    (asserted), hands all seven of a's lanes back to exactly the song's
+    values, and b is undisturbed;
+  - with no target, a program change is neither applied nor counted, and a
+    knob does nothing.
+  Routes go back to the defaults.
+- The parse table now says that a program change parses (2 bytes, a masked
+  data byte, a third byte ignored), and that `{0xC0}` and `{0xB0, 7}` are
+  rejected as truncated.
+- `--primecheck` gains a `chaseTouched` unit block on its synthetic song.
+  Every lane of tracks 0–2 is poked first. Then:
+  - VOL, BENDR, bend and voice on track 0 come back as song VOL, default
+    BENDR 2, centred bend and the tick-0 voice, while PAN, LFOS and MOD
+    stay as poked;
+  - PAN, LFOS and MOD chased late give the late PAN, LFOS 22 and MOD 0,
+    and VOL isn't re-chased;
+  - track 1's voice, with nothing before `pos`, comes from its first later
+    program change;
+  - track 2 has no voice event anywhere, so it keeps the keyboard's voice;
+  - an empty mask moves nothing;
+  - `ccDefault` matches the engine.
+  This is where "untouched lanes stay untouched" is proven: end to end, a
+  knob can't move a lane without touching it.
+- `--scriptcheck` changes:
+  - `receivedCount` now grows by 6 for the tap batch, because the program
+    change reaches live play's ring.
+  - The tap-overflow burst uses channel pressure (0xD0) instead of program
+    changes, so the burst can't change the live target's voice 1100 times.
+- Mutation-tested 15 ways. Each failed the expected checks and was
+  restored byte for byte (a script asserted the restore):
+  - BENDR unscaled;
+  - the CC applied to the wrong track;
+  - no CC touch bit;
+  - no program touch bit;
+  - CC121 resetting all lanes;
+  - CC121 resetting MOD only;
+  - no voice-count limit;
+  - a program counted with no target;
+  - re-reporting every poll;
+  - no voice-count publish;
+  - parse dropping 0xC0;
+  - `chaseTouched` ignoring the program;
+  - no later-program fallback;
+  - the mask ignored (all five lanes chased);
+  - bend always chased.
+
+**Notes for step 3**
+
+- `applyLiveControl` is where VOL/PAN/BENDR/LFOS capture goes. It currently
+  pushes only for `lane == 0x01`, as `CaptureEvent::Mod`. `pushCapture`'s
+  `lateSamples` list names `Mod`, so add `Control` there too.
+- CC121 already calls `applyLiveControl` for every routed lane, so once
+  capture is generalised its VOL 127 / PAN 64 / BENDR 2 / LFOS 22 resets
+  will record as moves (J5) with no further work. Check that reccheck's
+  CC121 case expects them.
+- The capture value is the scaled, as-heard value (BENDR in semitones, MOD
+  in the lane's range), the same as MOD today.
+- Program changes are deliberately not captured (step 5). `applyLiveProgram`
+  returns early without a target, and step 5 must revisit that, because
+  notes are captured even when they don't sound.
+
+**Windows checkpoint (manual test script)**
+
+1. Open a song with a few tracks, select a track with a sustained voice,
+   and press Play (or just hold notes while stopped).
+2. Settings → MIDI → Controls: click **Learn** on VOL and turn a knob; then
+   do the same for PAN, BENDR and LFOS with three other knobs. MOD stays on
+   the mod wheel (CC1) unless you change it.
+3. While holding a note:
+   - **VOL**: turning down makes the track quieter; full up is loud.
+   - **PAN**: sweeps the track from left to right; the middle is centre.
+   - **LFOS**: with the mod wheel up (vibrato on), changes the vibrato
+     speed. Down to 0 stops the vibrato.
+   - **BENDR**: with the pitch wheel pushed up, sets how far it bends, up
+     to two octaves at full turn. At the knob's bottom the pitch wheel does
+     nothing.
+4. Press your keyboard's program-change buttons (or use its program
+   up/down). The selected track's voice changes; the notes you play use the
+   new voice. Going past the voicegroup's last voice changes nothing and
+   shows "Program change N ignored: …" in the status bar.
+5. Move every knob away from where it was, change the voice, then click
+   another track in the song. Play the song: the track you left sounds
+   like the song again (its volume, pan, bend range, vibrato speed and
+   voice); the new track is unaffected until you touch something.
+6. If your keyboard can send Reset All Controllers (CC121; often a
+   "reset" or "panic" function, so check its manual): with knobs moved, send
+   it. VOL jumps to full, PAN to centre, BENDR to 2, LFOS to the default
+   speed, the bend centres and MOD goes to 0, but the voice stays. Set PAN
+   to None in Settings and repeat: PAN is no longer reset.
+7. Known, by design: stopping playback or a panic doesn't undo a knob (the
+   same as the pitch wheel today). A seek, an edit or a track change does.
+   Knob moves of VOL/PAN/BENDR/LFOS and program changes aren't recorded
+   yet (steps 3 and 5).
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--midicheck` and `--primecheck` pass on build-nomidi, build-off and
+build-dummy, and all five trees build cleanly.

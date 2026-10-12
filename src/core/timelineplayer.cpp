@@ -4,6 +4,35 @@
 
 #include "core/mid2agbtables.h"
 
+namespace {
+
+// Engine reset defaults for the stateful controllers (the track-init values
+// in m4a_engine.c). The opt-in ones — portamento, PWM — are no-ops in the
+// engine while their feature is disabled.
+constexpr struct {
+    uint8_t cc;
+    uint8_t value;
+} kCcDefaults[] = {
+    {0x01, 0},   // MOD
+    {0x05, 0},   // PORTAMENTO
+    {0x07, 127}, // VOL
+    {0x0A, 64},  // PAN (center)
+    {0x14, 2},   // BENDR
+    {0x15, 22},  // LFOS
+    {0x17, 0},   // PWMC
+    {0x19, 0},   // PWMS
+};
+
+} // namespace
+
+int TimelinePlayer::ccDefault(uint8_t cc)
+{
+    for (const auto &d : kCcDefaults)
+        if (d.cc == cc)
+            return d.value;
+    return -1;
+}
+
 void TimelinePlayer::dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask)
 {
     switch (ev.type) {
@@ -73,23 +102,6 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         }
     }
 
-    // Engine reset defaults for the stateful controllers (the track-init
-    // values in m4a_engine.c). The opt-in ones — portamento, PWM — are
-    // no-ops in the engine while their feature is disabled.
-    static constexpr struct {
-        uint8_t cc;
-        uint8_t value;
-    } kCcDefaults[] = {
-        {0x01, 0},   // MOD
-        {0x05, 0},   // PORTAMENTO
-        {0x07, 127}, // VOL
-        {0x0A, 64},  // PAN (center)
-        {0x14, 2},   // BENDR
-        {0x15, 22},  // LFOS
-        {0x17, 0},   // PWMC
-        {0x19, 0},   // PWMS
-    };
-
     for (int track = 0; track < 16; track++) {
         if (program[track])
             dispatchEvent(engine, *program[track], 0);
@@ -117,32 +129,57 @@ void TimelinePlayer::chase(M4AEngine *engine, const MidiTimeline *timeline, uint
         m4a_engine_set_tempo_bpm(engine, 150); // engine reset default
 }
 
-void TimelinePlayer::chaseBendMod(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
-                                  int track)
+void TimelinePlayer::chaseTouched(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos,
+                                  int track, const TouchedLanes &touched)
 {
-    if (track < 0 || track >= 16)
+    if (track < 0 || track >= 16 || !touched.any())
         return;
-    const TimelineEvent *mod = nullptr;
+    // Most recent event per touched lane at or before pos; for the voice,
+    // the first one after pos too, when there is none before.
+    const TimelineEvent *cc[128] = {};
     const TimelineEvent *bend = nullptr;
+    const TimelineEvent *program = nullptr;
+    const TimelineEvent *laterProgram = nullptr;
     for (const TimelineEvent &ev : timeline->events) {
-        if (ev.samplePos > pos)
-            break;
+        if (ev.samplePos > pos) {
+            if (!touched.program || program)
+                break;
+            if (ev.track == track && ev.type == 0xC) {
+                laterProgram = &ev;
+                break;
+            }
+            continue;
+        }
         if (ev.track != track)
             continue;
-        if (ev.type == 0xB && ev.data0 == 0x01)
-            mod = &ev;
+        if (ev.type == 0xB && touched.hasCc(ev.data0 & 0x7F))
+            cc[ev.data0 & 0x7F] = &ev;
         else if (ev.type == 0xE)
             bend = &ev;
+        else if (ev.type == 0xC)
+            program = &ev;
     }
-    // Defaults as in chase(): the engine's track-init values.
-    if (mod)
-        dispatchEvent(engine, *mod, 0);
-    else
-        m4a_engine_cc(engine, track, 0x01, 0);
-    if (bend)
-        dispatchEvent(engine, *bend, 0);
-    else
-        m4a_engine_pitch_bend(engine, track, 0);
+    if (touched.program) {
+        if (program)
+            dispatchEvent(engine, *program, 0);
+        else if (laterProgram)
+            dispatchEvent(engine, *laterProgram, 0);
+    }
+    for (int n = 0; n < 128; n++) {
+        if (!touched.hasCc(uint8_t(n)))
+            continue;
+        // Defaults as in chase(): the engine's track-init values.
+        if (cc[n])
+            dispatchEvent(engine, *cc[n], 0);
+        else if (const int value = ccDefault(uint8_t(n)); value >= 0)
+            m4a_engine_cc(engine, track, uint8_t(n), uint8_t(value));
+    }
+    if (touched.bend) {
+        if (bend)
+            dispatchEvent(engine, *bend, 0);
+        else
+            m4a_engine_pitch_bend(engine, track, 0);
+    }
 }
 
 void TimelinePlayer::primeVoices(M4AEngine *engine, const MidiTimeline *timeline, uint64_t pos)

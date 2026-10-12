@@ -5348,6 +5348,17 @@ void MainWindow::publishLiveTarget()
         track = m_take.track();
     if (track >= 0)
         m_audio.setLiveModMax(m_active->view->laneDisplayMax(track, 0x01));
+    // A program change past the voicegroup's last voice line is ignored
+    // (J3). Without a parsed source every slot counts: the engine's table
+    // always has 128.
+    int voices = VOICEGROUP_SIZE;
+    if (songLoaded && m_active->vgSource) {
+        voices = 0;
+        for (int slot = VOICEGROUP_SIZE - 1; slot >= 0 && voices == 0; slot--)
+            if (m_active->vgSource->kindAt(slot) != VgLineKind::None)
+                voices = slot + 1;
+    }
+    m_audio.setLiveVoiceCount(voices);
     m_audio.setLiveTarget(track);
     // Whether Record can start depends on the selection too.
     syncRecordAction();
@@ -5367,6 +5378,20 @@ void MainWindow::pollLiveKeys()
         m_audio.liveHeldKeys(&lo, &hi);
     if (m_active)
         m_active->view->setLiveHeldKeys(lo, hi);
+    // One report per poll, however many arrived since the last.
+    const uint32_t ignored = m_audioOk ? m_audio.liveIgnoredProgram() : 0;
+    if (ignored != m_liveIgnoredSeen) {
+        m_liveIgnoredSeen = ignored;
+        m_liveIgnoredReports++;
+        const int voices = m_audio.liveVoiceCount();
+        statusBar()->showMessage(
+            voices > 0 ? tr("Program change %1 ignored: this voicegroup's voices are 0–%2.")
+                             .arg(ignored & 0x7F)
+                             .arg(voices - 1)
+                       : tr("Program change %1 ignored: this voicegroup has no voices.")
+                             .arg(ignored & 0x7F),
+            5000);
+    }
     // About half a second of nothing held and no input: stop polling until
     // the next activity.
     if (lo || hi)
