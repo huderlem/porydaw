@@ -45,6 +45,12 @@ class MidiTimeline;
 //  - A Reset All Controllers (CaptureEvent::Reset) is a move only on a lane
 //    the take already moved, in any of its segments; an untouched lane
 //    keeps the song's automation (J5).
+//  - Program changes (CaptureEvent::Program) are moves of the Voice lane
+//    (DOC_CC_VOICE), under the same rules. The song's voice at a tick is
+//    its last program change there or before, or with none its first later
+//    one (what TimelinePlayer::primeVoices plays), so that is what a
+//    write's end restores and, when the take's voice would become the
+//    track's first, what goes to tick 0 (voiceLeadPoint).
 class RecordingTake
 {
   public:
@@ -67,8 +73,9 @@ class RecordingTake
         uint64_t floorSample = 0; // the start of its segment
         uint32_t late = 0;        // how long its message waited for its callback
         uint32_t segment = 0;
-        uint8_t cc = 0; // DOC_CC_BEND, or the lane's CC (0x01 MOD, 0x07 VOL, ...)
-        int value = 0;  // bend -8192..8191; a CC lane 0-127, as the lane stores it
+        uint8_t cc = 0; // DOC_CC_BEND, DOC_CC_VOICE, or the lane's CC (0x01 MOD, ...)
+        int value = 0;  // bend -8192..8191; a CC lane 0-127, as the lane stores
+                        // it; the voice its slot
     };
     // One lane's moves from one segment (a loop pass, a seek's landing):
     // they replace the lane's points in [tickBegin, tickEnd]
@@ -94,11 +101,24 @@ class RecordingTake
     static int audible(uint8_t cc, int value);
     // What a lane plays with no point before: the engine's track-init value
     // (TimelinePlayer::ccDefault; bend centred, 0 for a CC it has none for).
+    // The voice has none (0 here): restorePoint reads its first later
+    // program change instead.
     static int restValue(uint8_t cc);
+    // The Voice lane's lead point, given the lane before the take (sorted by
+    // tick): when the take's first voice write starts after tick 0, on or
+    // before the track's first program change, the take would make itself
+    // the track's first voice, which plays from the start (primeVoices); this
+    // point keeps that first song voice at tick 0, so what plays before the
+    // take is unchanged. False otherwise (a voice before the take, none in
+    // the song, or the take's own at tick 0).
+    static bool voiceLeadPoint(const std::vector<DocLanePoint> &before,
+                               const std::vector<LaneWrite> &writes,
+                               SongDocument::LanePointValue *out);
     // The lane `cc` as the commit would leave it: before (the lane's points,
     // sorted by tick) with this cc's writes applied in order, each with its
     // restore point read against before, as MainWindow::commitTake writes
-    // them. Sorted by tick. The live preview's curve.
+    // them, the voice's lead point included. Sorted by tick. The live
+    // preview's curve.
     static std::vector<SongDocument::LanePointValue>
     applyLaneWrites(const std::vector<DocLanePoint> &before, const std::vector<LaneWrite> &writes,
                     uint8_t cc);
@@ -145,14 +165,14 @@ class RecordingTake
     const std::vector<Control> &controls() const { return m_controls; }
     // The take's bend and lane moves as lane writes, in segment order
     // (later passes win where they overlap), and within a segment in
-    // ascending CC with BEND last (0x01 MOD, 0x07 VOL, 0x0A PAN, 0x14 BENDR,
-    // 0x15 LFOS, then BEND: the writes touch different lanes, so the order
-    // only keeps the result deterministic). Ticks round to the nearest and
-    // never run backwards within a write; on a shared tick the last move
-    // wins, and a move that changes nothing the engine plays (the same CC
-    // value, or the same bend to its 7-bit resolution) is dropped, its
-    // exact value taken by the point it sounds like (a
-    // bend's spring back to centre rests at 0). Each write runs to its
+    // ascending CC with BEND then the voice last (0x01 MOD, 0x07 VOL, 0x0A
+    // PAN, 0x14 BENDR, 0x15 LFOS, BEND, DOC_CC_VOICE: the writes touch
+    // different lanes, so the order only keeps the result deterministic).
+    // Ticks round to the nearest and never run backwards within a write; on
+    // a shared tick the last move wins, and a move that changes nothing the
+    // engine plays (the same CC value or voice, or the same bend to its
+    // 7-bit resolution) is dropped, its exact value taken by the point it
+    // sounds like (a bend's spring back to centre rests at 0). Each write runs to its
     // segment's end, unshifted: the Boundary that ended it, or for the
     // current segment endSample under toNotes' rule for an open note
     // (endSample when read in it, else the last position seen); there the

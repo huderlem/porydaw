@@ -1519,8 +1519,13 @@ void SongDocument::writeLanePoints(int engineTrack, uint8_t cc, uint64_t tickBeg
         op.event = makeLaneEvent(cc, channel, pt.tick, pt.value);
         ops.push_back(op);
     }
+    // J4: the track's initial voice is replaced by a write of its own at
+    // tick 0, never deleted.
+    if (cc == DOC_CC_VOICE)
+        keepInitialVoiceOps(ops, removals);
     appendTrackKeepAliveOps(ops, removals);
-    pushEdit(tr("draw automation points"), std::move(ops));
+    pushEdit(cc == DOC_CC_VOICE ? tr("write voice changes") : tr("draw automation points"),
+             std::move(ops));
 }
 
 void SongDocument::moveLanePoints(const std::vector<LanePointMove> &moves)

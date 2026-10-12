@@ -1351,3 +1351,204 @@ build-off and build-dummy, and all five trees build cleanly.
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (all
 harnesses). `--reccheck`, `--midicheck` and `--primecheck` pass on
 build-nomidi, build-off and build-dummy. All five trees build cleanly.
+
+### Step 5 — record program changes onto the Voice lane (2026-10-12, uncommitted)
+
+**What landed**
+
+- **Capture.** New `CaptureEvent::Program`: `value` is the voice slot,
+  stamped (`lateSamples`) like a move. `AudioEngine::applyLiveProgram` now
+  checks the range first (J3): a program past the voicegroup's last voice
+  is neither heard nor captured, and is reported once when it would have
+  mattered (a sound target, or a take; with neither it is silently dropped,
+  as before). A valid one is captured **before** the sound-target check, so
+  it records with live play off, exactly like notes and knobs. A program
+  change may use the ring's note reserve (it is a press, not a stream).
+- **Latch.** A captured, sounding change sets `m_captureMoved.program` and
+  `m_liveLatch.lanes.program`; a dropped one (full ring) neither. Everything
+  else was already plumbed in step 4 and is now exercised: `holds()` skips
+  the song's 0xC events on the latched track, `chaseTouched` hands the voice
+  back (the later-program fallback), `reapplyLiveLatch` re-sends the voice
+  after a document edit's full chase, and the wrap chases at the loop end,
+  so the voice, like the other lanes, carries the loop end's song state
+  into pass 2 (the same value the take's restore point there commits).
+- **`RecordingTake`.** `Program` becomes a `Control` on `DOC_CC_VOICE`,
+  going through the same per-segment machinery: same-tick last wins, a
+  repeat is dropped (`audible` is identity), and within a segment the voice
+  writes after BEND (map key 0x100), as `takeLanesText` already ordered it.
+  - **The song's voice at a tick** is its last program change at or before
+    it, or with none its first later one: what the app plays there
+    (`primeVoices`, `chaseTouched`, and `SongView::programAtTick`'s
+    `firstProgram` fallback). `restorePoint` restores exactly that at a
+    write's end. With no program change anywhere on the track there is no
+    restore point: no event can stand for "no voice", and the engine has no
+    track-init voice (`restValue` stays 0, unused for the voice).
+  - **`voiceLeadPoint`** (new): when the take's first voice write starts
+    after tick 0 on or before the track's first program change, the take
+    would become the track's first voice, which `primeVoices` plays from the
+    start. The commit then also writes the song's first voice at tick 0, so
+    what plays before the take is unchanged. `applyLaneWrites` includes it,
+    so the ghost shows it. Not needed with a voice before the take, with no
+    voice in the song, or with the take's own at tick 0.
+- **Document (J4).** `writeLanePoints` with `DOC_CC_VOICE` now calls
+  `keepInitialVoiceOps` before `appendTrackKeepAliveOps`: a range over tick
+  0 never removes the track's tick-0 program change unless the write puts
+  its own there (then it replaces it). Undo text "write voice changes" when
+  used alone; inside a take's group the group's text wins. `commitTake`
+  writes the lead (if any), then the writes in order, all in the take's one
+  undo step: "Record 2 note(s) with voice", "Record voice".
+- **Ghosts.** The Voice row draws the take's lane from
+  `RecordingPreview::lanes` (the preview's `DOC_CC_VOICE` lane): chips
+  inside the take's ranges at `kRecordingGhostAlpha`, the song's chips
+  outside them solid, the gutter counting the ghost's changes. The row is
+  read-only meanwhile (`rowHasTakeGhost` covers Row::Voice: no voice picker
+  on a click, no right-click delete, no hover readout). `mergeEmptyLanes`
+  skips the voice (it has its own row, not an AutoLane), `rebuildRows` keeps
+  a Voice row for a ghost even without a document (in practice the row is
+  always there with one), and `recordingLanesChanged` repaints the Voice row
+  from the chip before the first change (a chip's label runs to the next
+  change). `recordingPreviewLanePoint(DOC_CC_VOICE, tick, _)` gives a chip
+  line's probe point.
+- **Same tick as a note.** `applyOps` already puts setup events (0xB and
+  up) before same-tick notes, and mid2agb sorts `InstrumentChange` before
+  `Note` within a tick anyway. Checked end to end below.
+
+**`writeLanePoints` voice audit**
+
+- *Voice-name stamps*: clipboard-only (`SongView::Clip::voiceNames`, set by
+  `setClipboard`); `addLanePoint(DOC_CC_VOICE)` stamps nothing in the
+  document and there is no sidecar voice metadata. Nothing to do.
+- *Tick-0 seed / keep-alive*: the only real hazard. Fixed with
+  `keepInitialVoiceOps` (above); `appendTrackKeepAliveOps` already ran.
+  A take's write over tick 0 always has its own point at tick 0 (a write's
+  first point is at its `tickBegin`), so for takes this is a guard.
+- *No drag editing*: why the comment said "not for voice"; the take is the
+  first gesture-like caller, and nothing in the write path is drag-specific.
+- *`editTrackVoice` / "first voice"*: reads the first change's tick, so a
+  take at tick 0 changes what the header's voice editor edits, as intended;
+  a take after tick 0 doesn't touch it (with the lead, a song whose first
+  voice was later now has it at tick 0 too, which is the voice the header
+  already showed via `firstProgram`).
+- *mid2agb*: mid-track 0xC is `InstrumentChange` → `VOICE , n` at any time;
+  reccheck compiles the song before and after a take with the project's
+  mid2agb and counts one more `VOICE` for each recorded program.
+
+**Judgment calls**
+
+- **Restore with no earlier voice = the first later one** (primeVoices),
+  and **the lead point** so the stretch before the take is unchanged. The
+  alternative (no restore, no lead) would change what plays both before and
+  after the take on a track whose first voice comes late (as on
+  `mus_abandoned_ship`'s first track, whose first voice is at tick 36).
+- **No restore and no lead on a track with no program change at all.**
+- **Out-of-range with no target and no take** stays unreported (step 2's
+  check); with a take (live play off) it is reported, since the take would
+  have recorded it.
+- **Program changes may take the capture reserve**, like notes.
+- **A note pressed just before a program change in the same callback**
+  lands on the same tick and plays the new voice in the committed song
+  (setup events precede same-tick notes), though live it sounded the old
+  one. Accepted.
+
+**Harness (`--reccheck`)**
+
+- Unit (`checkTakeRules`): Program → Voice moves with the slot; same tick,
+  repeat; the voice after BEND per segment; a second segment's write;
+  restore with none (no point), before, inside, only later (first later),
+  already the song's (no point); `voiceLeadPoint`'s none/before/at-0/
+  first-at-or-after cases; `applyLaneWrites` with the lead and the
+  restore, and over a tick-0 voice.
+- End to end (`checkRecordingVoice`, after the latch block, on two song
+  voice changes at t1 on a and b):
+  - the change sounds on the target only; the Voice ghost holds it, with no
+    CC lane row for it, and its chip paints in the track colour at ghost
+    alpha after a warmed cache (so it is the row's repaint);
+  - a note in the same callback as a change: one tick, the change first in
+    the file and in the timeline;
+  - an out-of-range program: not heard, reported once, not recorded;
+  - the song's t1 voice is held on a, not on b; a document edit mid-take
+    keeps the held voice;
+  - commit "Record 2 note(s) with voice" / "Recorded 2 note(s) with voice.",
+    the lane exactly the take over the song with t1's voice back at the
+    stop; mid2agb compiles one more VOICE per recorded program; playback
+    sounds cursor voice → P1 → P2 → the song's at the stop; undo restores
+    the chunk's events exactly, redo the take's lane;
+  - a take at tick 0 on a's real fixture (first voice at 36): the take's
+    voice at 0, the song's first back at the stop; then with a tick-0 voice
+    added: replaced (exactly one tick-0 change, the take's), undo byte for
+    byte; `writeLanePoints` over tick 0 with no point there keeps it;
+  - a new track whose only voice was moved later: the commit writes the
+    song's voice at 0, the take, the restore, and the later one;
+  - a private arm: Stop hands the held voice back to the song's at the
+    stop position;
+  - live play off: not heard, not held (t1 plays), recorded, and an
+    out-of-range program still reported;
+  - loop: P1 before the wrap restored at the loop end, the wrap leaving the
+    voice where plain playback has it (not P1), the song's in-loop change
+    playing on pass 2, P2 after it restored to it at the stop ("Record
+    voice").
+- Mutation-tested 19 ways, each failing the expected checks and restored
+  byte for byte (md5 asserted per file):
+  - no program capture; capture after the no-target return; no program
+    latch; out-of-range captured; out-of-range not reported in a take with
+    no target; no voice reapply after an edit;
+  - voice sorted by cc (before BEND); restore without the later fallback;
+    restore from `restValue`; no lead (`voiceLeadPoint` false); the commit
+    not writing the lead; the preview not inserting it;
+  - `writeLanePoints` without `keepInitialVoiceOps`;
+  - ghost chips not faded; the ghost not drawn (song chips instead);
+    `mergeEmptyLanes` adding a voice AutoLane; no Voice row repaint (caught
+    once the cache was warmed before the change);
+  - the mid2agb check compiling the old song; `applyOps` putting setup
+    events after same-tick notes.
+- Not harness-covered: the read-only guards on the Voice row (press,
+  right-click, hover) and the step back to the previous chip in the
+  repaint region.
+
+**Notes for step 6**
+
+- The Voice row has no Learn (program changes need no route), so the lane
+  menu's "Learn MIDI control…" shouldn't appear on it.
+- The manual outline gains "program changes onto the Voice row" next to the
+  knobs line, and the "Program change … don't do anything" TODO now names
+  only aftertouch and the rest.
+
+**Windows checkpoint (manual test script)**
+
+1. Pick a track with notes (ideally one whose voice changes partway
+   through the song). Select it, put the edit cursor a bar before a phrase
+   and press Record.
+2. While it plays, press a program-change button, play a few notes, press
+   another, play more. Each press changes the track's voice at once; the
+   notes you play sound in the new voice.
+   - The Voice row shows your changes as faded chips while recording; the
+     song's own chips outside the take stay solid. Clicking the row does
+     nothing until Stop.
+   - A program past the voicegroup's last voice changes nothing and says
+     "Program change N ignored: …" once.
+3. Stop. The chips turn solid; the undo menu and status bar say "Record N
+   notes with voice". Right where you stopped, the song's voice comes back
+   (a chip with the voice the song had there).
+4. Play the stretch back: the recorded notes play in the voices you chose,
+   and after the take the track sounds as before.
+5. Ctrl+Z: the notes and voice changes go; Ctrl+Y brings them back.
+6. Tick 0: put the cursor at the very start, Record, press a program at
+   once, Stop. The track's first voice (the header's) is now that voice;
+   there is still exactly one voice at the start. Undo puts the old one
+   back.
+7. Latch: record over a spot where the song changes this track's voice
+   after you press a program. The song's change doesn't take over while
+   recording. Other tracks' voice changes still play.
+8. Loop: with Loop on, press a program on pass 1 before the loop end. At
+   the wrap the track goes back to the song's voice (as plain looped
+   playback has it there); on pass 2 the song's own voice changes play
+   until you press again. After Stop, pass 1's change ends at the loop end
+   on the song's voice.
+9. Live play off (Settings → MIDI): record pressing a program. You hear no
+   change, the song's voices play, and the change is still recorded.
+10. Optional: build the ROM (`make`) and listen in-game: the recorded voice
+    changes play there too.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--reccheck`, `--midicheck` and `--primecheck` pass on build-nomidi,
+build-off and build-dummy, and all five trees build cleanly.

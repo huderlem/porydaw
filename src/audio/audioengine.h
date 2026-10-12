@@ -416,8 +416,9 @@ class AudioEngine
     // with CaptureEvent::Reset).
     void applyLiveBend(int16_t bend, bool reset = false);
     void applyLiveControl(uint8_t lane, uint8_t value, bool reset = false);
-    // A keyboard program change: the target track's voice. Sound target
-    // only, and not captured yet (step 5 records the Voice lane).
+    // A keyboard program change: the target track's voice, captured
+    // whether or not it sounds (CaptureEvent::Program) unless the
+    // voicegroup has no such voice (J3: ignored, and reported).
     void applyLiveProgram(uint8_t program);
     // The recording latch (docs/midi-controls/PLAN.md §3.4, m_liveLatch).
     // release: its lanes go back to the song at pos (chaseTouched) and it
@@ -593,11 +594,12 @@ class AudioEngine
     // The lanes sent to m_liveTrack since it became the target: the ones a
     // target change hands back to the song.
     TouchedLanes m_liveTouched;
-    // The recording latch (D3, J2): the lanes of m_liveTrack whose song events
-    // render skips, because the keyboard moved them, sounding, during the
-    // take. A lane latches on its first such move; a CC121 reset latches only
-    // a lane the take already moved (m_captureMoved), as only there is the
-    // reset recorded. It is always a subset of m_liveTouched, on m_liveTrack.
+    // The recording latch (D3, J2): the lanes of m_liveTrack (its voice
+    // included) whose song events render skips, because the keyboard moved
+    // them, sounding, during the take. A lane latches on its first such
+    // move; a CC121 reset latches only a lane the take already moved
+    // (m_captureMoved), as only there is the reset recorded. It is always a
+    // subset of m_liveTouched, on m_liveTrack.
     // It ends (the lanes chased back to the song) at a loop wrap, inside
     // render, to the song's loop-end state before the loop start's events;
     // at a seek; at the take's end (punch-out, a disarm, a new arm, Stop,

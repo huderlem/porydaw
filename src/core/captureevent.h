@@ -29,6 +29,8 @@ struct CaptureEvent {
                   // key is the lane's document CC (0x01 MOD, 0x07 VOL, 0x0A
                   // PAN, 0x14 BENDR, 0x15 LFOS), value what it set, as heard
                   // (scaled to the lane: MOD to its range, BENDR to 0..24)
+        Program,  // a program change (docs/midi-controls/PLAN.md step 5): value
+                  // is the voice slot, 0..127, one the voicegroup has (J3)
     };
     enum Flag : uint8_t {
         // Bend/Control: a Reset All Controllers (CC121) put the lane back at
@@ -40,8 +42,9 @@ struct CaptureEvent {
     uint64_t resumePos = 0;   // Boundary only
     uint32_t generation = 0;  // the arm this belongs to (AudioEngine::armCapture)
     uint32_t segment = 0;     // Boundary: the segment it starts
-    uint32_t lateSamples = 0; // NoteOn/NoteOff/Bend/Control: arrival to callback, in samples
-    int16_t value = 0;        // Bend/Control
+    uint32_t lateSamples = 0; // NoteOn/NoteOff/Bend/Control/Program: arrival to callback, in
+                              // samples
+    int16_t value = 0;        // Bend/Control/Program
     uint8_t kind = NoteOn;
     uint8_t key = 0; // NoteOn/NoteOff: the key; Control: the lane's CC
     uint8_t velocity = 0;

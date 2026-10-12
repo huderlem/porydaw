@@ -3454,6 +3454,11 @@ class AutomationArea : public TimelineSurface
     {
         for (int i = 0; i < int(m_rows.size()); i++) {
             const Row &row = m_rows[i];
+            // The voice: a change's chip line, near its top (the selected
+            // track's row).
+            if (cc == DOC_CC_VOICE && row.kind == Row::Voice && track == m_sv->selectedTrack())
+                return QPointF(m_sv->displayX(double(tick), kGutterW, devicePixelRatioF()),
+                               rowTop(i) + 8);
             if (row.kind != Row::Lane || row.track != track || row.cc != cc)
                 continue;
             int minV, maxV;
@@ -3477,10 +3482,14 @@ class AutomationArea : public TimelineSurface
         QRegion dirty;
         for (int i = 0; i < int(m_rows.size()); i++) {
             const Row &row = m_rows[i];
-            if (row.kind != Row::Lane)
+            if (row.kind == Row::Tempo)
                 continue;
-            const RecordingPreview::Lane *a = before.lane(row.track, row.cc);
-            const RecordingPreview::Lane *b = after.lane(row.track, row.cc);
+            // The Voice row shows the selected track's voice changes.
+            const bool voice = row.kind == Row::Voice;
+            const int track = voice ? m_sv->selectedTrack() : row.track;
+            const uint8_t cc = voice ? DOC_CC_VOICE : row.cc;
+            const RecordingPreview::Lane *a = before.lane(track, cc);
+            const RecordingPreview::Lane *b = after.lane(track, cc);
             if (a == b || (a && b && *a == *b))
                 continue;
             const QRect r(0, rowTop(i), width(), rowHeight(row));
@@ -3493,8 +3502,8 @@ class AutomationArea : public TimelineSurface
             // A ghost that rescales a zoomable row (laneDisplayMax counts
             // it) moves every point: all of it, its gutter's range included.
             // A new peak under the row's fixed range changes nothing there.
-            if (laneDisplayMaxWith(row.track, row.cc, a) !=
-                laneDisplayMaxWith(row.track, row.cc, b)) {
+            if (!voice && laneDisplayMaxWith(row.track, row.cc, a) !=
+                              laneDisplayMaxWith(row.track, row.cc, b)) {
                 // Counted for the test harness.
                 setProperty("rescaleRepaints", property("rescaleRepaints").toInt() + 1);
                 dirty += r;
@@ -3523,6 +3532,16 @@ class AutomationArea : public TimelineSurface
                     from =
                         std::min({from, ra ? ra->first : UINT64_MAX, rb ? rb->first : UINT64_MAX});
                 break;
+            }
+            if (voice) {
+                // A chip's label runs to the next change: the one before
+                // the first that differs relays out too.
+                uint64_t prev = 0;
+                for (const RecordingPreview::Lane *l : {a, b})
+                    for (const LanePoint &pt : l->points)
+                        if (pt.tick < from)
+                            prev = std::max<uint64_t>(prev, pt.tick);
+                from = std::min(from, prev);
             }
             const qreal x = m_sv->displayX(double(from), kGutterW, dpr) - nodeExtent() - 2;
             const int left = std::max(kGutterW, int(std::floor(x)));
@@ -3571,7 +3590,8 @@ class AutomationArea : public TimelineSurface
             const int selected = m_sv->selectedTrack();
             // The voice row shows whenever the track has changes; with a
             // document attached it is always present as the place to add one.
-            bool voiceRow = m_sv->document() != nullptr;
+            bool voiceRow = m_sv->document() != nullptr ||
+                            m_sv->recordingPreview().lane(selected, DOC_CC_VOICE);
             for (const VoiceChange &vc : model.voices) {
                 if (vc.track == selected) {
                     voiceRow = true;
@@ -3998,7 +4018,8 @@ class AutomationArea : public TimelineSurface
             }
         }
         if (row.kind == Row::Voice) {
-            voiceRowPress(event);
+            if (!rowHasTakeGhost(ri))
+                voiceRowPress(event);
             return;
         }
         uint8_t cc;
@@ -4748,7 +4769,7 @@ class AutomationArea : public TimelineSurface
         }
         if (row.kind == Row::Voice) {
             DocLanePoint hit;
-            if (voiceChangeNear(event->position().x(), &hit))
+            if (!rowHasTakeGhost(m_rightRow) && voiceChangeNear(event->position().x(), &hit))
                 doc->deleteLanePoints(m_sv->selectedTrack(), DOC_CC_VOICE, {hit});
             return;
         }
@@ -5265,7 +5286,16 @@ class AutomationArea : public TimelineSurface
     bool rowHasTakeGhost(int ri) const
     {
         const Row &row = m_rows[ri];
+        if (row.kind == Row::Voice)
+            return voiceTakeGhost() != nullptr;
         return row.kind == Row::Lane && m_sv->recordingPreview().lane(row.track, row.cc);
+    }
+
+    // The take's Voice lane, when it records into the selected track (the
+    // track the Voice row shows).
+    const RecordingPreview::Lane *voiceTakeGhost() const
+    {
+        return m_sv->recordingPreview().lane(m_sv->selectedTrack(), DOC_CC_VOICE);
     }
 
     const std::vector<LanePoint> *rowPoints(const Row &row) const
@@ -5950,9 +5980,12 @@ class AutomationArea : public TimelineSurface
                        SongView::tr("empty · click to add points"));
         } else if (row.kind == Row::Voice && m_sv->document()) {
             int count = 0;
-            for (const VoiceChange &vc : m_sv->model().voices)
-                if (vc.track == m_sv->selectedTrack())
-                    count++;
+            if (const RecordingPreview::Lane *ghost = voiceTakeGhost())
+                count = int(ghost->points.size()); // as its commit would leave it
+            else
+                for (const VoiceChange &vc : m_sv->model().voices)
+                    if (vc.track == m_sv->selectedTrack())
+                        count++;
             p.setPen(themes::color(themes::Role::song_view_secondary_text));
             p.drawText(textBoxes.secondary, Qt::AlignLeft | Qt::AlignVCenter,
                        count ? SongView::tr("%n change(s) · click to edit", nullptr, count)
@@ -6359,7 +6392,23 @@ class AutomationArea : public TimelineSurface
         std::vector<Shown> changes;
         const SongView::RangeDrag &range = m_sv->rangeDrag();
         const bool previewing = range.active && range.dTick != 0;
+        // A recording take's voice changes (its ghost): the row as the
+        // commit would leave it, the take's own chips faded, the song's
+        // outside the ranges it rewrites as they are. The row is read-only
+        // meanwhile, so no range drag previews here.
+        const RecordingPreview::Lane *take = voiceTakeGhost();
+        if (take) {
+            for (const LanePoint &pt : take->points) {
+                const bool ghost = std::any_of(take->ranges.begin(), take->ranges.end(),
+                                               [&](const std::pair<uint64_t, uint64_t> &r) {
+                                                   return pt.tick >= r.first && pt.tick <= r.second;
+                                               });
+                changes.push_back({int64_t(pt.tick), uint8_t(pt.value), ghost});
+            }
+        }
         for (const VoiceChange &vc : model.voices) {
+            if (take)
+                break;
             if (vc.track != selected)
                 continue;
             const bool carried =
@@ -6384,8 +6433,8 @@ class AutomationArea : public TimelineSurface
             QColor line = color;
             QColor text = themes::color(themes::Role::song_view_primary_text);
             if (changes[i].ghost) {
-                line.setAlpha(110);
-                text.setAlpha(110);
+                line.setAlpha(take ? kRecordingGhostAlpha : 110);
+                text.setAlpha(take ? kRecordingGhostAlpha : 110);
             }
             p.setPen(QPen(line, 2));
             p.drawLine(QLineF(x, plot.top() + 4, x, plot.bottom() - 4));
@@ -9291,8 +9340,11 @@ bool SongView::mergeEmptyLanes()
     // until the commit gives them points (setRecordingPreview).
     std::vector<std::pair<int, uint8_t>> keys = m_emptyLanes;
     if (m_recordingPreview.track >= 0) {
+        // The voice has its own row (always there with a document), not a
+        // lane.
         for (const RecordingPreview::Lane &lane : m_recordingPreview.lanes)
-            keys.push_back({m_recordingPreview.track, lane.cc});
+            if (lane.cc != DOC_CC_VOICE)
+                keys.push_back({m_recordingPreview.track, lane.cc});
     }
     for (const std::pair<int, uint8_t> &key : keys) {
         if (m_model.findLane(key.first, key.second))

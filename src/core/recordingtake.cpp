@@ -172,14 +172,18 @@ void RecordingTake::push(const CaptureEvent &ev)
         closeOpen(ev.samplePos, /*played=*/false);
         break;
     case CaptureEvent::Bend:
-    case CaptureEvent::Control: {
+    case CaptureEvent::Control:
+    case CaptureEvent::Program: {
         Control control;
         control.sample = ev.samplePos;
         control.floorSample = m_segmentStart;
         control.late = ev.lateSamples;
         control.segment = m_segment;
-        // A Control's lane is its key (its 7 bits: never DOC_CC_BEND).
-        control.cc = ev.kind == CaptureEvent::Bend ? DOC_CC_BEND : key;
+        // A Control's lane is its key (its 7 bits: never DOC_CC_BEND); a
+        // program change's is the Voice lane.
+        control.cc = ev.kind == CaptureEvent::Bend      ? DOC_CC_BEND
+                     : ev.kind == CaptureEvent::Program ? DOC_CC_VOICE
+                                                        : key;
         // A CC121 reset on a lane this take never moved isn't recorded:
         // the lane keeps the song's automation (J5).
         if (ev.flags & CaptureEvent::Reset) {
@@ -328,8 +332,10 @@ std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTime
         const uint64_t sample =
             std::max(c.floorSample, samplesEarlier(c.sample, latencySamples + c.late));
         uint64_t tick = tickAt(sample);
-        // Within a segment the lanes go in ascending CC, BEND (0xFF) last.
-        auto [it, fresh] = writes.try_emplace({c.segment, c.cc});
+        // Within a segment the lanes go in ascending CC, then BEND (0xFF),
+        // then the voice.
+        auto [it, fresh] =
+            writes.try_emplace({c.segment, c.cc == DOC_CC_VOICE ? 0x100 : int(c.cc)});
         LaneWrite &w = it->second;
         if (fresh) {
             w.cc = c.cc;
@@ -382,15 +388,49 @@ bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &bef
     // 2, LFOS 22, MOD 0, bend centred), which is what plays there. A point
     // on tickEnd itself, which the write's range takes, comes back this way
     // (or goes when the take's last value already sounds like it).
+    // The voice has no track-init value: with no program change before,
+    // the track plays its first later one (TimelinePlayer::primeVoices, and
+    // chaseTouched at a wrap), so that is what comes back; with none at
+    // all, nothing can stand for "no voice", and the take's last voice
+    // stays.
+    const bool voice = cc == DOC_CC_VOICE;
     int value = restValue(cc);
+    bool known = !voice;
     for (const DocLanePoint &pt : before) {
-        if (pt.tick > tickEnd)
+        if (pt.tick > tickEnd) {
+            if (!known) {
+                value = pt.value;
+                known = true;
+            }
             break;
+        }
         value = pt.value;
+        known = true;
     }
+    if (!known)
+        return false;
     if (audible(cc, value) == audible(cc, points.back().value))
         return false;
     *out = {tickEnd, value};
+    return true;
+}
+
+bool RecordingTake::voiceLeadPoint(const std::vector<DocLanePoint> &before,
+                                   const std::vector<LaneWrite> &writes,
+                                   SongDocument::LanePointValue *out)
+{
+    uint64_t first = UINT64_MAX;
+    for (const LaneWrite &w : writes)
+        if (w.cc == DOC_CC_VOICE && !w.points.empty())
+            first = std::min(first, w.tickBegin);
+    // Before the take the track played its first program change from the
+    // start (primeVoices). When the take's voice would become the first
+    // instead, that one goes to tick 0 so the stretch before the take keeps
+    // its voice. A track with a voice before the take, or with none at
+    // all, needs nothing.
+    if (first == UINT64_MAX || first == 0 || before.empty() || before.front().tick < first)
+        return false;
+    *out = {0, before.front().value};
     return true;
 }
 
@@ -404,6 +444,11 @@ RecordingTake::applyLaneWrites(const std::vector<DocLanePoint> &before,
         lane.push_back({pt.tick, pt.value});
     const auto byTick = [](const SongDocument::LanePointValue &a,
                            const SongDocument::LanePointValue &b) { return a.tick < b.tick; };
+    // The voice's tick-0 lead goes in first, as MainWindow::commitTake
+    // writes it.
+    SongDocument::LanePointValue lead;
+    if (cc == DOC_CC_VOICE && voiceLeadPoint(before, writes, &lead))
+        lane.insert(lane.begin(), lead);
     for (const LaneWrite &w : writes) {
         if (w.cc != cc)
             continue;

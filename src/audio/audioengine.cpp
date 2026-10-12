@@ -1008,14 +1008,15 @@ void AudioEngine::reapplyLiveLatch()
 
 void AudioEngine::applyLiveProgram(uint8_t program)
 {
-    if (m_liveTrack < 0)
-        return;
     // J3: the data byte is the voice slot. Past the voicegroup's last voice
-    // there is nothing to play: ignored, and counted for the status bar.
-    // The count in effect goes into the report with it, so a tab switch
-    // before the UI polls can't name the wrong range.
+    // there is nothing to play: ignored, neither heard nor recorded, and
+    // counted for the status bar where it would have mattered (a sound
+    // target, or a take). The count in effect goes into the report with it,
+    // so a tab switch before the UI polls can't name the wrong range.
     const int voices = m_liveVoiceCount.load();
     if (int(program) >= voices) {
+        if (m_liveTrack < 0 && !capturing())
+            return;
         m_liveIgnoredSeq = (m_liveIgnoredSeq + 1) & 0xFFFF;
         if (m_liveIgnoredSeq == 0)
             m_liveIgnoredSeq = 1; // 0 stays "none yet"
@@ -1023,11 +1024,22 @@ void AudioEngine::applyLiveProgram(uint8_t program)
                                    std::memory_order_relaxed);
         return;
     }
+    // Captured whether or not it sounds, as the other lanes are. Only a
+    // change the take records counts as moved, or latches.
+    const bool take = pushCapture(CaptureEvent::Program, m_player.position(), 0, 0, 0, program);
+    if (take)
+        m_captureMoved.program = true;
+    if (m_liveTrack < 0)
+        return;
     m4a_engine_program_change(m_engine.get(), m_liveTrack, program);
     m_liveTouched.program = true;
-    // Kept for reapplyLiveLatch. The voice doesn't latch yet: step 5 sets
-    // m_liveLatch.lanes.program here, as the bend and CC lanes do theirs.
-    m_liveProgramValue = program;
+    m_liveProgramValue = program; // for reapplyLiveLatch
+    // D3: the song's program changes on the track stop here until the pass
+    // ends, as the bend and CC lanes do.
+    if (take) {
+        m_liveLatch.track = m_liveTrack;
+        m_liveLatch.lanes.program = true;
+    }
 }
 
 void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)
@@ -1123,7 +1135,8 @@ bool AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     // A knob streams far faster than anyone plays notes: bend and lane moves
     // stop short of the ring's last kCaptureReserve slots, which only notes,
     // cuts and boundaries take, so a flood of moves the UI can't drain in
-    // time loses moves before it loses a note.
+    // time loses moves before it loses a note. A program change is a
+    // press, like a note: it may take them.
     const bool move = kind == CaptureEvent::Bend || kind == CaptureEvent::Control;
     const uint32_t room = move ? kCaptureRingSize - kCaptureReserve : kCaptureRingSize;
     if (w - m_captureRead.load(std::memory_order_acquire) >= room) {
@@ -1140,8 +1153,10 @@ bool AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.velocity = velocity;
     ev.value = value;
     ev.flags = flags;
-    ev.lateSamples =
-        kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff || move ? m_liveLate : 0;
+    ev.lateSamples = kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff || move ||
+                             kind == CaptureEvent::Program
+                         ? m_liveLate
+                         : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);
     return true;
 }

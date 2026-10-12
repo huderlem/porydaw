@@ -252,8 +252,11 @@ class SongDocument : public QObject
     // Gesture write (freehand sweep / line ramp): replaces every point of the
     // lane inside [tickBegin, tickEnd] with the given stream, as one undoable
     // command. An empty stream just clears the range; a call with nothing to
-    // remove and nothing to write pushes nothing. Not for DOC_CC_VOICE (the
-    // voice row has no drag editing).
+    // remove and nothing to write pushes nothing. With DOC_CC_VOICE (a
+    // recording take's program changes: the voice row has no drag editing)
+    // the track's tick-0 program change is never removed, only replaced by
+    // a point the write puts at tick 0 (keepInitialVoiceOps). Every write
+    // keeps a track alive (appendTrackKeepAliveOps).
     struct LanePointValue {
         uint64_t tick;
         int value;

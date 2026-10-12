@@ -3,9 +3,13 @@
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
 #include <QKeyEvent>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QProcess>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -21,6 +25,7 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <random>
 #include <vector>
@@ -77,7 +82,8 @@
 // checkRecordingLaneDisplay, checkRecordingCcLaneDisplay); a 3-knob flood,
 // drained and with the UI stalled (checkRecordingFlood); the latch, song
 // events of a moved lane held back during a take and back after each way it
-// ends (checkRecordingLatch).
+// ends (checkRecordingLatch); program changes onto the Voice lane
+// (checkRecordingVoice).
 
 namespace {
 
@@ -230,6 +236,8 @@ struct Feed {
         control(CaptureEvent::Control, pos, value, cc);
     }
     void mod(uint64_t pos, int16_t value) { lane(0x01, pos, value); }
+    // A program change: value is the voice slot.
+    void program(uint64_t pos, int16_t voice) { control(CaptureEvent::Program, pos, voice); }
     void begin(uint64_t pos) { push(CaptureEvent::Begin, pos); }
     void on(uint64_t pos, uint8_t key, uint8_t velocity = 100)
     {
@@ -925,6 +933,105 @@ void checkTakeRules()
               "take: a CC121 reset in a take that moved nothing was recorded");
         take.clear();
         check(take.controls().empty(), "take: clear() kept the moves");
+        // Program changes (docs/midi-controls/PLAN.md step 5) are Voice
+        // lane moves: same-tick last wins, a repeat is dropped, and within a
+        // segment the voice writes after BEND.
+        {
+            take.begin(0, 18);
+            Feed v{take, 18};
+            v.begin(0);
+            v.program(1000, 5);
+            v.lane(0x07, 1500, 90);
+            v.bend(1600, 4096);
+            v.program(2000, 7);
+            v.program(2400, 9); // same tick: wins
+            v.program(3000, 9); // a repeat: dropped
+            v.program(5000, 10);
+            v.jump(6000, 0);
+            v.program(1000, 11);
+            check(take.controls().size() == 8 && take.controls()[0].cc == DOC_CC_VOICE &&
+                      take.controls()[0].value == 5 && take.controls()[1].cc == 0x07,
+                  "take: a program change did not become a Voice lane move with its slot");
+            const auto vw = take.toLaneWrites(tl, 3000, 1, 0);
+            std::vector<uint8_t> vorder;
+            for (const RecordingTake::LaneWrite &w : vw)
+                vorder.push_back(w.cc);
+            if (check(vorder == std::vector<uint8_t>{0x07, DOC_CC_BEND, DOC_CC_VOICE, DOC_CC_VOICE},
+                      "take: the voice's writes are not after BEND, segment by segment")) {
+                check(vw[2].tickBegin == 1 && vw[2].tickEnd == 6 && vw[2].restoreEnd &&
+                          samePoints(vw[2].points, {{1, 5}, {2, 9}, {5, 10}}),
+                      "take: the voice moves did not convert (same tick, a repeat)");
+                check(vw[3].tickBegin == 1 && vw[3].tickEnd == 3 && vw[3].restoreEnd &&
+                          samePoints(vw[3].points, {{1, 11}}),
+                      "take: the second segment's voice write is off");
+            }
+            take.clear();
+        }
+        // The voice's restore: the song's program at or before the end,
+        // else its first later one (what primeVoices plays there), else
+        // nothing (no event stands for "no voice"). And its lead point: a
+        // take that would become the track's first voice puts the song's
+        // first one at tick 0.
+        {
+            const auto pts = [](std::initializer_list<std::pair<uint64_t, int>> list) {
+                std::vector<DocLanePoint> out;
+                for (const auto &[tick, value] : list) {
+                    DocLanePoint pt;
+                    pt.tick = tick;
+                    pt.value = value;
+                    out.push_back(pt);
+                }
+                return out;
+            };
+            RecordingTake::LaneWrite w;
+            w.cc = DOC_CC_VOICE;
+            w.tickBegin = 10;
+            w.tickEnd = 40;
+            w.points = {{10, 5}, {20, 6}};
+            w.restoreEnd = true;
+            LanePointValue r{0, 0};
+            check(!w.restorePoint(pts({}), &r),
+                  "take: a voice end restored with no program change in the song");
+            check(w.restorePoint(pts({{0, 3}, {50, 4}}), &r) && r.tick == 40 && r.value == 3,
+                  "take: a voice end did not restore the song's program before it");
+            check(w.restorePoint(pts({{25, 8}, {50, 4}}), &r) && r.tick == 40 && r.value == 8,
+                  "take: a voice end did not restore the program inside its range");
+            check(w.restorePoint(pts({{50, 4}, {60, 2}}), &r) && r.tick == 40 && r.value == 4,
+                  "take: a voice end with no program before did not restore the first later one");
+            check(!w.restorePoint(pts({{0, 6}}), &r) && !w.restorePoint(pts({{50, 6}}), &r),
+                  "take: a voice end that already plays the song's voice got a point");
+            const auto lead = [&](std::vector<DocLanePoint> before, uint64_t begin,
+                                  LanePointValue *out) {
+                RecordingTake::LaneWrite l = w;
+                l.tickBegin = begin;
+                l.points = {{begin, 5}};
+                RecordingTake::LaneWrite later = l;
+                later.tickBegin = begin + 100;
+                later.points = {{begin + 100, 7}};
+                RecordingTake::LaneWrite vol;
+                vol.cc = 0x07;
+                vol.tickBegin = 0;
+                vol.points = {{0, 1}};
+                return RecordingTake::voiceLeadPoint(before, {vol, later, l}, out);
+            };
+            LanePointValue ld{99, 99};
+            check(!lead(pts({}), 10, &ld) && !lead(pts({{0, 3}}), 10, &ld) &&
+                      !lead(pts({{5, 3}}), 10, &ld) && !lead(pts({{50, 3}}), 0, &ld),
+                  "take: a voice lead point was given where the song keeps its first voice");
+            check(lead(pts({{10, 3}}), 10, &ld) && ld.tick == 0 && ld.value == 3 &&
+                      lead(pts({{50, 4}, {60, 2}}), 10, &ld) && ld.tick == 0 && ld.value == 4,
+                  "take: a take becoming the track's first voice got no lead point (the song's "
+                  "first, at tick 0)");
+            // The preview's lane: the lead, the take, the first later
+            // program restored at the end, the song's own after it.
+            const auto voiceLane =
+                RecordingTake::applyLaneWrites(pts({{50, 4}}), {w}, DOC_CC_VOICE);
+            check(samePoints(voiceLane, {{0, 4}, {10, 5}, {20, 6}, {40, 4}, {50, 4}}),
+                  "take: the Voice lane preview is not the lead, the take and its restore");
+            check(samePoints(RecordingTake::applyLaneWrites(pts({{0, 4}}), {w}, DOC_CC_VOICE),
+                             {{0, 4}, {10, 5}, {20, 6}, {40, 4}}),
+                  "take: the Voice lane preview over a tick-0 voice is off");
+        }
     }
     // A take whose Begin never came records nothing.
     {
@@ -1432,6 +1539,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
     }
 
     checkRecordingLatch(a, b);
+    checkRecordingVoice(a, b);
 
     // Record's key is the roll's, like M/S: R in the focused roll starts and
     // ends a take. The action carries no window shortcut, which would fire
@@ -2698,6 +2806,526 @@ void MainWindow::checkRecordingLatch(int a, int b)
     while (undo->index() > undoStart)
         undo->undo();
     m_loopAction->setChecked(loopWas);
+    m_audio.seek(0);
+    pumpMs(10);
+}
+
+// Program changes recorded onto the Voice lane (docs/midi-controls/PLAN.md
+// step 5): heard and held through the song's own voice changes during a
+// take, one undo step with the notes ("... with voice"), the song's voice
+// back at the stop, a same-tick note playing the new voice, an
+// out-of-range program neither heard nor recorded (reported once), the
+// tick-0 voice replaced and never deleted, a take that would become a
+// track's first voice keeping the song's at tick 0, ghost chips while
+// recording, playback of the recorded voices, undo and redo exact; the
+// latch ending at Stop, live play off recording without holding, and a
+// loop pass's voice restored at the loop end, the wrap handing the voice
+// back as plain playback has it.
+void MainWindow::checkRecordingVoice(int a, int b)
+{
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    MidiInput &midi = midiInput();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto playhead = [&] { return m_audio.playheadSamples(); };
+    const auto sampleOf = [&](uint64_t tick) { return session->timeline->sampleForTick(tick); };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    const auto tickNow = [&] {
+        return uint64_t(std::max(0.0, std::floor(session->timeline->tickForSample(playhead()))));
+    };
+    const auto pumpPast = [&](uint64_t tick, int ms) {
+        const uint64_t target = sampleOf(tick) + uint64_t(rate * ms / 1000.0);
+        for (int i = 0; i < 4000 && playhead() < target; i++)
+            pumpMs(5);
+        return playhead() >= target;
+    };
+    using Points = std::vector<std::pair<uint64_t, int>>;
+    const auto voices = [&](int track) {
+        Points out;
+        for (const DocLanePoint &p : doc.lanePoints(track, DOC_CC_VOICE))
+            out.push_back({p.tick, p.value});
+        return out;
+    };
+    // The song's voice at tick, as the app plays it: the last program change
+    // there or before, else the track's first (primeVoices).
+    const auto songVoice = [&](int track, uint64_t tick) {
+        const Points v = voices(track);
+        int value = v.empty() ? -1 : v.front().second;
+        for (const auto &[t, p] : v)
+            if (t <= tick)
+                value = p;
+        return value;
+    };
+    const auto chunkEvents = [&](int track) {
+        return doc.smf().tracks[size_t(doc.smfTrackFor(track))].events;
+    };
+    const M4AEngine *engine = m_audio.engineForTest();
+    const auto program = [&](int track) { return int(engine->tracks[track].currentProgram); };
+    const auto lastUndoText = [&] {
+        return undo->index() > 0 ? undo->text(undo->index() - 1) : QString();
+    };
+    const auto drainRing = [&] {
+        CaptureEvent ev;
+        while (m_audio.popCapture(&ev)) {
+        }
+    };
+    const uint64_t tpb = session->timeline->ticksPerBeat;
+    const int count = m_active->vgSource ? m_active->vgSource->voiceCount() : VOICEGROUP_SIZE;
+    // Six voices neither track uses: three to play, three for the song.
+    std::vector<int> pick;
+    {
+        Points used = voices(a);
+        const Points ub = voices(b);
+        used.insert(used.end(), ub.begin(), ub.end());
+        for (int v = 1; v < count && pick.size() < 6; v++)
+            if (std::none_of(used.begin(), used.end(),
+                             [&](const auto &p) { return p.second == v; }))
+                pick.push_back(v);
+    }
+    if (!check(pick.size() == 6 && count < 128 && !voices(a).empty(),
+               "voice: the fixture has no voice on the track, too few free voices, or a full "
+               "voicegroup")) {
+        std::fprintf(stderr, "reccheck:   %zu free, %d voices, first change at %lld\n", pick.size(),
+                     count, voices(a).empty() ? -1LL : (long long)voices(a).front().first);
+        return;
+    }
+    const uint8_t P1 = uint8_t(pick[0]), P2 = uint8_t(pick[1]), P3 = uint8_t(pick[2]);
+    const int S1 = pick[3], Sb = pick[4], S2 = pick[5];
+    const bool loopWas = m_loopAction->isChecked();
+    m_loopAction->setChecked(false);
+    const bool lanesWere = view->automationLanesVisible();
+    view->setAutomationLanesVisible(true);
+    view->selectTrack(a);
+    auto *lanes = view->findChild<QWidget *>(QStringLiteral("automationArea"));
+
+    // The song changes voice at t1 on both tracks.
+    const uint64_t cursor = tpb * 24, t1 = cursor + tpb;
+    const int undoStart = undo->index();
+    doc.addLanePoint(a, DOC_CC_VOICE, t1, S1);
+    doc.addLanePoint(b, DOC_CC_VOICE, t1, Sb);
+    const int undoSetup = undo->index();
+
+    // The song's .s as mid2agb compiles it, VOICE commands counted by
+    // voice; empty without the project's mid2agb.
+    const QString mid2agb = m_project.root() + QStringLiteral("/tools/mid2agb/mid2agb");
+    const auto compiledVoices = [&](const SmfFile &smf) {
+        std::map<int, int> counts;
+        QTemporaryDir dir;
+        const QString mid = dir.filePath(QStringLiteral("reccheck_voice.mid"));
+        const QString out = dir.filePath(QStringLiteral("reccheck_voice.s"));
+        QString error;
+        if (!QFileInfo::exists(mid2agb) || !smf.writeFile(mid, &error))
+            return counts;
+        QProcess proc;
+        proc.start(mid2agb, QStringList() << doc.cfg().rawFlags << mid << out);
+        if (!proc.waitForFinished(15000) || proc.exitCode() != 0)
+            return counts;
+        QFile file(out);
+        if (!file.open(QIODevice::ReadOnly))
+            return counts;
+        const QString text = QString::fromLatin1(file.readAll());
+        static const QRegularExpression voiceOp(QStringLiteral("VOICE\\s*,\\s*(\\d+)"));
+        for (auto it = voiceOp.globalMatch(text); it.hasNext();)
+            counts[it.next().captured(1).toInt()]++;
+        return counts;
+    };
+
+    // A take with two program changes over two notes.
+    {
+        const Points before = voices(a);
+        const auto eventsBefore = chunkEvents(a);
+        const SmfFile smfBefore = doc.smf();
+        const int reportsBefore = m_liveIgnoredReports;
+        view->setEditCursorTick(cursor);
+        m_recordAction->trigger();
+        pumpMs(20);
+        // Painted once before the change: the chip below must come from
+        // the row's repaint, not a first paint.
+        synchronizePlayhead();
+        if (lanes)
+            (void)lanes->grab();
+        const uint64_t p1 = playhead();
+        send(0xC0, P1, 0);
+        pumpMs(5);
+        check(program(a) == P1 && program(b) == songVoice(b, cursor),
+              "voice: a program change in a take did not sound on the target alone");
+        send(0x90, 60, 100);
+        pumpMs(40);
+        send(0x80, 60, 0);
+        pumpMs(20);
+        // The ghost: a faded chip at the change, on the Voice row.
+        synchronizePlayhead();
+        {
+            const RecordingPreview::Lane *ghost = view->recordingPreview().lane(a, DOC_CC_VOICE);
+            check(!view->model().findLane(a, DOC_CC_VOICE),
+                  "voice: the take's voice brought up a CC lane row (it has its own row)");
+            check(ghost && ghost->ranges.size() == 1 && ghost->ranges.front().first == tickOf(p1) &&
+                      std::any_of(ghost->points.begin(), ghost->points.end(),
+                                  [&](const LanePoint &pt) {
+                                      return pt.tick == tickOf(p1) && pt.value == P1;
+                                  }),
+                  "voice: the take's Voice lane ghost does not hold the program change");
+            const std::optional<QPointF> at =
+                view->recordingPreviewLanePoint(DOC_CC_VOICE, tickOf(p1), 0);
+            if (check(lanes && at, "voice: no Voice row to probe")) {
+                const qreal dpr = lanes->devicePixelRatioF();
+                const QImage image = lanes->grab().toImage();
+                const auto pixel = [&](QPointF p) {
+                    return image.pixelColor(int(p.x() * dpr), int(p.y() * dpr));
+                };
+                const QColor color = SongView::trackColor(a);
+                const QColor under = pixel(*at - QPointF(0, 6));
+                const QColor got = pixel(*at);
+                const auto ch = [&](int f, int u) {
+                    return (f * songview::kRecordingGhostAlpha +
+                            u * (255 - songview::kRecordingGhostAlpha)) /
+                           255;
+                };
+                check(got != under && std::abs(got.red() - ch(color.red(), under.red())) <= 3 &&
+                          std::abs(got.green() - ch(color.green(), under.green())) <= 3 &&
+                          std::abs(got.blue() - ch(color.blue(), under.blue())) <= 3,
+                      "voice: the take's voice chip is not painted in its track's colour at "
+                      "reduced alpha");
+            }
+        }
+        const uint64_t p2 = playhead();
+        // A note on the change's own callback: one tick, the voice first.
+        send(0xC0, P2, 0);
+        send(0x90, 62, 90);
+        pumpMs(5);
+        // Past the voicegroup: ignored (not heard, not recorded), reported
+        // once.
+        send(0xC0, uint8_t(count), 0);
+        pumpMs(5);
+        pollLiveKeys();
+        check(program(a) == P2 && m_liveIgnoredReports == reportsBefore + 1,
+              "voice: an out-of-range program change sounded, or was not reported once");
+        // The song's t1 change is held back on the target, not on b.
+        check(pumpPast(t1, 5), "voice: the take never reached t1");
+        check(program(a) == P2 && program(b) == Sb,
+              "voice: during a take the song's voice change reached the moved track, or "
+              "another track's did not");
+        // A document edit's full chase gives the held voice back to the
+        // keyboard's.
+        doc.addLanePoint(b, 0x0A, t1 + tpb * 8, 10);
+        pumpMs(5);
+        check(program(a) == P2, "voice: a document edit mid-take did not keep the held voice");
+        pumpMs(30);
+        const uint64_t pStop = playhead();
+        m_stopAction->trigger();
+        send(0x80, 62, 0);
+        pumpMs(10);
+        const uint64_t tP1 = tickOf(p1), tP2 = tickOf(p2), tStop = tickOf(pStop);
+        check(lastUndoText() == QStringLiteral("Record 2 note(s) with voice") &&
+                  statusBar()->currentMessage() == QStringLiteral("Recorded 2 note(s) with voice."),
+              "voice: the take did not commit as \"Record 2 note(s) with voice\"");
+        Points want;
+        for (const auto &pt : before)
+            if (pt.first < tP1 || pt.first > tStop)
+                want.push_back(pt);
+        want.push_back({tP1, P1});
+        want.push_back({tP2, P2});
+        want.push_back({tStop, S1}); // the song's voice there (t1's, inside the take)
+        std::sort(want.begin(), want.end());
+        const Points after = voices(a);
+        if (!check(after == want, "voice: the Voice lane is not the take's changes over the "
+                                  "song's, with the song's voice back at the stop")) {
+            for (const auto &[t, v] : after)
+                std::fprintf(stderr, "reccheck:   got %llu %d\n", (unsigned long long)t, v);
+            for (const auto &[t, v] : want)
+                std::fprintf(stderr, "reccheck:   want %llu %d\n", (unsigned long long)t, v);
+        }
+        check(std::none_of(after.begin(), after.end(),
+                           [&](const auto &p) { return p.second == count; }),
+              "voice: an out-of-range program change was recorded");
+        // The same-tick note follows its voice change, in the file (mid2agb
+        // keeps file order within a type... and sorts VOICE first anyway) and
+        // in the timeline the app plays.
+        {
+            const auto evs = chunkEvents(a);
+            int pc = -1, on = -1;
+            for (int i = 0; i < int(evs.size()); i++) {
+                if (evs[i].tick != tP2 || !evs[i].isChannel())
+                    continue;
+                if (evs[i].typeNibble() == 0xC && pc < 0)
+                    pc = i;
+                if (evs[i].isNoteOn() && evs[i].data0 == 62 && on < 0)
+                    on = i;
+            }
+            int tpc = -1, ton = -1;
+            const auto &tev = session->timeline->events;
+            for (int i = 0; i < int(tev.size()); i++) {
+                if (tev[i].track != a || tev[i].tick != tP2)
+                    continue;
+                if (tev[i].type == 0xC && tpc < 0)
+                    tpc = i;
+                if (tev[i].type == 0x9 && tev[i].data0 == 62 && ton < 0)
+                    ton = i;
+            }
+            check(pc >= 0 && on > pc && tpc >= 0 && ton > tpc,
+                  "voice: a note on its voice change's tick does not follow it (file or "
+                  "timeline)");
+        }
+        // mid2agb compiles them as mid-song VOICE commands.
+        if (QFileInfo::exists(mid2agb)) {
+            std::map<int, int> was = compiledVoices(smfBefore), now = compiledVoices(doc.smf());
+            check(!was.empty() && now[P1] == was[P1] + 1 && now[P2] == was[P2] + 1,
+                  "voice: mid2agb does not compile the recorded program changes as VOICE "
+                  "commands");
+        } else {
+            std::printf("reccheck: voice mid2agb SKIP (no %s)\n", qUtf8Printable(mid2agb));
+        }
+        // Playback sounds the recorded voices.
+        view->setEditCursorTick(cursor);
+        m_playAction->trigger();
+        pumpMs(5);
+        const int atCursor = program(a);
+        check(pumpPast(tP1, 2), "voice: playback never reached the first change");
+        const int atP1 = program(a);
+        check(pumpPast(tP2, 2), "voice: playback never reached the second change");
+        const int atP2 = program(a);
+        check(pumpPast(tStop, 2), "voice: playback never reached the stop");
+        const int atStop = program(a);
+        check(atCursor == songVoice(a, cursor) && atP1 == P1 && atP2 == P2 && atStop == S1,
+              "voice: playback after the commit does not sound the recorded voices");
+        m_stopAction->trigger();
+        pumpMs(10);
+        undo->undo();
+        check(voices(a) == before && chunkEvents(a) == eventsBefore,
+              "voice: undo did not restore the track exactly");
+        undo->redo();
+        check(voices(a) == want, "voice: redo did not put the take's voices back");
+        undo->undo();
+    }
+
+    // A take at tick 0. With no voice there before (the song's first comes
+    // later), the take's becomes the track's initial voice and the song's
+    // first one comes back at the stop. With one there, the take replaces
+    // it, never deletes it. Undo puts the track back byte for byte.
+    const auto voiceIn = [](const Points &points, uint64_t tick) {
+        int value = points.empty() ? -1 : points.front().second;
+        for (const auto &[t, v] : points)
+            if (t <= tick)
+                value = v;
+        return value;
+    };
+    for (const bool seeded : {false, true}) {
+        const int undoBefore = undo->index();
+        if (seeded && voices(a).front().first != 0)
+            doc.addLanePoint(a, DOC_CC_VOICE, 0, S2);
+        const Points before = voices(a);
+        const auto eventsBefore = chunkEvents(a);
+        view->setEditCursorTick(0);
+        m_recordAction->trigger();
+        send(0xC0, P3, 0);
+        pumpMs(30);
+        const uint64_t tStop = tickOf(playhead());
+        m_stopAction->trigger();
+        pumpMs(10);
+        int atZero = 0, value = -1;
+        for (const SmfEvent &ev : chunkEvents(a))
+            if (ev.tick == 0 && ev.isChannel() && ev.typeNibble() == 0xC) {
+                atZero++;
+                value = ev.data0;
+            }
+        Points want{{0, P3}};
+        if (voiceIn(before, tStop) != P3)
+            want.push_back({tStop, voiceIn(before, tStop)});
+        for (const auto &pt : before)
+            if (pt.first > tStop)
+                want.push_back(pt);
+        if (!check(tStop > 0 && atZero == 1 && value == P3 && voices(a) == want,
+                   seeded ? "voice: a take at tick 0 did not replace the initial voice (one "
+                            "tick-0 change, the take's), with the song's voice back at the stop"
+                          : "voice: a take at tick 0 on a track whose first voice is later did "
+                            "not start the track on it, with the song's first voice back at the "
+                            "stop")) {
+            for (const auto &[t, v] : voices(a))
+                std::fprintf(stderr, "reccheck:   got %llu %d\n", (unsigned long long)t, v);
+            for (const auto &[t, v] : want)
+                std::fprintf(stderr, "reccheck:   want %llu %d\n", (unsigned long long)t, v);
+        }
+        undo->undo();
+        check(chunkEvents(a) == eventsBefore, "voice: undo did not restore the tick-0 voice");
+        if (seeded) {
+            // writeLanePoints over tick 0 with no point there keeps the
+            // initial voice (J4).
+            doc.writeLanePoints(a, DOC_CC_VOICE, 0, tpb, {{tpb / 2, P1}});
+            const Points kept = voices(a);
+            check(kept.size() >= 2 && kept[0] == before.front() &&
+                      kept[1] == std::make_pair(tpb / 2, int(P1)),
+                  "voice: a voice write over tick 0 deleted the initial voice");
+            undo->undo();
+        }
+        while (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // A track whose only voice change is later: the take's would become
+    // its first voice, so the song's goes to tick 0 (the stretch before the
+    // take keeps it), and comes back at the stop.
+    if (check(doc.canAddTrack(), "voice: no free track slot")) {
+        const int undoBefore = undo->index();
+        const int added = doc.addTrack(S2);
+        const uint64_t later = cursor + tpb * 8;
+        std::vector<DocLanePoint> seed =
+            added >= 0 ? doc.lanePoints(added, DOC_CC_VOICE) : std::vector<DocLanePoint>();
+        if (check(added >= 0 && seed.size() == 1 && seed.front().tick == 0,
+                  "voice: a new track has no tick-0 voice")) {
+            doc.moveLanePoint(added, DOC_CC_VOICE, seed.front(), later, S2);
+            view->selectTrack(added);
+            view->setEditCursorTick(cursor);
+            m_recordAction->trigger();
+            pumpMs(20);
+            const uint64_t tP = tickOf(playhead());
+            send(0xC0, P1, 0);
+            pumpMs(30);
+            const uint64_t tStop = tickOf(playhead());
+            m_stopAction->trigger();
+            pumpMs(10);
+            const Points want{{0, S2}, {tP, P1}, {tStop, S2}, {later, S2}};
+            check(voices(added) == want,
+                  "voice: a take becoming a track's first voice did not keep the song's at tick "
+                  "0 (and back at the stop)");
+        }
+        while (undo->index() > undoBefore)
+            undo->undo();
+        view->selectTrack(a);
+    }
+
+    // Stop ends the latch: the voice goes back to the song's where the
+    // player stopped. A private arm, so no commit edit chases it.
+    {
+        m_audio.seek(sampleOf(cursor));
+        m_audio.armCapture(0x7E60);
+        m_audio.play();
+        pumpMs(20);
+        send(0xC0, P1, 0);
+        pumpMs(5);
+        check(pumpPast(t1, 5) && program(a) == P1, "voice: a private arm did not hold the voice");
+        m_audio.stop();
+        pumpMs(1);
+        check(program(a) == S1, "voice: Stop did not hand the held voice back to the song");
+        m_audio.armCapture(0);
+        pumpMs(10);
+        drainRing();
+    }
+
+    // Live play off: not heard, not held, still recorded.
+    {
+        midi.setLivePlay(false);
+        const int undoBefore = undo->index();
+        view->setEditCursorTick(cursor);
+        m_recordAction->trigger();
+        pumpMs(20);
+        const int was = program(a);
+        send(0xC0, P1, 0);
+        pumpMs(5);
+        check(program(a) == was, "voice: with live play off the program change sounded");
+        // An out-of-range one is still reported: the take would have
+        // recorded it.
+        const int reports = m_liveIgnoredReports;
+        send(0xC0, uint8_t(count), 0);
+        pumpMs(5);
+        pollLiveKeys();
+        check(m_liveIgnoredReports == reports + 1,
+              "voice: with live play off an out-of-range program change in a take was not "
+              "reported");
+        check(pumpPast(t1, 5) && program(a) == S1,
+              "voice: with live play off the song's voice change was held");
+        m_stopAction->trigger();
+        pumpMs(10);
+        const Points v = voices(a);
+        check(undo->index() == undoBefore + 1 &&
+                  std::any_of(v.begin(), v.end(), [&](const auto &p) { return p.second == P1; }),
+              "voice: with live play off the program change was not recorded");
+        while (undo->index() > undoBefore)
+            undo->undo();
+        midi.setLivePlay(true);
+    }
+
+    // A loop pass: the voice before the wrap is restored at the loop end;
+    // the wrap hands the held voice back as plain playback has it there,
+    // and pass 2 plays the song's own change until the next press.
+    const MidiTimeline *tl = session->timeline.get();
+    if (tl->hasLoop() && tl->loopEndTick > tl->loopStartTick + 4 * tpb) {
+        const uint64_t loopStart = tl->loopStartTick, loopEnd = tl->loopEndTick;
+        const uint64_t inside = loopStart + tpb / 2;
+        m_loopAction->setChecked(true);
+        doc.addLanePoint(a, DOC_CC_VOICE, inside, S2);
+        const Points before = voices(a);
+        const int undoBefore = undo->index();
+        view->setEditCursorTick(loopEnd - tpb / 4);
+        m_recordAction->trigger();
+        pumpMs(10);
+        const uint64_t pStart = playhead();
+        const uint64_t tP1 = tickOf(pStart);
+        send(0xC0, P1, 0);
+        pumpMs(5);
+        check(program(a) == P1, "voice: the program change did not sound before the wrap");
+        for (int i = 0; i < 1000 && playhead() >= pStart; i++)
+            pumpMs(5);
+        check(playhead() < pStart && tickNow() < loopStart + tpb / 4,
+              "voice: the take's loop never wrapped");
+        const int wrapped = program(a);
+        check(pumpPast(inside, 5) && program(a) == S2,
+              "voice: pass 2 did not play the song's own voice change");
+        const uint64_t tP2 = tickOf(playhead());
+        send(0xC0, P2, 0);
+        pumpMs(30);
+        const uint64_t tStop = tickOf(playhead());
+        m_stopAction->trigger();
+        pumpMs(10);
+        // Pass 1 to the loop end (the song's voice back there), pass 2 to
+        // the stop (S2, played on pass 2, back there).
+        Points want;
+        for (const auto &pt : before)
+            if (!(pt.first >= tP1 && pt.first <= loopEnd) &&
+                !(pt.first >= tP2 && pt.first <= tStop))
+                want.push_back(pt);
+        want.push_back({tP1, P1});
+        int atEnd = before.front().second;
+        for (const auto &[t, v] : before)
+            if (t <= loopEnd)
+                atEnd = v;
+        if (atEnd != P1)
+            want.push_back({loopEnd, atEnd});
+        want.push_back({tP2, P2});
+        want.push_back({tStop, S2});
+        std::sort(want.begin(), want.end());
+        check(lastUndoText() == QStringLiteral("Record voice") && voices(a) == want,
+              "voice: a looped take's voice is not restored at the loop end and the stop");
+        while (undo->index() > undoBefore)
+            undo->undo();
+        // Plain playback through the same wrap.
+        view->setEditCursorTick(loopEnd - tpb / 4);
+        m_playAction->trigger();
+        pumpMs(10);
+        const uint64_t qStart = playhead();
+        for (int i = 0; i < 1000 && playhead() >= qStart; i++)
+            pumpMs(5);
+        check(playhead() < qStart && wrapped == program(a) && wrapped != P1,
+              "voice: the wrap did not hand the held voice back as plain playback has it");
+        m_stopAction->trigger();
+        pumpMs(10);
+    } else {
+        std::printf("reccheck: voice loop SKIP (the song has no loop of 4+ beats)\n");
+    }
+
+    while (undo->index() > undoSetup)
+        undo->undo();
+    while (undo->index() > undoStart)
+        undo->undo();
+    m_loopAction->setChecked(loopWas);
+    view->setAutomationLanesVisible(lanesWere);
     m_audio.seek(0);
     pumpMs(10);
 }

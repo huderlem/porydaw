@@ -64,7 +64,8 @@ wheel scaled to the lane's range) — they replace the lane's points from
 your first move to where the take ends (Stop, or a loop wrap), and there
 the lane goes back to the value the song had, so a wheel left up doesn't
 carry on through the rest of the song. Knobs routed to VOL, PAN, BENDR or LFOS
-(Settings → MIDI → Controls) record onto those lanes the same way. The sustain pedal lengthens recorded notes. Takes are added on top
+(Settings → MIDI → Controls) record onto those lanes the same way, and program
+changes onto the Voice row (the song's voice comes back where the take ends). The sustain pedal lengthens recorded notes. Takes are added on top
 of what's there (overdub); where a new note overlaps an old one on the same
 pitch, the new one wins, the same as drawing a note over another. -->
 
@@ -101,6 +102,6 @@ silences the keys you're holding (press them again) and ends their
 recorded notes at the edit; a tempo edit mid-take shifts where the take
 lands. -->
 
-<!-- TODO: Program change, aftertouch and other keyboard messages don't do
+<!-- TODO: Aftertouch and other keyboard messages don't do
 anything in porydaw itself — plugins can still see them (link plugins.md;
 the MIDI Monitor example shows everything your keyboard sends). -->

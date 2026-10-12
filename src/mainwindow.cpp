@@ -5657,7 +5657,8 @@ template <typename Before>
 std::vector<RecordingPreview::Lane> takeLanes(const std::vector<RecordingTake::LaneWrite> &writes,
                                               Before &&before)
 {
-    // Every lane the writes touch, by cc (BEND, 0xFF, last).
+    // Every lane the writes touch, by cc (the voice, 0xFD, then BEND, 0xFF,
+    // last).
     std::vector<uint8_t> ccs;
     for (const RecordingTake::LaneWrite &w : writes)
         ccs.push_back(w.cc);
@@ -5903,6 +5904,12 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
             if (w.restorePoint(doc->lanePoints(track, w.cc), &restore))
                 w.points.push_back(restore);
         }
+        // A take that would become the track's first voice keeps the
+        // song's first one at tick 0, so the stretch before it still plays
+        // what it did (RecordingTake::voiceLeadPoint).
+        SongDocument::LanePointValue lead;
+        if (RecordingTake::voiceLeadPoint(doc->lanePoints(track, DOC_CC_VOICE), lanes, &lead))
+            doc->writeLanePoints(track, DOC_CC_VOICE, 0, 0, {lead});
         // In segment order: a later loop pass replaces what an earlier one
         // wrote where they overlap.
         for (const RecordingTake::LaneWrite &w : writes)

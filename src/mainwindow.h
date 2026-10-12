@@ -310,6 +310,7 @@ class MainWindow : public QMainWindow
     void checkRecordingCcLaneDisplay(int track);
     void checkRecordingFlood();
     void checkRecordingLatch(int a, int b);
+    void checkRecordingVoice(int a, int b);
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.

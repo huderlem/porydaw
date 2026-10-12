@@ -325,6 +325,8 @@ class SongView : public QWidget
     QRectF recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const;
     // Where (tick, value) sits on the take's track's cc row, in the
     // automation area's coordinates; nullopt while that row isn't shown.
+    // DOC_CC_VOICE: a voice change's chip line at tick, near its top (the
+    // value is ignored).
     std::optional<QPointF> recordingPreviewLanePoint(uint8_t cc, uint64_t tick, int value) const;
     // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
     // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
