@@ -415,9 +415,47 @@ bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &bef
     return true;
 }
 
+namespace {
+
+const auto byTick = [](const SongDocument::LanePointValue &a,
+                       const SongDocument::LanePointValue &b) { return a.tick < b.tick; };
+
+// What writeLanePoints does to lane (sorted by tick): the range
+// [tickBegin, tickEnd] goes, points (one a tick, inside the range) take its
+// place.
+void replaceRange(std::vector<SongDocument::LanePointValue> &lane, uint64_t tickBegin,
+                  uint64_t tickEnd, const std::vector<SongDocument::LanePointValue> &points)
+{
+    const auto first = std::lower_bound(lane.begin(), lane.end(),
+                                        SongDocument::LanePointValue{tickBegin, 0}, byTick);
+    const auto last =
+        std::upper_bound(first, lane.end(), SongDocument::LanePointValue{tickEnd, 0}, byTick);
+    lane.insert(lane.erase(first, last), points.begin(), points.end());
+}
+
+// lane with this cc's writes applied in order, each with its restore point
+// read against before, as MainWindow::commitTake writes them.
+void applyWrites(std::vector<SongDocument::LanePointValue> &lane,
+                 const std::vector<DocLanePoint> &before,
+                 const std::vector<RecordingTake::LaneWrite> &writes, uint8_t cc)
+{
+    for (const RecordingTake::LaneWrite &w : writes) {
+        if (w.cc != cc)
+            continue;
+        std::vector<SongDocument::LanePointValue> points = w.points;
+        SongDocument::LanePointValue restore;
+        if (w.restorePoint(before, &restore))
+            points.push_back(restore);
+        replaceRange(lane, w.tickBegin, w.tickEnd, points);
+    }
+}
+
+} // namespace
+
 bool RecordingTake::voiceLeadPoint(const std::vector<DocLanePoint> &before,
                                    const std::vector<LaneWrite> &writes,
-                                   SongDocument::LanePointValue *out)
+                                   std::vector<SongDocument::LanePointValue> *points,
+                                   uint64_t *rangeEnd)
 {
     uint64_t first = UINT64_MAX;
     for (const LaneWrite &w : writes)
@@ -430,7 +468,41 @@ bool RecordingTake::voiceLeadPoint(const std::vector<DocLanePoint> &before,
     // all, needs nothing.
     if (first == UINT64_MAX || first == 0 || before.empty() || before.front().tick < first)
         return false;
-    *out = {0, before.front().value};
+    *points = {{0, before.front().value}};
+    *rangeEnd = 0;
+    // It is a move: the song's first changes (every one on their tick, f)
+    // were the track's initial voice, and a copy left behind at f would
+    // keep claiming that (SongView::editTrackVoice edits the last change on
+    // the first change's tick, SongDocument::mergeTrack leaves those
+    // behind) while only repeating what plays there. A write over f takes
+    // them anyway. Outside every write they go when what plays just before
+    // f, once the take lands, is already their last (same-tick changes are
+    // last-wins), as after a restore point at a write's end; otherwise they
+    // still change the voice there (the take ended on its own voice, so
+    // nothing was restored) and stay, as only that last one.
+    const uint64_t f = before.front().tick;
+    for (const LaneWrite &w : writes)
+        if (w.cc == DOC_CC_VOICE && w.tickBegin <= f && f <= w.tickEnd)
+            return true;
+    size_t group = 0;
+    while (group < before.size() && before[group].tick == f)
+        group++;
+    const int last = before[group - 1].value;
+    std::vector<SongDocument::LanePointValue> lane;
+    lane.reserve(before.size() + 1);
+    lane.push_back(points->front());
+    for (const DocLanePoint &pt : before)
+        lane.push_back({pt.tick, pt.value});
+    applyWrites(lane, before, writes, DOC_CC_VOICE);
+    const auto atF =
+        std::lower_bound(lane.begin(), lane.end(), SongDocument::LanePointValue{f, 0}, byTick);
+    const int playing = std::prev(atF)->value; // the lead at 0 comes before
+    if (audible(DOC_CC_VOICE, playing) == audible(DOC_CC_VOICE, last)) {
+        *rangeEnd = f;
+    } else if (group > 1) {
+        points->push_back({f, last});
+        *rangeEnd = f;
+    }
     return true;
 }
 
@@ -439,30 +511,15 @@ RecordingTake::applyLaneWrites(const std::vector<DocLanePoint> &before,
                                const std::vector<LaneWrite> &writes, uint8_t cc)
 {
     std::vector<SongDocument::LanePointValue> lane;
-    lane.reserve(before.size());
+    lane.reserve(before.size() + 1);
     for (const DocLanePoint &pt : before)
         lane.push_back({pt.tick, pt.value});
-    const auto byTick = [](const SongDocument::LanePointValue &a,
-                           const SongDocument::LanePointValue &b) { return a.tick < b.tick; };
-    // The voice's tick-0 lead goes in first, as MainWindow::commitTake
+    // The voice's lead write goes in first, as MainWindow::commitTake
     // writes it.
-    SongDocument::LanePointValue lead;
-    if (cc == DOC_CC_VOICE && voiceLeadPoint(before, writes, &lead))
-        lane.insert(lane.begin(), lead);
-    for (const LaneWrite &w : writes) {
-        if (w.cc != cc)
-            continue;
-        // writeLanePoints: the range [tickBegin, tickEnd] goes, the write's
-        // points (one a tick, inside the range) take its place.
-        const auto first = std::lower_bound(lane.begin(), lane.end(),
-                                            SongDocument::LanePointValue{w.tickBegin, 0}, byTick);
-        const auto last =
-            std::upper_bound(first, lane.end(), SongDocument::LanePointValue{w.tickEnd, 0}, byTick);
-        std::vector<SongDocument::LanePointValue> points = w.points;
-        SongDocument::LanePointValue restore;
-        if (w.restorePoint(before, &restore))
-            points.push_back(restore);
-        lane.insert(lane.erase(first, last), points.begin(), points.end());
-    }
+    std::vector<SongDocument::LanePointValue> lead;
+    uint64_t leadEnd = 0;
+    if (cc == DOC_CC_VOICE && voiceLeadPoint(before, writes, &lead, &leadEnd))
+        replaceRange(lane, 0, leadEnd, lead);
+    applyWrites(lane, before, writes, cc);
     return lane;
 }

@@ -50,7 +50,7 @@ class MidiTimeline;
 //    its last program change there or before, or with none its first later
 //    one (what TimelinePlayer::primeVoices plays), so that is what a
 //    write's end restores and, when the take's voice would become the
-//    track's first, what goes to tick 0 (voiceLeadPoint).
+//    track's first, what moves to tick 0 (voiceLeadPoint).
 class RecordingTake
 {
   public:
@@ -104,20 +104,26 @@ class RecordingTake
     // The voice has none (0 here): restorePoint reads its first later
     // program change instead.
     static int restValue(uint8_t cc);
-    // The Voice lane's lead point, given the lane before the take (sorted by
+    // The Voice lane's lead, given the lane before the take (sorted by
     // tick): when the take's first voice write starts after tick 0, on or
     // before the track's first program change, the take would make itself
-    // the track's first voice, which plays from the start (primeVoices); this
-    // point keeps that first song voice at tick 0, so what plays before the
-    // take is unchanged. False otherwise (a voice before the take, none in
-    // the song, or the take's own at tick 0).
+    // the track's first voice, which plays from the start (primeVoices); the
+    // lead moves that first song voice to tick 0, so what plays before the
+    // take is unchanged. It is one write, before the take's: *points over
+    // [0, *rangeEnd]. *rangeEnd is the song's first-change tick when those
+    // changes go with the move (redundant once the take lands: what plays
+    // just before them is already their voice; or reduced to their audible
+    // last of several same-tick ones), else 0 (a write over that tick takes
+    // them, or they still change the voice there). False otherwise (a
+    // voice before the take, none in the song, or the take's own at tick 0).
     static bool voiceLeadPoint(const std::vector<DocLanePoint> &before,
                                const std::vector<LaneWrite> &writes,
-                               SongDocument::LanePointValue *out);
+                               std::vector<SongDocument::LanePointValue> *points,
+                               uint64_t *rangeEnd);
     // The lane `cc` as the commit would leave it: before (the lane's points,
     // sorted by tick) with this cc's writes applied in order, each with its
     // restore point read against before, as MainWindow::commitTake writes
-    // them, the voice's lead point included. Sorted by tick. The live
+    // them, the voice's lead write first. Sorted by tick. The live
     // preview's curve.
     static std::vector<SongDocument::LanePointValue>
     applyLaneWrites(const std::vector<DocLanePoint> &before, const std::vector<LaneWrite> &writes,

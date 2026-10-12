@@ -1025,10 +1025,9 @@ void AudioEngine::applyLiveProgram(uint8_t program)
         return;
     }
     // Captured whether or not it sounds, as the other lanes are. Only a
-    // change the take records counts as moved, or latches.
+    // change the take records latches. m_captureMoved has no voice to keep:
+    // it gates CC121's recorded resets, and those leave the voice alone (J5).
     const bool take = pushCapture(CaptureEvent::Program, m_player.position(), 0, 0, 0, program);
-    if (take)
-        m_captureMoved.program = true;
     if (m_liveTrack < 0)
         return;
     m4a_engine_program_change(m_engine.get(), m_liveTrack, program);

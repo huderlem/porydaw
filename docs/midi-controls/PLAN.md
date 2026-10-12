@@ -1441,6 +1441,12 @@ build-nomidi, build-off and build-dummy. All five trees build cleanly.
   after the take on a track whose first voice comes late (as on
   `mus_abandoned_ship`'s first track, whose first voice is at tick 36).
 - **No restore and no lead on a track with no program change at all.**
+  The take's first voice then plays from the song's start, not from where
+  it was pressed: with no program change before it, the engine primes the
+  track's first one at the start (`primeVoices`), and nothing can be
+  written before the take to stand for the voice the track had (it had
+  none; the engine just kept whatever the slot last played, and the
+  engine has no track-init voice to restore).
 - **Out-of-range with no target and no take** stays unreported (step 2's
   check); with a take (live play off) it is reported, since the take would
   have recorded it.
@@ -1523,7 +1529,9 @@ build-nomidi, build-off and build-dummy. All five trees build cleanly.
    notes you play sound in the new voice.
    - The Voice row shows your changes as faded chips while recording; the
      song's own chips outside the take stay solid. Clicking the row does
-     nothing until Stop.
+     nothing until Stop. A band slide over the row (Alt-drag inside a
+     time selection) still moves the song's chips, and shows where they
+     land while you drag.
    - A program past the voicegroup's last voice changes nothing and says
      "Program change N ignored: …" once.
 3. Stop. The chips turn solid; the undo menu and status bar say "Record N
@@ -1532,23 +1540,139 @@ build-nomidi, build-off and build-dummy. All five trees build cleanly.
 4. Play the stretch back: the recorded notes play in the voices you chose,
    and after the take the track sounds as before.
 5. Ctrl+Z: the notes and voice changes go; Ctrl+Y brings them back.
-6. Tick 0: put the cursor at the very start, Record, press a program at
+6. First voice later in the song: pick a track whose first voice change
+   isn't at the very start (on mus_abandoned_ship the first track's sits
+   just after it, at tick 36: zoom in, put the cursor at the very start,
+   Record, press a program within the first beat, Stop before that chip). The track's first voice now sits at the very start (its
+   chip faded while recording, like your own), your change and the song's
+   voice back at the stop follow, and the old chip a few bars in is gone
+   (it only repeated that voice). The header's voice editor now changes
+   the start up to your change; Ctrl+Z puts the chip back where it was.
+7. Tick 0: put the cursor at the very start, Record, press a program at
    once, Stop. The track's first voice (the header's) is now that voice;
    there is still exactly one voice at the start. Undo puts the old one
    back.
-7. Latch: record over a spot where the song changes this track's voice
+8. Latch: record over a spot where the song changes this track's voice
    after you press a program. The song's change doesn't take over while
    recording. Other tracks' voice changes still play.
-8. Loop: with Loop on, press a program on pass 1 before the loop end. At
+9. Loop: with Loop on, press a program on pass 1 before the loop end. At
    the wrap the track goes back to the song's voice (as plain looped
    playback has it there); on pass 2 the song's own voice changes play
    until you press again. After Stop, pass 1's change ends at the loop end
    on the song's voice.
-9. Live play off (Settings → MIDI): record pressing a program. You hear no
+10. Live play off (Settings → MIDI): record pressing a program. You hear no
    change, the song's voices play, and the change is still recorded.
-10. Optional: build the ROM (`make`) and listen in-game: the recorded voice
+11. Optional: build the ROM (`make`) and listen in-game: the recorded voice
     changes play there too.
 
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--reccheck`, `--midicheck` and `--primecheck` pass on build-nomidi,
 build-off and build-dummy, and all five trees build cleanly.
+
+### Step 5 review fixes (2026-10-12, uncommitted)
+
+**What changed**
+
+- **The lead is a move (medium).** `voiceLeadPoint` copied the song's
+  first voice A (at tick f) to tick 0 and left A@f behind: after a take
+  ending before f the lane read A@0, P@b, A@end, A@f. A@f only repeated
+  the restore, yet it still counted as the track's initial voice:
+  `SongView::editTrackVoice` edits the last change on the first change's
+  tick, now 0, so A@f switched a header edit back at f; and
+  `SongDocument::mergeTrack` leaves the first tick's changes behind, so
+  A@f was carried into the destination. `voiceLeadPoint` now returns the
+  lead as one write, before the take's: points over `[0, *rangeEnd]`.
+  - f inside (or on the end of) a voice write: that write takes A@f
+    anyway; the lead is `[0, 0]` {A@0}.
+  - f outside every write: the lane is simulated with the lead and the
+    writes (their restores included, read against the song before the
+    take). When what plays just before f is already A (the last of f's
+    changes: same-tick changes are last-wins), as after a restore, or
+    when the take ended on A itself, the write is `[0, f]` {A@0}: f's
+    changes go. Otherwise (stopped on the take's last move, so nothing
+    was restored, and P runs on to f) they still change the voice and
+    stay: untouched (`[0, 0]`), or, with several on f, reduced to their
+    last (`[0, f]` {A@0, last@f}).
+  - The lead's value stays the first of f's changes: that is what played
+    before f (`primeVoices` primes a track's first change event).
+  - `applyLaneWrites` (the ghost) replays the same lead write and then
+    the writes through one shared helper (`replaceRange` /
+    `applyWrites`), so the preview is the commit exactly.
+- **Voice row range-drag preview under a ghost (low).** Band slide,
+  duplicate and insert-space drags still run on the Voice row mid-take
+  (they are checked before the row's read-only guard, as on CC rows with
+  a ghost; policy unchanged), but with a ghost `paintVoiceRow` drew no
+  `rangeDragCarriesRowTick` preview, so a slide moved song changes
+  unseen. The carried song chips now draw at their destination in the
+  edit-preview colour over the ghost, as the CC rows' range-drag curve
+  draws over theirs (the ghost itself stays as the commit would leave it,
+  origins included, as on CC rows). The comment now says what is blocked
+  (clicks, right-click delete, hover readout) and what is not.
+- **Lead chip faded (low).** A ghost chip is now faded when it lies in a
+  take range **or** isn't one of the song's own changes (same track, tick
+  and voice), so the lead at tick 0 draws at `kRecordingGhostAlpha` like
+  the take's chips. The chip the commit removes (A@f) is gone from the
+  preview lane with the fix above, so it is not drawn at all (checked).
+- **`m_captureMoved.program` removed (nit).** It was written, never read:
+  `m_captureMoved` only gates CC121's recorded resets (bend and CC
+  lanes), and those leave the voice alone (J5). Removed, with a comment
+  at the write site and on the member saying why the voice isn't kept
+  there; `TouchedLanes::program` stays (the touched mask and the latch
+  use it).
+- **`rebuildRows` (nit).** The `|| recordingPreview().lane(selected,
+  DOC_CC_VOICE)` term is gone: there is no ghost without a document (the
+  Voice row is always there with one), so the step 5 note "keeps a Voice
+  row for a ghost even without a document" no longer applies.
+- **Step 5 entry.** The "no program change at all" judgment call now says
+  plainly that the take's first voice then plays from the song's start,
+  and why. The Windows script gains a step for the moved first voice and
+  a line on the band-slide preview; the later steps renumber.
+
+**Harness (`--reccheck`)**
+
+- Unit: `voiceLeadPoint`'s new range (after a restore → f; f covered by
+  a write, at its start or its end → 0); `applyLaneWrites` minimal with
+  f inside, on and just past a write's end, with the take ending on A, an
+  open take (no restore: A@f kept), and same-tick first changes (kept as
+  their last after an open take, reduced to their last after a restore).
+- End to end (the new-track case, now near the song's start with follow
+  off so tick 0 is on screen, the song's first voice S2 moved a few beats
+  in plus a later P3 change):
+  - mid-take, the ghost is exactly {S2@0, P1@tP, S2@restore, P3}: no S2
+    left at its old tick;
+  - the lead chip at tick 0 paints in the track colour at the ghost
+    alpha;
+  - a band slide over the Voice row mid-take draws the song's carried
+    chip at its destination in the edit-preview colour (probed inside the
+    landing frame, off its dashed edge);
+  - the commit is {S2@0, P1@tP, S2@stop, P3}; undo restores the chunk's
+    events exactly, redo the take's;
+  - `editTrackVoice` (its picker driven) changes only the lead: {P2@0,
+    P1@tP, S2@stop, P3};
+  - `mergeTrack` into track a leaves the lead behind and carries P1, the
+    restore and P3, exactly.
+- Mutation-tested 8 ways, each failing the expected checks and restored
+  byte for byte (md5 asserted per file): no drop at f; the commit
+  ignoring the lead's range; the preview ignoring it; no keep-last for
+  same-tick changes; no covered-by-a-write check; the lead not faded; no
+  range-drag preview over the ghost (first survived while the probe sat on
+  the landing frame's dashed edge; moved inside it); the group's first
+  read as its last.
+
+**Judgment calls**
+
+- **Same-tick first changes (A1, A2 on f):** the lead takes A1 (what
+  played before f), f's changes go only when what plays just before f is
+  A2, else they stay as A2 alone. Sound is unchanged in every case.
+- **A take whose first recorded voice is the song's first (A) still gets
+  the lead** (A@0, then the take's A@b): the A@b is the take's own
+  recorded point, so it is kept, as CC lanes keep a recorded value equal
+  to the song's.
+- **Voice row range drags mid-take stay allowed**, consistent with CC
+  ghosts; the destination preview doesn't hide the origin chip in the
+  ghost, matching CC rows.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--reccheck`, `--midicheck` and `--primecheck` pass on build-nomidi,
+build-off and build-dummy; all five trees build cleanly (exit 0, no new
+warnings).

@@ -3590,8 +3590,7 @@ class AutomationArea : public TimelineSurface
             const int selected = m_sv->selectedTrack();
             // The voice row shows whenever the track has changes; with a
             // document attached it is always present as the place to add one.
-            bool voiceRow = m_sv->document() != nullptr ||
-                            m_sv->recordingPreview().lane(selected, DOC_CC_VOICE);
+            bool voiceRow = m_sv->document() != nullptr;
             for (const VoiceChange &vc : model.voices) {
                 if (vc.track == selected) {
                     voiceRow = true;
@@ -6388,23 +6387,40 @@ class AutomationArea : public TimelineSurface
             int64_t tick;
             uint8_t program;
             bool ghost;
+            bool preview = false; // a range drag's destination over a take's ghost
         };
         std::vector<Shown> changes;
         const SongView::RangeDrag &range = m_sv->rangeDrag();
         const bool previewing = range.active && range.dTick != 0;
         // A recording take's voice changes (its ghost): the row as the
-        // commit would leave it, the take's own chips faded, the song's
-        // outside the ranges it rewrites as they are. The row is read-only
-        // meanwhile, so no range drag previews here.
+        // commit would leave it. Every chip the commit adds is faded: the
+        // take's own inside the ranges it rewrites, and its lead (the song's
+        // first voice moved to tick 0, RecordingTake::voiceLeadPoint); the
+        // song's chips it keeps are drawn as they are, and one it removes is
+        // already gone from the lane. Clicks, the right-click delete and the
+        // hover readout are off meanwhile (rowHasTakeGhost), but a band
+        // slide or duplicate and an insert-space drag still move the song's
+        // changes: their destinations preview over the ghost in the edit
+        // preview colour, as the CC rows' range-drag curve draws over theirs.
         const RecordingPreview::Lane *take = voiceTakeGhost();
         if (take) {
             for (const LanePoint &pt : take->points) {
-                const bool ghost = std::any_of(take->ranges.begin(), take->ranges.end(),
-                                               [&](const std::pair<uint64_t, uint64_t> &r) {
-                                                   return pt.tick >= r.first && pt.tick <= r.second;
-                                               });
-                changes.push_back({int64_t(pt.tick), uint8_t(pt.value), ghost});
+                const bool rewritten =
+                    std::any_of(take->ranges.begin(), take->ranges.end(),
+                                [&](const std::pair<uint64_t, uint64_t> &r) {
+                                    return pt.tick >= r.first && pt.tick <= r.second;
+                                });
+                const bool song = std::any_of(
+                    model.voices.begin(), model.voices.end(), [&](const VoiceChange &vc) {
+                        return vc.track == selected && vc.tick == pt.tick &&
+                               vc.program == uint8_t(pt.value);
+                    });
+                changes.push_back({int64_t(pt.tick), uint8_t(pt.value), rewritten || !song});
             }
+            for (const VoiceChange &vc : model.voices)
+                if (previewing && vc.track == selected &&
+                    m_sv->rangeDragCarriesRowTick(selected, DOC_CC_VOICE, vc.tick))
+                    changes.push_back({int64_t(vc.tick) + range.dTick, vc.program, false, true});
         }
         for (const VoiceChange &vc : model.voices) {
             if (take)
@@ -6430,7 +6446,9 @@ class AutomationArea : public TimelineSurface
                                    : plot.right();
             if (xEnd < plot.left() || x > plot.right())
                 continue;
-            QColor line = color;
+            QColor line = changes[i].preview
+                              ? themes::color(themes::Role::song_view_edit_preview_outline)
+                              : color;
             QColor text = themes::color(themes::Role::song_view_primary_text);
             if (changes[i].ghost) {
                 line.setAlpha(take ? kRecordingGhostAlpha : 110);

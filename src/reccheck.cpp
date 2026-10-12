@@ -1,11 +1,13 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QMouseEvent>
 #include <QProcess>
@@ -1001,36 +1003,96 @@ void checkTakeRules()
             check(!w.restorePoint(pts({{0, 6}}), &r) && !w.restorePoint(pts({{50, 6}}), &r),
                   "take: a voice end that already plays the song's voice got a point");
             const auto lead = [&](std::vector<DocLanePoint> before, uint64_t begin,
-                                  LanePointValue *out) {
+                                  std::vector<LanePointValue> *out, uint64_t *rangeEnd) {
                 RecordingTake::LaneWrite l = w;
                 l.tickBegin = begin;
                 l.points = {{begin, 5}};
                 RecordingTake::LaneWrite later = l;
                 later.tickBegin = begin + 100;
+                later.tickEnd = begin + 140;
                 later.points = {{begin + 100, 7}};
                 RecordingTake::LaneWrite vol;
                 vol.cc = 0x07;
                 vol.tickBegin = 0;
                 vol.points = {{0, 1}};
-                return RecordingTake::voiceLeadPoint(before, {vol, later, l}, out);
+                return RecordingTake::voiceLeadPoint(before, {vol, later, l}, out, rangeEnd);
             };
-            LanePointValue ld{99, 99};
-            check(!lead(pts({}), 10, &ld) && !lead(pts({{0, 3}}), 10, &ld) &&
-                      !lead(pts({{5, 3}}), 10, &ld) && !lead(pts({{50, 3}}), 0, &ld),
+            std::vector<LanePointValue> ld;
+            uint64_t le = 99;
+            check(!lead(pts({}), 10, &ld, &le) && !lead(pts({{0, 3}}), 10, &ld, &le) &&
+                      !lead(pts({{5, 3}}), 10, &ld, &le) && !lead(pts({{50, 3}}), 0, &ld, &le),
                   "take: a voice lead point was given where the song keeps its first voice");
-            check(lead(pts({{10, 3}}), 10, &ld) && ld.tick == 0 && ld.value == 3 &&
-                      lead(pts({{50, 4}, {60, 2}}), 10, &ld) && ld.tick == 0 && ld.value == 4,
+            check(lead(pts({{10, 3}}), 10, &ld, &le) && samePoints(ld, {{0, 3}}) && le == 0 &&
+                      lead(pts({{50, 4}, {60, 2}}), 10, &ld, &le) && samePoints(ld, {{0, 4}}),
                   "take: a take becoming the track's first voice got no lead point (the song's "
                   "first, at tick 0)");
+            // The lead is a move: the song's first change goes where the
+            // take's restore already plays it (here at the write's end, 40,
+            // before the 50), and is left to a write that covers it.
+            check(lead(pts({{50, 4}, {60, 2}}), 10, &ld, &le) && le == 50,
+                  "take: the voice lead left the song's first change behind after a restore");
+            check(lead(pts({{10, 3}}), 10, &ld, &le) && le == 0 &&
+                      lead(pts({{40, 3}}), 10, &ld, &le) && le == 0,
+                  "take: the voice lead cleared past a write that already covers the song's "
+                  "first change");
             // The preview's lane: the lead, the take, the first later
-            // program restored at the end, the song's own after it.
+            // program restored at the end; the song's own there has moved.
             const auto voiceLane =
                 RecordingTake::applyLaneWrites(pts({{50, 4}}), {w}, DOC_CC_VOICE);
-            check(samePoints(voiceLane, {{0, 4}, {10, 5}, {20, 6}, {40, 4}, {50, 4}}),
-                  "take: the Voice lane preview is not the lead, the take and its restore");
+            check(samePoints(voiceLane, {{0, 4}, {10, 5}, {20, 6}, {40, 4}}),
+                  "take: the Voice lane preview is not the lead, the take and its restore (the "
+                  "song's first voice moved, not copied)");
             check(samePoints(RecordingTake::applyLaneWrites(pts({{0, 4}}), {w}, DOC_CC_VOICE),
                              {{0, 4}, {10, 5}, {20, 6}, {40, 4}}),
                   "take: the Voice lane preview over a tick-0 voice is off");
+            // The first change inside the write, on its end, just past it.
+            check(samePoints(
+                      RecordingTake::applyLaneWrites(pts({{30, 4}, {70, 2}}), {w}, DOC_CC_VOICE),
+                      {{0, 4}, {10, 5}, {20, 6}, {40, 4}, {70, 2}}) &&
+                      samePoints(RecordingTake::applyLaneWrites(pts({{40, 4}}), {w}, DOC_CC_VOICE),
+                                 {{0, 4}, {10, 5}, {20, 6}, {40, 4}}) &&
+                      samePoints(RecordingTake::applyLaneWrites(pts({{41, 4}}), {w}, DOC_CC_VOICE),
+                                 {{0, 4}, {10, 5}, {20, 6}, {40, 4}}),
+                  "take: the Voice lane preview is not minimal with the song's first change "
+                  "inside, on or next to the write's end");
+            // The take ending on the song's voice (nothing restored): the
+            // first change still goes, the take's last already plays it.
+            {
+                RecordingTake::LaneWrite same = w;
+                same.points = {{10, 5}, {20, 4}};
+                check(
+                    samePoints(RecordingTake::applyLaneWrites(pts({{50, 4}}), {same}, DOC_CC_VOICE),
+                               {{0, 4}, {10, 5}, {20, 4}}),
+                    "take: a take ending on the song's first voice left it behind");
+            }
+            // Stopped on the take's last move (no restore): the take's voice
+            // runs on to the song's first change, which still changes it.
+            {
+                RecordingTake::LaneWrite open = w;
+                open.tickEnd = 20;
+                open.restoreEnd = false;
+                std::vector<LanePointValue> lp;
+                uint64_t end = 99;
+                check(RecordingTake::voiceLeadPoint(pts({{50, 4}}), {open}, &lp, &end) &&
+                          end == 0 && samePoints(lp, {{0, 4}}) &&
+                          samePoints(
+                              RecordingTake::applyLaneWrites(pts({{50, 4}}), {open}, DOC_CC_VOICE),
+                              {{0, 4}, {10, 5}, {20, 6}, {50, 4}}),
+                      "take: an open take's voice lost the song's first change after it");
+                // Several changes on the first tick (last wins): the lead
+                // takes what played before them (the first, primeVoices);
+                // they go when the take's restore already plays their last,
+                // else stay as that last alone.
+                check(samePoints(RecordingTake::applyLaneWrites(pts({{50, 4}, {50, 2}}), {open},
+                                                                DOC_CC_VOICE),
+                                 {{0, 4}, {10, 5}, {20, 6}, {50, 2}}),
+                      "take: same-tick first changes after an open take are not their last");
+                check(samePoints(RecordingTake::applyLaneWrites(pts({{50, 4}, {50, 2}}), {w},
+                                                                DOC_CC_VOICE),
+                                 {{0, 4}, {10, 5}, {20, 6}, {40, 4}, {50, 2}}),
+                      "take: same-tick first changes after a restore are not reduced to their "
+                      "last");
+            }
         }
     }
     // A take whose Begin never came records nothing.
@@ -3169,36 +3231,172 @@ void MainWindow::checkRecordingVoice(int a, int b)
             undo->undo();
     }
 
-    // A track whose only voice change is later: the take's would become
-    // its first voice, so the song's goes to tick 0 (the stretch before the
-    // take keeps it), and comes back at the stop.
+    // A track whose first voice change is later: the take's would become
+    // its first voice, so the song's moves to tick 0 (the stretch before the
+    // take keeps it) and comes back at the stop. A move, not a copy: the
+    // later change, which only repeats what the restore plays there, goes,
+    // so the moved one is the track's initial voice to the header's voice
+    // editor and to Merge.
     if (check(doc.canAddTrack(), "voice: no free track slot")) {
         const int undoBefore = undo->index();
+        const bool followWas = m_followPlayheadAction->isChecked();
+        m_followPlayheadAction->setChecked(false);
         const int added = doc.addTrack(S2);
-        const uint64_t later = cursor + tpb * 8;
+        // Near the start, so tick 0 and the song's changes are on screen.
+        const uint64_t start = tpb, later = start + tpb * 4, later2 = later + tpb * 2;
         std::vector<DocLanePoint> seed =
             added >= 0 ? doc.lanePoints(added, DOC_CC_VOICE) : std::vector<DocLanePoint>();
         if (check(added >= 0 && seed.size() == 1 && seed.front().tick == 0,
                   "voice: a new track has no tick-0 voice")) {
             doc.moveLanePoint(added, DOC_CC_VOICE, seed.front(), later, S2);
+            doc.addLanePoint(added, DOC_CC_VOICE, later2, P3);
             view->selectTrack(added);
-            view->setEditCursorTick(cursor);
+            view->setEditCursorTick(start);
+            view->ensureTickVisible(0);
+            const auto eventsBefore = chunkEvents(added);
             m_recordAction->trigger();
             pumpMs(20);
             const uint64_t tP = tickOf(playhead());
             send(0xC0, P1, 0);
             pumpMs(30);
+            synchronizePlayhead();
+            // The ghost is the lane as the commit will leave it: the lead
+            // at tick 0, the take, no song change left at `later`.
+            const RecordingPreview::Lane *ghost =
+                view->recordingPreview().lane(added, DOC_CC_VOICE);
+            check(ghost && ghost->points.size() == 4 && ghost->points[0].tick == 0 &&
+                      ghost->points[0].value == S2 && ghost->points[1].tick == tP &&
+                      ghost->points[1].value == P1 && ghost->points[2].value == S2 &&
+                      ghost->points[2].tick < later && ghost->points[3].tick == later2,
+                  "voice: the Voice ghost is not the moved lead, the take, its restore and the "
+                  "song's later change (the moved one gone)");
+            const qreal dpr = lanes ? lanes->devicePixelRatioF() : 1.0;
+            const auto pixel = [&](const QImage &image, QPointF p) {
+                return image.pixelColor(int(p.x() * dpr), int(p.y() * dpr));
+            };
+            const auto onScreen = [&](const std::optional<QPointF> &at) {
+                return lanes && at && at->x() >= songview::kGutterW + 2 &&
+                       at->x() <= lanes->width() - 2;
+            };
+            // The lead is the commit's, not yet the song's: faded, as the
+            // take's own chips are.
+            const std::optional<QPointF> leadAt =
+                view->recordingPreviewLanePoint(DOC_CC_VOICE, 0, 0);
+            if (check(onScreen(leadAt), "voice: the lead chip is off screen")) {
+                const QImage image = lanes->grab().toImage();
+                const QColor color = SongView::trackColor(added);
+                const QColor under = pixel(image, *leadAt - QPointF(0, 6));
+                const QColor got = pixel(image, *leadAt);
+                const auto ch = [&](int f, int u) {
+                    return (f * songview::kRecordingGhostAlpha +
+                            u * (255 - songview::kRecordingGhostAlpha)) /
+                           255;
+                };
+                check(got != under && std::abs(got.red() - ch(color.red(), under.red())) <= 3 &&
+                          std::abs(got.green() - ch(color.green(), under.green())) <= 3 &&
+                          std::abs(got.blue() - ch(color.blue(), under.blue())) <= 3,
+                      "voice: the take's lead chip is not painted at the ghost alpha");
+            }
+            // A band slide over the Voice row mid-take still moves the
+            // song's changes: its destination previews over the ghost.
+            {
+                SongView::TimeSelection band;
+                // The change mid-band: its destination is inside the landing
+                // frame, not on its dashed edge.
+                band.startTick = later2 - tpb / 2;
+                band.endTick = later2 + tpb / 2;
+                band.scope = SongView::TimeSelection::Lanes;
+                band.lanes = {{added, DOC_CC_VOICE}};
+                view->setTimeSelection(band);
+                const double press = double(later2);
+                const bool began = view->beginRangeDrag(press, false);
+                view->updateRangeDrag(press + double(tpb));
+                const int64_t dTick = view->rangeDrag().dTick;
+                const std::optional<QPointF> dest = view->recordingPreviewLanePoint(
+                    DOC_CC_VOICE, uint64_t(int64_t(later2) + dTick), 0);
+                if (check(began && dTick > 0 && onScreen(dest),
+                          "voice: no range drag over the Voice row mid-take, or its destination "
+                          "is off screen")) {
+                    const QImage image = lanes->grab().toImage();
+                    const QColor want = themes::color(themes::Role::song_view_edit_preview_outline);
+                    const QColor got = pixel(image, *dest);
+                    check(std::abs(got.red() - want.red()) <= 3 &&
+                              std::abs(got.green() - want.green()) <= 3 &&
+                              std::abs(got.blue() - want.blue()) <= 3,
+                          "voice: a range drag over the Voice row's ghost shows no preview of the "
+                          "song's carried change");
+                }
+                view->cancelRangeDrag();
+                view->clearTimeSelection();
+            }
             const uint64_t tStop = tickOf(playhead());
             m_stopAction->trigger();
             pumpMs(10);
-            const Points want{{0, S2}, {tP, P1}, {tStop, S2}, {later, S2}};
-            check(voices(added) == want,
-                  "voice: a take becoming a track's first voice did not keep the song's at tick "
-                  "0 (and back at the stop)");
+            const Points want{{0, S2}, {tP, P1}, {tStop, S2}, {later2, P3}};
+            if (!check(tStop < later && voices(added) == want,
+                       "voice: a take becoming a track's first voice did not move the song's to "
+                       "tick 0 (back at the stop, the moved one gone from its old tick)")) {
+                for (const auto &[t, v] : voices(added))
+                    std::fprintf(stderr, "reccheck:   got %llu %d\n", (unsigned long long)t, v);
+                for (const auto &[t, v] : want)
+                    std::fprintf(stderr, "reccheck:   want %llu %d\n", (unsigned long long)t, v);
+            }
+            const auto eventsAfter = chunkEvents(added);
+            undo->undo();
+            const bool undone = chunkEvents(added) == eventsBefore;
+            undo->redo();
+            check(undone && chunkEvents(added) == eventsAfter,
+                  "voice: undo/redo of the moved lead is not exact");
+            // The header's voice editor edits the moved lead: the start
+            // through the take's start, then the take's voice, then the
+            // restore.
+            {
+                QTimer answer;
+                answer.setInterval(10);
+                int picked = 0;
+                QObject::connect(&answer, &QTimer::timeout, [&] {
+                    auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+                    auto *list = dialog ? dialog->findChild<QListWidget *>() : nullptr;
+                    if (!list)
+                        return;
+                    list->setCurrentRow(P2);
+                    picked++;
+                    dialog->accept();
+                });
+                answer.start();
+                view->editTrackVoice(added);
+                answer.stop();
+                const Points edited{{0, P2}, {tP, P1}, {tStop, S2}, {later2, P3}};
+                check(picked == 1 && voices(added) == edited,
+                      "voice: the header's voice edit after a take did not change the voice "
+                      "from the start through the take's start alone");
+                if (picked == 1)
+                    undo->undo();
+            }
+            // Merge leaves the moved lead behind as the track's identity and
+            // carries the take and the song's later change.
+            if (a < added) {
+                Points merged = voices(a);
+                for (const std::pair<uint64_t, int> &pt :
+                     Points{{tP, P1}, {tStop, S2}, {later2, P3}}) {
+                    merged.erase(std::remove_if(merged.begin(), merged.end(),
+                                                [&](const auto &m) { return m.first == pt.first; }),
+                                 merged.end());
+                    merged.insert(std::upper_bound(merged.begin(), merged.end(), pt,
+                                                   [](const auto &x, const auto &y) {
+                                                       return x.first < y.first;
+                                                   }),
+                                  pt);
+                }
+                check(doc.mergeTrack(added, a, false) && voices(a) == merged,
+                      "voice: Merge did not treat the moved lead as the track's identity");
+                undo->undo();
+            }
         }
         while (undo->index() > undoBefore)
             undo->undo();
         view->selectTrack(a);
+        m_followPlayheadAction->setChecked(followWas);
     }
 
     // Stop ends the latch: the voice goes back to the song's where the

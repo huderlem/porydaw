@@ -618,7 +618,8 @@ class AudioEngine
     LiveFollow m_liveFollow;
     // The lanes this arm's take moved (an unflagged move captured), on any
     // pass, sounding or not, as RecordingTake's own per-take mask: cleared at
-    // the Begin.
+    // the Begin. Bend and CC lanes only: it gates CC121's resets, which leave
+    // the voice alone (J5).
     TouchedLanes m_captureMoved;
     // What the keyboard last set on m_liveTrack, per lane: reapplyLiveLatch's
     // values.
