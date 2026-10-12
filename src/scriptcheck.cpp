@@ -39,6 +39,7 @@
 #include <functional>
 
 #include "audio/audiotap.h"
+#include "audio/midiinput.h"
 #include "audio/wavexport.h"
 #include "core/songdocument.h"
 #include "mainwindow.h"
@@ -1395,6 +1396,246 @@ QJsonObject readJson(const QString &path)
 bool isRed(const QColor &c)
 {
     return c.red() > 200 && c.green() < 60 && c.blue() < 60;
+}
+
+// porydaw.midi (docs/midi-input/PLAN.md step 6), through MidiInput's test
+// injector: no device is needed.
+const char *kMidiPlugManifest =
+    R"({ "id": "midiplug", "name": "MIDI Listener", "version": "1.0.0", "api": 1 })";
+const char *kMidiPlugMain = R"(
+export function activate() {
+    porydaw.midi.on("message", function (m) { porydaw.log("midiplug " + m.status); });
+}
+)";
+
+void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &window,
+                   QList<Message> &messages, const QString &pluginsDir)
+{
+    MidiInput &midi = window.midiInput();
+    const auto runc = [&](const char *code) { return host.evalConsole(QLatin1String(code)); };
+    const auto settle = [] {
+        for (int i = 0; i < 5; ++i)
+            QApplication::processEvents();
+    };
+    settle(); // any port hop left from startup
+
+    // --- ports ---
+    check(runc("typeof porydaw.midi.available") == QStringLiteral("boolean") &&
+              (runc("porydaw.midi.available") == QStringLiteral("true")) == midi.backendAvailable(),
+          "midi.available does not mirror the MIDI backend");
+    check(runc("Array.isArray(porydaw.midi.ports())") == QStringLiteral("true") &&
+              runc("porydaw.midi.ports().length").toInt() == midi.ports().size(),
+          "midi.ports() is not a real Array of the listed ports");
+    runc("var mpLog = []; var mpFn = function (p) { mpLog.push(Array.isArray(p) + ':' + "
+         "JSON.stringify(p)); }; var mpOff = porydaw.midi.on('ports', mpFn)");
+    midi.setPortListForTest(
+        {QStringLiteral("Keys A"), QStringLiteral("Keys A"), QStringLiteral("Pads")});
+    midi.setOpenPortsForTest({QStringLiteral("Keys A (2)")});
+    midi.setPortEnabled(QStringLiteral("Pads"), false);
+    settle();
+    const QString expectedPorts =
+        QString::fromUtf8(R"j([{"enabled":true,"failed":false,"name":"Keys A","open":false},)j"
+                          R"j({"enabled":true,"failed":false,"name":"Keys A (2)","open":true},)j"
+                          R"j({"enabled":false,"failed":false,"name":"Pads","open":false}])j");
+    // JSON.stringify keeps insertion order; sort the keys to compare.
+    runc("function mpSorted(list) { return JSON.stringify(list.map(function (p) { var o = {}; "
+         "Object.keys(p).sort().forEach(function (k) { o[k] = p[k]; }); return o; })); }");
+    check(runc("mpSorted(porydaw.midi.ports())") == expectedPorts,
+          "midi.ports() does not report names, open, enabled and failed");
+    check(runc("mpLog.length") == QStringLiteral("1") &&
+              runc("mpLog[0].indexOf('true:') === 0") == QStringLiteral("true") &&
+              runc("mpSorted(JSON.parse(mpLog[0].slice(5)))") == expectedPorts,
+          "midi.ports did not fire exactly once (coalesced) with the new list");
+    midi.setOpenPortsForTest({QStringLiteral("Keys A (2)")}); // no change
+    settle();
+    check(runc("mpLog.length") == QStringLiteral("1"), "midi.ports fired without a change");
+    runc("mpOff()");
+    midi.setPortEnabled(QStringLiteral("Pads"), true);
+    settle();
+    check(runc("mpLog.length") == QStringLiteral("1"), "midi.ports fired after unsubscribing");
+
+    // --- messages: the tap runs only while somebody listens ---
+    check(!midi.tapEnabled(), "the MIDI script tap runs with no midi.message listener");
+    runc("var mmLog = []; var mmFn = function (m) { mmLog.push([m.status, m.data1, m.data2, "
+         "m.port].join(',')); }; var mmOff = porydaw.midi.on('message', mmFn)");
+    check(midi.tapEnabled(), "a midi.message listener did not start the script tap");
+
+    const QString keys = QStringLiteral("Keys A");
+    const QString pads = QStringLiteral("Pads");
+    const uint64_t receivedBefore = midi.receivedCount();
+    const uint64_t batchesBefore = host.midiBatches();
+    int tapHops = 0;
+    const QMetaObject::Connection hopCounter =
+        QObject::connect(&midi, &MidiInput::tapReady, [&tapHops] { tapHops++; });
+    midi.injectForTest({0x91, 60, 100}, keys);    // note on, channel 2
+    midi.injectForTest({0x91, 60, 0}, pads);      // note on velocity 0: as sent
+    midi.injectForTest({0x81, 62, 64}, keys);     // note off
+    midi.injectForTest({0xB2, 7, 99}, pads);      // CC
+    midi.injectForTest({0xE0, 0x12, 0x40}, keys); // pitch bend
+    midi.injectBytesForTest({0xC3, 5}, pads);     // program change (2 bytes)
+    midi.injectBytesForTest({0xD4, 77}, keys);    // channel pressure
+    midi.injectForTest({0xA5, 60, 30});           // poly aftertouch, no port
+    midi.injectBytesForTest({0xF2, 1, 2}, keys);  // song position: system, dropped
+    midi.injectBytesForTest({0xFA}, keys);        // start: realtime, dropped
+    midi.injectBytesForTest({0x40, 1, 2}, keys);  // a bare data byte, dropped
+    midi.injectBytesForTest({0xC0}, keys);        // truncated, dropped
+    check(runc("mmLog.length") == QStringLiteral("0"),
+          "midi.message ran synchronously inside the MIDI producer");
+    settle();
+    check(runc("mmLog.join(' | ')") ==
+              QStringLiteral("145,60,100,Keys A | 145,60,0,Pads | 129,62,64,Keys A | "
+                             "178,7,99,Pads | 224,18,64,Keys A | 195,5,0,Pads | "
+                             "212,77,0,Keys A | 165,60,30,"),
+          "midi.message did not deliver every channel-voice message as sent, in order, "
+          "with its port");
+    check(host.midiBatches() == batchesBefore + 1 && tapHops == 1,
+          "a burst of messages was not delivered as one batch, through one queued hop");
+    QObject::disconnect(hopCounter);
+    // Live play's ring took what it plays (note on/off, CC, bend), as
+    // before; the tap took nothing from it.
+    check(midi.receivedCount() == receivedBefore + 5,
+          "the script tap changed what reaches live play's input ring");
+
+    // Live play off (Settings → MIDI) changes nothing for listeners.
+    const bool livePlayBefore = midi.livePlay();
+    midi.setLivePlay(false);
+    midi.injectForTest({0x90, 70, 1}, keys);
+    settle();
+    check(runc("mmLog[mmLog.length - 1]") == QStringLiteral("144,70,1,Keys A"),
+          "midi.message stopped with Play incoming notes off");
+    midi.setLivePlay(livePlayBefore);
+
+    // A throwing listener: logged, and the others still get every message.
+    qsizetype seen = messages.size();
+    runc("var mtOff = porydaw.midi.on('message', function (m) { throw new Error('midi boom'); "
+         "}); var mm2 = []; var mm2Off = porydaw.midi.on('message', function (m) { "
+         "mm2.push(m.data1); })");
+    midi.injectForTest({0x90, 1, 1});
+    midi.injectForTest({0x90, 2, 1});
+    settle();
+    check(runc("mm2.join(',')") == QStringLiteral("1,2") &&
+              runc("mmLog.length") == QStringLiteral("11"),
+          "a throwing midi.message listener kept the others from their messages");
+    check(hasMessage(messages.mid(seen), QStringLiteral("console"), 2, QStringLiteral("midi boom")),
+          "a throwing midi.message listener was not reported");
+    check(runc("1 + 1") == QStringLiteral("2"), "the console broke after a throwing listener");
+    runc("mtOff(); mm2Off()");
+
+    // A listener removed while a message is being delivered still gets
+    // that message (the snapshot rule of every event) but none of the
+    // batch's later ones.
+    runc("var mrLog = []; var mrFn = function (m) { mrLog.push(m.data1); }; "
+         "var mrStop = porydaw.midi.on('message', function (m) { if (m.data1 === 2) "
+         "porydaw.midi.off('message', mrFn); }); porydaw.midi.on('message', mrFn)");
+    midi.injectForTest({0x90, 1, 1});
+    midi.injectForTest({0x90, 2, 1});
+    midi.injectForTest({0x90, 3, 1});
+    settle();
+    check(runc("mrLog.join(',')") == QStringLiteral("1,2"),
+          "a listener removed mid-batch still got the batch's later messages");
+    runc("mrStop()");
+
+    // A listener's nested event loop (a dialog) does not start a second
+    // delivery: what arrives meanwhile follows the batch, in order.
+    runc("var mnDepth = 0, mnNested = false, mnLog = []; var mnOff = porydaw.midi.on('message', "
+         "function (m) { mnDepth++; if (mnDepth > 1) mnNested = true; mnLog.push(m.data1); "
+         "if (m.data1 === 10) porydaw.ui.dialog.alert('midi'); mnDepth--; })");
+    driveNextModal([&midi](QWidget *w) {
+        midi.injectForTest({0x90, 12, 1});
+        for (int i = 0; i < 5; ++i)
+            QApplication::processEvents();
+        if (auto *box = qobject_cast<QDialog *>(w))
+            box->accept();
+    });
+    midi.injectForTest({0x90, 10, 1});
+    midi.injectForTest({0x90, 11, 1});
+    QDeadlineTimer modalDeadline(4000);
+    while (runc("mnLog.length").toInt() < 3 && !modalDeadline.hasExpired())
+        QApplication::processEvents(QEventLoop::AllEvents, 20);
+    check(runc("mnLog.join(',')") == QStringLiteral("10,11,12") &&
+              runc("mnNested") == QStringLiteral("false"),
+          "midi.message re-entered a listener from its own dialog, or lost the order");
+    runc("mnOff()");
+
+    // Unsubscribing: the returned function and off() both work; with no
+    // listener left the tap stops.
+    const QString mmCount = runc("mmLog.length");
+    runc("mmOff()");
+    midi.injectForTest({0x90, 5, 1});
+    settle();
+    check(runc("mmLog.length") == mmCount,
+          "midi.message still delivered after the unsubscribe function ran");
+    check(!midi.tapEnabled(), "the script tap kept running after the last listener left");
+    // What the tap held when its last listener left is never delivered to
+    // a later one.
+    runc("var msLog = []; var msOff = porydaw.midi.on('message', function (m) { "
+         "msLog.push(m.data1); })");
+    midi.injectForTest({0x90, 6, 1});
+    runc("msOff(); msOff = porydaw.midi.on('message', function (m) { msLog.push(m.data1); })");
+    midi.injectForTest({0x90, 7, 1});
+    settle();
+    check(runc("msLog.join(',')") == QStringLiteral("7"),
+          "a message from before the listeners left reached a later listener");
+    runc("msOff()");
+
+    // Overflow: 1024 fit; the rest are dropped and counted, and delivery
+    // carries on afterwards. Program changes, so live play's ring is
+    // untouched.
+    runc("var moLog = []; var moFn = function (m) { moLog.push(m.data1); }; "
+         "porydaw.midi.on('message', moFn)");
+    const double droppedBefore = runc("porydaw.midi.dropped").toDouble();
+    const int burst = int(MidiTapRing::kCapacity) + 76;
+    for (int i = 0; i < burst; ++i)
+        midi.injectBytesForTest({0xC0, uint8_t(i & 0x7F)});
+    settle();
+    check(runc("moLog.length").toInt() == int(MidiTapRing::kCapacity) &&
+              runc("porydaw.midi.dropped").toDouble() == droppedBefore + 76,
+          "a full script tap did not keep the first 1024 and count the rest as dropped");
+    midi.injectBytesForTest({0xC0, 99});
+    settle();
+    check(runc("moLog[moLog.length - 1]") == QStringLiteral("99") &&
+              runc("moLog.length").toInt() == int(MidiTapRing::kCapacity) + 1,
+          "midi.message did not recover after the tap overflowed");
+    runc("porydaw.midi.off('message', moFn)");
+    check(!midi.tapEnabled(), "off() did not stop the script tap");
+
+    // A plugin's listeners go with it when it unloads.
+    const QString plugDir = pluginsDir + QStringLiteral("/midiplug");
+    check(writeFile(plugDir + QStringLiteral("/plugin.json"), QLatin1String(kMidiPlugManifest)) &&
+              writeFile(plugDir + QStringLiteral("/main.js"), QLatin1String(kMidiPlugMain)),
+          "could not write the midiplug fixture");
+    const auto plugLoaded = [&] {
+        const scripting::Plugin *p = host.plugin(QStringLiteral("midiplug"));
+        return p && p->state == scripting::PluginState::Loaded;
+    };
+    if (check(waitFor(plugLoaded, 4000), "the midiplug fixture did not load")) {
+        check(midi.tapEnabled(), "a plugin's midi.message listener did not start the tap");
+        seen = messages.size();
+        midi.injectForTest({0x92, 64, 90});
+        settle();
+        check(hasMessage(messages.mid(seen), QStringLiteral("midiplug"), 0,
+                         QStringLiteral("midiplug 146")),
+              "a plugin's midi.message listener got nothing");
+        host.setEnabled(QStringLiteral("midiplug"), false);
+        check(!midi.tapEnabled(), "unloading the plugin left the script tap running");
+        seen = messages.size();
+        midi.injectForTest({0x92, 64, 90});
+        settle();
+        check(!hasMessage(messages.mid(seen), QStringLiteral("midiplug"), 0,
+                          QStringLiteral("midiplug")),
+              "an unloaded plugin's midi.message listener still ran");
+        host.setEnabled(QStringLiteral("midiplug"), true);
+        check(plugLoaded() && midi.tapEnabled(),
+              "re-enabling the plugin did not bring its listener back");
+    }
+    QDir(plugDir).removeRecursively();
+    check(waitFor([&] { return host.plugin(QStringLiteral("midiplug")) == nullptr; }, 4000),
+          "the midiplug fixture was not dropped after its folder went");
+    check(!midi.tapEnabled(), "a removed plugin left the script tap running");
+
+    midi.setPortListForTest({});
+    midi.setOpenPortsForTest({});
+    settle();
 }
 
 void runReachChecks(const Check &check, scripting::ScriptHost &host, MainWindow &window,
@@ -3483,6 +3724,7 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
     host.setWatchdogMs(5000);
 
     runPanelChecks(check, host, *this, messages, m_pluginPanelsMenu);
+    runMidiChecks(check, host, *this, messages, pluginsDir);
 
     // --- song half ---
     if (!projectRoot.isEmpty()) {

@@ -18,6 +18,7 @@
 #include <algorithm>
 
 #include "audio/audioengine.h"
+#include "audio/midiinput.h"
 #include "core/miditimeline.h"
 #include "core/songdocument.h"
 #include "scriptapi.h"
@@ -157,6 +158,10 @@ ScriptHost::ScriptHost(QObject *parent) : QObject(parent), m_pluginsDir(resolveP
     m_changedTimer->setSingleShot(true);
     m_changedTimer->setInterval(0);
     connect(m_changedTimer, &QTimer::timeout, this, &ScriptHost::fireChanged);
+    m_midiPortsTimer = new QTimer(this);
+    m_midiPortsTimer->setSingleShot(true);
+    m_midiPortsTimer->setInterval(0);
+    connect(m_midiPortsTimer, &QTimer::timeout, this, &ScriptHost::firePorts);
 }
 
 ScriptHost::~ScriptHost()
@@ -172,6 +177,16 @@ ScriptHost::~ScriptHost()
 void ScriptHost::setBindings(HostBindings bindings)
 {
     m_bindings = std::move(bindings);
+    if (m_midi)
+        disconnect(m_midi, nullptr, this, nullptr);
+    m_midi = m_bindings.midi;
+    if (m_midi) {
+        connect(m_midi, &MidiInput::tapReady, this, &ScriptHost::deliverMidi);
+        connect(m_midi, &MidiInput::portsChanged, m_midiPortsTimer,
+                static_cast<void (QTimer::*)()>(&QTimer::start));
+    }
+    m_lastMidiPorts = midiPorts();
+    updateMidiTap();
 }
 
 QString ScriptHost::defaultPluginsDir()
@@ -392,8 +407,11 @@ void ScriptHost::setEnabled(const QString &id, bool enabled)
     emit pluginsChanged();
 }
 
-void ScriptHost::reload(const QString &id)
+void ScriptHost::reload(const QString &pluginId)
 {
+    // A copy: callers pass the plugin's own manifest.id (the reload timer
+    // does), and the scan() below erases a plugin whose folder is gone.
+    const QString id = pluginId;
     Plugin *plugin = findPlugin(id);
     if (!plugin)
         return;
@@ -531,6 +549,7 @@ void ScriptHost::teardown(Plugin &plugin, bool callDeactivate)
     invalidateOverlays();
     plugin.images.clear();
     plugin.listeners.clear();
+    updateMidiTap();
     plugin.changedEditStreak = 0;
     auto &keys = keymap::Registry::instance();
     for (PluginAction &action : plugin.actions) {
@@ -540,6 +559,7 @@ void ScriptHost::teardown(Plugin &plugin, bool callDeactivate)
     plugin.actions.clear();
     // QJSValues must die before their engine.
     plugin.dispatch = QJSValue();
+    plugin.dispatchEach = QJSValue();
     plugin.runAction = QJSValue();
     plugin.deactivate = QJSValue();
     plugin.facades.clear();
@@ -932,6 +952,8 @@ void ScriptHost::setListenerCount(Plugin &plugin, const QString &event, int coun
     else
         plugin.listeners.insert(event, count);
     updateFrameTimer();
+    if (event == QLatin1String("midi.message"))
+        updateMidiTap();
 }
 
 bool ScriptHost::anyListener(const QString &event) const
@@ -958,6 +980,94 @@ void ScriptHost::updateFrameTimer()
 bool ScriptHost::frameTimerActive() const
 {
     return m_frameTimer->isActive();
+}
+
+MidiInput *ScriptHost::midiInput() const
+{
+    return m_midi.data();
+}
+
+void ScriptHost::updateMidiTap()
+{
+    if (m_midi)
+        m_midi->setTapEnabled(anyListener(QStringLiteral("midi.message")));
+}
+
+QVariantList ScriptHost::midiPorts() const
+{
+    QVariantList out;
+    if (!m_midi)
+        return out;
+    const QStringList open = m_midi->openPorts();
+    for (const QString &name : m_midi->ports()) {
+        out.append(QVariantMap{{QStringLiteral("name"), name},
+                               {QStringLiteral("open"), open.contains(name)},
+                               {QStringLiteral("enabled"), m_midi->isPortEnabled(name)},
+                               {QStringLiteral("failed"), m_midi->portFailed(name)}});
+    }
+    return out;
+}
+
+void ScriptHost::firePorts()
+{
+    QVariantList now = midiPorts();
+    if (now == m_lastMidiPorts)
+        return;
+    m_lastMidiPorts = now;
+    if (anyListener(QStringLiteral("midi.ports")))
+        emitEventListening(QStringLiteral("midi.ports"), now);
+}
+
+void ScriptHost::deliverMidi()
+{
+    if (!m_midi)
+        return;
+    if (m_inMidiFire) {
+        // From a listener's nested event loop: the messages wait in the
+        // tap for the outer delivery to finish.
+        m_midiPending = true;
+        return;
+    }
+    std::vector<MidiTapMsg> batch;
+    MidiTapMsg msg;
+    while (m_midi->popTap(&msg))
+        batch.push_back(msg);
+    if (batch.empty())
+        return;
+    m_midiBatches++;
+    // Token → identity once per batch, not per message and plugin.
+    QHash<uint16_t, QString> names;
+    for (const MidiTapMsg &m : batch) {
+        if (!names.contains(m.port))
+            names.insert(m.port, m_midi->portForToken(m.port));
+    }
+    const QString event = QStringLiteral("midi.message");
+    m_inMidiFire = true;
+    forEachPlugin([&](Plugin &plugin) {
+        if (plugin.listeners.value(event) <= 0 || !plugin.dispatchEach.isCallable())
+            return;
+        if (plugin.engine->isInterrupted())
+            return;
+        // Built as real JS objects in the plugin's engine: no QVariant
+        // conversion (and no Qt 6.5+ sequence objects) per message.
+        QJSEngine &engine = *plugin.engine;
+        QJSValue list = engine.newArray(uint(batch.size()));
+        for (size_t i = 0; i < batch.size(); ++i) {
+            QJSValue o = engine.newObject();
+            o.setProperty(QStringLiteral("status"), int(batch[i].status));
+            o.setProperty(QStringLiteral("data1"), int(batch[i].d1));
+            o.setProperty(QStringLiteral("data2"), int(batch[i].d2));
+            o.setProperty(QStringLiteral("port"), names.value(batch[i].port));
+            list.setProperty(quint32(i), o);
+        }
+        QJSValue fn = plugin.dispatchEach;
+        guarded(plugin, [&] { return fn.call({QJSValue(event), list}); });
+    });
+    m_inMidiFire = false;
+    if (m_midiPending) {
+        m_midiPending = false;
+        QTimer::singleShot(0, this, &ScriptHost::deliverMidi);
+    }
 }
 
 void ScriptHost::emitEventListening(const QString &event, const QVariant &payload)

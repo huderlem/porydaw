@@ -28,6 +28,7 @@
 
 class AudioEngine;
 class DecompProject;
+class MidiInput;
 class QAction;
 class QDockWidget;
 class QFileSystemWatcher;
@@ -162,6 +163,10 @@ struct HostBindings {
     std::function<bool(const EngineSettings &settings, QString *error)> setEngineSettings;
     const AudioEngine *audio = nullptr;
     const DecompProject *project = nullptr;
+    // porydaw.midi (docs/midi-input/PLAN.md step 6): the ports and the
+    // script tap. Absent: no ports, no messages. Must outlive the host or
+    // be destroyed after it (the host holds it through a QPointer).
+    MidiInput *midi = nullptr;
 };
 
 // {maxPcmChannels, pcmMixRate, analogFilter}: porydaw.audio.engine and the
@@ -192,6 +197,9 @@ struct Plugin {
     // From the prelude (scriptprelude.js): the event dispatcher and the
     // action runner, both closures over the plugin's `porydaw` object.
     QJSValue dispatch;
+    // dispatchEach(event, payloads): every payload to every listener, in
+    // order, in one call (midi.message batches).
+    QJSValue dispatchEach;
     QJSValue runAction;
     QJSValue deactivate;
     // API facade QObjects; destroyed before the engine (they hold QJSValues).
@@ -364,6 +372,16 @@ class ScriptHost : public QObject
     // listens; harnesses call it directly.
     void pumpFrame();
     bool frameTimerActive() const;
+    // porydaw.midi: the port list as midi.ports() reports it
+    // ([{name, open, enabled, failed}]), and the MIDI service (nullptr
+    // when the window gave none, or it is gone).
+    QVariantList midiPorts() const;
+    MidiInput *midiInput() const;
+    // Delivers what the MIDI script tap holds as one midi.message batch
+    // per plugin (MidiInput::tapReady; harnesses may call it directly).
+    void deliverMidi();
+    // midi.message batches delivered so far (each one drain of the tap).
+    uint64_t midiBatches() const { return m_midiBatches; }
     // The analysis the last pumpFrame produced (porydaw.audio reads it).
     AudioAnalyzer &analyzer() { return m_analyzer; }
 
@@ -463,6 +481,12 @@ class ScriptHost : public QObject
     static bool enabledSetting(const QString &id);
     bool anyListener(const QString &event) const;
     void updateFrameTimer();
+    // The MIDI script tap runs only while some plugin listens for
+    // midi.message.
+    void updateMidiTap();
+    // midi.ports: MidiInput::portsChanged arms a zero timer; firePorts
+    // emits when the list differs from the last one reported.
+    void firePorts();
     // song.changed: documentChanged arms a zero-length timer (coalescing a
     // whole transaction, or a macro undo, into one event) and fireChanged
     // delivers it once the mutation's stack has fully unwound.
@@ -505,6 +529,15 @@ class ScriptHost : public QObject
     QTimer *m_changedTimer = nullptr;
     int m_pendingOrigins = 0;
     bool m_inChangedFire = false;
+    // porydaw.midi. m_inMidiFire: a listener's nested event loop (a dialog)
+    // must not start a second delivery; the hop that arrives meanwhile
+    // leaves its messages in the tap and sets m_midiPending.
+    QPointer<MidiInput> m_midi;
+    bool m_inMidiFire = false;
+    bool m_midiPending = false;
+    uint64_t m_midiBatches = 0;
+    QTimer *m_midiPortsTimer = nullptr;
+    QVariantList m_lastMidiPorts;
 };
 
 } // namespace scripting

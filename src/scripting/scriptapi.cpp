@@ -33,6 +33,7 @@
 #include <set>
 
 #include "audio/audioengine.h"
+#include "audio/midiinput.h"
 #include "audio/wavexport.h"
 #include "core/smf.h"
 #include "core/songdocument.h"
@@ -3475,6 +3476,25 @@ void ViewApi::revealKey(int key)
         v->ensureKeyVisible(std::clamp(key, 0, 127));
 }
 
+// ---- MidiApi ----
+
+bool MidiApi::available() const
+{
+    const MidiInput *midi = m_host.midiInput();
+    return midi && midi->backendAvailable();
+}
+
+double MidiApi::dropped() const
+{
+    const MidiInput *midi = m_host.midiInput();
+    return midi ? double(midi->tapDropped()) : 0.0;
+}
+
+QVariantList MidiApi::ports() const
+{
+    return m_host.midiPorts();
+}
+
 // ---- installApi ----
 
 bool installApi(ScriptHost &host, Plugin &plugin, QString *error)
@@ -3512,6 +3532,7 @@ bool installApi(ScriptHost &host, Plugin &plugin, QString *error)
     add(new UiApi(host, plugin));
     add(new IoApi(host, plugin));
     add(new VoicegroupApi(host, plugin));
+    add(new MidiApi(host, plugin));
 
     const QJSValue result = factory.call(facades);
     if (result.isError() || !result.isObject()) {
@@ -3519,6 +3540,7 @@ bool installApi(ScriptHost &host, Plugin &plugin, QString *error)
         return false;
     }
     plugin.dispatch = result.property(QStringLiteral("dispatch"));
+    plugin.dispatchEach = result.property(QStringLiteral("dispatchEach"));
     plugin.runAction = result.property(QStringLiteral("runAction"));
     engine->globalObject().setProperty(QStringLiteral("porydaw"),
                                        result.property(QStringLiteral("porydaw")));

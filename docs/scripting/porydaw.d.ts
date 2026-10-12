@@ -343,6 +343,38 @@ declare namespace porydaw {
         function off(event: string, fn: Function): void;
     }
 
+    // ---- midi (input only) ----
+    interface MidiPort {
+        /** The port's name in Settings → MIDI ("Name (2)" for a second device of the same name). */
+        name: string;
+        /** porydaw is receiving from it. */
+        open: boolean;
+        /** Its Settings → MIDI checkbox. */
+        enabled: boolean;
+        /** Enabled but could not be opened. */
+        failed: boolean;
+    }
+    /** One channel message as the keyboard sent it (a velocity-0 note on stays a note on). */
+    interface MidiMessage {
+        /** 0x80..0xEF: the type in the high nibble, the channel (0-based) in the low one. */
+        status: number;
+        data1: number;
+        /** 0 for program change (0xCn) and channel pressure (0xDn). */
+        data2: number;
+        /** The sending port's name. */
+        port: string;
+    }
+    namespace midi {
+        /** A MIDI system is up. */
+        const available: boolean;
+        /** Messages listeners never got because porydaw fell more than 1024 behind. */
+        const dropped: number;
+        function ports(): MidiPort[];
+        function on(event: "message", fn: (message: MidiMessage) => void): Unsubscribe;
+        function on(event: "ports", fn: (ports: MidiPort[]) => void): Unsubscribe;
+        function off(event: string, fn: Function): void;
+    }
+
     // ---- actions ----
     namespace actions {
         function register(spec: {

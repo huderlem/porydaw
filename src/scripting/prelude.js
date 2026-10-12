@@ -4,7 +4,7 @@
 // result's `porydaw` and `console` as globals. ES2017 at most: Qt 6.2's
 // QJSEngine is the floor.
 (function (host, song, selection, cursor, transport, actions, storage, project, edit, view,
-          audio, ui, io, voicegroup) {
+          audio, ui, io, voicegroup, midi) {
     "use strict";
 
     var listeners = {};
@@ -46,6 +46,19 @@
         payload = plain(payload);
         for (var i = 0; i < l.length; i++) {
             try { l[i](payload); } catch (e) { host.reportError(e); }
+        }
+    }
+    // A batch of payloads (midi.message), each to every listener in turn,
+    // in one call from the host. A listener removed by an earlier payload's
+    // listener gets no later ones; one added gets the rest.
+    function dispatchEach(event, payloads) {
+        for (var m = 0; m < payloads.length; m++) {
+            var l = listeners[event];
+            if (!l || !l.length) return;
+            l = l.slice();
+            for (var i = 0; i < l.length; i++) {
+                try { l[i](payloads[m]); } catch (e) { host.reportError(e); }
+            }
         }
     }
     function events(prefix) {
@@ -470,6 +483,15 @@
             }
         }, events("audio")),
 
+        // MIDI keyboard input (read-only; porydaw sends no MIDI). on("message")
+        // gets {status, data1, data2, port} per channel-voice message, as
+        // sent; on("ports") gets ports() whenever it changes.
+        midi: mix({
+            get available() { return midi.available; },
+            get dropped() { return midi.dropped; },
+            ports: function () { return list(midi.ports()); }
+        }, events("midi")),
+
         actions: {
             // {id, name, context?, default?, run} → full keymap id.
             register: function (spec) {
@@ -603,5 +625,6 @@
         warn: api.warn, error: api.error
     };
 
-    return { porydaw: api, console: console, dispatch: dispatch, runAction: runAction };
+    return { porydaw: api, console: console, dispatch: dispatch, dispatchEach: dispatchEach,
+             runAction: runAction };
 })

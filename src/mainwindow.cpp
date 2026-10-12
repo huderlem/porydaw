@@ -478,6 +478,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         };
         bindings.audio = &m_audio;
         bindings.project = &m_project;
+        bindings.midi = m_midiInput.get();
         m_scriptHost->setBindings(std::move(bindings));
     }
 #endif

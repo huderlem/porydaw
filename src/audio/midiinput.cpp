@@ -49,36 +49,6 @@ void onRtMidiError(RtMidiError::Type type, const std::string &text, void *)
 
 } // namespace
 
-bool MidiInputRing::push(const MidiMsg &msg)
-{
-    std::lock_guard<std::mutex> lock(m_producer);
-    const uint32_t write = m_write.load(std::memory_order_relaxed);
-    const uint32_t read = m_read.load(std::memory_order_acquire);
-    if (write - read >= kCapacity) {
-        m_dropped.fetch_add(1, std::memory_order_relaxed);
-        return false;
-    }
-    m_slots[write & (kCapacity - 1)] = msg;
-    m_write.store(write + 1, std::memory_order_release);
-    return true;
-}
-
-bool MidiInputRing::pop(MidiMsg *out)
-{
-    const uint32_t read = m_read.load(std::memory_order_relaxed);
-    const uint32_t write = m_write.load(std::memory_order_acquire);
-    if (read == write)
-        return false;
-    *out = m_slots[read & (kCapacity - 1)];
-    m_read.store(read + 1, std::memory_order_release);
-    return true;
-}
-
-uint32_t MidiInputRing::size() const
-{
-    return m_write.load(std::memory_order_acquire) - m_read.load(std::memory_order_acquire);
-}
-
 // One open port: its own RtMidiIn client (RtMidi opens one port per
 // object), whose callback thread carries this as its user data.
 struct MidiInput::OpenPort {
@@ -89,6 +59,7 @@ struct MidiInput::OpenPort {
     // Set before the client closes; a callback already running on the
     // driver's thread then drops its message (see shutPort).
     std::atomic<bool> closing{false};
+    uint16_t token = 0; // portToken(id), for the script tap
     std::unique_ptr<RtMidiIn> in;
 };
 
@@ -370,6 +341,7 @@ bool MidiInput::openQuietly(const QString &name)
     port->owner = this;
     port->id = name;
     port->rawAtOpen = rawNames(now);
+    port->token = portToken(name);
     try {
         port->in = std::make_unique<RtMidiIn>(RtMidi::Api(m_api), kClientName);
         port->in->setErrorCallback(&onRtMidiError, nullptr);
@@ -571,13 +543,73 @@ void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *use
     if (!port || port->closing.load(std::memory_order_acquire))
         return;
     if (message && !message->empty())
-        port->owner->receive(message->data(), message->size(), midiClockNs());
+        port->owner->receive(message->data(), message->size(), midiClockNs(), port->token);
 }
 
-void MidiInput::injectForTest(const MidiMsg &msg)
+void MidiInput::injectForTest(const MidiMsg &msg, const QString &port)
 {
     const unsigned char bytes[3] = {msg.status, msg.d1, msg.d2};
-    receive(bytes, sizeof bytes, msg.arrivalNs);
+    receive(bytes, sizeof bytes, msg.arrivalNs, port.isEmpty() ? 0 : portToken(port));
+}
+
+void MidiInput::injectBytesForTest(const std::vector<unsigned char> &bytes, const QString &port)
+{
+    receive(bytes.data(), bytes.size(), 0, port.isEmpty() ? 0 : portToken(port));
+}
+
+bool MidiInput::parseTap(const unsigned char *bytes, size_t size, MidiTapMsg *out)
+{
+    if (!bytes || size < 1)
+        return false;
+    const uint8_t status = bytes[0];
+    if (status < 0x80 || status >= 0xF0)
+        return false; // a bare data byte, or a system message
+    const uint8_t type = status & 0xF0;
+    const size_t dataBytes = (type == 0xC0 || type == 0xD0) ? 1 : 2;
+    if (size < 1 + dataBytes)
+        return false;
+    out->status = status;
+    out->d1 = bytes[1] & 0x7F;
+    out->d2 = dataBytes == 2 ? uint8_t(bytes[2] & 0x7F) : uint8_t(0);
+    return true;
+}
+
+void MidiInput::setTapEnabled(bool on)
+{
+    if (m_tapEnabled.load(std::memory_order_relaxed) == on)
+        return;
+    m_tapEnabled.store(on, std::memory_order_release);
+    // Empty either way: switched off, nobody will read it; switched on,
+    // what a producer slipped in around the flip belongs to no listener.
+    MidiTapMsg discard;
+    while (m_tap.pop(&discard)) {
+    }
+}
+
+QString MidiInput::portForToken(uint16_t token) const
+{
+    return token < m_tokenNames.size() ? m_tokenNames[token] : QString();
+}
+
+uint16_t MidiInput::portToken(const QString &id)
+{
+    if (id.isEmpty())
+        return 0;
+    const qsizetype at = m_tokenNames.indexOf(id);
+    if (at > 0)
+        return uint16_t(at);
+    if (m_tokenNames.size() > 0xFFFF)
+        return 0; // 65535 distinct identities: report later ones as none
+    m_tokenNames.append(id);
+    return uint16_t(m_tokenNames.size() - 1);
+}
+
+void MidiInput::deliverTap()
+{
+    // Cleared first: a message pushed while the receiver drains posts a
+    // new hop, so nothing waits for the next one.
+    m_tapPosted.store(false, std::memory_order_release);
+    emit tapReady();
 }
 
 void MidiInput::setPortListForTest(const QStringList &names)
@@ -611,8 +643,19 @@ int64_t midiClockNs()
         .count();
 }
 
-void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs)
+void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port)
 {
+    // The script tap first, and independently: it keeps what live play
+    // drops (program change, aftertouch) and the bytes as sent.
+    if (m_tapEnabled.load(std::memory_order_acquire)) {
+        MidiTapMsg tap;
+        if (parseTap(bytes, size, &tap)) {
+            tap.port = port;
+            m_tap.push(tap);
+            if (!m_tapPosted.exchange(true, std::memory_order_acq_rel))
+                QMetaObject::invokeMethod(this, &MidiInput::deliverTap, Qt::QueuedConnection);
+        }
+    }
     MidiMsg msg;
     if (!parse(bytes, size, &msg))
         return;

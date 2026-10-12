@@ -577,6 +577,25 @@ class VoicegroupApi : public ApiObject
     Q_INVOKABLE QVariantMap typicalAdsr(const QString &type, const QString &symbol) const;
 };
 
+// porydaw.midi: the MIDI keyboard ports (docs/midi-input/PLAN.md step 6).
+// Messages arrive as the midi.message event (ScriptHost::deliverMidi); the
+// prelude adds on()/off(). Read-only: nothing here sends MIDI or changes
+// what the keyboard does to live play and recording.
+class MidiApi : public ApiObject
+{
+    Q_OBJECT
+    Q_PROPERTY(bool available READ available)
+    Q_PROPERTY(double dropped READ dropped)
+  public:
+    using ApiObject::ApiObject;
+    // A MIDI system is up (false in a build without MIDI, on WSL, ...).
+    bool available() const;
+    // midi.message messages lost because the UI thread fell behind.
+    double dropped() const;
+    // [{name, open, enabled, failed}] in the backend's order.
+    Q_INVOKABLE QVariantList ports() const;
+};
+
 // Builds the facades into plugin.facades, runs prelude.js against them, and
 // installs `porydaw` + `console` as globals of the plugin's engine. False
 // with *error on failure (a broken prelude is a porydaw bug, not a plugin's).

@@ -526,8 +526,13 @@ a failed registration (`reloadProjectOrWarn`), `newVoicegroup` calls
 `createVoicegroupNamed`, and `SongRegistry::registrationGaps(status)`
 feeds both `SongInfo::registrationGaps` and `project.registration().gaps`.
 
-Still open: MIDI input (`porydaw.midi` reserved; porydaw has no MIDI input
-at all yet).
+MIDI input landed later (docs/midi-input/PLAN.md); its step 6 added
+`porydaw.midi`: `on("message")` delivers every channel message a keyboard
+sends, as sent, with the port's name, through a script tap (a second ring
+from the MIDI threads, drained once per queued hop on the UI thread and
+running only while some plugin listens); `ports()` and `on("ports")` list
+the ports. Input only (no `send`); listeners observe and can't suppress
+or alter what live play and recording get.
 
 ## 7. Other plugin categories the API should not preclude
 
@@ -541,9 +546,8 @@ at all yet).
   song → text for diffs, batch render via `TimelinePlayer`.
 - **Project maintenance**: bulk voicegroup edits, sample dedup reports,
   registration audits — all through the existing adapter APIs.
-- **Live input**: MIDI keyboard input (not yet supported by porydaw at all;
-  if added later it would be `porydaw.midi.on('message')` — keep the
-  namespace free).
+- **Live input**: MIDI keyboard input through `porydaw.midi.on('message')`
+  (chord detectors, MIDI monitors, controller-driven tools).
 - **Cosmetic**: theme generators (write `theme/*` QSettings), custom note
   colouring (`ui.overlay`), status-bar widgets.
 - **Workflow**: macro recorder (record a sequence of `edit.*` calls into a

@@ -33,33 +33,80 @@ struct MidiMsg {
 // The clock MidiMsg::arrivalNs is read on (steady, any thread).
 int64_t midiClockNs();
 
-// The input ring between the MIDI threads and the audio thread
-// (docs/midi-input/PLAN.md §2 stance 1). Multi-producer: RtMidi runs one
-// callback thread per open port, and the test injector pushes from the UI
-// thread, so producers serialise on a short mutex. Single consumer, which
-// never locks: pop() is wait-free and safe to call from the audio callback.
-// A full ring drops the new message and counts it.
-class MidiInputRing
+// A bounded multi-producer, single-consumer ring of T. Producers (RtMidi's
+// callback threads, one per open port, and the test injector on the UI
+// thread) serialise on a short mutex; the one consumer never locks: pop()
+// is wait-free. A full ring drops the new message and counts it.
+template <typename T, uint32_t Capacity>
+class MidiRing
 {
   public:
-    static constexpr uint32_t kCapacity = 256; // power of two
+    static constexpr uint32_t kCapacity = Capacity; // power of two
     static_assert((kCapacity & (kCapacity - 1)) == 0, "ring size must be a power of two");
 
     // Any thread. False (and dropped() grows) when the ring is full.
-    bool push(const MidiMsg &msg);
+    bool push(const T &msg)
+    {
+        std::lock_guard<std::mutex> lock(m_producer);
+        const uint32_t write = m_write.load(std::memory_order_relaxed);
+        const uint32_t read = m_read.load(std::memory_order_acquire);
+        if (write - read >= kCapacity) {
+            m_dropped.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        m_slots[write & (kCapacity - 1)] = msg;
+        m_write.store(write + 1, std::memory_order_release);
+        return true;
+    }
     // The one consumer thread only. False when empty.
-    bool pop(MidiMsg *out);
+    bool pop(T *out)
+    {
+        const uint32_t read = m_read.load(std::memory_order_relaxed);
+        const uint32_t write = m_write.load(std::memory_order_acquire);
+        if (read == write)
+            return false;
+        *out = m_slots[read & (kCapacity - 1)];
+        m_read.store(read + 1, std::memory_order_release);
+        return true;
+    }
     // Approximate from any thread; exact on the consumer thread.
-    uint32_t size() const;
+    uint32_t size() const
+    {
+        return m_write.load(std::memory_order_acquire) - m_read.load(std::memory_order_acquire);
+    }
     uint64_t dropped() const { return m_dropped.load(std::memory_order_relaxed); }
 
   private:
     std::mutex m_producer;
-    std::array<MidiMsg, kCapacity> m_slots{};
+    std::array<T, kCapacity> m_slots{};
     std::atomic<uint32_t> m_write{0}; // producers (under m_producer) increment
     std::atomic<uint32_t> m_read{0};  // the consumer increments
     std::atomic<uint64_t> m_dropped{0};
 };
+
+// The input ring between the MIDI threads and the audio thread
+// (docs/midi-input/PLAN.md §2 stance 1); its consumer is the audio callback.
+class MidiInputRing : public MidiRing<MidiMsg, 256>
+{};
+
+// One channel-voice message as a port sent it, for porydaw.midi
+// (docs/midi-input/PLAN.md step 6): unlike MidiMsg nothing is normalised
+// (a velocity-0 note on stays 0x9n) and every channel-voice type is kept,
+// program change and both aftertouches included. One-data-byte types
+// (0xCn, 0xDn) have d2 = 0. port is MidiInput's token for the port's
+// identity (portForToken); 0 = none (an injected message without a port).
+struct MidiTapMsg {
+    uint8_t status = 0;
+    uint8_t d1 = 0;
+    uint8_t d2 = 0;
+    uint16_t port = 0;
+};
+
+// The script tap: MIDI threads to the UI thread, drained there once per
+// queued hop (MidiInput::tapReady). Separate from the input ring, so the
+// audio path neither sees nor waits for it.
+class MidiTapRing : public MidiRing<MidiTapMsg, 1024>
+{};
 
 // MIDI keyboard input (docs/midi-input/PLAN.md, step 1): owns the RtMidi
 // ports, the input ring they feed, and the MIDI preferences. Lives on the UI
@@ -165,10 +212,34 @@ class MidiInput : public QObject
     // and truncated input.
     static bool parse(const unsigned char *bytes, size_t size, MidiMsg *out);
 
+    // The script tap (porydaw.midi, docs/midi-input/PLAN.md step 6). While
+    // enabled (some plugin listens for midi.message), every channel-voice
+    // message a port sends also goes, as sent, into a second ring the UI
+    // thread drains: one queued hop at a time posts tapReady(), and the
+    // receiver drains everything with popTap. Live play and recording use
+    // the input ring and never see this one. Disabled, the MIDI threads skip
+    // it entirely; enabling or disabling empties it (nothing stale arrives).
+    void setTapEnabled(bool on);
+    bool tapEnabled() const { return m_tapEnabled.load(std::memory_order_relaxed); }
+    // UI thread only. False when the tap is empty.
+    bool popTap(MidiTapMsg *out) { return m_tap.pop(out); }
+    // Messages lost to a full tap (the UI thread was busy for 1024 of them).
+    uint64_t tapDropped() const { return m_tap.dropped(); }
+    // The port identity a MidiTapMsg::port token stands for ("" for 0).
+    QString portForToken(uint16_t token) const;
+    // The tap's view of one raw message: false for system messages (sysex,
+    // clock and active sensing never arrive: ignoreTypes), bare data bytes
+    // and truncated input.
+    static bool parseTap(const unsigned char *bytes, size_t size, MidiTapMsg *out);
+
     // Harness entry: the message's bytes take the same path as a port's
-    // callback (parse, ring push, activity). Its arrivalNs is kept as
-    // given: 0 (the default) means it waited for no callback.
-    void injectForTest(const MidiMsg &msg);
+    // callback (parse, ring push, tap, activity), as if port (an identity;
+    // empty = none) sent them. Its arrivalNs is kept as given: 0 (the
+    // default) means it waited for no callback.
+    void injectForTest(const MidiMsg &msg, const QString &port = QString());
+    // The same with raw bytes (a two-byte program change, say).
+    void injectBytesForTest(const std::vector<unsigned char> &bytes,
+                            const QString &port = QString());
     // Harness entry: replaces the listed ports (raw names, plain naming;
     // opening none), so the Settings page's port list can be driven without
     // MIDI hardware.
@@ -190,6 +261,8 @@ class MidiInput : public QObject
     void portsClosed();
     // Input arrived (throttled, UI thread).
     void activity();
+    // The script tap has messages (UI thread; at most one hop in flight).
+    void tapReady();
     void settingsChanged();
 
   private:
@@ -202,9 +275,13 @@ class MidiInput : public QObject
     };
 
     static void onMessage(double timeStamp, std::vector<unsigned char> *message, void *userData);
-    // Any thread: parse, push, flag activity.
-    void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs);
+    // Any thread: parse, push, flag activity. port is the sender's token.
+    void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port);
     void deliverActivity();
+    void deliverTap();
+    // UI thread: the token for a port identity, assigned on first use and
+    // kept (the list only grows, by one per identity ever opened).
+    uint16_t portToken(const QString &id);
     bool startBackend();
     // Lists the ports again, closes vanished ones and opens enabled new
     // ones; userAsked also reopens open ports, retries failed ones and
@@ -220,6 +297,15 @@ class MidiInput : public QObject
     void saveDisabledPorts();
 
     MidiInputRing m_ring;
+    MidiTapRing m_tap;
+    std::atomic<bool> m_tapEnabled{false};
+    // Set by the producer that posts the tap hop, cleared on the UI thread
+    // just before tapReady() (so a message pushed during the drain posts
+    // again).
+    std::atomic<bool> m_tapPosted{false};
+    // Token → identity (index 0 = none). UI thread only; tokens reach the
+    // MIDI threads through OpenPort::token, set before the port opens.
+    QStringList m_tokenNames{QString()};
     // The enumerating client; null without a backend.
     std::unique_ptr<RtMidiIn> m_backend;
     int m_api = 0; // RtMidi::Api of m_backend

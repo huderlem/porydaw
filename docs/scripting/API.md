@@ -249,6 +249,36 @@ Every `on()` returns a function that unsubscribes the listener.
 See these example plugins for reference: [`plugins/examples/vu-meter`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/vu-meter), [`plugins/examples/spectrum`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/spectrum),
 [`plugins/examples/dancer`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/dancer) (beats), [`plugins/examples/song-report`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/song-report) (render).
 
+### `porydaw.midi`
+
+`porydaw.midi` lets a plugin listen to the MIDI keyboards connected to porydaw (Settings → MIDI). It only listens: porydaw sends no MIDI, so there is no `send`.
+
+| Member | |
+|---|---|
+| `available` | Whether a MIDI system is up. `false` in a build without MIDI support, or where the computer has none (WSL, for example) |
+| `ports()` | `[{name, open, enabled, failed}]`, the MIDI input ports as Settings → MIDI lists them. `name` is the port's name there (a second device with the same name is `"Name (2)"`). `enabled` is its checkbox, `open` is whether porydaw is receiving from it, and `failed` is whether it is enabled but could not be opened (another program may be using it) |
+| `dropped` | How many messages `on("message")` listeners never got, because porydaw fell more than 1024 messages behind |
+| `on("message", fn({status, data1, data2, port}))` | Callback invoked for every message a keyboard sends. `port` is the sending port's `name` |
+| `on("ports", fn(ports))` | Callback invoked with `ports()` whenever it changes (a keyboard plugged in or unplugged, a port turned on or off) |
+
+Every `on()` returns a function that unsubscribes the listener.
+
+About `on("message")`:
+
+- Messages arrive on the UI thread, a moment after the keyboard sent them, in the order they arrived (across ports too). Several messages that arrive close together are delivered one after another in the same turn.
+- Every channel message is delivered with its bytes as sent: note off (`0x8n`), note on (`0x9n`), polyphonic aftertouch (`0xAn`), control change (`0xBn`), program change (`0xCn`), channel pressure (`0xDn`) and pitch bend (`0xEn`). The channel is `status & 0x0F` (0-based). `data2` is 0 for program change and channel pressure. A note on with velocity 0 means note off, as MIDI defines it, and it is delivered as a note on. Pitch bend is `data1 | (data2 << 7)`, with 8192 as the centre.
+- System messages (sysex, clock, active sensing, start/stop, song position…) are not delivered.
+- Messages arrive whether or not a song is open, and whether or not "Play incoming notes" is on.
+- Listening changes nothing else. The keyboard still plays the selected track and records as usual, whatever a listener does. A plugin can't hold back or change the input.
+
+```js
+porydaw.midi.on("message", function (m) {
+    var type = m.status & 0xF0, channel = m.status & 0x0F;
+    if (type === 0x90 && m.data2 > 0)
+        porydaw.ui.statusMessage("Key " + m.data1 + " (channel " + (channel + 1) + ", " + m.port + ")");
+});
+```
+
 ### `porydaw.ui`
 
 `porydaw.ui` exposes porydaw's window, status bar, theme colors, images for canvases, and the visual things a plugin can add, like docks, menus, roll overlays and dialogs.

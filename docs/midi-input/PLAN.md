@@ -37,7 +37,7 @@ count-in, step input, and MIDI learn.
 | D6 | When notes enter the document | ✅ **Once, at punch-out or stop.** Every document edit rebuilds the timeline and restarts the audio device with all-notes-off (`AudioEngine::updateTimeline`, `audioengine.cpp:208-238`), so writing notes during the take would chop the song and your held notes. While recording, the roll shows the take as ghost notes (step 4). |
 | D7 | Overlap with existing notes | ✅ **Overdub.** Take notes are merged in with `SongDocument::addNotes`, so `resolveNoteOverlaps` (`songdocument.cpp:1009`) lets the new note win. "Replace" mode, which clears the punched range first, is deferred. |
 | D8 | Loop | ✅ **Keep recording across loop passes and merge them all.** Later passes win overlaps through D7. A note held across the wrap ends at the loop end. |
-| D9 | Quantize | ✅ **None at input.** Times are rounded to the nearest tick and nothing else. Step 5 adds an optional "Quantize note starts to grid" toggle, off by default, that uses the roll's `snapTick`. |
+| D9 | Quantize | ✅ **None at input.** Times are rounded to the nearest tick and nothing else. (The optional quantize toggle once planned for step 5 was dropped by the user 2026-10-11.) |
 | D10 | Metronome or count-in | ✅ **Not in v1.** Porydaw has neither, and it's a separate feature. You start recording from the edit cursor; leave yourself a bar. |
 | D11 | Input while Porydaw isn't the focused window | ✅ **Keep sounding and recording**, as DAWs do. |
 | D12 | Velocity | ✅ **Pass the raw value through** to the engine and the note. Settings → MIDI gets an optional *Fixed velocity* (off, or 1-127). |
@@ -374,15 +374,15 @@ To change a decision later, update this table and every step it affects
 - rollcheck- or midicheck-style pixel probe: a growing note is visible
   during the take and gone (replaced by a real note) after commit.
 
-### Step 5 — Recording options
+### Step 5 — Recording options (dropped 2026-10-11)
 
-- **Input quantize** (D9): a toggle in the Record button's drop-down menu
-  and on Settings → MIDI (`midi/quantizeStarts`). At commit it snaps
-  starts with the roll's `snapTick` at the time of commit, and keeps
-  durations.
+- **Input quantize** (D9): dropped by the user 2026-10-11. Recording
+  keeps nearest-tick rounding only; the user judged a quantize option
+  unlikely to see real use.
 - **Recording offset auto-detection** shown on the Settings page as "Auto
-  (≈ N ms)".
-- Revisit D7 (Replace mode) and D10 (count-in) **only if the user asks**.
+  (N ms)": already done in 7a0e0ba (Windows checkpoint fixes).
+- D7 (Replace mode) and D10 (count-in) stay unrevisited unless the user
+  asks.
 
 ### Step 6 — Scripting `porydaw.midi` (D13)
 
@@ -1536,3 +1536,181 @@ byte.
 - Sweeps (`tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`):
   **PASS (all harnesses)** on both the normal and ASAN builds. The fix
   agent stalled before reporting them, so these were run separately.
+
+### Step 6 — done 2026-10-11 (uncommitted on `midi-input`)
+
+**Landed**
+
+- **API** (`docs/scripting/API.md` `porydaw.midi`, `porydaw.d.ts`,
+  regenerated `docsrc/reference/scripting.md`):
+  - `porydaw.midi.on("message", fn({status, data1, data2, port}))`;
+  - `porydaw.midi.on("ports", fn(ports))`, fired with `ports()` when it
+    changes;
+  - `porydaw.midi.ports()` → `[{name, open, enabled, failed}]`;
+  - `porydaw.midi.available` (a backend is up) and `porydaw.midi.dropped`
+    (messages lost to a full tap).
+  - There is no `send`. `on()` returns the unsubscribe function, as
+    everywhere else, and `off()` works.
+- **The script tap** (`src/audio/midiinput.{h,cpp}`): a third ring,
+  separate from the input ring. The audio thread never sees it.
+  - `MidiRing<T, N>` is the old ring made a template.
+    `MidiInputRing` (256, `MidiMsg`) and `MidiTapRing` (1024,
+    `MidiTapMsg{status, d1, d2, port}`) derive from it, so the forward
+    declaration in `audioengine.h` still works.
+  - `receive()` pushes into the tap **before** the live parse, and only
+    while `setTapEnabled(true)`. It uses `parseTap`, which keeps every
+    channel-voice message as sent.
+  - One queued hop is in flight at a time (`m_tapPosted`, cleared just
+    before `tapReady()`), so a burst is one hop and one drain.
+  - The port is a `uint16_t` token: `portToken(id)` interns the identity on
+    the UI thread at open and sets `OpenPort::token` before the callback
+    can run. `portForToken` resolves it; 0 means none.
+  - `injectForTest(msg, port)` and `injectBytesForTest(bytes, port)`.
+- **Host** (`src/scripting/scripthost.{h,cpp}`):
+  - The new binding `HostBindings::midi` is held as a `QPointer`.
+  - `updateMidiTap()` turns the tap on while any loaded plugin (the
+    console included) has a `midi.message` listener. It runs from
+    `setListenerCount` and from teardown.
+  - `deliverMidi()` drains the tap and builds each plugin's batch as real
+    JS objects (`newArray`/`newObject`, so no Qt 6.5 sequence). It makes
+    **one** guarded call per plugin into the prelude's new
+    `dispatchEach(event, payloads)`. That call delivers each message to a
+    fresh snapshot of the listeners, with a try/catch per listener.
+  - `m_inMidiFire` stops a listener's nested event loop (a dialog) from
+    starting a second delivery. That hop leaves its messages in the tap
+    and sets `m_midiPending`. The outer delivery then re-posts once with
+    `singleShot(0)`.
+  - `firePorts()` runs from a zero timer on `portsChanged` and emits only
+    when the list differs from the last one seen.
+  - New facade: `MidiApi` in `scriptapi.{h,cpp}`, the prelude's 15th
+    parameter `midi`.
+- `MainWindow` passes `bindings.midi = m_midiInput.get()`. Nothing else in
+  the window changed.
+- `docs/scripting/PLAN.md`: the "Still open: MIDI input" note and the §7
+  live-input bullet are updated.
+
+**Judgment calls for the user**
+
+- **Messages are raw bytes.** A velocity-0 note on is delivered as
+  `0x9n`, data2 0, not normalised. Live play keeps its own `parse()`.
+  `status` keeps the channel nibble.
+- **Which messages are delivered:**
+  - Delivered: note off/on, poly aftertouch, CC, program change, channel
+    pressure and pitch bend. data2 is 0 for the one-data-byte types.
+  - Not delivered: system messages. Sysex, clock and active sensing are
+    already ignored by RtMidi (`ignoreTypes(true,true,true)`). `parseTap`
+    drops the rest (start/stop, song position and so on).
+- **Delivery doesn't depend on live play.** It ignores "Play incoming
+  notes" and whether a song is open.
+- **Listeners only observe.** There is no consume or suppress, and the
+  docs say so.
+- **The tap holds 1024 messages.** The UI thread is the consumer, so it
+  is sized for a UI stall rather than an audio period. A full tap drops
+  the new message, as the input ring does. Drops show only in
+  `midi.dropped`; there is no console warning.
+- **The `ports` payload** is the list itself, as `audio.engine` passes
+  its settings, not `{ports}`.
+- **A listener removed mid-batch** still gets the message being
+  delivered (the same snapshot rule as `dispatch`), but none after it.
+- **A throwing listener** is logged on every message, as `transport.tick`
+  is. It is not faulted.
+
+**Fixed along the way (pre-existing, not MIDI):** `ScriptHost::reload`
+took `const QString &id`, and the reload timer passed `p->manifest.id`.
+When a plugin's folder was deleted, `reload`'s `scan()` erased that plugin
+and `findPlugin(id)` then read freed memory. The new midiplug cleanup hit
+this as a SIGSEGV, depending on timing. `reload` now copies the id. It
+can't be negative-tested deterministically, because it depends on the
+order in which the two timers fire.
+
+**scriptcheck** (`runMidiChecks`, after `runPanelChecks`, so it also runs
+without a project):
+
+- `available` mirrors the backend; `ports()` is a real Array with name,
+  open, enabled and failed (driven by `setPortListForTest`,
+  `setOpenPortsForTest` and `setPortEnabled`).
+- `ports` fires once (coalesced) with the new list, not on a no-op
+  change, and not after unsubscribing.
+- The tap is off with no listener and on with one.
+- Each message type is delivered as sent, in order across two ports and
+  with no port. System, bare-data and truncated messages are dropped.
+- Delivery is not synchronous inside the producer, and a burst is one
+  batch through one `tapReady` hop.
+- Live play's ring still receives exactly its 5 messages.
+- Delivery continues with live play off.
+- A throwing listener is logged, the others get everything, and the
+  console survives.
+- Removal mid-batch follows the snapshot rule.
+- A dialog opened from a listener gets no nested delivery, and order is
+  kept: 10, 11, then 12, which arrived during the dialog.
+- The unsubscribe function works, and the last listener leaving stops the
+  tap. Nothing stale reaches a later listener.
+- Overflow: 1100 messages give 1024 delivered and 76 dropped, and
+  delivery resumes afterwards.
+- A fixture plugin's listener works, is gone after it is disabled, comes
+  back after it is re-enabled, and leaves no tap running once its folder
+  is removed.
+
+**Negative tests.** Each was a scripted edit, rebuilt and run with
+`--scriptcheck`, then restored from the saved original. A sha256 check
+confirmed every restore. Each FAILed as expected:
+
+- velocity-0 normalised;
+- program change dropped;
+- system messages kept;
+- port token zeroed;
+- a hop per message;
+- the tap always on;
+- no try/catch in `dispatchEach`;
+- no re-entry guard;
+- no pending re-post;
+- teardown not updating the tap;
+- `dropped` reading 0;
+- `open` taken from `isPortOpen`;
+- no ports dedupe;
+- the tap returning before the live push;
+- no drain on enable/disable;
+- one snapshot per batch;
+- `ports` wired to `settingsChanged`;
+- `enabled` always true.
+
+One restore slip was caught by the hash check and repaired by hand: the
+`return 0.0;` pattern matched two other lines in `scriptapi.cpp`. After
+that, the runner wrote back the saved original.
+
+**Verification**
+
+- Builds: `build`, `build-asan`, `build-nomidi`, `build-dummy` and
+  `build-off` (`PORYDAW_SCRIPTING=OFF`, Release, an existing dir that was
+  rebuilt) all exit 0.
+- `--scriptcheck` without a project PASSes on build, build-nomidi and
+  build-dummy.
+- `tools/format.sh` was run; `tools/format.sh --check` is clean.
+- `tools/gen_scripting_docs.py --check` is up to date.
+- `tools/run_checks.sh <bin> ~/pokeemerald ~/teamaqua-pokeemerald`:
+  **PASS (all harnesses)**, exit 0, on both the normal and ASAN builds.
+  That includes scriptcheck, midicheck, reccheck and gen_scripting_docs.
+
+**Not verified**
+
+- A real device: the RtMidi callback threads feeding the tap, and
+  `OpenPort::token` set before the first callback on WinMM and CoreMIDI.
+- Qt 6.9 (CI's asan job). Payloads are built as real JS objects and
+  `ports()` goes through `list()`, so the V4Sequence gotcha should not
+  apply, but it has not been run.
+- mkdocs `--strict` was not run.
+- **CoreMIDI run-loop reentrancy** (report-only since review 1) is
+  unchanged here. Delivery is a queued hop on the UI thread, and a
+  nested event loop is guarded, so no script runs on a MIDI thread.
+
+**Gotchas for step 7 (docs, CHANGELOG, final review)**
+
+- CHANGELOG: mention `porydaw.midi` in the MIDI bullet, or as a scripting
+  bullet.
+- `docsrc/manual/plugins.md` has no MIDI mention; a line may be wanted.
+- `docs/scripting/API.md` is the source of the generated reference;
+  regenerate after any edit.
+- The reload-UAF fix in `scripthost.cpp` is unrelated to MIDI. Call it out
+  in the review or CHANGELOG.
+- `MidiTapRing` is about 6 KB inside `MidiInput`; it doesn't touch
+  `AudioEngine`'s size.
