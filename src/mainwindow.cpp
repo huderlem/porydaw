@@ -5559,7 +5559,7 @@ void MainWindow::syncRecordAction()
     m_recordAction->setVisible(recording || !m_midiInput->openPorts().isEmpty());
     // The reason shows on hover, in the tooltip and the status bar.
     const QString tip = why.isEmpty() ? tr("Record from the MIDI keyboard into the selected track")
-                                      : tr("Record (unavailable: %1)").arg(why);
+                                      : tr("Record\n%1").arg(why);
     if (m_recordAction->toolTip() != tip) {
         m_recordAction->setToolTip(tip);
         m_recordAction->setStatusTip(why);

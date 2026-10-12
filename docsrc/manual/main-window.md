@@ -41,7 +41,8 @@ Editing details in [Editing Notes](piano-roll.md). -->
 
 ## The transport bar
 
-<!-- TODO: Play/pause/stop, loop toggle, follow-playhead toggle, position
+<!-- TODO: Play/pause/stop, Record (only shown while a MIDI keyboard is
+connected — see [MIDI Keyboard](midi-keyboard.md)), loop toggle, follow-playhead toggle, position
 and tempo display, master volume, polyphony meter (link to
 [Polyphony](polyphony.md) for what the meter means). -->
 

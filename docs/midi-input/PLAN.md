@@ -1,6 +1,6 @@
 # MIDI Input — play and record from a MIDI keyboard
 
-Status: **decisions confirmed 2026-10-11; step 1 done (28aaf34); step 2 done (ef8a087); step 3 done 2026-10-11 (uncommitted)** (written 2026-10-11).
+Status: **all steps done 2026-10-12** (step 5 dropped by the user). Steps 1–4 and 6 and every review-fix round are committed on `midi-input`; step 7 is docs, CHANGELOG and the final review (written 2026-10-11).
 File/line references verified against `midi-input` at `6b2e78c`. Work the
 steps **in order, one agent per step**; each step must leave the branch
 green (`tools/run_checks.sh`, normal + ASAN) and ends with a progress entry
@@ -410,7 +410,7 @@ To change a decision later, update this table and every step it affects
 
 ## 5. Progress
 
-### Step 1 — done 2026-10-11 (uncommitted on `midi-input`)
+### Step 1 — done 2026-10-11
 
 **Landed**
 
@@ -568,7 +568,7 @@ To change a decision later, update this table and every step it affects
   callback thread delivering into the ring all wait for the user's manual
   pass on Windows.
 
-### Step 2 — done 2026-10-11 (uncommitted on `midi-input`)
+### Step 2 — done 2026-10-11
 
 **Landed**
 
@@ -746,7 +746,7 @@ To change a decision later, update this table and every step it affects
   - with the range-changed republish removed, the rescale check fails.
 - Normal and ASAN sweeps both PASS.
 
-### Review fixes (2026-10-11, uncommitted on `midi-input`)
+### Review fixes (2026-10-11)
 
 A code review of 28aaf34, ef8a087 and 096c667 was verified finding by finding.
 Every finding checked out, and all were fixed.
@@ -885,7 +885,7 @@ for the user's Windows pass.
   patched `RtMidi.cpp` cross-compiles with MinGW (`__WINDOWS_MM__`). The
   unplug itself needs the user's Windows pass.
 
-### Step 3 — done 2026-10-11 (uncommitted on `midi-input`)
+### Step 3 — done 2026-10-11
 
 **Landed**
 
@@ -1109,7 +1109,7 @@ or move shifted its notes onto a neighbour.
 - **Verification:** all 4 builds; format clean; normal and ASAN
   sweeps **PASS (all harnesses)**.
 
-### Windows checkpoint feedback (2026-10-11, uncommitted)
+### Windows checkpoint feedback (2026-10-11)
 
 The user tested step 3 on Windows. Everything worked except three
 points, now addressed:
@@ -1153,7 +1153,7 @@ points, now addressed:
 - **Verification:** all 4 builds; format clean; normal and ASAN sweeps
   **PASS (all harnesses)**.
 
-### MIDI activity light removed (2026-10-11, uncommitted)
+### MIDI activity light removed (2026-10-11)
 
 The user found the light still unreliable on Windows after the stuck-on
 fix (7a0e0ba) and judged it not useful. It is removed:
@@ -1170,7 +1170,7 @@ above are history.
 - **Verification:** all 4 builds; format clean; normal and ASAN sweeps
   **PASS (all harnesses)**.
 
-### Review fixes 2 (2026-10-11, uncommitted)
+### Review fixes 2 (2026-10-11)
 
 A code review of 5b7e169..bb3a8f9 (the WinMM unplug patch, step 3, the
 Windows-checkpoint fixes and the light's removal) was verified finding by
@@ -1299,7 +1299,7 @@ reccheck, then reversed. A `git diff` comparison confirmed every revert.
   R-from-the-roll feel, the A2 and A4 timing by ear, and the RtMidi patch
   beyond a syntax check.
 
-### Step 4 — done 2026-10-11 (uncommitted on `midi-input`)
+### Step 4 — done 2026-10-11
 
 **Landed**
 
@@ -1450,7 +1450,7 @@ original byte for byte.
   plan says so) and at each preview tick, so a zoom mid-take shows what
   will be written.
 
-### Step 4 review fixes (2026-10-11, uncommitted)
+### Step 4 review fixes (2026-10-11)
 
 A code review of cc0c1f8 (step 4) was verified finding by finding. All
 held and were fixed.
@@ -1537,7 +1537,7 @@ byte.
   **PASS (all harnesses)** on both the normal and ASAN builds. The fix
   agent stalled before reporting them, so these were run separately.
 
-### Step 6 — done 2026-10-11 (uncommitted on `midi-input`)
+### Step 6 — done 2026-10-11
 
 **Landed**
 
@@ -1715,7 +1715,7 @@ that, the runner wrote back the saved original.
 - `MidiTapRing` is about 6 KB inside `MidiInput`; it doesn't touch
   `AudioEngine`'s size.
 
-### Step 6 review fixes (2026-10-12, uncommitted)
+### Step 6 review fixes (2026-10-12)
 
 An Opus review of a379cbf found no high or medium bugs.
 
@@ -1752,3 +1752,30 @@ race, and 3–5 have no observable effect today.
   `build-dummy` and `build-off` all exit 0. Format is clean,
   `gen_scripting_docs --check` is up to date, and the normal and ASAN
   sweeps both **PASS (all harnesses)**.
+
+### Step 7 — docs, CHANGELOG, final review (2026-10-12)
+
+- **CHANGELOG:** three short Unreleased bullets, kept simple at the
+  user's request (MIDI keyboard support, `porydaw.midi` plus the MIDI
+  Monitor example, the plugin-folder crash fix).
+- **User manual:** `docsrc/manual/midi-keyboard.md`, in mkdocs nav after
+  "Playing Songs". It is a heading-plus-TODO-outline stub, as the user
+  writes the manual prose; the outlines carry every fact. There are also
+  MIDI TODOs in settings.md and main-window.md. `mkdocs build --strict`
+  passes.
+- **Final branch review (Opus, 6b2e78c..HEAD):** no high or medium bugs.
+  - Fixed:
+    - the docs facts: an edit mid-take silences held keys until pressed
+      again and ends their notes; bend and mod are not recorded; Note
+      Tools is an example plugin;
+    - `midi.panic` moved to the Tools shortcut category;
+    - the Record tooltip is now "Record\n<reason>";
+    - the settings and main-window stub TODOs;
+    - this file's status line and "uncommitted" headings.
+  - Skipped:
+    - R giving no status message when Record is disabled. The user
+      confirmed the reason shows only on hover.
+    - The activity throttle now serving one idempotent slot. Harmless.
+    - `songview.h` including `songdocument.h`. Compile time only.
+- **Manual pass:** a Windows pass with a real keyboard is the user's
+  (see the checklist given with this step).

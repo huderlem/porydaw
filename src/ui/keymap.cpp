@@ -84,6 +84,8 @@ const Def kDefs[] = {
     {"view.companion", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Show Beat Companion"),
      QKeySequence::UnknownKey, ""},
     // Tools
+    {"midi.panic", Context::Global, QT_TR_NOOP("Tools"), QT_TR_NOOP("MIDI: All Notes Off"),
+     QKeySequence::UnknownKey, ""},
     {"tools.import_sample", Context::Global, QT_TR_NOOP("Tools"), QT_TR_NOOP("Import Sample"),
      QKeySequence::UnknownKey, ""},
     // Transport
@@ -107,8 +109,6 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, "R"},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
-    {"midi.panic", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("MIDI: All Notes Off"),
-     QKeySequence::UnknownKey, ""},
     // Songs dock
     {"songs.find", Context::Global, QT_TR_NOOP("Songs"), QT_TR_NOOP("Find Song"),
      QKeySequence::Find, ""},

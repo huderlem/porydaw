@@ -13,6 +13,13 @@ WAVs — see [Playing Songs](playback.md)). GBA engine: PCM polyphony, PCM
 mix rate, analog output filter — the global accuracy knobs, contrast with
 the per-song [Song Settings](song-settings.md). Restore Defaults. -->
 
+## MIDI
+
+<!-- TODO: The MIDI keyboard settings: the input port list (checkbox per
+port, Refresh), Play incoming notes, Fixed velocity, Recording offset
+(Auto (N ms) or a fixed value). Details in
+[Playing & Recording with a MIDI Keyboard](midi-keyboard.md). -->
+
 ## Appearance
 
 <!-- TODO: Theme presets + Custom colors, grid line contrast, system font.

@@ -5,7 +5,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-Nothing, yet.
+
+## Added
+- Added MIDI keyboard support. Play the selected track live from a MIDI keyboard, and record into it with the new `Record` button (`R` in the piano roll). Configure it in `Settings -> MIDI`.
+- Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
+
+## Fixed
+- Fixed a crash when a plugin's folder was deleted while Porydaw was running.
 
 ## [1.3.0] - 2026-10-04
 

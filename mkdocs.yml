@@ -50,6 +50,7 @@ nav:
   - User Manual:
       - The Main Window: manual/main-window.md
       - Playing Songs: manual/playback.md
+      - Playing & Recording with a MIDI Keyboard: manual/midi-keyboard.md
       - Editing Notes in the Piano Roll: manual/piano-roll.md
       - Working with Tracks: manual/tracks.md
       - Automation (Volume, Pan, Tempo & More): manual/automation.md
