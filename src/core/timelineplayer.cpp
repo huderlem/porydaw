@@ -226,16 +226,18 @@ void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
 }
 
 void TimelinePlayer::settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
-                                uint32_t muteMask)
+                                uint32_t muteMask, LaneLatch *latch)
 {
     const bool loop = looping && timeline->hasLoop();
     if (loop && m_pos >= timeline->loopEndSample)
-        dispatchDue(engine, timeline, loop, muteMask);
+        dispatchDue(engine, timeline, loop, muteMask, latch);
 }
 
 void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop,
-                                 uint32_t muteMask)
+                                 uint32_t muteMask, LaneLatch *latch)
 {
+    if (latch && !latch->any())
+        latch = nullptr;
     for (;;) {
         // Gate-carried releases fire before regular events at the same
         // position: on hardware the channel gate hits zero as the clock
@@ -260,6 +262,9 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
             // so it is unreachable on hardware too).
             if (loop && ev.type == 0x9 && ev.samplePos >= timeline->loopEndSample)
                 continue;
+            // A lane a live take holds (never a note).
+            if (latch && latch->holds(ev))
+                continue;
             if (ev.type == 0x9 && !((muteMask >> ev.track) & 1)) {
                 m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
                 m_keyedOnTick[ev.track][ev.data0 & 0x7F] = ev.tick;
@@ -277,6 +282,15 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                            timeline->events.begin(), timeline->events.end(), m_pos,
                            [](const TimelineEvent &e, uint64_t pos) { return e.samplePos < pos; }) -
                        timeline->events.begin());
+            // The pass that latched them is over (J2): the held lanes go back
+            // to the song as it stands at the loop start — at or before it,
+            // so not the loop end's value — and are released before the loop
+            // start's own events dispatch, which therefore all play.
+            if (latch) {
+                chaseTouched(engine, timeline, m_pos, latch->track, latch->lanes);
+                *latch = LaneLatch();
+                latch = nullptr;
+            }
             continue;
         }
         break;
@@ -284,7 +298,8 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
 }
 
 void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, float *outL,
-                            float *outR, uint32_t frames, bool looping, uint32_t muteMask)
+                            float *outR, uint32_t frames, bool looping, uint32_t muteMask,
+                            LaneLatch *latch)
 {
     const bool loop = looping && timeline->hasLoop();
     uint32_t done = 0;
@@ -292,7 +307,7 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
     while (done < frames) {
         // Dispatch every event due at the current position, wrapping the loop
         // as needed.
-        dispatchDue(engine, timeline, loop, muteMask);
+        dispatchDue(engine, timeline, loop, muteMask, latch);
 
         // Render up to the next event, pending release, or the loop end.
         uint64_t next = UINT64_MAX;

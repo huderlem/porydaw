@@ -22,6 +22,36 @@ struct TouchedLanes {
     bool any() const { return cc[0] || cc[1] || bend || program; }
 };
 
+// The song lanes a recording take holds on its track
+// (docs/midi-controls/PLAN.md §3.4, D3): once the keyboard moves a lane while
+// a take is armed and the move sounds, the song's own events in that lane on
+// that track stop playing, so what you hear is what gets committed.
+// TimelinePlayer::render skips them; the latch ends with the pass (a loop
+// wrap, see render). Notes, other lanes and other tracks are never held.
+// Plain data: the audio thread keeps one; offline paths never pass one.
+struct LaneLatch {
+    int track = -1;
+    TouchedLanes lanes;
+
+    bool any() const { return track >= 0 && lanes.any(); }
+    // Whether ev is a song event this latch holds back.
+    bool holds(const TimelineEvent &ev) const
+    {
+        if (ev.track != track)
+            return false;
+        switch (ev.type) {
+        case 0xB:
+            return lanes.hasCc(ev.data0 & 0x7F);
+        case 0xC:
+            return lanes.program;
+        case 0xE:
+            return lanes.bend;
+        default:
+            return false;
+        }
+    }
+};
+
 // Walks a MidiTimeline, dispatching events to an M4AEngine and rendering
 // audio between them. Shared by the real-time audio callback (AudioEngine)
 // and the offline render CLI so both play back identically.
@@ -121,8 +151,15 @@ class TimelinePlayer
     // Renders exactly `frames` samples into outL/outR, dispatching every due
     // event. Note-ons for tracks set in muteMask are skipped (note-offs and
     // controllers always pass so state stays consistent).
+    //
+    // `latch` (live recording only; null everywhere else, which costs one
+    // pointer test per event): the song events it holds are skipped. A loop
+    // wrap ends it, before the loop start's events dispatch: its lanes are
+    // chased to the loop start (chaseTouched) and it is cleared in place, so
+    // the next pass plays the song's own events until the keyboard latches
+    // a lane again (J2).
     void render(M4AEngine *engine, const MidiTimeline *timeline, float *outL, float *outR,
-                uint32_t frames, bool looping, uint32_t muteMask);
+                uint32_t frames, bool looping, uint32_t muteMask, LaneLatch *latch = nullptr);
 
     // A position at or past the loop end (a start or seek there, or the
     // last render ending exactly on it) wraps before the next render plays
@@ -130,13 +167,14 @@ class TimelinePlayer
     // caller reading position() sees where the sound will come from. A
     // no-op otherwise.
     void settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
-                    uint32_t muteMask);
+                    uint32_t muteMask, LaneLatch *latch = nullptr);
 
   private:
     static void dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask);
     // Dispatches every event (and gate-carried release) due at the
-    // position, wrapping the loop as needed.
-    void dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop, uint32_t muteMask);
+    // position, wrapping the loop as needed; a latch as in render.
+    void dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop, uint32_t muteMask,
+                     LaneLatch *latch);
 
     void wrapNotes(M4AEngine *engine, const MidiTimeline *timeline);
 

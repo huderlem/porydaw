@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 
 #include "core/miditimeline.h"
 #include "core/smf.h"
@@ -103,6 +104,45 @@ SmfFile buildPrimeSong()
     t2.events.push_back(channelEvent(24, 0x82, 64, 0));
     t2.endTick = 192;
 
+    return smf;
+}
+
+// A looped song for the recording latch (TimelinePlayer::render's LaneLatch,
+// docs/midi-controls/PLAN.md §3.4): engine track 0 automates VOL, PAN, MOD,
+// the bend and the voice, with a VOL event on the loop start, a PAN event
+// only before it, and a VOL event on the loop end; engine track 1 a VOL.
+// The loop is ticks kLatchLoopStart..kLatchLoopEnd (set on the timeline).
+constexpr uint64_t kLatchLoopStart = 5;
+constexpr uint64_t kLatchLoopEnd = 30;
+
+SmfFile buildLatchSong()
+{
+    SmfFile smf;
+    smf.format = 1;
+    smf.division = kDivision;
+    smf.tracks.resize(3);
+    SmfTrack &conductor = smf.tracks[0];
+    conductor.events.push_back(metaEvent(0, 0x51, QByteArray("\x07\xA1\x20", 3)));
+    conductor.endTick = 48;
+
+    SmfTrack &t0 = smf.tracks[1];
+    t0.events.push_back(channelEvent(0, 0xC0, 5, 0));
+    t0.events.push_back(channelEvent(0, 0xB0, 7, 100));
+    t0.events.push_back(channelEvent(2, 0xB0, 10, 20));
+    t0.events.push_back(channelEvent(kLatchLoopStart, 0xB0, 7, 90));
+    t0.events.push_back(channelEvent(6, 0x90, 60, 100));
+    t0.events.push_back(channelEvent(8, 0x80, 60, 0));
+    t0.events.push_back(channelEvent(10, 0xB0, 7, 80));
+    t0.events.push_back(channelEvent(12, 0xB0, 1, 9));
+    t0.events.push_back(channelEvent(12, 0xE0, 0x00, 72)); // +1024
+    t0.events.push_back(channelEvent(12, 0xC0, 9, 0));
+    t0.events.push_back(channelEvent(15, 0xB0, 10, 100));
+    t0.events.push_back(channelEvent(kLatchLoopEnd, 0xB0, 7, 11));
+    t0.endTick = 48;
+
+    SmfTrack &t1 = smf.tracks[2];
+    t1.events.push_back(channelEvent(10, 0xB1, 7, 50));
+    t1.endTick = 48;
     return smf;
 }
 
@@ -357,6 +397,151 @@ int runPrimeCheck()
                    TimelinePlayer::ccDefault(0x01) == 0 && TimelinePlayer::ccDefault(0x03) == -1,
                "ccDefault does not match the engine's track-init values");
         m4a_engine_destroy(&engine);
+    }
+
+    // The recording latch (docs/midi-controls/PLAN.md §3.4): render skips
+    // exactly the song events a LaneLatch holds — its lanes, on its track —
+    // and a loop wrap ends it, chasing its lanes to the song at the loop
+    // start (not the loop end) before the loop start's events play.
+    {
+        auto timeline = MidiTimeline::build(buildLatchSong(), kSampleRate);
+        if (!timeline || timeline->usedTrackCount != 2) {
+            std::fprintf(stderr, "primecheck: FAIL: latch: the synthesized song built wrong\n");
+            return 1;
+        }
+        timeline->loopStartTick = kLatchLoopStart;
+        timeline->loopEndTick = kLatchLoopEnd;
+        timeline->loopStartSample = kLatchLoopStart * kSamplesPerTick;
+        timeline->loopEndSample = kLatchLoopEnd * kSamplesPerTick;
+        const auto expect = [&](bool ok, const char *what) {
+            if (!ok) {
+                std::fprintf(stderr, "primecheck: FAIL: latch: %s\n", what);
+                failures++;
+            }
+        };
+        struct Lanes {
+            int vol, pan, mod, bend, program, vol1;
+            bool operator==(const Lanes &o) const
+            {
+                return vol == o.vol && pan == o.pan && mod == o.mod && bend == o.bend &&
+                       program == o.program && vol1 == o.vol1;
+            }
+        };
+        struct Run {
+            M4AEngine engine;
+            TimelinePlayer player;
+            float bufL[512], bufR[512];
+            Run(TestVoicegroup &vg, const MidiTimeline *timeline)
+            {
+                m4a_engine_init(&engine, float(kSampleRate));
+                m4a_engine_set_voicegroup(&engine, vg.voices);
+                TimelinePlayer::chase(&engine, timeline, 0);
+                player.reset();
+            }
+            ~Run() { m4a_engine_destroy(&engine); }
+            // Renders `ticks` ticks of playback time (wraps included).
+            void play(const MidiTimeline *timeline, uint64_t ticks, LaneLatch *latch)
+            {
+                uint64_t left = ticks * kSamplesPerTick;
+                while (left > 0) {
+                    const uint32_t n = uint32_t(std::min<uint64_t>(left, 512));
+                    player.render(&engine, timeline, bufL, bufR, n, true, 0, latch);
+                    left -= n;
+                }
+            }
+            Lanes lanes() const
+            {
+                const M4ATrack &t = engine.tracks[0];
+                return Lanes{t.rawVolume,
+                             t.pan,
+                             t.mod,
+                             t.bend,
+                             t.currentProgram,
+                             engine.tracks[1].rawVolume};
+            }
+            void poke()
+            {
+                m4a_engine_cc(&engine, 0, 0x07, 33);
+                m4a_engine_cc(&engine, 0, 0x0A, 5);
+                m4a_engine_pitch_bend(&engine, 0, 4096);
+                m4a_engine_program_change(&engine, 0, 3);
+            }
+            bool keyed(uint8_t key) const
+            {
+                for (int i = 0; i < TOTAL_PCM_CHANNELS; i++) {
+                    const M4APCMChannel &ch = engine.pcmChannels[i];
+                    if ((ch.status & CHN_ON) && !(ch.status & CHN_STOP) && ch.midiKey == key &&
+                        ch.trackIndex == 0)
+                        return true;
+                }
+                return false;
+            }
+        };
+        // The song unlatched at tick 16: every event played.
+        const Lanes songAt16{80, 100 - 64, 9, 8, 9, 50};
+        {
+            auto run = std::make_unique<Run>(vg, timeline.get());
+            run->play(timeline.get(), 3, nullptr);
+            run->poke();
+            run->play(timeline.get(), 13, nullptr);
+            expect(run->lanes() == songAt16, "the control render did not play the song");
+        }
+        // A latch with no lanes holds nothing.
+        {
+            auto run = std::make_unique<Run>(vg, timeline.get());
+            LaneLatch none;
+            none.track = 0;
+            run->play(timeline.get(), 3, &none);
+            run->poke();
+            run->play(timeline.get(), 13, &none);
+            expect(run->lanes() == songAt16, "an empty latch held a song event");
+        }
+        // VOL, PAN, the bend and the voice latched on track 0, after the
+        // keyboard set them at tick 3: their events stay out, while MOD,
+        // track 1's VOL and track 0's note play.
+        {
+            auto run = std::make_unique<Run>(vg, timeline.get());
+            LaneLatch latch;
+            latch.track = 0;
+            latch.lanes.setCc(0x07);
+            latch.lanes.setCc(0x0A);
+            latch.lanes.bend = true;
+            latch.lanes.program = true;
+            run->play(timeline.get(), 3, &latch);
+            run->poke();
+            run->play(timeline.get(), 4, &latch);
+            expect(run->keyed(60), "a note on the latched track did not play");
+            run->play(timeline.get(), 9, &latch); // tick 16
+            expect(run->lanes() == Lanes{33, 5 - 64, 9, 32, 3, 50},
+                   "the latch did not hold exactly its lanes' events on its track");
+            expect(latch.any(), "the latch ended before the wrap");
+            // To the loop end, where its VOL 11 is held back too, then one
+            // tick past the wrap: the latch is over, its lanes are the
+            // song's at the loop start (VOL 90 from the loop start's own
+            // event, PAN 20 from before it, the bend centred, voice 5),
+            // never the loop end's (VOL 11, PAN 100, bend +1024, voice 9).
+            run->play(timeline.get(), 14, &latch);
+            expect(run->lanes().vol == 33, "the latch did not hold the loop end's VOL");
+            run->play(timeline.get(), 1, &latch); // tick 6 of pass 2
+            expect(!latch.any() && latch.track == -1, "the loop wrap did not end the latch");
+            expect(run->lanes() == Lanes{90, 20 - 64, 9, 0, 5, 50},
+                   "the wrap did not chase the latched lanes to the loop start");
+            // Pass 2 plays the song's own events.
+            run->play(timeline.get(), 10, &latch); // tick 16
+            expect(run->lanes() == songAt16, "pass 2 did not play the song's events");
+        }
+        // A latch on another track leaves track 0 alone.
+        {
+            auto run = std::make_unique<Run>(vg, timeline.get());
+            LaneLatch other;
+            other.track = 1;
+            other.lanes.setCc(0x0A);
+            other.lanes.bend = true;
+            run->play(timeline.get(), 3, &other);
+            run->poke();
+            run->play(timeline.get(), 13, &other);
+            expect(run->lanes() == songAt16, "a latch on track 1 held track 0's events");
+        }
     }
 
     // An audition belongs to the note, not to the cursor: with the engine

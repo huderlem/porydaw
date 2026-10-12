@@ -222,6 +222,11 @@ class AudioEngine
     // so the first notes are caught; the Begin lands after the start's
     // seek. 0 disarms; each arm needs a new nonzero generation, which
     // stamps its events so a late one from an earlier arm is told apart.
+    //
+    // While a take captures, a lane the keyboard moves on the sounding target
+    // latches (docs/midi-controls/PLAN.md §3.4, D3): the song's own events in
+    // that lane on that track stop playing until the pass ends, so what you
+    // hear is what the take commits (m_liveLatch has the rules).
     void armCapture(uint32_t generation) { m_captureGen.store(generation); }
     // UI thread: the single consumer. False when empty.
     bool popCapture(CaptureEvent *out);
@@ -404,6 +409,15 @@ class AudioEngine
     // A keyboard program change: the target track's voice. Sound target
     // only, and not captured yet (step 5 records the Voice lane).
     void applyLiveProgram(uint8_t program);
+    // The recording latch (docs/midi-controls/PLAN.md §3.4, m_liveLatch).
+    // release: its lanes go back to the song at pos (chaseTouched) and it
+    // clears; drop: it clears with no chase, for a caller whose full chase
+    // (or fresh engine) already covers its lanes; reapply: after such a
+    // chase, its lanes get the keyboard's values back (dropped instead once
+    // the take is disarmed).
+    void releaseLiveLatch(uint64_t pos);
+    void dropLiveLatch() { m_liveLatch = LaneLatch(); }
+    void reapplyLiveLatch();
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
     // The same on the app's say-so (a panic, a tab switch, the target
@@ -568,6 +582,27 @@ class AudioEngine
     // The lanes sent to m_liveTrack since it became the target: the ones a
     // target change hands back to the song.
     TouchedLanes m_liveTouched;
+    // The recording latch (D3, J2): the lanes of m_liveTrack whose song events
+    // render skips, because the keyboard moved them, sounding, during the
+    // take. A lane latches on its first such move; a CC121 reset latches only
+    // a lane the take already moved (m_captureMoved), as only there is the
+    // reset recorded. It is always a subset of m_liveTouched, on m_liveTrack.
+    // It ends (the lanes chased back to the song) at a loop wrap, inside
+    // render, before the loop start's events; at a seek; at the take's end
+    // (punch-out, a disarm, a new arm, Stop, Pause); at a target change
+    // (live play off included); at a panic or a tab's release; and with the
+    // song (load, unload). A document edit's full chase keeps it: the lanes
+    // get the keyboard's values back (reapplyLiveLatch).
+    LaneLatch m_liveLatch;
+    // The lanes this arm's take moved (an unflagged move captured), on any
+    // pass, sounding or not, as RecordingTake's own per-take mask: cleared at
+    // the Begin.
+    TouchedLanes m_captureMoved;
+    // What the keyboard last set on m_liveTrack, per lane: reapplyLiveLatch's
+    // values.
+    uint8_t m_liveCcValue[128] = {};
+    int16_t m_liveBendValue = 0;
+    uint8_t m_liveProgramValue = 0;
     uint32_t m_liveIgnoredSeq = 0; // m_liveIgnoredProgram's sequence
     // The routes as last unpacked: the lane (document CC) each MIDI CC
     // drives, 0xFF for none, and which lanes have a CC at all (bit i for

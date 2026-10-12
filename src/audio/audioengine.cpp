@@ -202,6 +202,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     clearTimedPreviews();
     // The fresh engine holds nothing the keyboard moved.
     m_liveTouched = TouchedLanes();
+    dropLiveLatch();
 
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -231,8 +232,12 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // race applyPendingSeek.
     const uint64_t pending = m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
     const uint64_t pos = pending != kNoPendingSeek ? pending : m_player.position();
-    if (pos != m_player.position())
+    // A seek raced in: the pass ends there, and the latch with it (the full
+    // chase below covers its lanes).
+    if (pos != m_player.position()) {
         captureBoundary(m_player.position(), pos);
+        dropLiveLatch();
+    }
     m_timeline = timeline;
     m_player.seek(pos, m_timeline);
     m_playhead.store(pos);
@@ -247,6 +252,9 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // (e.g. clearing a lane), which would otherwise stay latched until stop.
     TimelinePlayer::chase(m_engine.get(), m_timeline, pos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, pos);
+    // Except on the lanes a take holds: what you hear there stays what the
+    // take commits, edit or no edit.
+    reapplyLiveLatch();
 
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -271,6 +279,7 @@ void AudioEngine::applyPendingSeek()
     clearTimedPreviews();
     m_player.seek(samplePos, m_timeline);
     captureBoundary(from, samplePos);
+    dropLiveLatch(); // the pass ends; the full chase covers its lanes
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
     m_playhead.store(samplePos);
@@ -306,6 +315,7 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
     if (m_timeline) {
         TimelinePlayer::chase(m_engine.get(), m_timeline, m_playhead.load());
         TimelinePlayer::primeVoices(m_engine.get(), m_timeline, m_playhead.load());
+        reapplyLiveLatch(); // as updateTimeline
     }
     resetPreviewEngine();
     if (m_deviceStarted)
@@ -400,6 +410,7 @@ void AudioEngine::unloadSong()
     m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
     m_liveTouched = TouchedLanes(); // no song to hand anything back to
+    dropLiveLatch();
     resetPreviewEngine();
     clearTimedPreviews();
     m_transport.store(static_cast<int>(Transport::Stopped));
@@ -508,6 +519,9 @@ void AudioEngine::applyTransportTransition()
     // stale note-off can later cut a playback note on the same track and
     // key.
     cutAllSound();
+    // Stop and Pause end the take, and its latch, where the player stopped
+    // (before Stop rewinds it).
+    releaseLiveLatch(m_player.position());
     switch (static_cast<Transport>(t)) {
     case Transport::Stopped:
         m_player.reset();
@@ -732,21 +746,29 @@ void AudioEngine::applyMidiInput()
         m_appliedLivePanic = panic;
         imposeLiveRelease();
         m_liveSustain = false;
+        releaseLiveLatch(m_player.position());
     }
     const uint32_t release = m_liveReleaseCmd.load();
     if (release != m_appliedLiveRelease) {
         m_appliedLiveRelease = release;
         imposeLiveRelease();
+        releaseLiveLatch(m_player.position());
     }
+    // A punch-out (or any disarm) ends the take's latch, as does a transport
+    // that is no longer playing.
+    if (!capturing())
+        releaseLiveLatch(m_player.position());
     if (target != m_liveTrack) {
         imposeLiveRelease(); // on the old track
         // Hand the old track back to the song: the lanes and voice the
         // keyboard moved, as chased at the playhead; every other track and
-        // parameter untouched.
+        // parameter untouched. The latch is a subset of the touched lanes,
+        // so that chase covers it too.
         if (m_liveTrack >= 0 && m_timeline)
             TimelinePlayer::chaseTouched(m_engine.get(), m_timeline, m_player.position(),
                                          m_liveTrack, m_liveTouched);
         m_liveTouched = TouchedLanes();
+        dropLiveLatch();
         m_liveTrack = target;
     }
 
@@ -868,9 +890,19 @@ void AudioEngine::applyLiveBend(int16_t bend, bool reset)
     // signed 14-bit value to its -64..63 and BENDR sets the range.
     pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend,
                 reset ? CaptureEvent::Reset : 0);
+    const bool take = capturing();
+    if (take && !reset)
+        m_captureMoved.bend = true;
     if (m_liveTrack >= 0) {
         m4a_engine_pitch_bend(m_engine.get(), m_liveTrack, bend);
         m_liveTouched.bend = true;
+        m_liveBendValue = bend;
+        // D3: the song's bend stops here until the pass ends. A reset only
+        // holds a lane the take moved, the one place the take records it.
+        if (take && m_captureMoved.bend) {
+            m_liveLatch.track = m_liveTrack;
+            m_liveLatch.lanes.bend = true;
+        }
     }
 }
 
@@ -880,10 +912,53 @@ void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value, bool reset)
     // lane's CC rides in the key.
     pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value,
                 reset ? CaptureEvent::Reset : 0);
+    const bool take = capturing();
+    if (take && !reset)
+        m_captureMoved.setCc(lane);
     if (m_liveTrack >= 0) {
         m4a_engine_cc(m_engine.get(), m_liveTrack, lane, value);
         m_liveTouched.setCc(lane);
+        m_liveCcValue[lane & 0x7F] = value;
+        // As for the bend: latched by a sounding move in the take, or by a
+        // reset of a lane the take moved.
+        if (take && m_captureMoved.hasCc(lane)) {
+            m_liveLatch.track = m_liveTrack;
+            m_liveLatch.lanes.setCc(lane);
+        }
     }
+}
+
+void AudioEngine::releaseLiveLatch(uint64_t pos)
+{
+    if (!m_liveLatch.any())
+        return;
+    if (m_timeline)
+        TimelinePlayer::chaseTouched(m_engine.get(), m_timeline, pos, m_liveLatch.track,
+                                     m_liveLatch.lanes);
+    dropLiveLatch();
+}
+
+void AudioEngine::reapplyLiveLatch()
+{
+    if (!m_liveLatch.any())
+        return;
+    // A take disarmed since (the commit's own edit, Stop's or a punch-out's,
+    // lands before the callback sees the disarm) keeps nothing: the chase
+    // stands, as releaseLiveLatch would have left it.
+    if (!capturing()) {
+        dropLiveLatch();
+        return;
+    }
+    const int track = m_liveLatch.track;
+    const TouchedLanes &lanes = m_liveLatch.lanes;
+    // In chase()'s order: the voice before the CCs.
+    if (lanes.program)
+        m4a_engine_program_change(m_engine.get(), track, m_liveProgramValue);
+    for (int cc = 0; cc < 128; cc++)
+        if (lanes.hasCc(uint8_t(cc)))
+            m4a_engine_cc(m_engine.get(), track, uint8_t(cc), m_liveCcValue[cc]);
+    if (lanes.bend)
+        m4a_engine_pitch_bend(m_engine.get(), track, m_liveBendValue);
 }
 
 void AudioEngine::applyLiveProgram(uint8_t program)
@@ -905,6 +980,9 @@ void AudioEngine::applyLiveProgram(uint8_t program)
     }
     m4a_engine_program_change(m_engine.get(), m_liveTrack, program);
     m_liveTouched.program = true;
+    // Kept for reapplyLiveLatch. The voice doesn't latch yet: step 5 sets
+    // m_liveLatch.lanes.program here, as the bend and CC lanes do theirs.
+    m_liveProgramValue = program;
 }
 
 void AudioEngine::applyLiveNote(uint8_t key, uint8_t velocity)
@@ -976,12 +1054,15 @@ void AudioEngine::syncCapture()
     const uint32_t gen = m_captureGen.load();
     if (gen == m_captureBegun)
         return;
-    // A new arm (or a disarm). It begins at the first callback that plays.
+    // A new arm (or a disarm). It begins at the first callback that plays;
+    // the take before it, if any, has ended, and its latch with it.
+    releaseLiveLatch(m_player.position());
     m_captureBegun = 0;
     if (gen == 0 || !m_timeline || m_appliedTransport != static_cast<int>(Transport::Playing))
         return;
     m_captureBegun = gen;
     m_captureSegment = 0;
+    m_captureMoved = TouchedLanes();
     // The clock first: a commit that reads it once the Begin is visible
     // must not see the previous take's position.
     publishCaptureClock();
@@ -1036,7 +1117,8 @@ void AudioEngine::settleLoopWrap()
         return;
     const uint64_t from = m_player.position();
     const uint32_t wraps = m_player.wrapCount();
-    m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute);
+    m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
+                        &m_liveLatch);
     if (m_player.wrapCount() != wraps)
         captureBoundary(from, m_timeline->loopStartSample);
 }
@@ -1163,7 +1245,9 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 
         if (playing) {
             const bool looping = m_loopEnabled.load();
-            m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute);
+            // The only latched render: every offline path passes none.
+            m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
+                            &m_liveLatch);
 
             // Auto-stop a non-looping song after the tail rings out.
             if (!(looping && tl->hasLoop()) &&
