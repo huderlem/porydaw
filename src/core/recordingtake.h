@@ -36,11 +36,12 @@ class MidiTimeline;
 //    only, not within its own batch). So an earlier note that outlasts a
 //    later one on the same (tick, key) keeps its tail, and one take of two
 //    passes lands as two takes would.
-//  - Pitch-bend and mod-wheel moves are played times too (the same wait
-//    and offset shifts and segment floor), written as BEND and MOD lane
-//    points; where the segment they were played in ends (an imposed end,
-//    like an open note's: not shifted), the lane goes back to what the song
-//    had there. See toLaneWrites.
+//  - Pitch-bend moves and routed lane moves (MOD, VOL, PAN, BENDR, LFOS:
+//    docs/midi-controls/PLAN.md) are played times too (the same wait and
+//    offset shifts and segment floor), written as points on their lanes;
+//    where the segment they were played in ends (an imposed end, like an
+//    open note's: not shifted), the lane goes back to what the song had
+//    there. See toLaneWrites.
 class RecordingTake
 {
   public:
@@ -57,14 +58,14 @@ class RecordingTake
         bool playedEnd = false; // closed by a played note-off (shifted by the offset)
     };
 
-    // A played pitch-bend or mod-wheel move.
+    // A played pitch-bend or routed lane move.
     struct Control {
         uint64_t sample = 0;
         uint64_t floorSample = 0; // the start of its segment
         uint32_t late = 0;        // how long its message waited for its callback
         uint32_t segment = 0;
-        uint8_t cc = 0; // DOC_CC_BEND, or 0x01 (MOD)
-        int value = 0;  // bend -8192..8191; MOD 0-127
+        uint8_t cc = 0; // DOC_CC_BEND, or the lane's CC (0x01 MOD, 0x07 VOL, ...)
+        int value = 0;  // bend -8192..8191; a CC lane 0-127, as the lane stores it
     };
     // One lane's moves from one segment (a loop pass, a seek's landing):
     // they replace the lane's points in [tickBegin, tickEnd]
@@ -86,8 +87,11 @@ class RecordingTake
                           SongDocument::LanePointValue *out) const;
     };
     // What the engine plays of a lane value: m4a's BEND keeps the bend's
-    // top 7 bits; MOD as it is.
+    // top 7 bits; a CC lane as it is.
     static int audible(uint8_t cc, int value);
+    // What a lane plays with no point before: the engine's track-init value
+    // (TimelinePlayer::ccDefault; bend centred, 0 for a CC it has none for).
+    static int restValue(uint8_t cc);
     // The lane `cc` as the commit would leave it: before (the lane's points,
     // sorted by tick) with this cc's writes applied in order, each with its
     // restore point read against before, as MainWindow::commitTake writes
@@ -136,12 +140,15 @@ class RecordingTake
 
     // In arrival order.
     const std::vector<Control> &controls() const { return m_controls; }
-    // The take's bend and mod moves as lane writes, in segment order (later
-    // passes win where they overlap), MOD before BEND within a segment.
-    // Ticks round to the nearest and never run backwards within a write; on
-    // a shared tick the last move wins, and a move that changes nothing the
-    // engine plays (the same MOD, or the same bend to its 7-bit resolution)
-    // is dropped, its exact value taken by the point it sounds like (a
+    // The take's bend and lane moves as lane writes, in segment order
+    // (later passes win where they overlap), and within a segment in
+    // ascending CC with BEND last (0x01 MOD, 0x07 VOL, 0x0A PAN, 0x14 BENDR,
+    // 0x15 LFOS, then BEND: the writes touch different lanes, so the order
+    // only keeps the result deterministic). Ticks round to the nearest and
+    // never run backwards within a write; on a shared tick the last move
+    // wins, and a move that changes nothing the engine plays (the same CC
+    // value, or the same bend to its 7-bit resolution) is dropped, its
+    // exact value taken by the point it sounds like (a
     // bend's spring back to centre rests at 0). Each write runs to its
     // segment's end, unshifted: the Boundary that ended it, or for the
     // current segment endSample under toNotes' rule for an open note

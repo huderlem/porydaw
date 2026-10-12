@@ -669,3 +669,213 @@ but not committed.
 each), and no render or roundtrip harness changed with the LFOS fix.
 `--midicheck` and `--primecheck` pass on build-nomidi, build-off and
 build-dummy, and all five trees build cleanly.
+
+### Step 3 — record routed CC lanes (2026-10-12, uncommitted)
+
+**What landed**
+
+- **Capture.** `CaptureEvent::Mod` became `CaptureEvent::Control`: `key`
+  holds the lane's document CC (0x01, 0x07, 0x0A, 0x14, 0x15) and `value`
+  the value it set, as heard (MOD on the lane's range, BENDR in semitones,
+  the rest the knob's 0..127). `AudioEngine::applyLiveControl` pushes one
+  for every lane, before the sound target is consulted, so a move is
+  captured whether or not it sounds, exactly like MOD and notes before.
+  `pushCapture` stamps `lateSamples` on it like a bend. Program changes are
+  still not captured (step 5).
+- **Lane values as stored.** Nothing converts between capture and the
+  document. The lanes store the CC byte that the engine's `m4a_engine_cc`
+  takes, live and in playback alike: PAN 0..127 (the engine subtracts 64
+  itself), VOL raw (the engine applies `songMasterVolume` on both paths),
+  BENDR in semitones. reccheck proves this end to end. It records VOL 37,
+  PAN 113, BENDR 20 (knob 106) and LFOS 77, then seeks into the committed
+  take, and the engine track's `rawVolume`, `pan`, `bendRange` and
+  `lfoSpeed` equal what they were live.
+- **`RecordingTake`.**
+  - `Control.cc` is the event's key. `audible()` is unchanged: bend MSB,
+    and identity for every CC lane, so a repeated value is dropped but a
+    one-step change is kept.
+  - `toLaneWrites` already keyed its map by (segment, cc). Within a
+    segment the writes are therefore in ascending CC with BEND (0xFF) last,
+    which the comments now document. The writes touch different lanes, so
+    the order only makes the result deterministic.
+  - Same-tick last-wins and inaudible-change dropping apply per lane,
+    unchanged.
+- **Restore-after-take, per lane.** The new `RecordingTake::restValue(cc)`
+  returns `TimelinePlayer::ccDefault(cc)` (VOL 127, PAN 64, BENDR 2, LFOS
+  22, MOD 0), centre for bend, and 0 for a CC without a default.
+  `restorePoint` starts from it instead of 0. A take's last value on a lane
+  with no song point before the write's end is therefore compared with what
+  the engine actually plays there, the track-init value. A restore point
+  is written exactly when the two sound different. MOD and bend behave as
+  before, since their rest values were already 0.
+- **Undo and status text.** The new `takeLanesText` names the lanes in
+  lower case, as their rows are titled: pitch bend first, then the CC
+  lanes in ascending CC ("mod", "volume", "pan", "bend range", "LFO
+  speed"), joined "a, b and c". The existing strings come out unchanged
+  ("Record 1 note(s) with pitch bend and mod", "Record mod"). New ones
+  look like "Record 1 note(s) with volume, pan, bend range and LFO speed",
+  "Record volume and pan", "Recorded pan.".
+- **Ghosts and transient rows.**
+  - `takeLanes` (MainWindow) builds a preview lane for every cc the writes
+    touch, instead of the fixed {MOD, BEND}.
+  - The `TakeLaneBefore` cache became a per-cc map, filled lazily and
+    cleared on a revision or track change.
+  - `RecordingPreview::lanes`, `mergeEmptyLanes`, read-only ghost rows and
+    `paintRecordingPreview` were already lane-generic. Only comments
+    changed there.
+- **Axis.** `AutomationArea::laneDisplayMax` now counts the take's ghost
+  points as data, just as committed points already grow a zoomed axis
+  back. So turning a knob past a zoomed VOL/BENDR/LFOS range grows the axis
+  while recording, instead of clipping the ghost at the row's top.
+  `recordingLanesChanged` repaints the whole row (gutter range included)
+  when a zoomable row's ghost peak changes, because a rescale moves every
+  point. PAN and bend aren't zoomable, and PAN draws on its plain 0..127
+  axis, as its rows always have.
+- **Capture ring priority (§5 flood risk).** Bend and lane moves can't take
+  the ring's last `kCaptureReserve` = 1024 slots (a quarter of 4096). Only
+  notes, cuts, boundaries and the Begin can use them. When the UI can't
+  drain in time, a knob flood therefore loses moves before it loses a note.
+  The loss counts in `captureDropped()` as before, so the commit's status
+  says "Some MIDI input was lost while recording.". The ring size stays
+  4096 (see the flood result below).
+- `docsrc/manual/midi-keyboard.md`: the recording outline gains one line
+  saying that knobs routed to VOL/PAN/BENDR/LFOS record onto those lanes.
+
+**Judgment calls**
+
+- **Undo text uses the rows' names in lower case** ("volume", "pan",
+  "bend range", "LFO speed"), not the plan's example "VOL and PAN". This
+  keeps the existing "pitch bend and mod" wording and its style instead of
+  mixing lane codes with words. Pitch bend is listed first so the existing
+  strings don't change.
+- **Moves always captured**, with or without a sound target, as MOD and
+  notes already were (`applyLiveControl` pushes before the target check).
+- **The reserve rather than a bigger ring.** Drained at the playhead
+  timer's 17 ms, a 3 kHz flood is about 51 events a frame against 3072
+  slots for moves, so it takes a UI stall of about 1 s to drop anything. A
+  bigger ring would only move that edge. Keeping notes safe when it happens
+  is the guarantee that matters. One counter covers both kinds of loss: the
+  user-facing message is the same.
+- **CC121 records VOL 127 / PAN 64 (and BENDR 2 / LFOS 22 when routed)**
+  as moves, per J5, even on lanes the user never touched in the take.
+  Their restores put the song back at the stop, as for bend and MOD.
+
+**Flood check (`checkRecordingFlood`)**
+
+The check runs three knobs (VOL CC7, PAN CC10, LFOS CC21) at 1 kHz each
+for 10 s (30 000 moves), with 100 notes played through them, in 1 ms pumps,
+drained every 17 ms the way the playhead timer drains.
+
+- Result: no capture drops, all 30 000 moves in the take, one undo step
+  with all 100 notes, and each lane holding at most one point a tick over
+  the take's ~400 ticks (same-tick last-wins).
+- `toLaneWrites` over 30 000 moves takes about 0.25 ms. The slowest
+  drain-and-preview frame was about 0.3 ms (normal build, WSL).
+- Then the UI stalls for 2 s (no drain) under the same flood. The moves
+  overflow (drops counted, the status bar reports the loss), and every one
+  of the 20 notes played meanwhile lands.
+- With the reserve mutated out, that check fails: notes are lost.
+
+**Harness (`--reccheck`)**
+
+- Unit (`checkTakeRules`):
+  - a multi-lane take keeps each Control's lane and value;
+  - the writes come out in ascending CC with BEND last, segment by segment;
+  - VOL drops a repeat and keeps a one-step change, PAN's same-tick last
+    wins, BENDR and LFOS convert, and a second segment's writes are right;
+  - `restValue` matches the engine;
+  - per lane (VOL, PAN, BENDR, LFOS): a value left away from rest restores
+    the rest with no song point, a value left at rest restores nothing, and
+    a song point wins over the rest;
+  - `applyLaneWrites` keeps to its lane, and PAN restores centre.
+- End to end (`checkRecordingTakes`):
+  - CC121 now expects "Record pitch bend, mod, volume and pan", with VOL
+    127 and PAN 64 recorded and nothing on BENDR (unrouted).
+  - A take with all four routed knobs gives one undo step that names them,
+    the status text, each lane as the move as heard over the song's other
+    points with the song's value back at the stop, playback that matches
+    live, the song's values past the stop, and undo.
+  - A looped take: a VOL move before the wrap is restored at the loop end,
+    and a PAN move after it is its own write to the stop ("Record volume
+    and pan").
+  - A lane move's callback wait moves it back, like a note's.
+- `checkRecordingCcLaneDisplay`:
+  - VOL, BENDR and LFOS ghosts, sorted by cc;
+  - BENDR and LFOS on transient rows, each curve back at the clock to its
+    track-init value (2, 22);
+  - LFOS zoomed to 32 grows past it, and the stretch drawn before the
+    growth is repainted on the new axis;
+  - ghost alpha on both rows, a solid curve after Stop, the undo text, and
+    undo removing the take's rows.
+- `--midicheck` `checkLiveRoutes` reads `Control` with key 0x01.
+- Mutation-tested 13 ways. Each failed the expected checks and was restored
+  byte for byte (a script asserted the restore):
+  - capture only for MOD;
+  - the Control's cc forced to MOD;
+  - the restore from 0;
+  - `restValue` 0;
+  - BEND sorted first;
+  - CC `audible` folding;
+  - `takeLanes` fixed to MOD/BEND;
+  - "volume" missing from the text;
+  - no capture reserve;
+  - `laneDisplayMax` ignoring the ghost;
+  - no peak repaint;
+  - the before-cache reading the wrong lane;
+  - no `lateSamples` on Control.
+
+**Notes for step 4 (latch)**
+
+- The take records what the keyboard sent, but until the latch lands the
+  song's own VOL/PAN/BENDR/LFOS events on the target track still play over
+  a knob mid-take, so what you hear can differ from what gets committed.
+  Step 4's harness can reuse `checkRecordingTakes`' `heard()` engine-state
+  reads.
+- `applyLiveControl` and `applyLiveBend` are where the latch bit is set:
+  capture armed (`capturing()`), target sounding (`m_liveTrack >= 0`) and
+  live play on. CC121's resets go through `applyLiveControl` too, so they
+  will latch the routed lanes. Decide whether that is wanted (probably
+  yes: what you hear is what is committed).
+- The `checkRecordingTakes` routed-lanes block deliberately reads the live
+  value 1 ms after each knob, before a song event could move it. With the
+  latch that guard becomes unnecessary, and a check that a song VOL event
+  after the knob no longer reaches the engine fits there.
+
+**Windows checkpoint (manual test script)**
+
+1. Settings → MIDI → Controls: route VOL, PAN, BENDR and LFOS to four
+   knobs (Learn). Select a track that holds notes (a sustained voice is
+   easiest to hear).
+2. Put the edit cursor a bar before a phrase and press Record. While it
+   plays, play a few notes and turn each of the four knobs.
+   - While recording, the Volume, Pan, Bend range and LFO speed rows show
+     your moves as a faded curve in the track's colour. A row the track
+     didn't have (often Bend range and LFO speed) appears for the take.
+   - Zoom the LFO speed row's value range small first (row menu) and turn
+     the knob high: the row's scale grows to fit while recording.
+3. Press Stop.
+   - The curves turn solid. The undo menu and the status bar say e.g.
+     "Record 3 notes with volume, pan, bend range and LFO speed".
+   - Right after where you stopped, each lane steps back to the value the
+     song had there (for a lane the song never set: volume full, pan
+     centre, bend range 2, LFO speed 22).
+4. Play the recorded stretch back: it sounds like what you played (until
+   step 4, a song's own volume or pan changes during the take may have
+   overridden a knob while you recorded; the recording itself has your
+   values).
+5. Ctrl+Z: notes and all four lanes go back as they were, and rows that
+   appeared only for the take disappear.
+6. Loop: turn on Loop with a short loop region and record across the loop
+   end. Turn VOL before the wrap and PAN after it. After Stop, VOL steps
+   back to the song's value at the loop end, and PAN's move starts on the
+   second pass and is restored where you stopped.
+7. Turn only one knob in a take (no notes): the undo step says e.g.
+   "Record pan".
+8. If your keyboard sends Reset All Controllers (CC121) mid-take, the take
+   records the routed lanes' resets (volume full, pan centre, ...), and
+   they are restored to the song's values at the stop.
+9. Pitch bend and the mod wheel still record exactly as before.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--midicheck` and `--reccheck` pass on build-nomidi, build-off and
+build-dummy, and all five trees build cleanly.

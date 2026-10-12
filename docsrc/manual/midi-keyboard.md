@@ -63,7 +63,8 @@ are recorded too, onto the track's BEND and MOD lanes (MOD as heard: the
 wheel scaled to the lane's range) — they replace the lane's points from
 your first move to where the take ends (Stop, or a loop wrap), and there
 the lane goes back to the value the song had, so a wheel left up doesn't
-carry on through the rest of the song. The sustain pedal lengthens recorded notes. Takes are added on top
+carry on through the rest of the song. Knobs routed to VOL, PAN, BENDR or LFOS
+(Settings → MIDI → Controls) record onto those lanes the same way. The sustain pedal lengthens recorded notes. Takes are added on top
 of what's there (overdub); where a new note overlaps an old one on the same
 pitch, the new one wins, the same as drawing a note over another. -->
 

@@ -5657,8 +5657,14 @@ template <typename Before>
 std::vector<RecordingPreview::Lane> takeLanes(const std::vector<RecordingTake::LaneWrite> &writes,
                                               Before &&before)
 {
+    // Every lane the writes touch, by cc (BEND, 0xFF, last).
+    std::vector<uint8_t> ccs;
+    for (const RecordingTake::LaneWrite &w : writes)
+        ccs.push_back(w.cc);
+    std::sort(ccs.begin(), ccs.end());
+    ccs.erase(std::unique(ccs.begin(), ccs.end()), ccs.end());
     std::vector<RecordingPreview::Lane> lanes;
-    for (const uint8_t cc : {uint8_t(0x01), DOC_CC_BEND}) {
+    for (const uint8_t cc : ccs) {
         RecordingPreview::Lane lane;
         lane.cc = cc;
         for (const RecordingTake::LaneWrite &w : writes) {
@@ -5681,6 +5687,32 @@ std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track
     return takeLanes(writes, [&](uint8_t cc) { return doc.lanePoints(track, cc); });
 }
 
+// The lanes a take moved, for its undo step and status message: "pitch
+// bend", "mod and volume", "pitch bend, mod, volume and pan". Pitch bend
+// first, then the CC lanes in ascending CC, each named as its row is (in
+// lower case, MOD as "mod").
+QString takeLanesText(const std::vector<RecordingTake::LaneWrite> &writes)
+{
+    const auto has = [&](uint8_t cc) {
+        return std::any_of(writes.begin(), writes.end(),
+                           [cc](const RecordingTake::LaneWrite &w) { return w.cc == cc; });
+    };
+    QStringList names;
+    for (const auto &[cc, name] : {std::pair{DOC_CC_BEND, MainWindow::tr("pitch bend")},
+                                   std::pair{uint8_t(0x01), MainWindow::tr("mod")},
+                                   std::pair{uint8_t(0x07), MainWindow::tr("volume")},
+                                   std::pair{uint8_t(0x0A), MainWindow::tr("pan")},
+                                   std::pair{uint8_t(0x14), MainWindow::tr("bend range")},
+                                   std::pair{uint8_t(0x15), MainWindow::tr("LFO speed")}}) {
+        if (has(cc))
+            names << name;
+    }
+    if (names.size() < 2)
+        return names.value(0);
+    const QString last = names.takeLast();
+    return MainWindow::tr("%1 and %2").arg(names.join(QStringLiteral(", ")), last);
+}
+
 } // namespace
 
 const std::vector<DocLanePoint> &MainWindow::takeLaneBefore(const SongDocument &doc, int track,
@@ -5691,10 +5723,12 @@ const std::vector<DocLanePoint> &MainWindow::takeLaneBefore(const SongDocument &
         cache.doc = &doc;
         cache.revision = doc.revision();
         cache.track = track;
-        cache.mod = doc.lanePoints(track, 0x01);
-        cache.bend = doc.lanePoints(track, DOC_CC_BEND);
+        cache.lanes.clear();
     }
-    return cc == DOC_CC_BEND ? cache.bend : cache.mod;
+    auto it = cache.lanes.find(cc);
+    if (it == cache.lanes.end())
+        it = cache.lanes.emplace(cc, doc.lanePoints(track, cc)).first;
+    return it->second;
 }
 
 void MainWindow::syncRecordingPreview()
@@ -5820,13 +5854,9 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
     // owns its preview now.
     if (view && view->recordingPreview().take == take)
         view->clearRecordingPreview();
-    // "pitch bend", "mod", or both: what the take moved besides notes.
-    bool bend = false, mod = false;
-    for (const RecordingTake::LaneWrite &w : lanes)
-        (w.cc == DOC_CC_BEND ? bend : mod) = true;
-    const QString moved = bend && mod ? tr("pitch bend and mod")
-                          : bend      ? tr("pitch bend")
-                                      : tr("mod");
+    // What the take moved besides notes ("pitch bend", "mod and volume",
+    // "pitch bend, mod, volume and pan", ...).
+    const QString moved = takeLanesText(lanes);
     const int count = int(notes.size());
     bool written = false;
     if (doc && !empty && !doc->isLocked() && track >= 0) {

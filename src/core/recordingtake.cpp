@@ -6,6 +6,7 @@
 #include <map>
 
 #include "core/miditimeline.h"
+#include "core/timelineplayer.h"
 
 void RecordingTake::begin(int track, uint32_t generation)
 {
@@ -170,13 +171,14 @@ void RecordingTake::push(const CaptureEvent &ev)
         closeOpen(ev.samplePos, /*played=*/false);
         break;
     case CaptureEvent::Bend:
-    case CaptureEvent::Mod: {
+    case CaptureEvent::Control: {
         Control control;
         control.sample = ev.samplePos;
         control.floorSample = m_segmentStart;
         control.late = ev.lateSamples;
         control.segment = m_segment;
-        control.cc = ev.kind == CaptureEvent::Bend ? DOC_CC_BEND : 0x01;
+        // A Control's lane is its key (its 7 bits: never DOC_CC_BEND).
+        control.cc = ev.kind == CaptureEvent::Bend ? DOC_CC_BEND : key;
         control.value = ev.kind == CaptureEvent::Bend ? std::clamp<int>(ev.value, -8192, 8191)
                                                       : std::clamp<int>(ev.value, 0, 127);
         m_controls.push_back(control);
@@ -294,6 +296,14 @@ int RecordingTake::audible(uint8_t cc, int value)
     return cc == DOC_CC_BEND ? (value + 8192) >> 7 : value;
 }
 
+int RecordingTake::restValue(uint8_t cc)
+{
+    if (cc == DOC_CC_BEND)
+        return 0;
+    const int value = TimelinePlayer::ccDefault(cc);
+    return value >= 0 ? value : 0;
+}
+
 std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTimeline &timeline,
                                                                   uint64_t endSample,
                                                                   uint32_t endSegment,
@@ -309,7 +319,7 @@ std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTime
         const uint64_t sample =
             std::max(c.floorSample, samplesEarlier(c.sample, latencySamples + c.late));
         uint64_t tick = tickAt(sample);
-        // MOD sorts first: 0x01 against BEND's 0xFF.
+        // Within a segment the lanes go in ascending CC, BEND (0xFF) last.
         auto [it, fresh] = writes.try_emplace({c.segment, c.cc});
         LaneWrite &w = it->second;
         if (fresh) {
@@ -358,11 +368,12 @@ bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &bef
 {
     if (!restoreEnd || points.empty())
         return false;
-    // The song's value at tickEnd: its last point there or before, or the
-    // engine's track-init value, 0 for both lanes. A point on tickEnd
-    // itself, which the write's range takes, comes back this way (or goes
-    // when the take's last value already sounds like it).
-    int value = 0;
+    // The song's value at tickEnd: its last point there or before, or with
+    // none the engine's track-init value (restValue: VOL 127, PAN 64, BENDR
+    // 2, LFOS 22, MOD 0, bend centred), which is what plays there. A point
+    // on tickEnd itself, which the write's range takes, comes back this way
+    // (or goes when the take's last value already sounds like it).
+    int value = restValue(cc);
     for (const DocLanePoint &pt : before) {
         if (pt.tick > tickEnd)
             break;

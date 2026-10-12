@@ -873,10 +873,9 @@ void AudioEngine::applyLiveBend(int16_t bend)
 
 void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value)
 {
-    // Captured as heard, whether or not it sounds (as notes are). Only MOD
-    // so far: recording the other lanes is step 3.
-    if (lane == 0x01)
-        pushCapture(CaptureEvent::Mod, m_player.position(), 0, 0, 0, value);
+    // Captured as heard, whether or not it sounds (as notes are): the
+    // lane's CC rides in the key.
+    pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value);
     if (m_liveTrack >= 0) {
         m4a_engine_cc(m_engine.get(), m_liveTrack, lane, value);
         m_liveTouched.setCc(lane);
@@ -991,7 +990,13 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     if (!capturing())
         return;
     const uint32_t w = m_captureWrite.load(std::memory_order_relaxed);
-    if (w - m_captureRead.load(std::memory_order_acquire) >= kCaptureRingSize) {
+    // A knob streams far faster than anyone plays notes: bend and lane moves
+    // stop short of the ring's last kCaptureReserve slots, which only notes,
+    // cuts and boundaries take, so a flood of moves the UI can't drain in
+    // time loses moves before it loses a note.
+    const bool move = kind == CaptureEvent::Bend || kind == CaptureEvent::Control;
+    const uint32_t room = move ? kCaptureRingSize - kCaptureReserve : kCaptureRingSize;
+    if (w - m_captureRead.load(std::memory_order_acquire) >= room) {
         m_captureDrops.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -1004,10 +1009,8 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.key = key;
     ev.velocity = velocity;
     ev.value = value;
-    ev.lateSamples = kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff ||
-                             kind == CaptureEvent::Bend || kind == CaptureEvent::Mod
-                         ? m_liveLate
-                         : 0;
+    ev.lateSamples =
+        kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff || move ? m_liveLate : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);
 }
 

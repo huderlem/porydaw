@@ -1361,7 +1361,7 @@ void MainWindow::checkLiveRoutes()
         std::vector<int> values;
         CaptureEvent ev;
         while (m_audio.popCapture(&ev)) {
-            if (ev.kind == CaptureEvent::Mod)
+            if (ev.kind == CaptureEvent::Control && ev.key == 0x01)
                 values.push_back(ev.value);
         }
         return values;

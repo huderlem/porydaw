@@ -144,12 +144,12 @@ struct RecordingPreview {
     // Punched [start, end) tick spans, sorted and merged: the ruler's REC
     // tint. Empty once the take has ended (a commit still pending).
     std::vector<std::pair<uint64_t, uint64_t>> spans;
-    // The take's BEND and MOD moves: each lane's whole curve as the commit
+    // The take's bend and lane moves: each lane's whole curve as the commit
     // would leave it, and the tick ranges the take rewrites ([begin, end],
     // inclusive, as SongDocument::writeLanePoints takes them), painted as
     // ghosts. Only lanes the take has moved; sorted by cc.
     struct Lane {
-        uint8_t cc = 0; // 0x01 (MOD) or LANE_CC_BEND
+        uint8_t cc = 0; // a CC lane (0x01 MOD, 0x07 VOL, ...) or LANE_CC_BEND
         std::vector<LanePoint> points;
         std::vector<std::pair<uint64_t, uint64_t>> ranges;
         bool operator==(const Lane &o) const

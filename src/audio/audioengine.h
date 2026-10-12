@@ -396,8 +396,8 @@ class AudioEngine
     void applyLiveNote(uint8_t key, uint8_t velocity);
     // The same for a bend (-8192..8191) and a routed CC lane (the lane's
     // document CC and the value it takes, already scaled): the whole
-    // track's, captured whether or not it sounds. Only MOD is captured so
-    // far (as CaptureEvent::Mod); the other lanes are step 3's.
+    // track's, captured whether or not it sounds (CaptureEvent::Bend and
+    // CaptureEvent::Control).
     void applyLiveBend(int16_t bend);
     void applyLiveControl(uint8_t lane, uint8_t value);
     // A keyboard program change: the target track's voice. Sound target
@@ -515,6 +515,9 @@ class AudioEngine
     // stopped, which hands the producer side over cleanly.
     std::atomic<uint32_t> m_captureGen{0};
     static constexpr uint32_t kCaptureRingSize = 4096;
+    // The ring's last slots, which bend and lane moves can't take
+    // (pushCapture): a quarter, held for notes, cuts and boundaries.
+    static constexpr uint32_t kCaptureReserve = 1024;
     CaptureEvent m_captureRing[kCaptureRingSize];
     std::atomic<uint32_t> m_captureWrite{0}; // producer increments
     std::atomic<uint32_t> m_captureRead{0};  // consumer increments
@@ -556,7 +559,7 @@ class AudioEngine
     bool m_liveOn[128] = {};   // applied on: held, or released under the pedal
     bool m_liveSustain = false;
     // The message being applied waited this long for its callback
-    // (pushCapture stamps it on a played note on/off, bend or mod); 0
+    // (pushCapture stamps it on a played note on/off, bend or lane move); 0
     // otherwise.
     uint32_t m_liveLate = 0;
     int64_t m_callbackNs = 0;      // midiClockNs at the callback's entry

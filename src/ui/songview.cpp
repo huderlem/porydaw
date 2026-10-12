@@ -3490,6 +3490,18 @@ class AutomationArea : public TimelineSurface
                 dirty += r;
                 continue;
             }
+            // A new peak can rescale a zoomable row (laneDisplayMax counts
+            // the ghost): all of it, its gutter's range included.
+            const auto peak = [](const RecordingPreview::Lane &lane) {
+                int top = 0;
+                for (const LanePoint &pt : lane.points)
+                    top = std::max(top, pt.value);
+                return top;
+            };
+            if (laneRangeZoomable(row.cc) && peak(*a) != peak(*b)) {
+                dirty += r;
+                continue;
+            }
             // Steps: a point that moved changes the curve from its tick on
             // (the hold before it is the same up to there), and a range
             // that moved shifts the fade's edge.
@@ -5321,6 +5333,12 @@ class AutomationArea : public TimelineSurface
             for (const LanePoint &pt : lane->points)
                 dataMax = std::max(dataMax, pt.value);
         }
+        // A recording take's ghost is data the commit is about to write:
+        // a knob turned past a zoomed range grows the axis as it goes.
+        if (const RecordingPreview::Lane *take = m_sv->recordingPreview().lane(track, cc)) {
+            for (const LanePoint &pt : take->points)
+                dataMax = std::max(dataMax, pt.value);
+        }
         const int mode = m_rowRanges.value(laneKey(track, cc), laneRangeDefault(cc));
         return mode > 0 ? std::max(mode, dataMax) : laneAutoMax(dataMax);
     }
@@ -6137,7 +6155,7 @@ class AutomationArea : public TimelineSurface
     }
 
     // A recording take's lane (docs/midi-input/PLAN.md step 4's ghosts, for
-    // bend and mod): the whole curve as the commit would leave it, the
+    // bend and lane moves): the whole curve as the commit would leave it, the
     // stretches the take rewrites in the track's colour at the ghost notes'
     // alpha, the rest as the lane's own. The faded stretch is one stroked
     // path, so its step corners don't double the alpha, and has no node

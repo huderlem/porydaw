@@ -4,6 +4,7 @@
 #include <QPointer>
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -288,9 +289,10 @@ class MainWindow : public QMainWindow
     // clock must be in the take's segment: when a callback crossed a wrap or
     // seek since the drain, it drains again; still not, the frame stays.
     void syncRecordingPreview();
-    // The take's track's MOD (0x01) or BEND points as the song has them,
-    // for syncRecordingPreview's lane ghosts: rescanned only when the song
-    // (its revision) or the take's track changes, not every playhead tick.
+    // The take's track's points on lane cc (a CC lane or BEND) as the song
+    // has them, for syncRecordingPreview's lane ghosts: rescanned only when
+    // the song (its revision) or the take's track changes, not every
+    // playhead tick.
     const std::vector<DocLanePoint> &takeLaneBefore(const SongDocument &doc, int track, uint8_t cc);
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
@@ -299,6 +301,8 @@ class MainWindow : public QMainWindow
     void checkRecordingTakes(const QString &scratchDir);
     void checkRecordingDisplay();
     void checkRecordingLaneDisplay(int track);
+    void checkRecordingCcLaneDisplay(int track);
+    void checkRecordingFlood();
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -683,7 +687,7 @@ class MainWindow : public QMainWindow
         const SongDocument *doc = nullptr;
         uint64_t revision = 0;
         int track = -1;
-        std::vector<DocLanePoint> mod, bend;
+        std::map<uint8_t, std::vector<DocLanePoint>> lanes; // by cc, as asked for
     };
     TakeLaneBefore m_takeLaneBefore;
     // Polls the live held-key mask while MIDI input is active (the playhead

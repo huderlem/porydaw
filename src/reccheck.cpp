@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <random>
 #include <vector>
@@ -44,8 +45,10 @@
 // start (and never moving an end the take imposed), later passes winning
 // overlapping notes by the document's own rules, unmatched note-offs, cuts,
 // a lost Boundary (and a Boundary after one), another arm's events; bend and
-// mod moves as lane writes, each ending at its segment's end (a Boundary, a
-// lost one, the stop) with the song's value restored there.
+// lane moves (MOD, VOL, PAN, BENDR, LFOS) as lane writes, in ascending CC
+// with BEND last, each ending at its segment's end (a Boundary, a lost one,
+// the stop) with the song's value (or the engine's track-init value)
+// restored there.
 //
 // Then Record end to end in the window, with the audio device parked and the
 // real callback pumped (AudioEngine::holdDeviceForTest/pumpForTest), every
@@ -55,7 +58,9 @@
 // a take ended inside an open edit group lands after it as its own step; a
 // take's pitch bend and mod wheel land on its BEND and MOD lanes, the song's
 // value back at the stop (a take of moves alone too, and Reset All
-// Controllers' centred bend and zeroed mod); a
+// Controllers' centred bend and reset routed lanes); routed VOL, PAN, BENDR
+// and LFOS knobs land on their lanes as heard and play back as they
+// sounded, a loop pass's VOL restored at the loop end; a
 // track the song doesn't have can't record, and a take that can't be
 // written isn't reported as recorded; an empty take pushes nothing; punch
 // in and out while playing keeps playing,
@@ -67,7 +72,9 @@
 // the loop end; a document edit mid-take; the capture ring overflowing; the
 // song ending by itself; closing another tab, closing, destroying and
 // reloading the take's own; a tab switch committing to the take's own tab;
-// Record disabled on a read-only bundle tab.
+// Record disabled on a read-only bundle tab; the ghosts (checkRecordingDisplay,
+// checkRecordingLaneDisplay, checkRecordingCcLaneDisplay); a 3-knob flood,
+// drained and with the UI stalled (checkRecordingFlood).
 
 namespace {
 
@@ -191,19 +198,25 @@ struct Feed {
             ev.lateSamples = late;
         take.push(ev);
     }
-    void control(uint8_t kind, uint64_t pos, int16_t value)
+    void control(uint8_t kind, uint64_t pos, int16_t value, uint8_t cc = 0)
     {
         CaptureEvent ev;
         ev.kind = kind;
         ev.samplePos = pos;
         ev.generation = generation;
         ev.segment = segment;
+        ev.key = cc;
         ev.value = value;
         ev.lateSamples = late;
         take.push(ev);
     }
     void bend(uint64_t pos, int16_t value) { control(CaptureEvent::Bend, pos, value); }
-    void mod(uint64_t pos, int16_t value) { control(CaptureEvent::Mod, pos, value); }
+    // A routed lane's move: cc is the lane's (0x01 MOD, 0x07 VOL, ...).
+    void lane(uint8_t cc, uint64_t pos, int16_t value)
+    {
+        control(CaptureEvent::Control, pos, value, cc);
+    }
+    void mod(uint64_t pos, int16_t value) { lane(0x01, pos, value); }
     void begin(uint64_t pos) { push(CaptureEvent::Begin, pos); }
     void on(uint64_t pos, uint8_t key, uint8_t velocity = 100)
     {
@@ -768,6 +781,106 @@ void checkTakeRules()
                       !w.restorePoint(pts({{5, 30}}), &r),
                   "take: a MOD end did not restore the song's value (0 with no point)");
         }
+        // The routed lanes (docs/midi-controls/PLAN.md step 3): VOL, PAN,
+        // BENDR and LFOS moves follow MOD's rules, each lane its own write,
+        // in ascending CC with BEND last within a segment; a later segment
+        // starts the order again.
+        take.begin(0, 15);
+        Feed cc{take, 15};
+        cc.begin(0);
+        cc.lane(0x15, 1000, 40);  // LFOS
+        cc.bend(1500, 4096);      // BEND
+        cc.lane(0x0A, 2000, 0);   // PAN hard left
+        cc.lane(0x0A, 2400, 127); // same tick: wins
+        cc.lane(0x07, 3000, 90);  // VOL
+        cc.lane(0x07, 4000, 90);  // the same VOL again: dropped
+        cc.lane(0x07, 5000, 91);  // one step: kept (identity, no 7-bit fold)
+        cc.lane(0x14, 6000, 12);  // BENDR, semitones as heard
+        cc.lane(0x01, 6500, 5);   // MOD
+        cc.lane(0x15, 7000, 41);
+        cc.jump(8000, 0);
+        cc.lane(0x14, 1000, 24);
+        cc.lane(0x07, 2000, 10);
+        check(take.controls().size() == 12 && take.controls()[2].cc == 0x0A &&
+                  take.controls()[6].cc == 0x07 && take.controls()[7].cc == 0x14 &&
+                  take.controls()[7].value == 12,
+              "take: a routed lane's move did not keep its lane (the key) and value");
+        const auto ccWrites = take.toLaneWrites(tl, 3000, 1, 0);
+        const std::vector<uint8_t> wantOrder{0x01, 0x07, 0x0A, 0x14, 0x15, DOC_CC_BEND, 0x07, 0x14};
+        std::vector<uint8_t> order;
+        for (const RecordingTake::LaneWrite &w : ccWrites)
+            order.push_back(w.cc);
+        if (check(order == wantOrder, "take: the routed lanes' writes are not in ascending CC, "
+                                      "BEND last, segment by segment")) {
+            check(ccWrites[0].tickBegin == 7 && samePoints(ccWrites[0].points, {{7, 5}}) &&
+                      ccWrites[0].tickEnd == 8 && ccWrites[0].restoreEnd,
+                  "take: the MOD write among the routed lanes is off");
+            check(ccWrites[1].tickBegin == 3 && ccWrites[1].tickEnd == 8 &&
+                      ccWrites[1].restoreEnd && samePoints(ccWrites[1].points, {{3, 90}, {5, 91}}),
+                  "take: the VOL moves did not convert (a repeat kept, or a step dropped)");
+            check(ccWrites[2].tickBegin == 2 && samePoints(ccWrites[2].points, {{2, 127}}),
+                  "take: the PAN moves on one tick did not keep the last");
+            check(samePoints(ccWrites[3].points, {{6, 12}}) &&
+                      samePoints(ccWrites[4].points, {{1, 40}, {7, 41}}),
+                  "take: the BENDR or LFOS moves did not convert");
+            check(ccWrites[6].tickBegin == 2 && ccWrites[6].tickEnd == 3 &&
+                      samePoints(ccWrites[6].points, {{2, 10}}) &&
+                      samePoints(ccWrites[7].points, {{1, 24}}),
+                  "take: the second segment's VOL and BENDR writes are off");
+        }
+        // Each lane's restore reads its own song value, and with no point
+        // before, the engine's track-init value: VOL 127, PAN 64, BENDR 2,
+        // LFOS 22 (MOD 0, bend centred).
+        {
+            check(RecordingTake::restValue(0x07) == 127 && RecordingTake::restValue(0x0A) == 64 &&
+                      RecordingTake::restValue(0x14) == 2 && RecordingTake::restValue(0x15) == 22 &&
+                      RecordingTake::restValue(0x01) == 0 &&
+                      RecordingTake::restValue(DOC_CC_BEND) == 0,
+                  "take: a lane's rest value is not the engine's track-init value");
+            const auto pts = [](std::initializer_list<std::pair<uint64_t, int>> list) {
+                std::vector<DocLanePoint> out;
+                for (const auto &[tick, value] : list) {
+                    DocLanePoint pt;
+                    pt.tick = tick;
+                    pt.value = value;
+                    out.push_back(pt);
+                }
+                return out;
+            };
+            RecordingTake::LaneWrite w;
+            w.tickBegin = 10;
+            w.tickEnd = 40;
+            w.restoreEnd = true;
+            LanePointValue r{0, 0};
+            bool rests = true;
+            for (const auto &[lane, rest] :
+                 {std::pair{uint8_t(0x07), 127}, std::pair{uint8_t(0x0A), 64},
+                  std::pair{uint8_t(0x14), 2}, std::pair{uint8_t(0x15), 22}}) {
+                w.cc = lane;
+                // Left away from rest: the rest comes back at the end.
+                w.points = {{10, rest == 2 ? 24 : 0}};
+                rests &= w.restorePoint(pts({}), &r) && r.tick == 40 && r.value == rest;
+                // Left at rest: nothing to restore.
+                w.points = {{10, 0}, {20, rest}};
+                rests &= !w.restorePoint(pts({}), &r);
+                // A song point before the end wins over the rest.
+                w.points = {{10, rest}};
+                rests &= w.restorePoint(pts({{5, 33}}), &r) && r.value == 33;
+            }
+            check(rests, "take: a routed lane's end did not restore the song's value, or its "
+                         "track-init value with no point before");
+            // applyLaneWrites keeps to its lane: PAN's write leaves VOL be.
+            RecordingTake::LaneWrite pan;
+            pan.cc = 0x0A;
+            pan.tickBegin = 10;
+            pan.tickEnd = 20;
+            pan.points = {{10, 0}};
+            pan.restoreEnd = true;
+            const auto volLane = RecordingTake::applyLaneWrites(pts({{0, 100}}), {pan}, 0x07);
+            const auto panLane = RecordingTake::applyLaneWrites(pts({}), {pan}, 0x0A);
+            check(samePoints(volLane, {{0, 100}}) && samePoints(panLane, {{10, 0}, {20, 64}}),
+                  "take: a PAN write moved another lane, or did not restore centre with no point");
+        }
         take.clear();
         check(take.controls().empty(), "take: clear() kept the moves");
     }
@@ -968,10 +1081,11 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
                 out.push_back({p.tick, p.value});
             return out;
         };
-        // What the lane held at tick, before the take (0 with no point).
-        const auto valueAt = [](const std::vector<std::pair<uint64_t, int>> &points,
+        // What the lane held at tick, before the take (with no point, what
+        // the engine starts a track at).
+        const auto valueAt = [](uint8_t cc, const std::vector<std::pair<uint64_t, int>> &points,
                                 uint64_t tick) {
-            int value = 0;
+            int value = RecordingTake::restValue(cc);
             for (const auto &[t, v] : points) {
                 if (t <= tick)
                     value = v;
@@ -989,7 +1103,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
                 if (pt.first < first || pt.first > last)
                     want.push_back(pt);
             }
-            const int song = valueAt(before, end);
+            const int song = valueAt(cc, before, end);
             if (end > moves.back().first &&
                 RecordingTake::audible(cc, song) != RecordingTake::audible(cc, moves.back().second))
                 moves.push_back({end, song});
@@ -1075,10 +1189,14 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         send(0xB0, 1, 0);
         pumpMs(30);
 
-        // Reset All Controllers (CC121) centres the bend and zeroes the mod,
-        // and the take records both.
+        // Reset All Controllers (CC121) centres the bend and puts every
+        // routed lane back at its track-init value (J5: with the default
+        // routes MOD 0, VOL 127 and PAN 64), and the take records them all.
         const auto bendReset = lane(DOC_CC_BEND);
         const auto modReset = lane(0x01);
+        const auto volReset = lane(0x07);
+        const auto panReset = lane(0x0A);
+        const auto bendrReset = lane(0x14);
         const int undoReset = undo->index();
         m_recordAction->trigger();
         pumpMs(20);
@@ -1091,15 +1209,150 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         const uint64_t pEnd = playhead();
         m_stopAction->trigger();
         check(undo->index() == undoReset + 1 &&
-                  lastUndoText() == QStringLiteral("Record pitch bend and mod"),
-              "record: Reset All Controllers did not record a bend and a mod");
+                  lastUndoText() == QStringLiteral("Record pitch bend, mod, volume and pan"),
+              "record: Reset All Controllers did not record the bend and every routed lane");
         check(sorted(lane(DOC_CC_BEND)) == expected(DOC_CC_BEND, bendReset,
                                                     {{tickOf(pUp), 4096}, {tickOf(pReset), 0}},
                                                     tickOf(pEnd)),
               "record: Reset All Controllers did not centre the recorded bend");
         check(sorted(lane(0x01)) == expected(0x01, modReset, {{tickOf(pReset), 0}}, tickOf(pEnd)),
               "record: Reset All Controllers did not zero the recorded mod");
+        check(sorted(lane(0x07)) ==
+                      expected(0x07, volReset, {{tickOf(pReset), 127}}, tickOf(pEnd)) &&
+                  sorted(lane(0x0A)) ==
+                      expected(0x0A, panReset, {{tickOf(pReset), 64}}, tickOf(pEnd)),
+              "record: Reset All Controllers did not record VOL 127 and PAN 64");
+        check(lane(0x14) == bendrReset,
+              "record: Reset All Controllers recorded BENDR, which has no route");
         undo->undo();
+
+        // Every routed lane records (docs/midi-controls/PLAN.md step 3):
+        // VOL, PAN, BENDR and LFOS knobs land on their lanes as heard (BENDR
+        // in semitones), in the note's undo step, the song's value back at
+        // the stop; played back, each sounds as it did live.
+        check(midi.setRoute(0x14, 20) && midi.setRoute(0x15, 21),
+              "record: BENDR and LFOS could not be routed");
+        const M4AEngine *engine = m_audio.engineForTest();
+        enum { Vol, Pan, BendR, Lfos };
+        const auto heard = [&] {
+            const M4ATrack &tr = engine->tracks[a];
+            return std::array<int, 4>{tr.rawVolume, tr.pan, tr.bendRange, tr.lfoSpeed};
+        };
+        const uint64_t ccCursor = tpb * 24;
+        view->setEditCursorTick(ccCursor);
+        std::array<std::vector<std::pair<uint64_t, int>>, 4> ccBefore;
+        const std::array<uint8_t, 4> ccLanes{0x07, 0x0A, 0x14, 0x15};
+        for (size_t i = 0; i < 4; i++)
+            ccBefore[i] = lane(ccLanes[i]);
+        const int undoCc = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        const uint64_t pNote = playhead();
+        send(0x90, 67, 100);
+        pumpMs(20);
+        // Values no song is likely to hold, so the restores show.
+        std::array<uint64_t, 4> pMove{};
+        const std::array<uint8_t, 4> knobCc{7, 10, 20, 21};
+        const std::array<uint8_t, 4> knob{37, 113, 106, 77};
+        const std::array<int, 4> asHeard{37, 113, 20, 77}; // BENDR: 106 * 24 / 127, rounded
+        std::array<int, 4> live{};
+        for (size_t i = 0; i < 4; i++) {
+            pMove[i] = playhead();
+            send(0xB0, knobCc[i], knob[i]);
+            pumpMs(1); // applied, before a song event can move it
+            live[i] = heard()[i];
+            pumpMs(40);
+        }
+        pumpMs(100);
+        const uint64_t pMid = playhead();
+        pumpMs(100);
+        send(0x80, 67, 0);
+        pumpMs(50);
+        const uint64_t pCcStop = playhead();
+        m_stopAction->trigger();
+        check(live == std::array<int, 4>{37, 113 - 64, 20, 77},
+              "record: the routed knobs did not sound at their scales live");
+        check(undo->index() == undoCc + 1 &&
+                  lastUndoText() ==
+                      QStringLiteral("Record 1 note(s) with volume, pan, bend range and LFO speed"),
+              "record: a take with every routed lane did not commit one step naming them");
+        check(message() ==
+                  QStringLiteral("Recorded 1 note(s) with volume, pan, bend range and LFO speed."),
+              "record: the status bar does not name the routed lanes recorded");
+        check(find(a, 67, tickOf(pNote)).has_value(), "record: the routed lanes' note was lost");
+        for (size_t i = 0; i < 4; i++) {
+            const auto want = expected(ccLanes[i], ccBefore[i], {{tickOf(pMove[i]), asHeard[i]}},
+                                       tickOf(pCcStop));
+            const auto got = sorted(lane(ccLanes[i]));
+            if (!check(got == want, "record: a routed lane is not the take's move as heard over "
+                                    "the song's other points, the song's value back at the stop")) {
+                std::fprintf(stderr, "reccheck:   lane 0x%02X:", ccLanes[i]);
+                for (const auto &[tick, value] : got)
+                    std::fprintf(stderr, " %llu:%d", (unsigned long long)tick, value);
+                std::fprintf(stderr, "\n");
+            }
+        }
+        // The song as committed, played from inside the take: the engine
+        // gets what it got from the knobs.
+        m_audio.seek(sampleOf(tickOf(pMid)));
+        pumpMs(1);
+        check(heard() == live, "record: a recorded lane does not play back as it sounded live");
+        // And past the stop, the song's own values again.
+        m_audio.seek(sampleOf(tickOf(pCcStop) + 1));
+        pumpMs(1);
+        std::array<int, 4> songAfter{};
+        for (size_t i = 0; i < 4; i++)
+            songAfter[i] = valueAt(ccLanes[i], ccBefore[i], tickOf(pCcStop) + 1);
+        songAfter[Pan] -= 64;
+        check(heard() == songAfter,
+              "record: past the take the lanes do not play the song's values");
+        undo->undo();
+        bool restored = true;
+        for (size_t i = 0; i < 4; i++)
+            restored &= lane(ccLanes[i]) == ccBefore[i];
+        check(restored, "record: undo did not restore the routed lanes");
+
+        // Loop passes: a VOL move before the wrap is restored at the loop
+        // end; a PAN move on the pass after it starts its own write.
+        if (session->timeline->hasLoop() &&
+            session->timeline->loopEndTick > session->timeline->loopStartTick + 4 * tpb) {
+            const uint64_t loopEnd = session->timeline->loopEndTick;
+            m_loopAction->setChecked(true);
+            view->setEditCursorTick(loopEnd - tpb);
+            const auto volLoop = lane(0x07);
+            const auto panLoop = lane(0x0A);
+            const int undoLoop = undo->index();
+            m_recordAction->trigger();
+            pumpMs(20);
+            const uint64_t pVol = playhead();
+            send(0xB0, 7, 41);
+            for (int i = 0; i < 1000 && playhead() >= pVol; i++)
+                pumpMs(10);
+            check(playhead() < pVol, "record: the routed lanes' loop never wrapped");
+            pumpMs(20);
+            const uint64_t pPan = playhead();
+            send(0xB0, 10, 5);
+            pumpMs(60);
+            const uint64_t pLoopStop = playhead();
+            m_stopAction->trigger();
+            check(undo->index() == undoLoop + 1 &&
+                      lastUndoText() == QStringLiteral("Record volume and pan"),
+                  "record: a looped take of VOL and PAN did not commit \"Record volume and pan\"");
+            check(sorted(lane(0x07)) == expected(0x07, volLoop, {{tickOf(pVol), 41}}, loopEnd),
+                  "record: a VOL move before the wrap did not end (restored) at the loop end");
+            check(sorted(lane(0x0A)) ==
+                      expected(0x0A, panLoop, {{tickOf(pPan), 5}}, tickOf(pLoopStop)),
+                  "record: a PAN move after the wrap is not its own write to the stop");
+            undo->undo();
+            check(lane(0x07) == volLoop && lane(0x0A) == panLoop,
+                  "record: undo did not restore the looped take's lanes");
+        }
+        // The knobs back where the song is, and the routes at the defaults.
+        m_audio.seek(0);
+        pumpMs(10);
+        check(midi.setRoute(0x14, MidiRoutes::kNone) && midi.setRoute(0x15, MidiRoutes::kNone),
+              "record: BENDR and LFOS could not be unrouted");
+        check(midi.routes() == MidiRoutes(), "record: the routes are not back at the defaults");
     }
 
     // Record's key is the roll's, like M/S: R in the focused roll starts and
@@ -1504,6 +1757,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         pumpMs(500);
         const uint64_t p1 = playhead();
         sendAged(0x90, 60, 100, double(waited) / rate);
+        sendAged(0xB0, 7, 33, double(waited) / rate); // a lane move waits back the same
         pumpMs(200);
         const uint64_t p2 = playhead();
         sendAged(0x90, 62, 100, 10.0);
@@ -1522,6 +1776,13 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         };
         check(tickOf(p1 - waited) < tickOf(p1) && landedIn(60, p1 - waited, p1 - waited - period),
               "record: a message's wait for its callback did not move it back");
+        const std::vector<DocLanePoint> vol = doc.lanePoints(a, 0x07);
+        check(std::any_of(vol.begin(), vol.end(),
+                          [&](const DocLanePoint &pt) {
+                              return pt.value == 33 && pt.tick >= tickOf(p1 - waited - period) &&
+                                     pt.tick <= tickOf(p1 - waited);
+                          }),
+              "record: a lane move's wait for its callback did not move it back");
         // Four periods, or two callbacks (pumpForTest's are 512 frames) when
         // that is more.
         const uint64_t cap = std::max<uint64_t>(4 * period, 2 * 512);
@@ -1931,6 +2192,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
     }
 
     checkRecordingDisplay();
+    checkRecordingFlood();
     m_audio.holdDeviceForTest(false);
 }
 
@@ -2178,6 +2440,7 @@ void MainWindow::checkRecordingDisplay()
     check(undo->index() == undoBefore, "display: undo did not restore the song");
 
     checkRecordingLaneDisplay(a);
+    checkRecordingCcLaneDisplay(a);
     m_followPlayheadAction->setChecked(followWas);
 }
 
@@ -2485,6 +2748,314 @@ void MainWindow::checkRecordingLaneDisplay(int track)
         view->addEmptyLane(track, LANE_CC_BEND);
     view->selectTrack(selectedWas);
     view->setAutomationLanesVisible(lanesWere);
+}
+
+// The routed lanes' ghosts (docs/midi-controls/PLAN.md step 3): VOL, BENDR
+// and LFOS knobs ghost on their rows while a take runs, BENDR and LFOS on
+// rows of their own the take brings up (the track has no points there), each
+// curve back at the clock to the song's value or, with no point, the
+// engine's track-init value (BENDR 2, LFOS 22); a ghost past a zoomed axis
+// grows it; Stop leaves the real curves and undo the rows the take brought.
+void MainWindow::checkRecordingCcLaneDisplay(int track)
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    auto *lanes = view->findChild<QWidget *>(QStringLiteral("automationArea"));
+    if (!check(lanes, "cc lane display: the song view has no automation area"))
+        return;
+    const qreal dpr = lanes->devicePixelRatioF();
+    const auto pixel = [&](const QImage &image, QPointF at) {
+        return image.pixelColor(int(at.x() * dpr), int(at.y() * dpr));
+    };
+    const auto blendsTo = [](const QColor &got, const QColor &fill, int alpha,
+                             const QColor &under) {
+        const auto ch = [&](int f, int u) { return (f * alpha + u * (255 - alpha)) / 255; };
+        return std::abs(got.red() - ch(fill.red(), under.red())) <= 3 &&
+               std::abs(got.green() - ch(fill.green(), under.green())) <= 3 &&
+               std::abs(got.blue() - ch(fill.blue(), under.blue())) <= 3;
+    };
+    const bool lanesWere = view->automationLanesVisible();
+    const int selectedWas = view->selectedTrack();
+    view->setAutomationLanesVisible(true);
+    view->selectTrack(track);
+    const std::vector<std::pair<int, uint8_t>> emptyWere = view->viewState().emptyLanes;
+    const int undoBefore = undo->index();
+    // BENDR and LFOS bare: the take's rows are its own.
+    for (const uint8_t cc : {uint8_t(0x14), uint8_t(0x15)}) {
+        if (const std::vector<DocLanePoint> pts = doc.lanePoints(track, cc); !pts.empty())
+            doc.deleteLanePoints(track, cc, pts);
+        if (view->model().findLane(track, cc))
+            view->removeEmptyLane(track, cc);
+    }
+    QApplication::processEvents();
+    check(!view->model().findLane(track, 0x14) && !view->model().findLane(track, 0x15),
+          "cc lane display: the track's BENDR and LFOS lanes could not be cleared");
+    // LFOS zoomed to 0..32: a knob past it grows the axis.
+    view->setLaneDisplayRange(track, 0x15, 32);
+    check(view->laneDisplayMax(track, 0x15) == 32, "cc lane display: LFOS did not zoom to 32");
+    check(midi.setRoute(0x14, 20) && midi.setRoute(0x15, 21),
+          "cc lane display: BENDR and LFOS could not be routed");
+    const auto volBefore = doc.lanePoints(track, 0x07);
+
+    const int undoTake = undo->index();
+    m_recordAction->trigger();
+    pumpMs(30);
+    synchronizePlayhead();
+    const uint64_t pMove = m_audio.playheadSamples();
+    send(0xB0, 20, 127); // BENDR 24
+    send(0xB0, 21, 20);  // LFOS 20: inside the zoom
+    send(0xB0, 7, 50);   // VOL 50
+    pumpMs(250);
+    synchronizePlayhead();
+    (void)lanes->grab(); // painted on the 0..32 axis
+    const uint64_t pLfos = m_audio.playheadSamples();
+    send(0xB0, 21, 100); // LFOS 100: past it
+    pumpMs(250);
+    synchronizePlayhead();
+    const uint64_t pNow = m_audio.playheadSamples();
+    const uint64_t from = tickOf(pMove), to = tickOf(pNow), lfosTick = tickOf(pLfos);
+    const RecordingPreview preview = view->recordingPreview();
+    std::vector<uint8_t> ghostCcs;
+    for (const RecordingPreview::Lane &l : preview.lanes)
+        ghostCcs.push_back(l.cc);
+    check(ghostCcs == std::vector<uint8_t>{0x07, 0x14, 0x15},
+          "cc lane display: the take's ghosts are not VOL, BENDR and LFOS, sorted by cc");
+    // The move, then the track-init value back at the clock.
+    const auto restsAt = [&](uint8_t cc, int value, int rest) {
+        const RecordingPreview::Lane *l = preview.lane(track, cc);
+        return l && l->ranges.size() == 1 && l->ranges.front() == std::make_pair(from, to) &&
+               l->points.size() == 2 && l->points[0].tick == from && l->points[0].value == value &&
+               l->points[1].tick == to && l->points[1].value == rest;
+    };
+    const RecordingPreview::Lane *lfos = preview.lane(track, 0x15);
+    check(restsAt(0x14, 24, 2) && lfos && lfos->ranges.size() == 1 &&
+              lfos->ranges.front() == std::make_pair(from, to) && lfos->points.size() == 3 &&
+              lfos->points[0].tick == from && lfos->points[0].value == 20 &&
+              lfos->points[1].tick == lfosTick && lfos->points[1].value == 100 &&
+              lfos->points[2].tick == to && lfos->points[2].value == 22,
+          "cc lane display: the BENDR and LFOS ghosts are not the moves, back at the clock to the "
+          "track-init values");
+    const RecordingPreview::Lane *vol = preview.lane(track, 0x07);
+    check(vol &&
+              std::any_of(vol->points.begin(), vol->points.end(),
+                          [&](const LanePoint &pt) { return pt.tick == from && pt.value == 50; }),
+          "cc lane display: the VOL ghost does not hold the knob's move");
+    check(view->model().findLane(track, 0x14) && view->model().findLane(track, 0x15),
+          "cc lane display: the take's BENDR and LFOS moves did not bring up their rows");
+    check(view->laneDisplayMax(track, 0x15) >= 100,
+          "cc lane display: an LFOS ghost past the zoomed axis did not grow it");
+    const QColor color = SongView::trackColor(track);
+    // Probed off the line: below LFOS's top, above BENDR's low 24.
+    const std::optional<QPointF> lfosAt =
+        view->recordingPreviewLanePoint(0x15, (lfosTick + to) / 2, 100);
+    // LFOS 20 before the axis grew, where the grown axis draws it: the
+    // whole row repainted, not only past the change.
+    const std::optional<QPointF> lfosEarly =
+        view->recordingPreviewLanePoint(0x15, (from + lfosTick) / 2, 20);
+    const std::optional<QPointF> bendrAt =
+        view->recordingPreviewLanePoint(0x14, (from + to) / 2, 24);
+    if (check(lfosAt && lfosEarly && bendrAt && to > lfosTick + 4 && lfosTick > from + 4,
+              "cc lane display: no BENDR or LFOS row to probe, or too short")) {
+        const QImage during = lanes->grab().toImage();
+        const QColor underL = pixel(during, *lfosAt + QPointF(0, 6));
+        const QColor underB = pixel(during, *bendrAt - QPointF(0, 6));
+        check(blendsTo(pixel(during, *lfosAt), color, songview::kRecordingGhostAlpha, underL) &&
+                  pixel(during, *lfosAt) != underL,
+              "cc lane display: the LFOS ghost is not painted in its track's colour at reduced "
+              "alpha");
+        const QColor underE = pixel(during, *lfosEarly - QPointF(0, 6));
+        check(blendsTo(pixel(during, *lfosEarly), color, songview::kRecordingGhostAlpha, underE) &&
+                  pixel(during, *lfosEarly) != underE,
+              "cc lane display: the LFOS ghost before its axis grew was not repainted on the new "
+              "axis");
+        check(blendsTo(pixel(during, *bendrAt), color, songview::kRecordingGhostAlpha, underB) &&
+                  pixel(during, *bendrAt) != underB,
+              "cc lane display: the BENDR ghost is not painted in its track's colour at reduced "
+              "alpha");
+    }
+
+    pumpMs(30);
+    m_stopAction->trigger();
+    check(view->recordingPreview().empty() && undo->index() == undoTake + 1 &&
+              undo->text(undo->index() - 1) ==
+                  QStringLiteral("Record volume, bend range and LFO speed"),
+          "cc lane display: Stop did not commit the VOL, BENDR and LFOS take");
+    check(view->model().findLane(track, 0x14) && view->model().findLane(track, 0x15) &&
+              doc.lanePoints(track, 0x14).size() == 2 && doc.lanePoints(track, 0x15).size() == 3,
+          "cc lane display: after Stop the BENDR and LFOS rows do not hold the take");
+    if (lfosAt) {
+        const QImage committed = lanes->grab().toImage();
+        check(blendsTo(pixel(committed, *lfosAt), color, 255, color),
+              "cc lane display: after Stop LFOS is not painted solid where its ghost was");
+    }
+    undo->undo();
+    check(!view->model().findLane(track, 0x14) && !view->model().findLane(track, 0x15) &&
+              doc.lanePoints(track, 0x07).size() == volBefore.size(),
+          "cc lane display: undoing the take left its BENDR or LFOS row (or VOL changed)");
+
+    // Put back the knobs, the routes, the zoom and the song.
+    m_audio.seek(0);
+    pumpMs(10);
+    midi.setRoute(0x14, MidiRoutes::kNone);
+    midi.setRoute(0x15, MidiRoutes::kNone);
+    view->setLaneDisplayRange(track, 0x15, 127);
+    while (undo->index() > undoBefore)
+        undo->undo();
+    check(undo->index() == undoBefore, "cc lane display: undo did not restore the song");
+    for (const std::pair<int, uint8_t> &key : emptyWere) {
+        if (key.first == track && (key.second == 0x14 || key.second == 0x15))
+            view->addEmptyLane(track, key.second);
+    }
+    view->selectTrack(selectedWas);
+    view->setAutomationLanesVisible(lanesWere);
+}
+
+// The plan's knob flood (docs/midi-controls/PLAN.md §5): three knobs at
+// 1 kHz each for 10 s, with notes played through it, drained at the
+// playhead timer's cadence: nothing is lost, the take commits, and each
+// lane holds at most a point a tick (same-tick last wins). Then the UI
+// stalls (no drain) under the flood: the ring fills with moves, but the
+// slots kept for notes take every note played meanwhile, and the loss is
+// reported.
+void MainWindow::checkRecordingFlood()
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    const int track = session->view->selectedTrack();
+    check(midi.setRoute(0x15, 21), "flood: LFOS could not be routed");
+    const uint64_t tpb = session->timeline->ticksPerBeat;
+    const bool loopWas = m_loopAction->isChecked();
+    m_loopAction->setChecked(false); // one segment, so the point bound is the span's ticks
+    session->view->setEditCursorTick(tpb * 4);
+    const auto countNew = [&](const std::vector<DocNote> &before) {
+        int n = 0;
+        for (const DocNote &note : doc.notesForTrack(track)) {
+            const bool old = std::any_of(before.begin(), before.end(), [&](const DocNote &b) {
+                return b.tick == note.tick && b.key == note.key && b.duration == note.duration;
+            });
+            n += !old;
+        }
+        return n;
+    };
+    // One millisecond of the flood: each knob moves (a sweep apiece), and
+    // every 100 ms a note on or off on its own key.
+    const auto floodMs = [&](int ms, int *notesOn) {
+        send(0xB0, 7, uint8_t((ms * 3) & 0x7F));
+        send(0xB0, 10, uint8_t((ms * 5 + 40) & 0x7F));
+        send(0xB0, 21, uint8_t((ms * 7 + 80) & 0x7F));
+        if (ms % 100 == 0)
+            send(0x90, uint8_t(36 + (*notesOn % 48)), 100);
+        else if (ms % 100 == 50)
+            send(0x80, uint8_t(36 + ((*notesOn)++ % 48)), 0);
+        pumpMs(1);
+    };
+
+    // Drained every 17 ms, as the playhead timer does.
+    {
+        const std::vector<DocNote> before = doc.notesForTrack(track);
+        const int undoBefore = undo->index();
+        const uint32_t droppedBefore = m_audio.captureDropped();
+        m_recordAction->trigger();
+        pumpMs(20);
+        const uint64_t pStart = m_audio.playheadSamples();
+        int notes = 0;
+        QElapsedTimer frames;
+        qint64 slowestFrameNs = 0;
+        for (int ms = 0; ms < 10000; ms++) {
+            floodMs(ms, &notes);
+            if (ms % 17 == 16) {
+                frames.start();
+                synchronizePlayhead(); // the drain and the ghosts' frame
+                slowestFrameNs = std::max(slowestFrameNs, frames.nsecsElapsed());
+            }
+        }
+        synchronizePlayhead();
+        const uint64_t pEnd = m_audio.playheadSamples();
+        const size_t controls = m_take.controls().size();
+        frames.start();
+        const size_t writes =
+            m_take.toLaneWrites(*session->timeline, pEnd, m_take.segment(), 0).size();
+        const qint64 writesNs = frames.nsecsElapsed();
+        m_stopAction->trigger();
+        check(m_audio.captureDropped() == droppedBefore,
+              "flood: a drained 3 kHz knob flood lost capture events");
+        check(controls == 30000, "flood: the take did not keep every knob move");
+        check(undo->index() == undoBefore + 1 && notes == 100 && countNew(before) == 100,
+              "flood: the flooded take did not commit every note in one step");
+        const uint64_t span = tickOf(pEnd) - tickOf(pStart) + 2;
+        bool bounded = true;
+        for (const uint8_t cc : {uint8_t(0x07), uint8_t(0x0A), uint8_t(0x15)}) {
+            // The take's stretch: the song keeps its points either side.
+            const std::vector<DocLanePoint> all = doc.lanePoints(track, cc);
+            std::vector<DocLanePoint> pts;
+            std::copy_if(all.begin(), all.end(), std::back_inserter(pts),
+                         [&](const DocLanePoint &pt) {
+                             return pt.tick >= tickOf(pStart) && pt.tick <= tickOf(pEnd);
+                         });
+            if (pts.empty() || pts.size() > span) {
+                bounded = false;
+                std::fprintf(stderr, "reccheck:   lane 0x%02X: %zu points over %llu ticks\n", cc,
+                             pts.size(), (unsigned long long)span);
+            }
+        }
+        check(bounded, "flood: a flooded lane holds more than a point a tick");
+        check(writes == 3, "flood: the flooded take is not one write a lane");
+        std::printf("reccheck: flood: %zu moves over %llu ticks; toLaneWrites %.2f ms, slowest "
+                    "drain+preview frame %.2f ms\n",
+                    controls, (unsigned long long)(span - 2), double(writesNs) / 1e6,
+                    double(slowestFrameNs) / 1e6);
+        undo->undo();
+    }
+
+    // The UI stalls for 2 s under the flood: the moves overflow the ring,
+    // the notes don't.
+    {
+        const std::vector<DocNote> before = doc.notesForTrack(track);
+        const int undoBefore = undo->index();
+        const uint32_t droppedBefore = m_audio.captureDropped();
+        m_recordAction->trigger();
+        pumpMs(20);
+        synchronizePlayhead();
+        int notes = 0;
+        for (int ms = 0; ms < 2000; ms++)
+            floodMs(ms, &notes);
+        synchronizePlayhead();
+        pumpMs(20);
+        m_stopAction->trigger();
+        check(m_audio.captureDropped() > droppedBefore,
+              "flood: a stalled UI under the flood did not overflow the ring");
+        check(undo->index() == undoBefore + 1 && notes == 20 && countNew(before) == 20,
+              "flood: notes played while the ring overflowed with moves were lost");
+        check(statusBar()->currentMessage().contains(QStringLiteral("MIDI input was lost")),
+              "flood: the overflow was not reported");
+        undo->undo();
+    }
+
+    m_audio.seek(0);
+    pumpMs(10);
+    midi.setRoute(0x15, MidiRoutes::kNone);
+    m_loopAction->setChecked(loopWas);
 }
 
 int runRecordCheck(const QString &projectRoot, const QString &songLabel)
