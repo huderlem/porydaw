@@ -701,14 +701,9 @@ void AudioEngine::syncLiveRoutes()
     if (packed == m_appliedLiveRoutes)
         return;
     m_appliedLiveRoutes = packed;
-    std::fill(std::begin(m_liveRouteOf), std::end(m_liveRouteOf), uint8_t(0xFF));
-    // The publisher packs a valid MidiRoutes; anything else is skipped, so
-    // a reserved CC never reaches the routed path.
-    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
-        const int cc = int((packed >> (8 * i)) & 0xFF);
-        if (MidiRoutes::assignable(cc) && m_liveRouteOf[cc] == 0xFF)
-            m_liveRouteOf[cc] = MidiRoutes::kLanes[i];
-    }
+    // Skips anything but a valid packing, so a reserved CC never reaches
+    // the routed path.
+    MidiRoutes::unpackLaneTable(packed, m_liveRouteOf);
 }
 
 void AudioEngine::applyMidiInput()

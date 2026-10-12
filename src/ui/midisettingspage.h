@@ -46,6 +46,8 @@ class MidiSettingsPage : public QWidget
     // (a learn started elsewhere shows here too).
     void syncLearn();
     void learnClicked(int lane, bool checked);
+    // The status line's "CC 74 now drives VOL (instead of PAN)."
+    void reportRoute(int lane, int cc, int movedFrom);
     void rebuildPorts();
     // Shows the controls or the no-backend message, whichever applies.
     void syncBackend();

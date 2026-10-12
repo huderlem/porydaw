@@ -479,6 +479,8 @@ class AudioEngine
     std::atomic<int> m_liveModMax{127};
     std::atomic<uint64_t> m_liveRoutes{
         0}; // MidiRoutes::packed(); the defaults from the constructor
+    static_assert(std::atomic<uint64_t>::is_always_lock_free,
+                  "the audio thread reads m_liveRoutes and must never lock");
     std::atomic<bool> m_livePlay{true};
     std::atomic<int> m_liveFixedVelocity{0};
     std::atomic<uint32_t> m_livePanicCmd{0};

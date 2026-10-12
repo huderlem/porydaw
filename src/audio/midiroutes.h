@@ -53,7 +53,11 @@ class MidiRoutes
     bool assign(int lane, int cc, int *movedFrom = nullptr);
 
     uint64_t packed() const;
-    static MidiRoutes fromPacked(uint64_t packed);
+    // The audio thread's decode of packed(): laneOf[cc] is the lane (a
+    // document CC from kLanes) cc drives, 0xFF for none. Allocation-free.
+    // Bytes that aren't an assignable CC, and a CC a lower byte already
+    // took, are skipped, so a malformed word never routes a reserved CC.
+    static void unpackLaneTable(uint64_t packed, uint8_t (&laneOf)[128]);
 
     // Every lane, in kLanes order: "NAME=cc" or "NAME=none".
     QStringList toStrings() const;

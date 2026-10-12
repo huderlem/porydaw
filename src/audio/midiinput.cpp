@@ -535,10 +535,10 @@ void MidiInput::saveRoutes()
         settings.setValue(kRoutesKey, m_routes.toStrings());
 }
 
-bool MidiInput::setRoute(int lane, int cc)
+bool MidiInput::setRoute(int lane, int cc, int *movedFrom)
 {
     MidiRoutes routes = m_routes;
-    if (!routes.assign(lane, cc))
+    if (!routes.assign(lane, cc, movedFrom))
         return false;
     if (routes != m_routes) {
         m_routes = routes;
@@ -558,11 +558,15 @@ void MidiInput::startLearn(int lane, int timeoutMs)
         emit learnCancelled(was, /*timedOut=*/false);
     }
     m_learnLane = lane;
-    // Emptied before arming, so nothing from an earlier learn is taken.
-    m_learnSlot.store(-1, std::memory_order_relaxed);
-    m_learnArmed.store(true, std::memory_order_release);
+    if (++m_learnGen == 0) // 0 is "disarmed"
+        m_learnGen = 1;
+    // Emptied before arming; a late CC from an earlier learn that still gets
+    // in carries that learn's generation and is dropped by the poll.
+    m_learnSlot.store(0, std::memory_order_relaxed);
+    m_learnArmedGen.store(m_learnGen, std::memory_order_release);
     m_learnPoll->start();
     m_learnTimeout->start(std::max(timeoutMs, 1));
+    emit learnStarted(lane);
 }
 
 void MidiInput::cancelLearn()
@@ -576,8 +580,8 @@ void MidiInput::cancelLearn()
 
 void MidiInput::stopLearn()
 {
-    m_learnArmed.store(false, std::memory_order_release);
-    m_learnSlot.store(-1, std::memory_order_relaxed);
+    m_learnArmedGen.store(0, std::memory_order_release);
+    m_learnSlot.store(0, std::memory_order_relaxed);
     m_learnLane = MidiRoutes::kNone;
     m_learnPoll->stop();
     m_learnTimeout->stop();
@@ -587,9 +591,10 @@ void MidiInput::pollLearn()
 {
     if (m_learnLane == MidiRoutes::kNone)
         return;
-    const int cc = m_learnSlot.exchange(-1, std::memory_order_acq_rel);
-    if (cc < 0)
-        return;
+    const uint64_t taken = m_learnSlot.exchange(0, std::memory_order_acq_rel);
+    if (taken == 0 || uint32_t(taken >> 8) != m_learnGen)
+        return; // empty, or a straggler from an earlier learn (see m_learnSlot)
+    const int cc = int(taken & 0x7F);
     const int lane = m_learnLane;
     stopLearn();
     MidiRoutes routes = m_routes;
@@ -746,10 +751,12 @@ void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrival
     // to arrive) and never reaches live play, so the knob being learned
     // doesn't move the song. The tap below still sees it.
     bool swallow = false;
-    if (m_learnArmed.load(std::memory_order_acquire) && bytes && size >= 3 &&
-        (bytes[0] & 0xF0) == 0xB0 && MidiRoutes::assignable(bytes[1] & 0x7F)) {
-        int empty = -1;
-        m_learnSlot.compare_exchange_strong(empty, bytes[1] & 0x7F, std::memory_order_acq_rel);
+    const uint32_t learnGen = m_learnArmedGen.load(std::memory_order_acquire);
+    if (learnGen != 0 && bytes && size >= 3 && (bytes[0] & 0xF0) == 0xB0 &&
+        MidiRoutes::assignable(bytes[1] & 0x7F)) {
+        uint64_t empty = 0;
+        m_learnSlot.compare_exchange_strong(empty, uint64_t(learnGen) << 8 | (bytes[1] & 0x7F),
+                                            std::memory_order_acq_rel);
         swallow = true;
     }
     // Live play first: the script tap's lock and queued hop never delay

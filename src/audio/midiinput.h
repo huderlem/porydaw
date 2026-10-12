@@ -204,18 +204,21 @@ class MidiInput : public QObject
     void setLatencyMs(int ms);
     // Which CC drives which lane (midi/routes, MidiRoutes' defaults when
     // unset). setRoute moves a CC already on another lane (that lane goes to
-    // none) and is false, changing nothing, for a lane that isn't routable
-    // or a CC that isn't assignable (MidiRoutes::assignable).
+    // none, and *movedFrom names it; kNone when nothing moved) and is false,
+    // changing nothing, for a lane that isn't routable or a CC that isn't
+    // assignable (MidiRoutes::assignable).
     const MidiRoutes &routes() const { return m_routes; }
-    bool setRoute(int lane, int cc);
+    bool setRoute(int lane, int cc, int *movedFrom = nullptr);
 
     // MIDI Learn (docs/midi-controls/PLAN.md J1): the next assignable CC any
     // port sends is routed to lane (a CC that drove another lane moves).
     // While armed, every assignable CC is kept from live play, so turning
     // the knob doesn't change the song; the script tap still sees it. The
-    // MIDI threads fill a one-message slot that a UI timer polls; the result
-    // arrives as learnFinished, or learnCancelled when cancelLearn() is
-    // called, another lane starts learning, or timeoutMs passes.
+    // MIDI threads fill a one-message slot that a UI timer polls. Every
+    // start is announced (learnStarted, so a learn begun elsewhere shows on
+    // the Settings page); the result arrives as learnFinished, or
+    // learnCancelled when cancelLearn() is called, another lane starts
+    // learning, or timeoutMs passes.
     static constexpr int kLearnTimeoutMs = 10000;
     static constexpr int kLearnPollMs = 15;
     void startLearn(int lane, int timeoutMs = kLearnTimeoutMs);
@@ -286,6 +289,8 @@ class MidiInput : public QObject
     // The script tap has messages (UI thread; at most one hop in flight).
     void tapReady();
     void settingsChanged();
+    // Learn for lane is armed (after any learn it replaced was cancelled).
+    void learnStarted(int lane);
     // Learn routed cc to lane; movedFrom is the lane cc drove before, or
     // MidiRoutes::kNone. settingsChanged() has already been emitted.
     void learnFinished(int lane, int cc, int movedFrom);
@@ -358,11 +363,19 @@ class MidiInput : public QObject
     int m_latencyMs = kLatencyAuto;
     MidiRoutes m_routes;
 
-    // Learn: armed (UI writes, MIDI threads read) and the first assignable
-    // CC to arrive while armed (any producer CASes it in from empty, -1; the
-    // UI thread takes it).
-    std::atomic<bool> m_learnArmed{false};
-    std::atomic<int> m_learnSlot{-1};
+    // Learn: the armed learn's generation, 0 when disarmed (UI writes, MIDI
+    // threads read), and the first assignable CC to arrive while armed,
+    // packed as generation << 8 | cc (any producer CASes it in from empty,
+    // 0; the UI thread takes it). The generation tags the slot because a
+    // MIDI thread can read the generation just before a disarm and CAS in
+    // after the UI cleared the slot: the poll drops a value whose generation
+    // isn't the current learn's, so it can never land on a later learn.
+    std::atomic<uint32_t> m_learnArmedGen{0};
+    std::atomic<uint64_t> m_learnSlot{0};
+    static_assert(std::atomic<uint32_t>::is_always_lock_free &&
+                      std::atomic<uint64_t>::is_always_lock_free,
+                  "the MIDI threads touch Learn's atomics and must never lock");
+    uint32_t m_learnGen = 0; // the last generation handed out (UI thread)
     int m_learnLane = MidiRoutes::kNone;
     QTimer *m_learnPoll = nullptr;
     QTimer *m_learnTimeout = nullptr;

@@ -1,6 +1,7 @@
 #include "midiroutes.h"
 
 #include <algorithm>
+#include <iterator>
 
 namespace {
 
@@ -89,17 +90,14 @@ uint64_t MidiRoutes::packed() const
     return word;
 }
 
-MidiRoutes MidiRoutes::fromPacked(uint64_t packed)
+void MidiRoutes::unpackLaneTable(uint64_t packed, uint8_t (&laneOf)[128])
 {
-    MidiRoutes routes;
-    for (int i = 0; i < kLaneCount; i++)
-        routes.m_cc[i] = kNone;
+    std::fill(std::begin(laneOf), std::end(laneOf), uint8_t(0xFF));
     for (int i = 0; i < kLaneCount; i++) {
         const int cc = int((packed >> (8 * i)) & 0xFF);
-        if (assignable(cc) && routes.laneFor(cc) == kNone)
-            routes.m_cc[i] = cc;
+        if (assignable(cc) && laneOf[cc] == 0xFF)
+            laneOf[cc] = kLanes[i];
     }
-    return routes;
 }
 
 QStringList MidiRoutes::toStrings() const

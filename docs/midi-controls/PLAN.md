@@ -306,3 +306,95 @@ before the next step, as on `midi-input`.
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--midicheck` passes on build-nomidi, build-off and build-dummy too,
 and all five trees build cleanly.
+
+### Step 1 review fixes (2026-10-12, uncommitted)
+
+**What changed**
+
+- **Spinner stepping never moves a route.** `CcSpinBox` takes a
+  `heldElsewhere` predicate (the page: "another lane holds this CC"), and
+  arrows, PageUp/PageDown and the wheel step over held CCs as they already
+  stepped over reserved ones. `stepEnabled()` follows suit, so an arrow
+  greys out when nothing is free that way. Only a **typed** CC another lane
+  holds moves it, and only when it commits (Enter or focus loss, since
+  keyboard tracking is off). `MidiInput::setRoute` gained a `movedFrom`
+  out-parameter, and the page reports a move on the status line exactly as
+  Learn does ("CC 10 now drives LFOS instead of PAN."). A route change
+  that moves nothing clears a stale report, unless a learn is listening.
+- **The wheel needs focus.** The boxes are `Qt::StrongFocus`, and an
+  unfocused box ignores the wheel, so it passes to the page.
+- **Typed, then an arrow.** `stepBy` starts from the box's displayed text,
+  as `QAbstractSpinBox::stepBy` does, so "50" then Up gives 51 (it used to
+  give the old value + 1). The typed number is **not** committed on its own
+  first (no `interpretText()`): with it, typing PAN's CC10 then Up would move
+  PAN and then step away, which is the stealing-in-passing this fix removes.
+  Qt also emits once, for the stepped value. With nowhere to step, the
+  entry stays pending for Enter. An unfinished entry, such as a reserved CC,
+  doesn't step, as in Qt. "None" is matched by hand, because Qt's line-edit
+  validator checks the special text, not `validate()`.
+- **`MidiInput::learnStarted(lane)`**, emitted by `startLearn` once armed
+  (after any learn it replaced was cancelled). The page's `syncLearn` follows
+  it, so a learn started elsewhere (the step-6 lane menu) shows "Listening…".
+  The status line leaves out "Esc cancels" for such a learn, because the
+  page's Esc filter only cancels its own.
+- **Learn's slot carries a generation.** `m_learnArmed` became
+  `m_learnArmedGen` (`uint32_t`, 0 = disarmed). The slot is a
+  `std::atomic<uint64_t>` holding `generation << 8 | cc`, with 0 for empty.
+  A MIDI thread that read the generation just before a disarm can still CAS
+  in after the UI cleared the slot. `pollLearn` drops any value whose
+  generation isn't the current learn's, so a straggler can never land on a
+  later learn. It costs at most one 15 ms poll's worth of blocked slot. The
+  MIDI threads stay lock-free: both atomics are `static_assert`ed
+  `is_always_lock_free`.
+- **A spontaneous hide (the window minimized) no longer cancels the page's
+  learn.** Closing Settings or switching sections still does.
+- `static_assert(std::atomic<uint64_t>::is_always_lock_free)` next to
+  `AudioEngine::m_liveRoutes`.
+- **One packed decode.** `MidiRoutes::fromPacked` is gone. The new
+  `MidiRoutes::unpackLaneTable(packed, uint8_t (&laneOf)[128])`
+  (allocation-free) is what `AudioEngine::syncLiveRoutes` calls, and the
+  harness tests that function.
+
+**Harness** (`--midicheck`)
+
+- `checkRoutesTable`: the packed form unpacks to exactly `laneFor` for every
+  CC (defaults and a remap). A malformed word (a reserved CC, a repeated CC,
+  CC121, CC0) routes only the first valid lane.
+- `checkControlsPage` now hosts the page in a `QDialog`. Keys go in the way
+  a real press arrives: a ShortcutOverride, ignored until it is claimed,
+  then the KeyPress, sent to the focus widget so that QApplication
+  propagates it up to the dialog. It checks:
+  - stepping up from None skips CC0 and MOD's CC1, and back down skips them
+    again;
+  - VOL stepping 5 past PAN's CC10 leaves PAN alone;
+  - a typed CC10 doesn't apply before Enter, then moves PAN with the exact
+    status text, and the dialog stays open;
+  - typed 50 then Up gives 51, and typed 10 then Up gives 11 with PAN
+    untouched;
+  - the wheel over an unfocused box is ignored and changes nothing, while
+    over a focused box it skips PAN's CC10;
+  - a learn started on `MidiInput` directly shows "Listening…" on its
+    button, without "Esc";
+  - Esc on the Learn button and in a CC box cancels, the override is
+    claimed, and the dialog is not rejected and still visible;
+  - with no learn, Esc closes the dialog;
+  - minimizing keeps the learn, and hiding the page cancels it.
+- Mutation-tested 10 ways, and each failed the expected checks and was
+  restored:
+  - stepping doesn't skip held CCs;
+  - no move report;
+  - the wheel ignores focus;
+  - the typed text is ignored when stepping;
+  - the typed text is committed before the step (`interpretText()`);
+  - no `learnStarted` hookup;
+  - the Esc KeyPress isn't consumed;
+  - the Esc override isn't claimed;
+  - a spontaneous hide cancels;
+  - `unpackLaneTable` doesn't validate.
+- The generation tag on Learn's slot has no harness check, because the race
+  needs a MIDI thread preempted between its load and its CAS. It is
+  covered by reasoning (the comment on `m_learnSlot`).
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--midicheck` passes on build-nomidi, build-off and build-dummy, and
+all five trees build cleanly.

@@ -11,13 +11,17 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <cstdlib>
+#include <functional>
+#include <utility>
 
 namespace {
 
@@ -26,34 +30,65 @@ constexpr int kPortNameRole = Qt::UserRole;
 // A CC number box that never offers a reserved CC (MidiRoutes::assignable):
 // the arrows step over them and typing one doesn't commit. -1 is None.
 // CC120–127 are reserved too, so they're simply past the maximum.
+//
+// Stepping (arrows, PageUp/PageDown, the wheel) also steps over the CCs
+// other lanes hold (heldElsewhere), so passing through a value never moves
+// another lane's route; only a typed CC, once committed, does. The wheel
+// steps only while the box has focus, so scrolling past it changes nothing.
 class CcSpinBox : public QSpinBox
 {
   public:
-    explicit CcSpinBox(QWidget *parent) : QSpinBox(parent)
+    CcSpinBox(std::function<bool(int)> heldElsewhere, QWidget *parent)
+        : QSpinBox(parent)
+        , m_heldElsewhere(std::move(heldElsewhere))
     {
         setRange(MidiRoutes::kNone, 119);
         setSpecialValueText(QCoreApplication::translate("MidiSettingsPage", "None"));
         setPrefix(QStringLiteral("CC "));
         setKeyboardTracking(false);
+        setFocusPolicy(Qt::StrongFocus);
     }
 
     void stepBy(int steps) override
     {
-        const int dir = steps < 0 ? -1 : 1;
-        int v = value();
-        for (int n = std::abs(steps); n > 0; n--) {
-            int next = v + dir;
-            while (next >= minimum() && next <= maximum() && next != MidiRoutes::kNone &&
-                   !MidiRoutes::assignable(next))
-                next += dir;
-            if (next < minimum() || next > maximum())
-                break;
-            v = next;
+        // A typed number not yet committed is where the step starts, as in
+        // QAbstractSpinBox::stepBy, but it isn't committed on its own: typing
+        // another lane's CC and pressing Up doesn't move that lane, and with
+        // nowhere to step the entry stays pending for Enter. An unfinished
+        // entry (a reserved CC) doesn't step, as in Qt.
+        int from = value();
+        if (!startValue(&from)) {
+            setValue(value()); // shows the route that stands
+            return;
         }
-        setValue(v);
+        const int to = stepped(from, steps);
+        if (to != from || from == value())
+            setValue(to);
+    }
+
+    StepEnabled stepEnabled() const override
+    {
+        int from = value();
+        if (isReadOnly() || !startValue(&from))
+            return isReadOnly() ? StepNone : StepUpEnabled | StepDownEnabled;
+        StepEnabled enabled = StepNone;
+        if (stepped(from, 1) != from)
+            enabled |= StepUpEnabled;
+        if (stepped(from, -1) != from)
+            enabled |= StepDownEnabled;
+        return enabled;
     }
 
   protected:
+    void wheelEvent(QWheelEvent *event) override
+    {
+        if (!hasFocus()) {
+            event->ignore(); // the page (or a scroll area) gets it
+            return;
+        }
+        QSpinBox::wheelEvent(event);
+    }
+
     QValidator::State validate(QString &text, int &pos) const override
     {
         const QValidator::State state = QSpinBox::validate(text, pos);
@@ -64,6 +99,46 @@ class CcSpinBox : public QSpinBox
         return v == MidiRoutes::kNone || MidiRoutes::assignable(v) ? state
                                                                    : QValidator::Intermediate;
     }
+
+  private:
+    bool offerable(int cc) const
+    {
+        return cc == MidiRoutes::kNone || (MidiRoutes::assignable(cc) && !m_heldElsewhere(cc));
+    }
+
+    // The value the box shows, typed or not; false for an unfinished entry.
+    bool startValue(int *v) const
+    {
+        QString text = lineEdit()->displayText();
+        if (text ==
+            specialValueText()) { // "None" (Qt's line-edit validator checks it, not validate)
+            *v = minimum();
+            return true;
+        }
+        int pos = lineEdit()->cursorPosition();
+        if (validate(text, pos) != QValidator::Acceptable)
+            return false;
+        *v = valueFromText(text);
+        return true;
+    }
+
+    // from, moved |steps| offerable values up or down (as far as there are).
+    int stepped(int from, int steps) const
+    {
+        const int dir = steps < 0 ? -1 : 1;
+        int v = from;
+        for (int n = std::abs(steps); n > 0; n--) {
+            int next = v + dir;
+            while (next >= minimum() && next <= maximum() && !offerable(next))
+                next += dir;
+            if (next < minimum() || next > maximum())
+                break;
+            v = next;
+        }
+        return v;
+    }
+
+    std::function<bool(int)> m_heldElsewhere;
 };
 
 QString laneDescription(int lane)
@@ -189,7 +264,12 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
         const QString name = MidiRoutes::laneName(lane);
         auto *label = new QLabel(name, m_controls);
         label->setToolTip(laneDescription(lane));
-        auto *cc = new CcSpinBox(m_controls);
+        auto *cc = new CcSpinBox(
+            [this, lane](int value) {
+                const int holder = m_midi.routes().laneFor(value);
+                return holder != MidiRoutes::kNone && holder != lane;
+            },
+            m_controls);
         cc->setObjectName(QStringLiteral("settingsMidiRoute%1").arg(name));
         cc->setToolTip(tr("The MIDI control (CC number, any channel) that drives %1: %2 "
                           "None leaves it to the song.")
@@ -208,10 +288,19 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
         m_routeCc[i] = cc;
         m_learn[i] = learn;
         connect(cc, &QSpinBox::valueChanged, this, [this, lane](int value) {
-            // Refused (only a reserved CC set from code): show the route
-            // that stands.
-            if (!m_midi.setRoute(lane, value))
+            // Steps never land on another lane's CC, so only a committed
+            // typed one (Enter, or leaving the box) moves a route; it says
+            // so, as Learn does.
+            int movedFrom = MidiRoutes::kNone;
+            if (!m_midi.setRoute(lane, value, &movedFrom)) {
+                // Refused (only a reserved CC set from code): show the route
+                // that stands.
                 loadPreferences();
+            } else if (movedFrom != MidiRoutes::kNone) {
+                reportRoute(lane, value, movedFrom);
+            } else if (m_midi.learnLane() == MidiRoutes::kNone) {
+                m_learnStatus->clear(); // an earlier report no longer applies
+            }
         });
         connect(learn, &QPushButton::clicked, this,
                 [this, lane](bool checked) { learnClicked(lane, checked); });
@@ -247,15 +336,12 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     connect(m_livePlay, &QCheckBox::toggled, &m_midi, &MidiInput::setLivePlay);
     connect(m_fixedVelocity, &QSpinBox::valueChanged, &m_midi, &MidiInput::setFixedVelocity);
     connect(m_latency, &QSpinBox::valueChanged, &m_midi, &MidiInput::setLatencyMs);
+    // A learn started elsewhere (a lane's menu) shows on the buttons too.
+    connect(&m_midi, &MidiInput::learnStarted, this, &MidiSettingsPage::syncLearn);
     connect(&m_midi, &MidiInput::learnFinished, this, [this](int lane, int cc, int movedFrom) {
         m_startedLearn = false;
         syncLearn();
-        const QString name = MidiRoutes::laneName(lane);
-        m_learnStatus->setText(movedFrom == MidiRoutes::kNone
-                                   ? tr("CC %1 now drives %2.").arg(cc).arg(name)
-                                   : tr("CC %1 now drives %2 instead of %3.")
-                                         .arg(cc)
-                                         .arg(name, MidiRoutes::laneName(movedFrom)));
+        reportRoute(lane, cc, movedFrom);
     });
     connect(&m_midi, &MidiInput::learnCancelled, this, [this](int, bool timedOut) {
         m_startedLearn = false;
@@ -265,6 +351,16 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
                                         : QString());
     });
     syncLearn();
+}
+
+void MidiSettingsPage::reportRoute(int lane, int cc, int movedFrom)
+{
+    const QString name = MidiRoutes::laneName(lane);
+    m_learnStatus->setText(movedFrom == MidiRoutes::kNone
+                               ? tr("CC %1 now drives %2.").arg(cc).arg(name)
+                               : tr("CC %1 now drives %2 instead of %3.")
+                                     .arg(cc)
+                                     .arg(name, MidiRoutes::laneName(movedFrom)));
 }
 
 void MidiSettingsPage::learnClicked(int lane, bool checked)
@@ -290,9 +386,12 @@ void MidiSettingsPage::syncLearn()
         m_learn[i]->setText(on ? tr("Listening…") : tr("Learn"));
     }
     if (learning != MidiRoutes::kNone) {
-        m_learnStatus->setText(tr("Move the knob, slider or button that should drive %1. Esc "
-                                  "cancels.")
-                                   .arg(MidiRoutes::laneName(learning)));
+        // Esc only cancels a learn this page started (see eventFilter).
+        m_learnStatus->setText(
+            (m_startedLearn ? tr("Move the knob, slider or button that should drive %1. Esc "
+                                 "cancels.")
+                            : tr("Move the knob, slider or button that should drive %1."))
+                .arg(MidiRoutes::laneName(learning)));
     } else {
         qApp->removeEventFilter(this);
     }
@@ -320,8 +419,8 @@ bool MidiSettingsPage::eventFilter(QObject *watched, QEvent *event)
 void MidiSettingsPage::hideEvent(QHideEvent *event)
 {
     // Closing the Settings window mid-learn: the knob shouldn't be learned
-    // unseen later.
-    if (m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone)
+    // unseen later. A spontaneous hide (the window minimized) isn't closing.
+    if (!event->spontaneous() && m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone)
         m_midi.cancelLearn();
     QWidget::hideEvent(event);
 }

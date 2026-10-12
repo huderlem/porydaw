@@ -1,6 +1,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QDialog>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QImage>
@@ -15,6 +16,8 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
+#include <QVBoxLayout>
+#include <QWheelEvent>
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -65,8 +68,9 @@
 // reserved-CC refusal, move-on-conflict, both encodings), its persistence
 // in midi/routes, Learn through the injector (first assignable CC, swallowed
 // from live play while armed, cancel, a shortened timeout), the Settings
-// page's Controls table (spinners skip reserved CCs, Learn, second click and
-// Esc cancel), and MOD following its routed CC live and into the capture
+// page's Controls table (spinners skip reserved and held CCs, a typed held
+// CC moves at Enter, the wheel needs focus, Learn, a learn started elsewhere
+// shows, second click and Esc cancel inside a dialog that stays open), and MOD following its routed CC live and into the capture
 // ring while the CC it left does nothing.
 
 namespace {
@@ -366,10 +370,33 @@ void checkRoutesTable()
     check(routes.assign(0x0A, MidiRoutes::kNone) && routes.ccFor(0x0A) == MidiRoutes::kNone,
           "routes: a lane could not be set to none");
 
-    // Both encodings round-trip.
-    check(MidiRoutes::fromPacked(routes.packed()) == routes &&
-              MidiRoutes::fromPacked(defaults.packed()) == defaults,
-          "routes: the packed form does not round-trip");
+    // The packed form decodes, through the audio thread's own unpacker, to
+    // exactly laneFor; a malformed word (reserved CCs, a CC twice) routes
+    // nothing reserved and keeps the first lane naming a CC.
+    const auto unpacksTo = [](uint64_t packed, const MidiRoutes &expect) {
+        uint8_t laneOf[128];
+        std::fill(std::begin(laneOf), std::end(laneOf), uint8_t(0x42));
+        MidiRoutes::unpackLaneTable(packed, laneOf);
+        bool ok = true;
+        for (int cc = 0; cc < 128; cc++) {
+            const int lane = expect.laneFor(cc);
+            ok &= laneOf[cc] == (lane == MidiRoutes::kNone ? 0xFF : lane);
+        }
+        return ok;
+    };
+    check(unpacksTo(routes.packed(), routes) && unpacksTo(defaults.packed(), defaults),
+          "routes: the packed form does not unpack to the same lanes");
+    {
+        // MOD=CC64 (reserved), VOL=CC20, PAN=CC20 again, BENDR=CC121,
+        // LFOS=CC0; the unused top bytes are 0xFF.
+        const uint64_t malformed = 0xFFFFFF0079141440ull;
+        MidiRoutes expect;
+        for (int lane : MidiRoutes::kLanes)
+            expect.assign(lane, MidiRoutes::kNone);
+        expect.assign(0x07, 20);
+        check(unpacksTo(malformed, expect),
+              "routes: a malformed packed word routed a reserved or repeated CC");
+    }
     check(MidiRoutes::fromStrings(routes.toStrings()) == routes &&
               MidiRoutes::fromStrings(defaults.toStrings()) == defaults,
           "routes: the settings form does not round-trip");
@@ -662,11 +689,57 @@ void checkSettingsPage()
 }
 
 // The Settings page's Controls table (docs/midi-controls/PLAN.md step 1).
+// Keys as a real press arrives: the shortcut map's ShortcutOverride to the
+// focus widget first (ignored until someone claims it), then the KeyPress,
+// which QApplication propagates up the parents to the dialog. Returns
+// whether the override was claimed.
+bool pressKey(QWidget *window, int key, const QString &text = QString())
+{
+    QWidget *focus = QApplication::focusWidget();
+    if (!focus || focus->window() != window)
+        focus = window;
+    QKeyEvent override(QEvent::ShortcutOverride, key, Qt::NoModifier, text);
+    override.ignore();
+    QApplication::sendEvent(focus, &override);
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, text);
+    QApplication::sendEvent(focus, &press);
+    QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier, text);
+    QApplication::sendEvent(focus, &release);
+    return override.isAccepted();
+}
+
+// Replaces what box shows with digits, typed (not committed: the boxes
+// commit on Enter or focus loss).
+void typeInto(QSpinBox *box, const QString &digits)
+{
+    box->setFocus();
+    box->selectAll(); // the number, not the "CC " prefix
+    for (const QChar c : digits)
+        pressKey(box->window(), Qt::Key_0 + (c.unicode() - '0'), QString(c));
+}
+
+bool wheelUp(QSpinBox *box)
+{
+    const QPointF at(box->width() / 2.0, box->height() / 2.0);
+    QWheelEvent wheel(at, box->mapToGlobal(at), QPoint(), QPoint(0, 120), Qt::NoButton,
+                      Qt::NoModifier, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(box, &wheel);
+    return wheel.isAccepted();
+}
+
 void checkControlsPage()
 {
     MidiInput midi;
-    MidiSettingsPage page(midi, nullptr, /*showWithoutBackend=*/true);
-    page.show();
+    // In a dialog, as in Settings, so Esc has a dialog to close.
+    QDialog dialog;
+    auto *pagePtr = new MidiSettingsPage(midi, &dialog, /*showWithoutBackend=*/true);
+    MidiSettingsPage &page = *pagePtr;
+    auto *dialogLayout = new QVBoxLayout(&dialog);
+    dialogLayout->addWidget(pagePtr);
+    int rejected = 0;
+    QObject::connect(&dialog, &QDialog::rejected, &dialog, [&rejected] { ++rejected; });
+    dialog.show();
+    dialog.activateWindow();
     QApplication::processEvents();
     std::array<QSpinBox *, MidiRoutes::kLaneCount> cc{};
     std::array<QPushButton *, MidiRoutes::kLaneCount> learn{};
@@ -696,12 +769,20 @@ void checkControlsPage()
     cc[Lfos]->stepBy(1);
     check(cc[Lfos]->value() == 65 && midi.routes().ccFor(0x15) == 65,
           "controls: stepping up from CC63 did not skip the sustain pedal");
+    // ...and over the CCs other lanes hold, so stepping never moves a route.
     cc[Lfos]->setValue(MidiRoutes::kNone);
     cc[Lfos]->stepBy(1);
-    check(cc[Lfos]->value() == 1 && midi.routes().ccFor(0x15) == 1 &&
-              midi.routes().ccFor(0x01) == MidiRoutes::kNone &&
-              cc[Mod]->value() == MidiRoutes::kNone,
-          "controls: stepping up from None did not skip CC0, or did not move CC1 off MOD");
+    check(cc[Lfos]->value() == 2 && midi.routes().ccFor(0x15) == 2 &&
+              midi.routes().ccFor(0x01) == 1 && cc[Mod]->value() == 1,
+          "controls: stepping up from None did not skip CC0 and MOD's CC1");
+    cc[Lfos]->stepBy(-1);
+    check(cc[Lfos]->value() == MidiRoutes::kNone && midi.routes().ccFor(0x01) == 1,
+          "controls: stepping down from CC2 did not skip MOD's CC1 back to None");
+    cc[Vol]->stepBy(5); // 8, 9, (PAN's 10), 11, 12, 13
+    check(cc[Vol]->value() == 13 && midi.routes().ccFor(0x07) == 13 &&
+              midi.routes().ccFor(0x0A) == 10 && cc[Pan]->value() == 10,
+          "controls: stepping VOL past PAN's CC10 moved PAN");
+    cc[Vol]->setValue(7);
     cc[Lfos]->setValue(119);
     cc[Lfos]->stepBy(1);
     check(cc[Lfos]->value() == 119 && cc[Lfos]->maximum() == 119,
@@ -720,12 +801,52 @@ void checkControlsPage()
     check(midi.routes().ccFor(0x07) == 7 && cc[Vol]->value() == 7,
           "controls: a reserved CC set on the spinner was not refused");
     cc[Lfos]->setValue(MidiRoutes::kNone);
-    cc[Mod]->setValue(1);
+
+    // A typed CC another lane holds applies at Enter, moves that lane, and
+    // says so the way Learn does.
+    typeInto(cc[Lfos], QStringLiteral("10"));
+    check(cc[Lfos]->hasFocus() && midi.routes().ccFor(0x15) == MidiRoutes::kNone &&
+              midi.routes().ccFor(0x0A) == 10,
+          "controls: a typed CC applied before Enter");
+    pressKey(&dialog, Qt::Key_Return);
+    check(cc[Lfos]->value() == 10 && midi.routes().ccFor(0x15) == 10 &&
+              midi.routes().ccFor(0x0A) == MidiRoutes::kNone &&
+              cc[Pan]->value() == MidiRoutes::kNone && rejected == 0 && dialog.isVisible() &&
+              status->text() == QStringLiteral("CC 10 now drives LFOS instead of PAN."),
+          "controls: a typed held CC did not move at Enter and say so");
+    cc[Lfos]->setValue(MidiRoutes::kNone);
+    cc[Pan]->setValue(10);
+    check(status->text().isEmpty(), "controls: a later route change left a stale status line");
+    // Typed, then an arrow: the step starts from the typed number, as in Qt
+    // (50, Up: 51), and the typed number isn't committed on its own (PAN's
+    // 10, Up: 11 with PAN untouched).
+    typeInto(cc[Lfos], QStringLiteral("50"));
+    pressKey(&dialog, Qt::Key_Up);
+    check(cc[Lfos]->value() == 51 && midi.routes().ccFor(0x15) == 51,
+          "controls: typing 50 then Up did not step to 51");
+    typeInto(cc[Lfos], QStringLiteral("10"));
+    pressKey(&dialog, Qt::Key_Up);
+    check(cc[Lfos]->value() == 11 && midi.routes().ccFor(0x15) == 11 &&
+              midi.routes().ccFor(0x0A) == 10 && status->text().isEmpty(),
+          "controls: typing PAN's CC10 then Up moved PAN, or did not step to 11");
+    // The wheel steps only a focused box (and skips held CCs too).
+    cc[Lfos]->setValue(9);
+    learn[Lfos]->setFocus();
+    const bool unfocusedTaken = wheelUp(cc[Lfos]);
+    check(!cc[Lfos]->hasFocus() && !unfocusedTaken && cc[Lfos]->value() == 9 &&
+              midi.routes().ccFor(0x15) == 9,
+          "controls: the wheel stepped an unfocused CC box");
+    cc[Lfos]->setFocus();
+    wheelUp(cc[Lfos]);
+    check(cc[Lfos]->value() == 11 && midi.routes().ccFor(0x0A) == 10,
+          "controls: the wheel over a focused box did not step past PAN's CC10");
+    cc[Lfos]->setValue(MidiRoutes::kNone);
+    check(midi.routes() == MidiRoutes(), "controls: the stepping checks left a route behind");
 
     // Learn: the button listens, the injected knob lands in its row.
     learn[Pan]->click();
     check(midi.learnLane() == 0x0A && learn[Pan]->isChecked() && !learn[Vol]->isChecked() &&
-              !status->text().isEmpty(),
+              status->text().contains(QStringLiteral("Esc")),
           "controls: Learn did not arm PAN and say so");
     midi.injectForTest({0xB0, 7, 99}); // VOL's knob: moves to PAN
     wait(MidiInput::kLearnPollMs * 4);
@@ -738,18 +859,45 @@ void checkControlsPage()
     learn[BendR]->click();
     check(midi.learnLane() == MidiRoutes::kNone && !learn[BendR]->isChecked(),
           "controls: a second click did not cancel Learn");
-    // Esc cancels wherever the focus is in the window, and leaves it open.
+    // A learn started elsewhere (a lane's menu) shows on its button.
+    midi.startLearn(0x14);
+    check(learn[BendR]->isChecked() && learn[BendR]->text() == QStringLiteral("Listening…") &&
+              learn[Pan]->text() == QStringLiteral("Learn") && !status->text().isEmpty() &&
+              !status->text().contains(QStringLiteral("Esc")),
+          "controls: a learn started outside the page did not show on its button");
+    midi.cancelLearn();
+    check(!learn[BendR]->isChecked() && learn[BendR]->text() == QStringLiteral("Learn"),
+          "controls: a learn cancelled outside the page still showed Listening");
+    // Esc, as a real key press, cancels wherever the focus is in the window
+    // and leaves the dialog open.
     learn[Lfos]->click();
     learn[Lfos]->setFocus();
-    QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
-    QApplication::sendEvent(cc[Vol], &esc);
-    check(midi.learnLane() == MidiRoutes::kNone && !learn[Lfos]->isChecked(),
-          "controls: Esc did not cancel Learn");
+    const bool escClaimed = pressKey(&dialog, Qt::Key_Escape);
+    check(escClaimed && midi.learnLane() == MidiRoutes::kNone && !learn[Lfos]->isChecked() &&
+              rejected == 0 && dialog.isVisible(),
+          "controls: Esc on the Learn button did not cancel Learn, or closed the dialog");
+    learn[Lfos]->click();
+    cc[Vol]->setFocus();
+    pressKey(&dialog, Qt::Key_Escape);
+    check(midi.learnLane() == MidiRoutes::kNone && rejected == 0 && dialog.isVisible(),
+          "controls: Esc in a CC box did not cancel Learn, or closed the dialog");
     midi.injectForTest({0xB0, 90, 1});
     wait(MidiInput::kLearnPollMs * 4);
     check(midi.routes().laneFor(90) == MidiRoutes::kNone, "controls: a cancelled Learn learned");
-    // Hiding the page (closing Settings) cancels its learn.
+    // With no learn, Esc closes the dialog as usual.
+    pressKey(&dialog, Qt::Key_Escape);
+    check(rejected == 1 && !dialog.isVisible(), "controls: Esc without a learn kept the dialog");
+    dialog.show();
+    dialog.activateWindow();
+    QApplication::processEvents();
+    // Minimizing the window (a spontaneous hide) keeps the learn; hiding the
+    // page (closing Settings, another section) cancels it.
     learn[Lfos]->click();
+    dialog.showMinimized();
+    QApplication::processEvents();
+    check(midi.learnLane() == 0x15, "controls: minimizing the window cancelled Learn");
+    dialog.showNormal();
+    QApplication::processEvents();
     page.hide();
     check(midi.learnLane() == MidiRoutes::kNone, "controls: hiding the page left Learn armed");
     drain(midi.ring());
