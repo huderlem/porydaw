@@ -161,8 +161,16 @@ class AudioEngine
     // old track and re-chases the lanes (and voice) the keyboard moved there
     // at the playhead (TimelinePlayer::chaseTouched), so a parked wheel or
     // knob doesn't stick to a track you've left.
-    void setLiveTarget(int track) { m_liveTarget.store(track); }
+    void setLiveTarget(int track);
     int liveTarget() const { return m_liveTarget.load(); }
+    // UI thread: the recording take `generation` follows its track from
+    // engine index `from` to `to` (another track added, deleted or moved
+    // before it), ahead of the rebuilt timeline's updateTimeline. That
+    // swap moves the live target and the take's latch to the new index with
+    // it, keeping the held lanes held, rather than a target change handing
+    // the take's track back to the song. Until then setLiveTarget(to) keeps
+    // `from`. Ignored when the take hasn't begun on the audio side.
+    void followLiveTrack(uint32_t generation, int from, int to);
     // The mod wheel's full travel (0..127) maps onto 0..modMax: the target
     // track's MOD lane range as drawn, so the wheel covers what the lane
     // shows (MOD defaults to 0..16).
@@ -257,6 +265,8 @@ class AudioEngine
     void pumpForTest(uint32_t frames);
     // Harness only: the main engine's state, read with the device held.
     const M4AEngine *engineForTest() const { return m_engine.get(); }
+    // With the device held: the recording latch as the callback left it.
+    LaneLatch liveLatchForTest() const { return m_liveLatch; }
 
     // Hot: audition a voicegroup entry by program number (SPEC §6.1 voicegroup
     // browser). Runs on a second engine instance (SPEC §3) so the program
@@ -433,7 +443,8 @@ class AudioEngine
     // Audio thread (or a cold op with the device stopped): recording capture.
     bool capturing() const;
     void syncCapture();
-    void pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key = 0, uint8_t velocity = 0,
+    // False when nothing was captured: no take, or the ring had no room.
+    bool pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key = 0, uint8_t velocity = 0,
                      uint64_t resumePos = 0, int16_t value = 0, uint8_t flags = 0);
     // The player jumped from `from` to `to`: the take's segment ends.
     void captureBoundary(uint64_t from, uint64_t to);
@@ -588,12 +599,21 @@ class AudioEngine
     // a lane the take already moved (m_captureMoved), as only there is the
     // reset recorded. It is always a subset of m_liveTouched, on m_liveTrack.
     // It ends (the lanes chased back to the song) at a loop wrap, inside
-    // render, before the loop start's events; at a seek; at the take's end
-    // (punch-out, a disarm, a new arm, Stop, Pause); at a target change
-    // (live play off included); at a panic or a tab's release; and with the
-    // song (load, unload). A document edit's full chase keeps it: the lanes
-    // get the keyboard's values back (reapplyLiveLatch).
+    // render, to the song's loop-end state before the loop start's events;
+    // at a seek; at the take's end (punch-out, a disarm, a new arm, Stop,
+    // Pause); at a target change (live play off included); at a tab's
+    // release; and with the song (load, unload). A panic doesn't end it. A
+    // document edit's full chase keeps it: the lanes get the keyboard's
+    // values back (reapplyLiveLatch), on the take's track's new index when
+    // the edit moved it (followLiveTrack).
     LaneLatch m_liveLatch;
+    // A take's track move waiting for updateTimeline (followLiveTrack); UI
+    // thread only, so read by cold operations alone. Generation 0: none.
+    struct LiveFollow {
+        uint32_t generation = 0;
+        int from = -1, to = -1;
+    };
+    LiveFollow m_liveFollow;
     // The lanes this arm's take moved (an unflagged move captured), on any
     // pass, sounding or not, as RecordingTake's own per-take mask: cleared at
     // the Begin.

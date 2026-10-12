@@ -60,7 +60,7 @@ the take.
 | # | Call | Proposal |
 |---|---|---|
 | J1 | What Learn listens for | The first routable CC to arrive. It ignores CC64, CC120–127 and bank select (CC0/32), and CC38/CC6 (data entry, which RPN bend-range messages use). Learning a CC that already drives another lane **moves** it there; the old row goes to None. Esc or a second click cancels. Learn times out after 10 s. |
-| J2 | Latch scope | Latch applies only while a take is armed **and** the control sounds (live play is on). With live play off, nothing of the knob is heard, so the song plays on untouched. The latch clears at a segment boundary (loop wrap or seek), and the lane is chased back to the song. On pass 2, before you touch the knob again, you hear the song's original events, not pass 1's take, because the timeline can't be rebuilt mid-take. This is a known mismatch with what gets committed there. |
+| J2 | Latch scope | Latch applies only while a take is armed **and** the control sounds (live play is on). With live play off, nothing of the knob is heard, so the song plays on untouched. The latch clears at a segment boundary (loop wrap or seek), and the lane is chased back to the song: at a wrap, to the song's value carried from the loop end (what plain playback holds there, and what the take's restore point at the loop end commits), the loop start's own events then playing; at a seek, to the song at the new position. On pass 2, before you touch the knob again, you hear the song's original events, not pass 1's take, because the timeline can't be rebuilt mid-take. This is a known mismatch with what gets committed there. |
 | J3 | Program numbers | The data byte is used as the voice slot directly (0–127, no bank select). A program change past the voicegroup's last voice is ignored and shown once in the status bar. |
 | J4 | Voice writes at tick 0 | A take that changes voice at tick 0 replaces the tick-0 program change; it never deletes it. The track's keep-alive seed (`appendTrackKeepAliveOps`) still holds. Restore-after-take puts the song's voice back at the segment end, just as it does for other lanes. |
 | J5 | CC121 (reset all controllers) | It resets every routed lane to the engine's track-init default (the table in `TimelinePlayer::chase`) and leaves the voice alone. In a take, that reset is recorded as moves only on lanes the take already moved (bend and MOD included); untouched lanes keep the song's automation — refined 2026-10-12 after step 3 review. |
@@ -1017,14 +1017,15 @@ ASAN PASS.
   test per event: `dispatchDue` nulls an empty one on entry. A held event is
   skipped after the loop-end note-on rule and before the keyed-on
   bookkeeping (it is never a note).
-- **The wrap ends the latch inside the player.** After the wrap has moved
-  the position and cursor to the loop start, and before the loop start's
-  events dispatch, `dispatchDue` calls `chaseTouched` for the latched lanes
-  at the loop start (events at or before it: the song's value there, never
-  the loop end's), then clears the latch in place. So no loop-start event is
-  skipped on a lane being released, and pass 2 plays the song's own events
-  (J2). `chaseTouched` and the loop start's own events can both apply an
-  event that sits exactly on the loop start; that is the same value twice.
+- **The wrap ends the latch inside the player.** Once the loop end's
+  events have dispatched, and before the position moves to the loop start,
+  `dispatchDue` calls `chaseTouched` for the latched lanes at the loop end
+  (events at or before it, the loop end's own included). That is the
+  song's carried loop-end value, what an unlatched pass takes across the
+  GOTO, and what the take's restore point at the loop end commits. It then
+  clears the latch in place, so the loop start's own events all play on top,
+  and pass 2 plays the song's own events (J2). (As first landed it chased at
+  the loop start; corrected in the step 4 review fixes.)
 - **Every other path passes no latch**: `wavexport.cpp`, the render CLI
   (`tools/porydaw_render_cli.cpp`), loopcheck, polycheck, xcmdcheck. Only
   `AudioEngine::process` (render) and `settleLoopWrap` (settleWrap) pass
@@ -1088,13 +1089,15 @@ ASAN PASS.
   Turning live play on and moving the lane again latches it. A CC121 that
   sounds latches it too, because the take moved it.
 - **The keyboard's CC120/123 (all notes off) don't end the latch.** They
-  concern notes; the app's panic does end it.
+  concern notes; the app's panic does end it. *(Changed in the step 4
+  review fixes: mid-take, the panic and a port closing don't either.)*
 - **A document edit keeps the latch** unless it carries a raced seek. A
   track move or delete mid-take: `updateTimeline` reapplies on the old
   index, and the next callback's target change (`publishLiveTarget` follows
   the take to the new index) hands that index back to the song by
   `chaseTouched`. At most one callback of the knob's value on whichever
-  track now has the old index. Not worth more machinery.
+  track now has the old index. Not worth more machinery. *(Fixed in the
+  step 4 review fixes: the take's track lost its latch there.)*
 - **Stop's own release chases at the stop position**, before the rewind.
   In the app a take's end is usually chased twice over anyway: the commit's
   edit runs a full chase (its reapply drops the latch, since the arm is
@@ -1111,9 +1114,10 @@ ASAN PASS.
     hold exactly those events (VOL 90/80, PAN 100, bend +1024, voice 9),
     while MOD, track 1's VOL and track 0's note play;
   - the loop end's VOL 11 is held too;
-  - one tick past the wrap the latch is gone and its lanes are the loop
-    start's (VOL 90 from the loop start's event, PAN 20 from before it,
-    bend centred, voice 5), never the loop end's;
+  - one tick past the wrap the latch is gone and its lanes equal an
+    unlatched run's at the same point: the loop end's state carried (PAN
+    100, bend +1024, voice 9), then the loop start's VOL 90; never the
+    song's at the loop start (PAN 20, bend centred, voice 5) (review fixes);
   - pass 2 plays the song;
   - a latch on track 1 leaves track 0 alone.
 - `--reccheck` `checkRecordingLatch(a, b)`, after the routed-lanes block, on
@@ -1128,16 +1132,16 @@ ASAN PASS.
   - **With no take**, the knob lasts until the song's next event, and the
     event wins.
   - **With a private arm** (no take, so no commit edit chases on its own):
-    a disarm, Pause, a seek, the app's panic and live play going off each
-    end the latch. The lanes are chased to the song at the playhead
+    a disarm, Pause, Stop, a seek and live play going off each end the
+    latch; the app's panic and a port closing don't (review fixes). The lanes are chased to the song at the playhead
     (immediately, not at the next event), and later song events play.
   - **Live play off in a take**: the knob isn't heard, t1's VOL plays, and
     the move is recorded.
   - **Loop**: a VOL point before the loop start, one early in the loop and
     a PAN point on the loop start. VOL and PAN are moved just before the
-    loop end. Right after the wrap they are the loop start's values
-    (asserted to differ from the loop end's); the unheld bend carries across
-    as ever; pass 2 plays the in-loop VOL point.
+    loop end. Right after the wrap they equal a plain play of the same
+    stretch (the loop end's VOL, the loop start's PAN; review fixes); the
+    unheld bend carries across as ever; pass 2 plays the in-loop VOL point.
 - The routed-lanes block's 1 ms workaround is gone: each knob's live value
   is read 40 ms after the move, held by the latch.
 - Mutation-tested 14 ways. Each failed the expected checks and was restored
@@ -1194,10 +1198,13 @@ ASAN PASS.
 4. Undo. Play without recording, turning the knob before the stretch: as
    before step 4, the song's next volume point takes over from the knob.
 5. Loop: set a short loop over the automated stretch and record. Turn the
-   knob on pass 1. At the wrap the track jumps back to the song's volume at
-   the loop start, and pass 2 plays the song's points again until you touch
-   the knob again (then it holds again). By design: pass 2 doesn't play
-   pass 1's take back (J2).
+   knob on pass 1. At the wrap the track's volume goes back to the song's:
+   the value it has at the end of the loop carries into pass 2, just as in
+   plain looped playback (then the loop start's own points, if any, play).
+   Pass 2 plays the song's points again until you touch the knob again
+   (then it holds again). By design: pass 2 doesn't play pass 1's take back
+   (J2). After Stop, the take's stretch ends at the loop end on that same
+   value.
 6. Pause mid-take: the take commits, and the track's volume is the song's
    (now including your take) at the pause point. Same with toggling Record
    off while playing (punch-out): playback goes on with the song's own
@@ -1210,7 +1217,137 @@ ASAN PASS.
 9. If your keyboard sends CC121 mid-take, the lanes you already moved stay
    held at their reset values; a lane you never touched (say PAN) resets
    live but then plays the song's next PAN point.
+10. Panic and unplug mid-take: turn the VOL knob before the automated
+    stretch, then use Tools → MIDI: All Notes Off (or unplug the keyboard)
+    before the stretch. The hold stays: the song's volume points still
+    don't pull the track away, and after Stop the stretch plays back as you
+    heard it.
+11. Track insert mid-take: while recording with the knob holding, add a
+    track and drag it above the recording track. The take follows its
+    track, the hold stays on it through its volume points, and the track
+    that now sits in the old row plays its own volume.
 
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (all
 harnesses). `--reccheck`, `--midicheck` and `--primecheck` pass on build-nomidi,
 build-off and build-dummy, and all five trees build cleanly.
+
+### Step 4 review fixes (2026-10-12, uncommitted)
+
+**What changed**
+
+1. **The wrap chases to the loop end** (medium). `dispatchDue`'s wrap
+   branch called `chaseTouched` after moving to the loop start, so a
+   released lane took the song's value there. Plain playback carries each
+   controller's loop-end state into pass 2 (the GOTO touches none), and the
+   take's restore point at the loop end (`LaneWrite::restorePoint`, `<=
+   tickEnd`) commits that same value. The chase now runs after the loop
+   end's events have dispatched and before the position moves (at `m_pos`,
+   the loop end, its own events included). The latch then clears, and the
+   loop start's events play on top. After the wrap, a released lane is
+   where an unlatched pass is, which is also the committed restore value.
+   J2's wording now says so.
+2. **A panic or a port closing mid-take keeps the latch** (medium). The
+   take goes on recording the knobs to its end, so releasing the latch
+   there made what you hear differ from what gets committed. The panic
+   branch in `applyMidiInput` no longer calls `releaseLiveLatch`. Outside
+   a take there is no latch: the catch-all (`!capturing()`) releases
+   anything left, so panic behaves as before. Notes and the pedal are
+   handled as before. A tab's release (`liveReleaseNotes`) still releases,
+   which changes nothing: a tab switch ends the take first.
+   - **Live play off mid-take** (target → −1) still releases the latch, as
+     J2 sanctions: the knob no longer sounds. It is a known mismatch for
+     the rest of the pass. From there to the segment end you hear the
+     song's events, while the commit writes the knob's last value.
+3. **A track move keeps the take's latch** (low).
+   `MainWindow::followTakeTrack` now publishes the move
+   (`AudioEngine::followLiveTrack(generation, old, now)`) before the
+   rebuilt timeline goes in. `updateTimeline` (a cold op, device stopped)
+   consumes it with the timeline swap. When the take `generation` has begun
+   on the audio side and `m_liveTrack` is `old`, it moves `m_liveTrack`,
+   `m_liveTarget` and the latch's track to `now`, keeping the bits and
+   the live values. Then, as for any edit, the full chase gives the old
+   index to whichever track has it now, and `reapplyLiveLatch` re-sends
+   the knobs on the new index. There is no stray callback: the timeline
+   and the index change together. The reapply never writes onto the old
+   index, because the follow is consumed before it.
+   - **Why an explicit publish.** During capture the target is locked to
+     `m_take.track()` (`publishLiveTarget`), so in the app a target change
+     mid-take is either the take's own remap or live play going off. But a
+     harness's private arm, or a stale state, can't be told apart on the
+     audio thread by "capturing" alone. The published follow is keyed to
+     the take's generation and to `from == m_liveTrack`, and is cleared at
+     every `updateTimeline`, `loadSong` and `unloadSong`.
+   - **The ordering guard.** Until the follow is consumed,
+     `setLiveTarget(now)` publishes `old`. So a `publishLiveTarget` that
+     ran between `tracksRemapped` and the rebuild (a selection signal, for
+     instance) can't move the target while the old timeline still has the
+     track at `old`. Two moves before one rebuild compose (`from` stays
+     the first move's origin).
+   - Held keyboard notes are no longer released by a target change at a
+     track move. As for any edit, the rebuild's all-notes-off releases
+     their sound, and the key-ups land on the track's new index.
+4. **Note: the shifted-start window.** A write's `tickBegin` is the first
+   move shifted back by the latency offset and the arrival wait. Song events
+   between that tick and the moment the latch takes hold (tens of ms) are
+   heard live but replaced by the commit. This is inherent to offset
+   stamping, and left as is.
+5. **A dropped move doesn't latch** (low). `pushCapture` returns whether
+   the event went into the ring. `applyLiveBend` and `applyLiveControl` set
+   `m_captureMoved` and the latch bit only when it did. A move the full ring
+   drops is heard and gone, like a move outside a take, so "latched =
+   recorded" holds there too. (A lane already latched by an earlier
+   recorded move stays latched.)
+6. **The transition's latch release stays, with a reason.** For Pause it
+   duplicates the catch-all. For Stop it doesn't: Stop rewinds the player
+   to 0 in the same transition, so the catch-all would chase the latched
+   lanes at tick 0, while every other lane stays at the stop position (the
+   state live play hears while stopped, when nothing seeks). A new check
+   shows it: with the transition release removed, the Stop check fails
+   (VOL 127 and bend 0 from tick 0, instead of 99 and 16).
+7. `reapplyLiveLatch`'s `capturing()` guard is unchanged.
+
+**Harness**
+
+- `--primecheck` latch block: after the wrap, the latched run's lanes equal
+  an unlatched run's (same song, same pokes, same 31 ticks). That run is
+  asserted to hold the loop end's carried state: VOL 90 from the loop start,
+  PAN 100, bend +1024 and voice 9 from before the loop end.
+- `--reccheck` `checkRecordingLatch`:
+  - **Loop:** the take's state right after the wrap is compared with a plain
+    play (no take, no knob) of the same stretch through the same wrap, read
+    at the same point. The plain VOL is asserted to be the loop end's and
+    not the loop start's.
+  - **Track insert mid-take:** a track is added and moved into the take's
+    slot after VOL and the bend latched. The take and the target follow to
+    `a + 1`. That track keeps the knob values through t1 and t2 (t2's VOL
+    88 moved with it). The new track at `a` plays its own song values.
+  - **Private arm, a follow published before its timeline:**
+    `setLiveTarget(a + 1)` keeps `a`, a callback keeps the latch, and
+    `updateTimeline` moves the target and the latch (bits kept, values
+    re-sent) to `a + 1`.
+  - **Private arm, the app's panic (`m_midiPanicAction`) and a port
+    closing (`portsClosed`):** both keep VOL and the bend held through t2.
+    The disarm after them hands the lanes back.
+  - **Private arm, Stop:** the held lanes are chased to the song where the
+    player stopped, not at tick 0 (the fixture is asserted to tell them
+    apart).
+- `--reccheck` flood, stalled UI: a bend sent into the full ring is dropped
+  and doesn't latch, while the flooded VOL (captured before the ring
+  filled) does (`AudioEngine::liveLatchForTest`).
+- Mutation-tested 7 ways. Each failed the expected checks, and each file
+  was restored byte for byte (`filecmp`, plus md5 before and after):
+  - the wrap chasing at the loop start (the old rule): primecheck and
+    reccheck loop;
+  - the panic releasing again: reccheck panic and port close;
+  - `updateTimeline` not consuming the follow: reccheck insert and the
+    direct follow check;
+  - `followTakeTrack` not publishing: reccheck insert;
+  - `setLiveTarget` not holding the old index: the direct follow check
+    (the app's own flow publishes the target only after the rebuild, so
+    only the direct check sees it);
+  - latching a dropped move (gate on `capturing()` again, bend): flood;
+  - no Stop release in the transition: reccheck Stop.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (all
+harnesses). `--reccheck`, `--midicheck` and `--primecheck` pass on
+build-nomidi, build-off and build-dummy. All five trees build cleanly.

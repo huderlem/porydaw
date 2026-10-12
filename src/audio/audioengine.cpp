@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#include <utility>
 #include <vector>
 
 #include "audio/midiinput.h"
@@ -203,6 +204,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     // The fresh engine holds nothing the keyboard moved.
     m_liveTouched = TouchedLanes();
     dropLiveLatch();
+    m_liveFollow = LiveFollow();
 
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -237,6 +239,20 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     if (pos != m_player.position()) {
         captureBoundary(m_player.position(), pos);
         dropLiveLatch();
+    }
+    // The take's track moved (followLiveTrack): the sound and the latch move
+    // with it, here, with the timeline that has the track at its new index.
+    // The full chase below hands the old index to whichever track has it
+    // now, and the reapply re-sends the knobs' values on the new one.
+    if (m_liveFollow.generation) {
+        const LiveFollow follow = std::exchange(m_liveFollow, LiveFollow());
+        if (capturing() && follow.generation == m_captureBegun && m_liveTrack == follow.from) {
+            m_liveTrack = follow.to;
+            if (m_liveTarget.load() == follow.from)
+                m_liveTarget.store(follow.to);
+            if (m_liveLatch.track == follow.from)
+                m_liveLatch.track = follow.to;
+        }
     }
     m_timeline = timeline;
     m_player.seek(pos, m_timeline);
@@ -411,6 +427,7 @@ void AudioEngine::unloadSong()
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
     m_liveTouched = TouchedLanes(); // no song to hand anything back to
     dropLiveLatch();
+    m_liveFollow = LiveFollow();
     resetPreviewEngine();
     clearTimedPreviews();
     m_transport.store(static_cast<int>(Transport::Stopped));
@@ -519,8 +536,10 @@ void AudioEngine::applyTransportTransition()
     // stale note-off can later cut a playback note on the same track and
     // key.
     cutAllSound();
-    // Stop and Pause end the take, and its latch, where the player stopped
-    // (before Stop rewinds it).
+    // Stop and Pause end the take, and its latch, where the player stopped.
+    // For Pause this is also the catch-all's in applyMidiInput; Stop needs it
+    // here, as it rewinds the player to 0 below, where the catch-all would
+    // chase the lanes, while every other lane stays at the stop position.
     releaseLiveLatch(m_player.position());
     switch (static_cast<Transport>(t)) {
     case Transport::Stopped:
@@ -746,7 +765,11 @@ void AudioEngine::applyMidiInput()
         m_appliedLivePanic = panic;
         imposeLiveRelease();
         m_liveSustain = false;
-        releaseLiveLatch(m_player.position());
+        // The latch stays: a panic (the menu's, or a port closing) concerns
+        // notes, like the keyboard's own CC120/123, and the take goes on
+        // recording the knobs' values to its end, so the song's events stay
+        // held there. Outside a take there is no latch (the catch-all
+        // below).
     }
     const uint32_t release = m_liveReleaseCmd.load();
     if (release != m_appliedLiveRelease) {
@@ -887,10 +910,11 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
 void AudioEngine::applyLiveBend(int16_t bend, bool reset)
 {
     // The whole track's bend, song notes included; the engine scales the
-    // signed 14-bit value to its -64..63 and BENDR sets the range.
-    pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend,
-                reset ? CaptureEvent::Reset : 0);
-    const bool take = capturing();
+    // signed 14-bit value to its -64..63 and BENDR sets the range. Only a
+    // move the take records counts as moved, or latches: one the full ring
+    // dropped is heard and gone, like a move outside a take.
+    const bool take = pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend,
+                                  reset ? CaptureEvent::Reset : 0);
     if (take && !reset)
         m_captureMoved.bend = true;
     if (m_liveTrack >= 0) {
@@ -910,9 +934,8 @@ void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value, bool reset)
 {
     // Captured as heard, whether or not it sounds (as notes are): the
     // lane's CC rides in the key.
-    pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value,
-                reset ? CaptureEvent::Reset : 0);
-    const bool take = capturing();
+    const bool take = pushCapture(CaptureEvent::Control, m_player.position(), lane, 0, 0, value,
+                                  reset ? CaptureEvent::Reset : 0); // as for the bend
     if (take && !reset)
         m_captureMoved.setCc(lane);
     if (m_liveTrack >= 0) {
@@ -926,6 +949,28 @@ void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value, bool reset)
             m_liveLatch.lanes.setCc(lane);
         }
     }
+}
+
+void AudioEngine::setLiveTarget(int track)
+{
+    // A move of the take's track waiting for its timeline keeps the old
+    // index: the old timeline still has the track there, and updateTimeline
+    // moves the target and the latch together with the new one.
+    if (m_liveFollow.generation && track == m_liveFollow.to)
+        track = m_liveFollow.from;
+    m_liveTarget.store(track);
+}
+
+void AudioEngine::followLiveTrack(uint32_t generation, int from, int to)
+{
+    if (generation == 0 || from < 0 || from >= MAX_TRACKS || to < 0 || to >= MAX_TRACKS ||
+        from == to)
+        return;
+    // Two moves before one rebuild: the target is still on the first's
+    // origin.
+    if (m_liveFollow.generation == generation && m_liveFollow.to == from)
+        from = m_liveFollow.from;
+    m_liveFollow = from == to ? LiveFollow() : LiveFollow{generation, from, to};
 }
 
 void AudioEngine::releaseLiveLatch(uint64_t pos)
@@ -1069,11 +1114,11 @@ void AudioEngine::syncCapture()
     pushCapture(CaptureEvent::Begin, m_player.position());
 }
 
-void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
+bool AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
                               uint64_t resumePos, int16_t value, uint8_t flags)
 {
     if (!capturing())
-        return;
+        return false;
     const uint32_t w = m_captureWrite.load(std::memory_order_relaxed);
     // A knob streams far faster than anyone plays notes: bend and lane moves
     // stop short of the ring's last kCaptureReserve slots, which only notes,
@@ -1083,7 +1128,7 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     const uint32_t room = move ? kCaptureRingSize - kCaptureReserve : kCaptureRingSize;
     if (w - m_captureRead.load(std::memory_order_acquire) >= room) {
         m_captureDrops.fetch_add(1, std::memory_order_relaxed);
-        return;
+        return false;
     }
     CaptureEvent &ev = m_captureRing[w % kCaptureRingSize];
     ev.samplePos = samplePos;
@@ -1098,6 +1143,7 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.lateSamples =
         kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff || move ? m_liveLate : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);
+    return true;
 }
 
 void AudioEngine::captureBoundary(uint64_t from, uint64_t to)

@@ -5934,8 +5934,11 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
     if (now >= 0) {
         // Another track was added, deleted, or moved (an undo or redo
         // included): the take follows its track to the new slot. The
-        // documentChanged that follows republishes the live target.
+        // documentChanged that follows republishes the live target; the
+        // engine moves it, and the take's latch, with the rebuilt timeline.
         if (now != old) {
+            if (m_audioOk)
+                m_audio.followLiveTrack(m_captureGeneration, old, now);
             m_take.setTrack(now);
             showRecordingStatus();
         }

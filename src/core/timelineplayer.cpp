@@ -275,6 +275,17 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
         }
         if (loop && m_pos >= timeline->loopEndSample) {
             wrapNotes(engine, timeline);
+            // The pass that latched them is over (J2): the held lanes go back
+            // to the song as an unlatched pass would carry them into the
+            // next — its state at the loop end, whose own events have just
+            // dispatched (the GOTO touches no controller), as the take's
+            // restore point at the loop end commits it. Released before the
+            // wrap, so the loop start's own events then all play on them.
+            if (latch) {
+                chaseTouched(engine, timeline, m_pos, latch->track, latch->lanes);
+                *latch = LaneLatch();
+                latch = nullptr;
+            }
             m_pos = timeline->loopStartSample;
             m_wraps++;
             m_cursor =
@@ -282,15 +293,6 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                            timeline->events.begin(), timeline->events.end(), m_pos,
                            [](const TimelineEvent &e, uint64_t pos) { return e.samplePos < pos; }) -
                        timeline->events.begin());
-            // The pass that latched them is over (J2): the held lanes go back
-            // to the song as it stands at the loop start — at or before it,
-            // so not the loop end's value — and are released before the loop
-            // start's own events dispatch, which therefore all play.
-            if (latch) {
-                chaseTouched(engine, timeline, m_pos, latch->track, latch->lanes);
-                *latch = LaneLatch();
-                latch = nullptr;
-            }
             continue;
         }
         break;

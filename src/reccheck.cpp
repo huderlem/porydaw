@@ -18,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
@@ -2405,6 +2406,57 @@ void MainWindow::checkRecordingLatch(int a, int b)
             undo->undo(); // the take and the mid-take edit
     }
 
+    // A track inserted before the take's mid-take (added, then moved into
+    // its slot): the take follows its track to the next index, and so does
+    // the latch. VOL and the bend stay held there through t2's VOL, while the
+    // new track at the old index plays its own song values.
+    if (check(doc.canAddTrack(), "latch: no free track slot to insert")) {
+        view->setEditCursorTick(cursor);
+        m_recordAction->trigger();
+        pumpMs(20);
+        send(0xB0, 7, 37);
+        send(0xE0, 0x00, 0x60);
+        pumpMs(5);
+        check(pumpPast(t1, 5), "latch: the take never reached t1 before the insert");
+        const int added = doc.addTrack(0);
+        const bool moved = added >= 0 && doc.moveTrack(added, a);
+        const int now = m_take.track();
+        if (check(moved && now == a + 1 && m_audio.liveTarget() == now,
+                  "latch: the take did not follow its track past the inserted one")) {
+            pumpMs(5);
+            const auto at = [&](int track) {
+                return Heard{engine->tracks[track].rawVolume, engine->tracks[track].pan,
+                             engine->tracks[track].bend, 0};
+            };
+            const auto songOf = [&](int track) {
+                const uint64_t t = tickNow();
+                return Heard{songAt(track, 0x07, t), songAt(track, 0x0A, t) - 64,
+                             songAt(track, DOC_CC_BEND, t) >> 7, 0};
+            };
+            const auto expectAt = [&](int track, const Heard &want, const char *what) {
+                const Heard got = at(track);
+                if (!check(got == want, what))
+                    report(what, got, want);
+            };
+            expectAt(now, {37, songOf(now).pan, 32, 0},
+                     "latch: the insert did not keep the knobs on the take's moved track");
+            expectAt(a, songOf(a),
+                     "latch: the track now at the take's old index did not play "
+                     "its own song values");
+            check(pumpPast(t2, 5), "latch: the take never reached t2 after the insert");
+            check(songOf(now).vol == 88, "latch: t2's VOL did not move with the take's track");
+            expectAt(now, {37, songOf(now).pan, 32, 0},
+                     "latch: after the insert a held lane's song event reached the take's track");
+            expectAt(a, songOf(a),
+                     "latch: after the insert the track at the old index did not "
+                     "play its own song values");
+        }
+        m_stopAction->trigger();
+        pumpMs(10);
+        while (undo->index() > undoSetup)
+            undo->undo(); // the take, the move and the add
+    }
+
     // No take: no latch. The knob sounds until the song's next event.
     {
         view->setEditCursorTick(cursor);
@@ -2422,11 +2474,12 @@ void MainWindow::checkRecordingLatch(int a, int b)
         pumpMs(10);
     }
 
-    // The latch ends at a disarm (a punch-out), at Pause, at a seek, at a
-    // panic and when the target goes (live play off), its
-    // lanes chased back to the song where the player is; the song's later
-    // events then play. An arm of the harness's own, with no take: the
-    // commit's edit would chase the lanes by itself.
+    // The latch ends at a disarm (a punch-out), at Pause, at Stop, at a seek
+    // and when the target goes (live play off), its lanes chased back to the
+    // song where the player is; the song's later events then play. A panic
+    // and a port closing don't end it: the take goes on recording the
+    // knobs. An arm of the harness's own, with no take: the commit's edit
+    // would chase the lanes by itself.
     {
         const auto armAndHold = [&](uint32_t generation) {
             m_audio.seek(sampleOf(cursor));
@@ -2458,6 +2511,20 @@ void MainWindow::checkRecordingLatch(int a, int b)
         m_audio.stop();
         pumpMs(10);
 
+        // Stop chases where the player stopped, not where it rewinds to.
+        armAndHold(0x7E5D);
+        {
+            const Heard there = song();
+            check(there.vol != songAt(a, 0x07, 0) || there.bend != songAt(a, DOC_CC_BEND, 0) >> 7,
+                  "latch: the fixture can't tell the stop position from the song's start");
+            m_audio.stop();
+            pumpMs(1);
+            expectHeard(there, "latch: Stop did not chase the held lanes back to the song where "
+                               "it stopped");
+        }
+        m_audio.armCapture(0);
+        pumpMs(10);
+
         armAndHold(0x7E5A);
         m_audio.seek(sampleOf(cursor));
         pumpMs(1);
@@ -2467,16 +2534,61 @@ void MainWindow::checkRecordingLatch(int a, int b)
         m_audio.stop();
         pumpMs(10);
 
-        // A panic, and live play going off (the target goes), end it too.
-        armAndHold(0x7E5B);
-        m_audio.liveAllNotesOff();
-        pumpMs(1);
-        expectHeard(song(), "latch: a panic did not chase the held lanes back to the song");
-        check(pumpPast(t2, 5), "latch: playback never reached t2 after the panic");
-        expectHeard(song(), "latch: after a panic the song's events did not play");
-        m_audio.armCapture(0);
-        m_audio.stop();
-        pumpMs(10);
+        // A take's track move waiting for its rebuilt timeline
+        // (followLiveTrack): a target published meanwhile at the new index
+        // stays on the old one, so a callback with the old timeline keeps the
+        // latch where the track still is; the rebuild then moves both (here
+        // the same timeline stands in for it).
+        if (a + 1 < MAX_TRACKS) {
+            armAndHold(0x7E5F);
+            m_audio.followLiveTrack(0x7E5F, a, a + 1);
+            m_audio.setLiveTarget(a + 1);
+            check(m_audio.liveTarget() == a,
+                  "latch: a target published before the track move's timeline left the old index");
+            pumpMs(5);
+            check(heard().vol == 37 && heard().bend == 32,
+                  "latch: a callback before the track move's timeline ended the latch");
+            m_audio.updateTimeline(session->timeline.get());
+            const LaneLatch moved = m_audio.liveLatchForTest();
+            check(m_audio.liveTarget() == a + 1 && moved.track == a + 1 && moved.lanes.bend &&
+                      moved.lanes.hasCc(0x07) && engine->tracks[a + 1].rawVolume == 37 &&
+                      engine->tracks[a + 1].bend == 32,
+                  "latch: the rebuild did not move the target and the latch to the new index");
+            m_audio.armCapture(0);
+            m_audio.setLiveTarget(a);
+            m_audio.stop();
+            pumpMs(10);
+        }
+
+        // The app's panic and a port closing keep it: the take goes on
+        // recording the knobs, so t2's VOL stays held (PAN, never moved,
+        // plays it). The disarm then ends it as ever.
+        const auto keptThrough = [&](uint32_t generation, const std::function<void()> &panic,
+                                     const char *what) {
+            armAndHold(generation);
+            panic();
+            pumpMs(1);
+            const Heard held = heard();
+            if (!check(held.vol == 37 && held.bend == 32,
+                       qPrintable(QStringLiteral("latch: %1 mid-take ended the latch").arg(what))))
+                report(what, held, {37, song().pan, 32, song().volB});
+            check(pumpPast(t2, 5), "latch: playback never reached t2 after the panic");
+            const Heard t2Held{37, song().pan, 32, song().volB};
+            if (!check(heard() == t2Held,
+                       qPrintable(QStringLiteral("latch: after %1 mid-take a held lane's song "
+                                                 "event reached the engine")
+                                      .arg(what))))
+                report(what, heard(), t2Held);
+            m_audio.armCapture(0);
+            pumpMs(1);
+            expectHeard(song(), "latch: a disarm after a panic did not hand the lanes back");
+            m_audio.stop();
+            pumpMs(10);
+        };
+        keptThrough(0x7E5B, [&] { m_midiPanicAction->trigger(); }, "the app's panic");
+        keptThrough(0x7E5E, [&] { emit midi.portsClosed(); }, "a port closing");
+
+        // Live play going off (the target goes) ends it.
 
         armAndHold(0x7E5C);
         midi.setLivePlay(false);
@@ -2517,11 +2629,12 @@ void MainWindow::checkRecordingLatch(int a, int b)
         midi.setLivePlay(true);
     }
 
-    // A loop wrap ends the pass, and the latch: the held lanes come back
-    // as the song stands at the loop start — VOL from before it, PAN from its
-    // own event there, never the loop end's — and pass 2 plays the song's
-    // events until the knob moves again. A lane that wasn't held carries
-    // across the wrap as ever (the GOTO touches no controller).
+    // A loop wrap ends the pass, and the latch: the held lanes come back as
+    // an unlatched play of the song has them there — the loop end's state
+    // carried across the GOTO (VOL), then the loop start's own events (PAN
+    // there), which is also what the take's restore point at the loop end
+    // commits — and pass 2 plays the song's events until the knob moves
+    // again. A lane that wasn't held carries across the wrap as ever.
     const MidiTimeline *tl = session->timeline.get();
     if (tl->hasLoop() && tl->loopEndTick > tl->loopStartTick + 4 * tpb) {
         const uint64_t loopStart = tl->loopStartTick, loopEnd = tl->loopEndTick;
@@ -2549,8 +2662,7 @@ void MainWindow::checkRecordingLatch(int a, int b)
             pumpMs(5);
         check(playhead() < pStart && tickNow() < loopStart + tpb / 4,
               "latch: the take's loop never wrapped");
-        expectHeard({song().vol, song().pan, bendBefore, song().volB},
-                    "latch: the wrap did not chase the held lanes to the loop start");
+        const Heard wrapped = heard();
         check(pumpPast(inside, 5), "latch: pass 2 never reached the in-loop VOL point");
         check(song().vol == 66, "latch: the in-loop VOL point is not in force on pass 2");
         expectHeard({song().vol, song().pan, bendBefore, song().volB},
@@ -2559,6 +2671,26 @@ void MainWindow::checkRecordingLatch(int a, int b)
         pumpMs(10);
         while (undo->index() > undoBefore)
             undo->undo();
+        // The same stretch played with no take and no knob: where the wrap
+        // left the held lanes is where plain playback is (the engine's own
+        // rule, not a model of it); VOL there is the loop end's, not the
+        // loop start's.
+        view->setEditCursorTick(loopEnd - tpb / 4);
+        m_playAction->trigger();
+        pumpMs(10);
+        const uint64_t qStart = playhead();
+        for (int i = 0; i < 1000 && playhead() >= qStart; i++)
+            pumpMs(5);
+        check(playhead() < qStart && tickNow() < loopStart + tpb / 4,
+              "latch: the plain play's loop never wrapped");
+        const Heard plain = heard();
+        check(plain.vol == songAt(a, 0x07, loopEnd) && plain.vol != songAt(a, 0x07, loopStart),
+              "latch: plain playback does not carry the loop end's VOL into pass 2");
+        if (!check(wrapped == plain, "latch: the wrap did not leave the held lanes where plain "
+                                     "playback has them"))
+            report("wrapped", wrapped, plain);
+        m_stopAction->trigger();
+        pumpMs(10);
     } else {
         std::printf("reccheck: latch loop wrap SKIP (the song has no loop of 4+ beats)\n");
     }
@@ -3436,6 +3568,18 @@ void MainWindow::checkRecordingFlood()
         int notes = 0;
         for (int ms = 0; ms < 2000; ms++)
             floodMs(ms, &notes);
+        // A bend now, with the ring still full of moves: dropped, so not
+        // moved and not latched either (the take never records it), while
+        // the flooded knobs, captured before the ring filled, are.
+        const uint32_t droppedBeforeBend = m_audio.captureDropped();
+        send(0xE0, 0x00, 0x60);
+        pumpMs(1);
+        const LaneLatch latch = m_audio.liveLatchForTest();
+        check(m_audio.captureDropped() > droppedBeforeBend,
+              "flood: the bend into the full ring was not dropped");
+        check(latch.track == track && latch.lanes.hasCc(0x07),
+              "flood: the flooded knobs did not latch");
+        check(!latch.lanes.bend, "flood: a move the full ring dropped latched its lane");
         synchronizePlayhead();
         const size_t taken = m_take.notes().size();
         pumpMs(20);

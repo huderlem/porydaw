@@ -401,8 +401,9 @@ int runPrimeCheck()
 
     // The recording latch (docs/midi-controls/PLAN.md §3.4): render skips
     // exactly the song events a LaneLatch holds — its lanes, on its track —
-    // and a loop wrap ends it, chasing its lanes to the song at the loop
-    // start (not the loop end) before the loop start's events play.
+    // and a loop wrap ends it, chasing its lanes to the song's state at the
+    // loop end (what an unlatched pass carries across the GOTO) before the
+    // loop start's events play.
     {
         auto timeline = MidiTimeline::build(buildLatchSong(), kSampleRate);
         if (!timeline || timeline->usedTrackCount != 2) {
@@ -516,16 +517,23 @@ int runPrimeCheck()
                    "the latch did not hold exactly its lanes' events on its track");
             expect(latch.any(), "the latch ended before the wrap");
             // To the loop end, where its VOL 11 is held back too, then one
-            // tick past the wrap: the latch is over, its lanes are the
-            // song's at the loop start (VOL 90 from the loop start's own
-            // event, PAN 20 from before it, the bend centred, voice 5),
-            // never the loop end's (VOL 11, PAN 100, bend +1024, voice 9).
+            // tick past the wrap: the latch is over, and its lanes are what
+            // an unlatched play of the song holds there — the loop end's
+            // state carried across the wrap (VOL 11, PAN 100, bend +1024,
+            // voice 9), then the loop start's own events (VOL 90) — never the
+            // song's at the loop start (PAN 20, the bend centred, voice 5).
             run->play(timeline.get(), 14, &latch);
             expect(run->lanes().vol == 33, "the latch did not hold the loop end's VOL");
             run->play(timeline.get(), 1, &latch); // tick 6 of pass 2
             expect(!latch.any() && latch.track == -1, "the loop wrap did not end the latch");
-            expect(run->lanes() == Lanes{90, 20 - 64, 9, 0, 5, 50},
-                   "the wrap did not chase the latched lanes to the loop start");
+            auto plain = std::make_unique<Run>(vg, timeline.get());
+            plain->play(timeline.get(), 3, nullptr);
+            plain->poke();
+            plain->play(timeline.get(), 4 + 9 + 14 + 1, nullptr);
+            expect(plain->lanes() == Lanes{90, 100 - 64, 9, 8, 9, 50},
+                   "an unlatched pass 2 does not carry the loop end's state");
+            expect(run->lanes() == plain->lanes(),
+                   "the wrap did not leave the latched lanes as an unlatched pass carries them");
             // Pass 2 plays the song's own events.
             run->play(timeline.get(), 10, &latch); // tick 16
             expect(run->lanes() == songAt16, "pass 2 did not play the song's events");

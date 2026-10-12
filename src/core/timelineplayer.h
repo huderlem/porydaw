@@ -155,9 +155,11 @@ class TimelinePlayer
     // `latch` (live recording only; null everywhere else, which costs one
     // pointer test per event): the song events it holds are skipped. A loop
     // wrap ends it, before the loop start's events dispatch: its lanes are
-    // chased to the loop start (chaseTouched) and it is cleared in place, so
-    // the next pass plays the song's own events until the keyboard latches
-    // a lane again (J2).
+    // chased to the song's state at the loop end (chaseTouched, the loop
+    // end's own events included: what an unlatched pass carries into the
+    // next) and it is cleared in place, so the loop start's events apply on
+    // top and the next pass plays the song's own events until the keyboard
+    // latches a lane again (J2).
     void render(M4AEngine *engine, const MidiTimeline *timeline, float *outL, float *outR,
                 uint32_t frames, bool looping, uint32_t muteMask, LaneLatch *latch = nullptr);
 
