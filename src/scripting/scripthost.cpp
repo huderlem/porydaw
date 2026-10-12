@@ -177,8 +177,10 @@ ScriptHost::~ScriptHost()
 void ScriptHost::setBindings(HostBindings bindings)
 {
     m_bindings = std::move(bindings);
-    if (m_midi)
+    if (m_midi) {
         disconnect(m_midi, nullptr, this, nullptr);
+        disconnect(m_midi, nullptr, m_midiPortsTimer, nullptr);
+    }
     m_midi = m_bindings.midi;
     if (m_midi) {
         connect(m_midi, &MidiInput::tapReady, this, &ScriptHost::deliverMidi);
@@ -493,6 +495,11 @@ void ScriptHost::load(Plugin &plugin)
         return;
     }
     plugin.error.clear();
+    // Listeners subscribed at module top level were counted while the
+    // plugin wasn't Loaded yet, which anyListener skips: start what they
+    // need now.
+    updateFrameTimer();
+    updateMidiTap();
     log(plugin, LogLevel::Info,
         tr("loaded %1 %2").arg(plugin.manifest.name, plugin.manifest.version));
 }

@@ -1402,10 +1402,11 @@ bool isRed(const QColor &c)
 // injector: no device is needed.
 const char *kMidiPlugManifest =
     R"({ "id": "midiplug", "name": "MIDI Listener", "version": "1.0.0", "api": 1 })";
+// Subscribed at module top level, before the plugin counts as loaded: the
+// tap must still start once it is.
 const char *kMidiPlugMain = R"(
-export function activate() {
-    porydaw.midi.on("message", function (m) { porydaw.log("midiplug " + m.status); });
-}
+porydaw.midi.on("message", function (m) { porydaw.log("midiplug " + m.status); });
+export function activate() {}
 )";
 
 void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &window,
@@ -1633,6 +1634,9 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
           "the midiplug fixture was not dropped after its folder went");
     check(!midi.tapEnabled(), "a removed plugin left the script tap running");
 
+    // Live play saw the note ons above with no note offs: let nothing stay
+    // held for later checks.
+    midi.injectForTest({0xB0, 123, 0});
     midi.setPortListForTest({});
     midi.setOpenPortsForTest({});
     settle();

@@ -269,6 +269,7 @@ About `on("message")`:
 - Every channel message is delivered with its bytes as sent: note off (`0x8n`), note on (`0x9n`), polyphonic aftertouch (`0xAn`), control change (`0xBn`), program change (`0xCn`), channel pressure (`0xDn`) and pitch bend (`0xEn`). The channel is `status & 0x0F` (0-based). `data2` is 0 for program change and channel pressure. A note on with velocity 0 means note off, as MIDI defines it, and it is delivered as a note on. Pitch bend is `data1 | (data2 << 7)`, with 8192 as the centre.
 - System messages (sysex, clock, active sensing, start/stop, song position…) are not delivered.
 - Messages arrive whether or not a song is open, and whether or not "Play incoming notes" is on.
+- Keep listeners quick. A burst (for example everything played while a dialog was open) is handled in one go, and a plugin that runs too long at a stretch is stopped like any other runaway script.
 - Listening changes nothing else. The keyboard still plays the selected track and records as usual, whatever a listener does. A plugin can't hold back or change the input.
 
 ```js

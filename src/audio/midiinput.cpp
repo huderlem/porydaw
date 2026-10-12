@@ -607,8 +607,11 @@ uint16_t MidiInput::portToken(const QString &id)
 void MidiInput::deliverTap()
 {
     // Cleared first: a message pushed while the receiver drains posts a
-    // new hop, so nothing waits for the next one.
-    m_tapPosted.store(false, std::memory_order_release);
+    // new hop, so nothing waits for the next one. An exchange, not a
+    // store: the drain's later read of the ring can't move ahead of it, so
+    // either it sees a producer's push or that producer sees false and
+    // posts (a plain store-then-load could strand a message until the next).
+    m_tapPosted.exchange(false, std::memory_order_acq_rel);
     emit tapReady();
 }
 
@@ -645,8 +648,19 @@ int64_t midiClockNs()
 
 void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port)
 {
-    // The script tap first, and independently: it keeps what live play
-    // drops (program change, aftertouch) and the bytes as sent.
+    // Live play first: the script tap's lock and queued hop never delay
+    // the audio thread's input.
+    MidiMsg msg;
+    if (parse(bytes, size, &msg)) {
+        msg.arrivalNs = arrivalNs;
+        if (m_ring.push(msg))
+            m_received.fetch_add(1, std::memory_order_relaxed);
+        // One queued hop at a time; deliverActivity re-arms it.
+        if (!m_activityPosted.exchange(true, std::memory_order_acq_rel))
+            QMetaObject::invokeMethod(this, &MidiInput::deliverActivity, Qt::QueuedConnection);
+    }
+    // The script tap, independently: it keeps what live play drops
+    // (program change, aftertouch) and the bytes as sent.
     if (m_tapEnabled.load(std::memory_order_acquire)) {
         MidiTapMsg tap;
         if (parseTap(bytes, size, &tap)) {
@@ -656,15 +670,6 @@ void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrival
                 QMetaObject::invokeMethod(this, &MidiInput::deliverTap, Qt::QueuedConnection);
         }
     }
-    MidiMsg msg;
-    if (!parse(bytes, size, &msg))
-        return;
-    msg.arrivalNs = arrivalNs;
-    if (m_ring.push(msg))
-        m_received.fetch_add(1, std::memory_order_relaxed);
-    // One queued hop at a time; deliverActivity re-arms it.
-    if (!m_activityPosted.exchange(true, std::memory_order_acq_rel))
-        QMetaObject::invokeMethod(this, &MidiInput::deliverActivity, Qt::QueuedConnection);
 }
 
 void MidiInput::deliverActivity()

@@ -1714,3 +1714,41 @@ that, the runner wrote back the saved original.
   in the review or CHANGELOG.
 - `MidiTapRing` is about 6 KB inside `MidiInput`; it doesn't touch
   `AudioEngine`'s size.
+
+### Step 6 review fixes (2026-10-12, uncommitted)
+
+An Opus review of a379cbf found no high or medium bugs.
+
+1. **Fixed: a tap message could be stranded.** `deliverTap` cleared
+   `m_tapPosted` with a release store, and the drain's later read of the
+   ring could move ahead of it, so a producer that still saw `true` posted
+   no hop. Its message then waited for the next key press. Now the flag
+   is cleared with `exchange(false, acq_rel)`. Either the drain sees the
+   producer's push, or the producer sees `false` and posts.
+2. **Fixed: a plugin subscribing at module top level never got
+   messages.** It was counted while not yet Loaded, and nothing
+   re-evaluated afterwards. `load()` now calls `updateFrameTimer()` and
+   `updateMidiTap()` once `activate` succeeds. The midiplug fixture now
+   subscribes at top level; with the call removed, three of its checks
+   FAIL.
+3. **Fixed: `setBindings` left a stale connection.** It now also
+   disconnects the `portsChanged` → ports-timer connection. Latent: it is
+   called once today.
+4. **Fixed: tap work no longer runs ahead of live play's ring push** in
+   `MidiInput::receive`.
+5. **Fixed: the scriptcheck MIDI checks left notes held.** They now end
+   with CC123.
+6. **Documented:** API.md asks for quick listeners, since a burst is one
+   watchdog window.
+7. **Not fixed:** if a `midi.ports` listener opens a dialog during which
+   the list changes again, the remaining plugins get the older list after
+   the newer one. That needs a nested modal inside a port listener; it
+   is noted here only.
+
+Fixes 1, 3, 4 and 5 can't be falsified by one edit: 1 is a memory-order
+race, and 3–5 have no observable effect today.
+
+- **Verification:** builds `build`, `build-asan`, `build-nomidi`,
+  `build-dummy` and `build-off` all exit 0. Format is clean,
+  `gen_scripting_docs --check` is up to date, and the normal and ASAN
+  sweeps both **PASS (all harnesses)**.
