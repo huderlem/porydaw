@@ -373,3 +373,31 @@ bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &bef
     *out = {tickEnd, value};
     return true;
 }
+
+std::vector<SongDocument::LanePointValue>
+RecordingTake::applyLaneWrites(const std::vector<DocLanePoint> &before,
+                               const std::vector<LaneWrite> &writes, uint8_t cc)
+{
+    std::vector<SongDocument::LanePointValue> lane;
+    lane.reserve(before.size());
+    for (const DocLanePoint &pt : before)
+        lane.push_back({pt.tick, pt.value});
+    const auto byTick = [](const SongDocument::LanePointValue &a,
+                           const SongDocument::LanePointValue &b) { return a.tick < b.tick; };
+    for (const LaneWrite &w : writes) {
+        if (w.cc != cc)
+            continue;
+        // writeLanePoints: the range [tickBegin, tickEnd] goes, the write's
+        // points (one a tick, inside the range) take its place.
+        const auto first = std::lower_bound(lane.begin(), lane.end(),
+                                            SongDocument::LanePointValue{w.tickBegin, 0}, byTick);
+        const auto last =
+            std::upper_bound(first, lane.end(), SongDocument::LanePointValue{w.tickEnd, 0}, byTick);
+        std::vector<SongDocument::LanePointValue> points = w.points;
+        SongDocument::LanePointValue restore;
+        if (w.restorePoint(before, &restore))
+            points.push_back(restore);
+        lane.insert(lane.erase(first, last), points.begin(), points.end());
+    }
+    return lane;
+}

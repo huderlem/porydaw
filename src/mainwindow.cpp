@@ -5627,6 +5627,33 @@ void MainWindow::drainCapture()
         m_take.push(ev);
 }
 
+namespace {
+
+// The take's moved lanes as the view shows them (RecordingPreview::lanes):
+// each curve as a commit now would leave it.
+std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track,
+                                              const std::vector<RecordingTake::LaneWrite> &writes)
+{
+    std::vector<RecordingPreview::Lane> lanes;
+    for (const uint8_t cc : {uint8_t(0x01), DOC_CC_BEND}) {
+        RecordingPreview::Lane lane;
+        lane.cc = cc;
+        for (const RecordingTake::LaneWrite &w : writes) {
+            if (w.cc == cc)
+                lane.ranges.push_back({w.tickBegin, w.tickEnd});
+        }
+        if (lane.ranges.empty())
+            continue;
+        for (const SongDocument::LanePointValue &pt :
+             RecordingTake::applyLaneWrites(doc.lanePoints(track, cc), writes, cc))
+            lane.points.push_back({uint32_t(std::min<uint64_t>(pt.tick, UINT32_MAX)), pt.value});
+        lanes.push_back(std::move(lane));
+    }
+    return lanes;
+}
+
+} // namespace
+
 void MainWindow::syncRecordingPreview()
 {
     if (!m_takeSession || !m_take.started())
@@ -5654,6 +5681,9 @@ void MainWindow::syncRecordingPreview()
     preview.track = m_take.track();
     preview.take = m_take.generation();
     preview.notes = m_take.toNotes(timeline, pos, segment, recordingLatencySamples());
+    preview.lanes =
+        takeLanes(m_takeSession->doc, m_take.track(),
+                  m_take.toLaneWrites(timeline, pos, segment, recordingLatencySamples()));
     const auto tickAt = [&](uint64_t sample) {
         return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
     };
@@ -5699,6 +5729,7 @@ void MainWindow::finishRecording()
     ghosts.track = track;
     ghosts.take = take;
     ghosts.notes = notes;
+    ghosts.lanes = takeLanes(session->doc, track, lanes);
     session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.

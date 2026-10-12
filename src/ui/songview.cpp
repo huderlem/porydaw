@@ -3448,6 +3448,45 @@ class AutomationArea : public TimelineSurface
         invalidateContent();
     }
 
+    // Where (tick, value) sits on the track's cc row, in this widget's
+    // coordinates; nullopt without the row (harness probes).
+    std::optional<QPointF> lanePointAt(int track, uint8_t cc, uint64_t tick, int value) const
+    {
+        for (int i = 0; i < int(m_rows.size()); i++) {
+            const Row &row = m_rows[i];
+            if (row.kind != Row::Lane || row.track != track || row.cc != cc)
+                continue;
+            int minV, maxV;
+            rowRange(row, &minV, &maxV);
+            return QPointF(m_sv->displayX(double(tick), kGutterW, devicePixelRatioF()),
+                           valueYFor(i, value, minV, maxV));
+        }
+        return std::nullopt;
+    }
+
+    // The take's lane ghosts moved on (SongView::setRecordingPreview, at
+    // the playhead cadence; the same lanes before and after): repaints the
+    // rows whose ghost changed.
+    void recordingLanesChanged(const RecordingPreview &before, const RecordingPreview &after)
+    {
+        if (before.lanes.empty() && after.lanes.empty())
+            return;
+        QRegion dirty;
+        for (int i = 0; i < int(m_rows.size()); i++) {
+            const Row &row = m_rows[i];
+            if (row.kind != Row::Lane)
+                continue;
+            const RecordingPreview::Lane *a = before.lane(row.track, row.cc);
+            const RecordingPreview::Lane *b = after.lane(row.track, row.cc);
+            if (a == b || (a && b && *a == *b))
+                continue;
+            // The gutter's point count too.
+            dirty += QRect(0, rowTop(i), width(), rowHeight(row));
+        }
+        if (!dirty.isEmpty())
+            invalidateContent(dirty);
+    }
+
     void rebuildRows()
     {
         m_rows.clear();
@@ -5795,6 +5834,11 @@ class AutomationArea : public TimelineSurface
             curve = SongView::trackColor(row.track);
             break;
         }
+        // A recording take's lane: the curve as its commit would leave it.
+        const RecordingPreview::Lane *take =
+            row.kind == Row::Lane ? m_sv->recordingPreview().lane(row.track, row.cc) : nullptr;
+        if (take)
+            points = &take->points;
 
         p.setPen(themes::color(themes::Role::song_view_primary_text));
         const auto titleFont = typography::bold(p.font());
@@ -5836,6 +5880,8 @@ class AutomationArea : public TimelineSurface
             const bool centerLine = row.kind == Row::Lane && row.cc == LANE_CC_BEND;
             if (pencilStrokeOnRow(rowIndex))
                 paintPencilPreview(p, plot, row, *points, minV, maxV, curve, centerLine);
+            else if (take)
+                paintRecordingPreview(p, plot, row, *take, minV, maxV, curve, centerLine);
             else
                 paintCurve(p, plot, row, *points, minV, maxV, curve, centerLine, dimUnselected,
                            nodeDragOnRow(rowIndex));
@@ -6035,6 +6081,39 @@ class AutomationArea : public TimelineSurface
             if (nodeVisible(plot, x))
                 paintNode(p, previewColor, QPointF(x, valueY(sample.second)));
         }
+    }
+
+    // A recording take's lane (docs/midi-input/PLAN.md step 4's ghosts, for
+    // bend and mod): the whole curve as the commit would leave it, the
+    // stretches the take rewrites in the track's colour at the ghost notes'
+    // alpha, the rest as the lane's own.
+    void paintRecordingPreview(QPainter &p, const QRect &plot, const Row &row,
+                               const RecordingPreview::Lane &take, int minV, int maxV,
+                               const QColor &color, bool centerLine)
+    {
+        const qreal dpr = p.device()->devicePixelRatioF();
+        QRegion ghost;
+        for (const auto &[begin, end] : take.ranges) {
+            // Out to the next tick: the hold to tickEnd and the step there
+            // (a restore) belong to the take.
+            const qreal x0 = m_sv->displayX(double(begin), kGutterW, dpr);
+            const qreal x1 = m_sv->displayX(double(end + 1), kGutterW, dpr);
+            if (x1 >= plot.left() && x0 <= plot.right())
+                ghost += QRectF(x0, plot.top(), x1 - x0, plot.height()).toAlignedRect();
+        }
+        ghost &= QRegion(plot);
+        QColor faded = color;
+        faded.setAlpha(kRecordingGhostAlpha);
+        p.save();
+        p.setClipRegion(QRegion(plot) - ghost, Qt::IntersectClip);
+        paintCurve(p, plot, row, take.points, minV, maxV, color, centerLine, false);
+        p.restore();
+        if (ghost.isEmpty())
+            return;
+        p.save();
+        p.setClipRegion(ghost, Qt::IntersectClip);
+        paintCurve(p, plot, row, take.points, minV, maxV, faded, centerLine, false);
+        p.restore();
     }
 
     void paintCurve(QPainter &p, const QRect &plot, const Row &row,
@@ -9065,7 +9144,12 @@ int SongView::laneDisplayMax(int track, uint8_t cc) const
 void SongView::mergeEmptyLanes()
 {
     bool added = false;
-    for (const std::pair<int, uint8_t> &key : m_emptyLanes) {
+    // A recording take's moved lanes show while it runs, as empty rows
+    // until the commit gives them points (setRecordingPreview).
+    std::vector<std::pair<int, uint8_t>> keys = m_emptyLanes;
+    for (const RecordingPreview::Lane &lane : m_recordingPreview.lanes)
+        keys.push_back({m_recordingPreview.track, lane.cc});
+    for (const std::pair<int, uint8_t> &key : keys) {
         if (m_model.findLane(key.first, key.second))
             continue;
         AutoLane lane;
@@ -10554,6 +10638,33 @@ void SongView::setRecordingPreview(RecordingPreview preview)
     const RecordingPreview before = std::exchange(m_recordingPreview, std::move(preview));
     m_roll->recordingPreviewChanged(before, m_recordingPreview);
     m_ruler->recordingSpansChanged(before.spans, m_recordingPreview.spans);
+    const auto laneKeys = [](const RecordingPreview &p) {
+        std::vector<std::pair<int, uint8_t>> keys;
+        for (const RecordingPreview::Lane &lane : p.lanes)
+            keys.push_back({p.track, lane.cc});
+        return keys;
+    };
+    const std::vector<std::pair<int, uint8_t>> beforeKeys = laneKeys(before);
+    if (beforeKeys == laneKeys(m_recordingPreview)) {
+        m_lanes->recordingLanesChanged(before, m_recordingPreview);
+        return;
+    }
+    // A lane joined or left the take: a row the take alone was showing goes
+    // (one the song or "+ Add lane" holds stays), and mergeEmptyLanes adds
+    // the take's new ones.
+    for (const std::pair<int, uint8_t> &key : beforeKeys) {
+        if (m_recordingPreview.lane(key.first, key.second) ||
+            std::find(m_emptyLanes.begin(), m_emptyLanes.end(), key) != m_emptyLanes.end())
+            continue;
+        for (auto it = m_model.lanes.begin(); it != m_model.lanes.end(); ++it) {
+            if (it->track == key.first && it->cc == key.second && it->points.empty()) {
+                m_model.lanes.erase(it);
+                break;
+            }
+        }
+    }
+    mergeEmptyLanes();
+    m_lanes->rebuildRows();
 }
 
 QRectF SongView::recordingPreviewNoteRect(const RecordingPreview::Note &note) const
@@ -10564,6 +10675,12 @@ QRectF SongView::recordingPreviewNoteRect(const RecordingPreview::Note &note) co
 QRectF SongView::recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const
 {
     return m_ruler->recordingSpanRect(span);
+}
+
+std::optional<QPointF> SongView::recordingPreviewLanePoint(uint8_t cc, uint64_t tick,
+                                                           int value) const
+{
+    return m_lanes->lanePointAt(m_recordingPreview.track, cc, tick, value);
 }
 
 void SongView::selectTrack(int track)

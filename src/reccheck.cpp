@@ -1938,7 +1938,9 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
 // held note grows with the clock, repainting only a sliver of the roll;
 // with Follow Playhead off nothing scrolls; Stop swaps the ghosts for the
 // real notes and the tint goes; a dropped take (its track deleted) clears
-// them. PORYDAW_RECCHECK_SHOT=<file.png> saves the view mid-take.
+// them; then the bend and mod ghosts in the automation lanes
+// (checkRecordingLaneDisplay). PORYDAW_RECCHECK_SHOT=<file.png> saves the
+// view mid-take (and <file>-lanes.png with a bend ghost).
 void MainWindow::checkRecordingDisplay()
 {
     MidiInput &midi = midiInput();
@@ -2173,7 +2175,142 @@ void MainWindow::checkRecordingDisplay()
     while (undo->index() > undoAtDelete)
         undo->undo();
     check(undo->index() == undoBefore, "display: undo did not restore the song");
+
+    checkRecordingLaneDisplay(a);
     m_followPlayheadAction->setChecked(followWas);
+}
+
+// The take's bend and mod ghosts (the lanes' half of plan step 4): the
+// BEND row shows the take's curve as a commit would leave it while the take
+// runs, its row appearing for the take when the track had none; the
+// rewritten stretch is painted in the track's colour at the ghost notes'
+// alpha and turns solid at Stop; a row the take alone showed goes with the
+// take (undo, or a dropped take).
+void MainWindow::checkRecordingLaneDisplay(int track)
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    auto *lanes = view->findChild<QWidget *>(QStringLiteral("automationArea"));
+    if (!check(lanes, "lane display: the song view has no automation area"))
+        return;
+    const qreal dpr = lanes->devicePixelRatioF();
+    const auto pixel = [&](const QImage &image, QPointF at) {
+        return image.pixelColor(int(at.x() * dpr), int(at.y() * dpr));
+    };
+    const auto blendsTo = [](const QColor &got, const QColor &fill, int alpha,
+                             const QColor &under) {
+        const auto ch = [&](int f, int u) { return (f * alpha + u * (255 - alpha)) / 255; };
+        return std::abs(got.red() - ch(fill.red(), under.red())) <= 3 &&
+               std::abs(got.green() - ch(fill.green(), under.green())) <= 3 &&
+               std::abs(got.blue() - ch(fill.blue(), under.blue())) <= 3;
+    };
+    const bool lanesWere = view->automationLanesVisible();
+    view->setAutomationLanesVisible(true);
+    view->selectTrack(track);
+    // No bend on the track, so its row is the take's alone.
+    const int undoBefore = undo->index();
+    if (const std::vector<DocLanePoint> bends = doc.lanePoints(track, DOC_CC_BEND); !bends.empty())
+        doc.deleteLanePoints(track, DOC_CC_BEND, bends);
+    if (view->model().findLane(track, LANE_CC_BEND))
+        view->removeEmptyLane(track, LANE_CC_BEND);
+    QApplication::processEvents();
+    check(!view->model().findLane(track, LANE_CC_BEND),
+          "lane display: the track's bend lane could not be cleared for the check");
+
+    const int undoTake = undo->index();
+    m_recordAction->trigger();
+    pumpMs(30);
+    synchronizePlayhead();
+    check(view->recordingPreview().lanes.empty() && !view->model().findLane(track, LANE_CC_BEND),
+          "lane display: a take with no moves shows a lane");
+    const uint64_t pBend = m_audio.playheadSamples();
+    send(0xE0, 0x00, 0x60); // +4096
+    pumpMs(200);
+    synchronizePlayhead();
+    const uint64_t pNow = m_audio.playheadSamples();
+    const RecordingPreview preview = view->recordingPreview();
+    const RecordingPreview::Lane *bend = preview.lane(track, LANE_CC_BEND);
+    const uint64_t from = tickOf(pBend), to = tickOf(pNow);
+    // The take's move, then the song's value (0: no bend) back at the clock.
+    const bool shape = bend && preview.lanes.size() == 1 && bend->ranges.size() == 1 &&
+                       bend->ranges.front() == std::make_pair(from, to) &&
+                       bend->points.size() == 2 && bend->points[0].tick == from &&
+                       bend->points[0].value == 4096 && bend->points[1].tick == to &&
+                       bend->points[1].value == 0;
+    if (!check(shape, "lane display: the bend ghost is not the take's move, restored at the clock"))
+        if (bend)
+            for (const LanePoint &pt : bend->points)
+                std::fprintf(stderr, "reccheck:   ghost %u %d (want %llu..%llu)\n", pt.tick,
+                             pt.value, (unsigned long long)from, (unsigned long long)to);
+    check(view->model().findLane(track, LANE_CC_BEND) != nullptr,
+          "lane display: the take's bend did not bring up a BEND row");
+    const std::optional<QPointF> at =
+        view->recordingPreviewLanePoint(LANE_CC_BEND, (from + to) / 2, 4096);
+    const QColor color = SongView::trackColor(track);
+    QPointF probe;
+    if (check(at.has_value() && to > from + 4,
+              "lane display: no BEND row to probe, or too short")) {
+        probe = *at;
+        const QImage during = lanes->grab().toImage();
+        const QColor under = pixel(during, probe + QPointF(0, 6));
+        check(blendsTo(pixel(during, probe), color, songview::kRecordingGhostAlpha, under) &&
+                  pixel(during, probe) != under,
+              "lane display: the bend ghost is not painted in its track's colour at reduced "
+              "alpha");
+        if (const QByteArray shot = qgetenv("PORYDAW_RECCHECK_SHOT"); !shot.isEmpty())
+            lanes->grab().save(QString::fromLocal8Bit(shot).replace(QStringLiteral(".png"),
+                                                                    QStringLiteral("-lanes.png")));
+    }
+
+    // Stop: the ghost turns into the real curve, painted solid where it was.
+    send(0xE0, 0x00, 0x40);
+    pumpMs(30);
+    m_stopAction->trigger();
+    check(view->recordingPreview().empty() && undo->index() == undoTake + 1 &&
+              view->model().findLane(track, LANE_CC_BEND) != nullptr,
+          "lane display: after Stop the ghost stayed, or the bend did not land");
+    if (at) {
+        const QImage committed = lanes->grab().toImage();
+        check(pixel(committed, probe) == color,
+              "lane display: after Stop the bend is not painted solid where its ghost was");
+    }
+    undo->undo();
+    check(!view->model().findLane(track, LANE_CC_BEND),
+          "lane display: undoing the take left its BEND row");
+
+    // A dropped take takes its row with it.
+    m_recordAction->trigger();
+    pumpMs(30);
+    send(0xE0, 0x00, 0x60);
+    pumpMs(100);
+    synchronizePlayhead();
+    check(view->model().findLane(track, LANE_CC_BEND) != nullptr,
+          "lane display: the second take's bend brought up no row");
+    const int undoAtDelete = undo->index();
+    doc.deleteTrack(track);
+    check(m_takeSession == nullptr && view->recordingPreview().empty(),
+          "lane display: deleting the take's track did not drop it");
+    undo->undo();
+    check(undo->index() == undoAtDelete && !view->model().findLane(track, LANE_CC_BEND),
+          "lane display: a dropped take left its BEND row");
+    send(0xE0, 0x00, 0x40);
+    pumpMs(30);
+    m_stopAction->trigger();
+    while (undo->index() > undoBefore)
+        undo->undo();
+    check(undo->index() == undoBefore, "lane display: undo did not restore the song");
+    view->setAutomationLanesVisible(lanesWere);
 }
 
 int runRecordCheck(const QString &projectRoot, const QString &songLabel)

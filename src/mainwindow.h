@@ -286,6 +286,7 @@ class MainWindow : public QMainWindow
     // runRecordWindowCheck's halves (reccheck.cpp).
     void checkRecordingTakes(const QString &scratchDir);
     void checkRecordingDisplay();
+    void checkRecordingLaneDisplay(int track);
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.

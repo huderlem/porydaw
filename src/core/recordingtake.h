@@ -88,6 +88,13 @@ class RecordingTake
     // What the engine plays of a lane value: m4a's BEND keeps the bend's
     // top 7 bits; MOD as it is.
     static int audible(uint8_t cc, int value);
+    // The lane `cc` as the commit would leave it: before (the lane's points,
+    // sorted by tick) with this cc's writes applied in order, each with its
+    // restore point read against before, as MainWindow::commitTake writes
+    // them. Sorted by tick. The live preview's curve.
+    static std::vector<SongDocument::LanePointValue>
+    applyLaneWrites(const std::vector<DocLanePoint> &before, const std::vector<LaneWrite> &writes,
+                    uint8_t cc);
 
     RecordingTake() { clear(); }
 

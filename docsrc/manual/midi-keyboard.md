@@ -50,7 +50,10 @@ switching tabs or closing the song also end the take. -->
 
 <!-- TODO: What you see: your notes appear right away as faded notes and
 grow while you hold them; the ruler is tinted red over the recorded span.
-When the take ends they become real notes. -->
+Pitch bend and mod-wheel moves show the same way in the BEND and MOD lanes:
+the stretch the take rewrites is drawn faded (a BEND or MOD row appears for
+the take if the track didn't have one). When the take ends they become real
+notes and points. -->
 
 <!-- TODO: What lands in the song: one undo step per take ("Record N
 notes") — one Ctrl+Z removes the whole take. Notes are placed on the
@@ -60,8 +63,7 @@ are recorded too, onto the track's BEND and MOD lanes (MOD as heard: the
 wheel scaled to the lane's range) — they replace the lane's points from
 your first move to where the take ends (Stop, or a loop wrap), and there
 the lane goes back to the value the song had, so a wheel left up doesn't
-carry on through the rest of the song; they show up once the take ends (no
-faded preview). The sustain pedal lengthens recorded notes. Takes are added on top
+carry on through the rest of the song. The sustain pedal lengthens recorded notes. Takes are added on top
 of what's there (overdub); where a new note overlaps an old one on the same
 pitch, the new one wins, the same as drawing a note over another. -->
 

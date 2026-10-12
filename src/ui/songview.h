@@ -144,7 +144,36 @@ struct RecordingPreview {
     // Punched [start, end) tick spans, sorted and merged: the ruler's REC
     // tint. Empty once the take has ended (a commit still pending).
     std::vector<std::pair<uint64_t, uint64_t>> spans;
-    bool empty() const { return notes.empty() && spans.empty(); }
+    // The take's BEND and MOD moves: each lane's whole curve as the commit
+    // would leave it, and the tick ranges the take rewrites ([begin, end],
+    // inclusive, as SongDocument::writeLanePoints takes them), painted as
+    // ghosts. Only lanes the take has moved; sorted by cc.
+    struct Lane {
+        uint8_t cc = 0; // 0x01 (MOD) or LANE_CC_BEND
+        std::vector<LanePoint> points;
+        std::vector<std::pair<uint64_t, uint64_t>> ranges;
+        bool operator==(const Lane &o) const
+        {
+            return cc == o.cc && ranges == o.ranges &&
+                   std::equal(points.begin(), points.end(), o.points.begin(), o.points.end(),
+                              [](const LanePoint &a, const LanePoint &b) {
+                                  return a.tick == b.tick && a.value == b.value;
+                              });
+        }
+        bool operator!=(const Lane &o) const { return !(*this == o); }
+    };
+    std::vector<Lane> lanes;
+    const Lane *lane(int engineTrack, uint8_t cc) const
+    {
+        if (engineTrack != track)
+            return nullptr;
+        for (const Lane &l : lanes) {
+            if (l.cc == cc)
+                return &l;
+        }
+        return nullptr;
+    }
+    bool empty() const { return notes.empty() && spans.empty() && lanes.empty(); }
 };
 
 class SongView : public QWidget
@@ -294,6 +323,9 @@ class SongView : public QWidget
     // sits in the ruler, in those widgets' coordinates (harness probes).
     QRectF recordingPreviewNoteRect(const RecordingPreview::Note &note) const;
     QRectF recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const;
+    // Where (tick, value) sits on the take's track's cc row, in the
+    // automation area's coordinates; nullopt while that row isn't shown.
+    std::optional<QPointF> recordingPreviewLanePoint(uint8_t cc, uint64_t tick, int value) const;
     // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
     // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
     void setLiveHeldKeys(uint64_t lo, uint64_t hi);
