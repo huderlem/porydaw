@@ -2949,7 +2949,8 @@ void MainWindow::checkRecordingCcLaneDisplay(int track)
     check(view->laneDisplayMax(track, 0x15) >= 100,
           "cc lane display: an LFOS ghost past the zoomed axis did not grow it");
     const QColor color = SongView::trackColor(track);
-    // Probed off the line: below LFOS's top, above BENDR's low 24.
+    // Probed off the line, below it: LFOS 100 tops its grown axis and
+    // BENDR 24 tops its 0..24 one.
     const std::optional<QPointF> lfosAt =
         view->recordingPreviewLanePoint(0x15, (lfosTick + to) / 2, 100);
     // LFOS 20 before the axis grew, where the grown axis draws it: the
@@ -2962,7 +2963,7 @@ void MainWindow::checkRecordingCcLaneDisplay(int track)
               "cc lane display: no BENDR or LFOS row to probe, or too short")) {
         const QImage during = lanes->grab().toImage();
         const QColor underL = pixel(during, *lfosAt + QPointF(0, 6));
-        const QColor underB = pixel(during, *bendrAt - QPointF(0, 6));
+        const QColor underB = pixel(during, *bendrAt + QPointF(0, 6));
         check(blendsTo(pixel(during, *lfosAt), color, songview::kRecordingGhostAlpha, underL) &&
                   pixel(during, *lfosAt) != underL,
               "cc lane display: the LFOS ghost is not painted in its track's colour at reduced "

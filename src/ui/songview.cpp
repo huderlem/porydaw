@@ -5108,11 +5108,15 @@ class AutomationArea : public TimelineSurface
             const std::pair<int, QString> options[] = {
                 {0, SongView::tr("Auto (fit to data)")},
                 {16, QStringLiteral("0–16")},
+                {kBendRangeAxis, QStringLiteral("0–24")},
                 {32, QStringLiteral("0–32")},
                 {64, QStringLiteral("0–64")},
                 {127, SongView::tr("0–127 (full)")},
             };
             for (const auto &opt : options) {
+                // 0–24 is BENDR's knob reach; no other lane offers it.
+                if (opt.first == kBendRangeAxis && cc != 0x14)
+                    continue;
                 QAction *action = range->addAction(opt.second);
                 action->setCheckable(true);
                 action->setChecked(opt.first == current);
@@ -5282,8 +5286,19 @@ class AutomationArea : public TimelineSurface
 
     // Default axis mode per CC (0 = auto-fit): MOD is only musical in the
     // bottom stretch of 0..127 (vibrato past ~20 is cartoony), so it fits
-    // to the data by default; everything else keeps the full axis.
-    static int laneRangeDefault(uint8_t cc) { return cc == 0x01 ? 0 : 127; }
+    // to the data by default. BENDR is in semitones and a keyboard knob
+    // reaches 0..24 (docs/midi-controls/PLAN.md D2), so that is its axis;
+    // a song's wider value still grows it. Everything else keeps the full
+    // axis.
+    static int laneRangeDefault(uint8_t cc)
+    {
+        if (cc == 0x01)
+            return 0;
+        if (cc == 0x14)
+            return kBendRangeAxis;
+        return 127;
+    }
+    static constexpr int kBendRangeAxis = 24;
 
     // Auto-fit rung: the smallest of 16/32/64/127 that holds the lane's
     // data. Coarse rungs keep the scale from twitching while points are

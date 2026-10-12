@@ -3700,6 +3700,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("node-selection setup: no data-free CC lane available");
         if (freeCc) {
             view.addEmptyLane(laneTrack, freeCc);
+            // BENDR's row defaults to its 0..24 knob axis; the mirrors
+            // assume the full 0..127 one.
+            view.setLaneDisplayRange(laneTrack, freeCc, 127);
             QCoreApplication::processEvents();
             // Row geometry mirrors, like the pencil/detent sections: tempo
             // row 0, voice row, then the track's lanes by ascending CC, all
@@ -4398,6 +4401,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             fail("point-menu setup: no data-free CC lane available");
         if (freeCc && pointMenu) {
             view.addEmptyLane(laneTrack, freeCc);
+            // BENDR's row defaults to its 0..24 knob axis; the mirrors
+            // assume the full 0..127 one.
+            view.setLaneDisplayRange(laneTrack, freeCc, 127);
             QCoreApplication::processEvents();
             // Row geometry mirror: tempo row 0, voice row, then the track's
             // lanes by ascending CC, all at the default 48 px height.
@@ -5351,6 +5357,9 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         if (!freeCc)
             fail("hover section setup: no data-free CC lane available");
         view.addEmptyLane(laneTrack, freeCc);
+        // BENDR's row defaults to its 0..24 knob axis; the mirrors
+        // assume the full 0..127 one.
+        view.setLaneDisplayRange(laneTrack, freeCc, 127);
         QCoreApplication::processEvents();
         // Row-geometry mirrors, like the pencil and node-selection
         // sections: tempo row 0, voice row, then the track's lanes by

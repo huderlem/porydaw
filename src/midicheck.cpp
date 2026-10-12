@@ -1455,6 +1455,13 @@ void MainWindow::checkLiveControls()
         bendrScaled &= lanes(a)[BendR] == semitones;
     }
     check(bendrScaled, "live controls: CC20 did not set BENDR on the 0..24 scale");
+    // The BENDR row's axis matches the knob's reach (unless the song's own
+    // points go past it).
+    int songBendrMax = 0;
+    for (const DocLanePoint &pt : m_active->doc.lanePoints(a, 0x14))
+        songBendrMax = std::max(songBendrMax, pt.value);
+    check(view->laneDisplayMax(a, 0x14) == std::max(24, songBendrMax),
+          "live controls: the BENDR row's axis is not 0..24");
     if (songA[BendR] == 12) { // keep the restore visible
         send(20, 127);
         pumpMs(30);

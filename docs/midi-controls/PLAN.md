@@ -990,3 +990,16 @@ build-dummy, and all five trees build cleanly.
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
 each). `--midicheck` and `--reccheck` pass on build-nomidi, build-off and
 build-dummy, and all five trees build cleanly.
+
+### Step 3 Windows checkpoint follow-up (2026-10-12)
+
+User's Windows pass of step 3: everything works, except the BENDR row drew the
+full 0–127 axis while the knob only reaches 0–24 (D2). Fixed, user-chosen
+option: the BENDR row's default value axis is **0–24** (`laneRangeDefault`,
+`kBendRangeAxis` in `songview.cpp`), and its Value range menu gains a 0–24
+entry (BENDR only). A song's points above 24 still grow the axis, as on any
+zoomed row. `--midicheck` asserts the default axis (mutation-tested); the
+reccheck BENDR ghost probe now samples below the line (24 tops the row); and
+rollcheck's data-free-lane probes, which pick BENDR first and mirror a
+0–127 axis, pin that row to 0–127 with `setLaneDisplayRange`. Sweeps normal +
+ASAN PASS.
