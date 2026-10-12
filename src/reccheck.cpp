@@ -42,7 +42,9 @@
 // the loop end, the latency offset clamped at punch-in and at the loop
 // start (and never moving an end the take imposed), later passes winning
 // overlapping notes by the document's own rules, unmatched note-offs, cuts,
-// a lost Boundary (and a Boundary after one), another arm's events.
+// a lost Boundary (and a Boundary after one), another arm's events; bend and
+// mod moves as lane writes, each ending at its segment's end (a Boundary, a
+// lost one, the stop) with the song's value restored there.
 //
 // Then Record end to end in the window, with the audio device parked and the
 // real callback pumped (AudioEngine::holdDeviceForTest/pumpForTest), every
@@ -50,6 +52,9 @@
 // from the edit cursor and Stop commits one undo step that undo removes; R
 // in the roll toggles Record, which has no window shortcut; Pause commits;
 // a take ended inside an open edit group lands after it as its own step; a
+// take's pitch bend and mod wheel land on its BEND and MOD lanes, the song's
+// value back at the stop (a take of moves alone too, and Reset All
+// Controllers' centred bend and zeroed mod); a
 // track the song doesn't have can't record, and a take that can't be
 // written isn't reported as recorded; an empty take pushes nothing; punch
 // in and out while playing keeps playing,
@@ -167,7 +172,7 @@ struct Feed {
     RecordingTake &take;
     uint32_t generation;
     uint32_t segment = 0;
-    uint32_t late = 0; // stamped on note ons and offs
+    uint32_t late = 0; // stamped on note ons and offs, bends and mods
 
     void push(uint8_t kind, uint64_t pos, uint8_t key = 0, uint8_t velocity = 0,
               uint64_t resume = 0)
@@ -180,10 +185,24 @@ struct Feed {
         ev.segment = segment;
         ev.key = key;
         ev.velocity = velocity;
-        if (kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff)
+        if (kind != CaptureEvent::Begin && kind != CaptureEvent::Cut &&
+            kind != CaptureEvent::Boundary)
             ev.lateSamples = late;
         take.push(ev);
     }
+    void control(uint8_t kind, uint64_t pos, int16_t value)
+    {
+        CaptureEvent ev;
+        ev.kind = kind;
+        ev.samplePos = pos;
+        ev.generation = generation;
+        ev.segment = segment;
+        ev.value = value;
+        ev.lateSamples = late;
+        take.push(ev);
+    }
+    void bend(uint64_t pos, int16_t value) { control(CaptureEvent::Bend, pos, value); }
+    void mod(uint64_t pos, int16_t value) { control(CaptureEvent::Mod, pos, value); }
     void begin(uint64_t pos) { push(CaptureEvent::Begin, pos); }
     void on(uint64_t pos, uint8_t key, uint8_t velocity = 100)
     {
@@ -607,6 +626,150 @@ void checkTakeRules()
                    "take: the later-wins pass visited more than a few notes per note"))
             std::fprintf(stderr, "reccheck:   %zu steps for %d notes\n", steps, count);
     }
+    // Bend and mod moves become lane writes: one per lane and segment,
+    // spanning its first move to the segment's end; nearest-tick rounding,
+    // last move on a tick wins, a move the engine can't hear dropped (its
+    // value kept by the point it sounds like), the wait and the offset
+    // shifted and clamped at the segment start, ticks never running
+    // backwards; nothing before the Begin or from another arm.
+    {
+        using LanePointValue = SongDocument::LanePointValue;
+        const auto samePoints = [](const std::vector<LanePointValue> &got,
+                                   std::initializer_list<LanePointValue> want) {
+            if (got.size() != want.size())
+                return false;
+            size_t i = 0;
+            for (const LanePointValue &w : want) {
+                if (got[i].tick != w.tick || got[i].value != w.value)
+                    return false;
+                i++;
+            }
+            return true;
+        };
+        take.begin(0, 12);
+        Feed feed{take, 12};
+        feed.bend(5000, 100);
+        feed.begin(10000);
+        Feed other{take, 11};
+        other.mod(21000, 9);
+        feed.bend(20000, 4096);
+        feed.bend(20400, 4100); // same tick: wins
+        feed.mod(22000, 50);
+        feed.bend(25000, 4101); // the same 7-bit bend: dropped
+        feed.bend(30000, 0);
+        feed.mod(31000, 20);
+        feed.late = 5000;
+        feed.mod(31000, 30); // waited back to tick 26: stays after tick 31, wins it
+        feed.late = 0;
+        check(take.controls().size() == 7,
+              "take: a bend or mod move was not kept (or a stray was)");
+        feed.jump(40000, 10000);
+        feed.mod(10500, 70);
+        feed.late = 500;
+        feed.mod(15000, 60);
+        feed.late = 0;
+        // Stopped at 16000 in the second segment: its writes end there, the
+        // first segment's at its Boundary (40000), neither shifted.
+        const auto writes = take.toLaneWrites(tl, 16000, 1, 2000);
+        const bool shape = writes.size() == 3 && writes[0].cc == 0x01 &&
+                           writes[1].cc == DOC_CC_BEND && writes[2].cc == 0x01;
+        if (check(shape, "take: the lane writes are not one per lane and segment, in order")) {
+            // Latency 2000 moves the first segment's moves 2 ticks earlier.
+            check(writes[0].tickBegin == 20 && writes[0].tickEnd == 40 && writes[0].restoreEnd &&
+                      samePoints(writes[0].points, {{20, 50}, {29, 30}}),
+                  "take: the mod moves did not convert (or a reordered move ran backwards)");
+            // 4101 sounds as 4100 did: dropped, the point keeping its value.
+            check(writes[1].tickBegin == 18 && writes[1].tickEnd == 40 && writes[1].restoreEnd &&
+                      samePoints(writes[1].points, {{18, 4101}, {28, 0}}),
+                  "take: the bend moves did not convert (same tick, inaudible change)");
+            check(writes[2].tickBegin == 10 && writes[2].tickEnd == 16 && writes[2].restoreEnd &&
+                      samePoints(writes[2].points, {{10, 70}, {13, 60}}),
+                  "take: a later segment's moves were not floored at its start and shifted");
+        }
+        take.begin(0, 13);
+        Feed none{take, 13};
+        none.begin(10000);
+        none.on(12000, 60);
+        check(take.toLaneWrites(tl, 20000, 0, 0).empty(),
+              "take: a take without moves wrote lane points");
+        // Where a write ends: a Boundary on its last move's tick, a lost
+        // Boundary (the last position seen), the stop position read in the
+        // current segment or not; an end on or before the last move's tick
+        // restores nothing.
+        take.begin(0, 14);
+        Feed ends{take, 14};
+        ends.begin(0);
+        ends.bend(3000, 108);
+        ends.bend(5000, 0); // the spring back: sounds as 108, rests at 0
+        ends.jump(5000, 0);
+        ends.bend(1000, 500);
+        ends.mod(2000, 10);
+        ends.segment++; // its Boundary lost: segment 1 ends at 2000
+        ends.mod(8000, 40);
+        const auto atStop = take.toLaneWrites(tl, 9000, 2, 0);
+        const bool endShape = atStop.size() == 4 && atStop[0].cc == DOC_CC_BEND &&
+                              atStop[1].cc == 0x01 && atStop[2].cc == DOC_CC_BEND &&
+                              atStop[3].cc == 0x01;
+        if (check(endShape, "take: the ended writes are not one per lane and segment")) {
+            check(atStop[0].tickEnd == 5 && !atStop[0].restoreEnd &&
+                      samePoints(atStop[0].points, {{3, 0}}),
+                  "take: a bend's inaudible spring back did not rest at 0 (or a Boundary on "
+                  "the last move restored)");
+            check(atStop[1].tickEnd == 2 && !atStop[1].restoreEnd,
+                  "take: a lost Boundary on the last move's tick restored");
+            check(atStop[2].tickBegin == 1 && atStop[2].tickEnd == 2 && atStop[2].restoreEnd,
+                  "take: a lost Boundary did not end the segment at the last position seen");
+            check(atStop[3].tickBegin == 8 && atStop[3].tickEnd == 9 && atStop[3].restoreEnd,
+                  "take: the current segment's write did not end at the stop");
+        }
+        const auto elsewhere = take.toLaneWrites(tl, 9000, 1, 0);
+        const auto early = take.toLaneWrites(tl, 7000, 2, 0);
+        check(elsewhere.size() == 4 && elsewhere[3].tickEnd == 8 && !elsewhere[3].restoreEnd &&
+                  early.size() == 4 && early[3].tickEnd == 8 && !early[3].restoreEnd,
+              "take: a stop read in another segment (or before the last move) still ended "
+              "the write there");
+        // The restore point: the song's value at the write's end before the
+        // take (its last point there or before, else 0), when it sounds
+        // different from the take's last.
+        {
+            const auto pts = [](std::initializer_list<std::pair<uint64_t, int>> list) {
+                std::vector<DocLanePoint> out;
+                for (const auto &[tick, value] : list) {
+                    DocLanePoint pt;
+                    pt.tick = tick;
+                    pt.value = value;
+                    out.push_back(pt);
+                }
+                return out;
+            };
+            RecordingTake::LaneWrite w;
+            w.cc = DOC_CC_BEND;
+            w.tickBegin = 10;
+            w.tickEnd = 40;
+            w.points = {{10, 4096}, {30, 0}};
+            w.restoreEnd = true;
+            LanePointValue r{0, 0};
+            check(w.restorePoint(pts({{0, 2000}, {20, 1000}, {50, 3000}}), &r) && r.tick == 40 &&
+                      r.value == 1000,
+                  "take: the end did not restore the song's value there");
+            check(w.restorePoint(pts({{0, 2000}, {40, -500}}), &r) && r.tick == 40 &&
+                      r.value == -500,
+                  "take: a point on the end tick did not come back");
+            check(!w.restorePoint(pts({{20, 100}}), &r) && !w.restorePoint(pts({}), &r),
+                  "take: an end that sounds like the take's last value got a point");
+            w.restoreEnd = false;
+            check(!w.restorePoint(pts({{20, 1000}}), &r),
+                  "take: a write ending on its last move restored");
+            w.cc = 0x01;
+            w.points = {{10, 30}};
+            w.restoreEnd = true;
+            check(w.restorePoint(pts({}), &r) && r.value == 0 &&
+                      !w.restorePoint(pts({{5, 30}}), &r),
+                  "take: a MOD end did not restore the song's value (0 with no point)");
+        }
+        take.clear();
+        check(take.controls().empty(), "take: clear() kept the moves");
+    }
     // A take whose Begin never came records nothing.
     {
         take.begin(0, 11);
@@ -790,6 +953,152 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         check(noteList(a) == before, "record: undo did not remove every recorded note");
         send(0x80, 62, 0);
         pumpMs(30);
+    }
+
+    // Pitch bend and the mod wheel record onto the take's BEND and MOD
+    // lanes (MOD as heard: the wheel scaled to the lane's range), in the
+    // same undo step as the notes, replacing the lane's points from the
+    // first move to the stop, where the song's value comes back, and keeping
+    // the rest; undo restores them.
+    {
+        const auto lane = [&](uint8_t cc) {
+            std::vector<std::pair<uint64_t, int>> out;
+            for (const DocLanePoint &p : doc.lanePoints(a, cc))
+                out.push_back({p.tick, p.value});
+            return out;
+        };
+        // What the lane held at tick, before the take (0 with no point).
+        const auto valueAt = [](const std::vector<std::pair<uint64_t, int>> &points,
+                                uint64_t tick) {
+            int value = 0;
+            for (const auto &[t, v] : points) {
+                if (t <= tick)
+                    value = v;
+            }
+            return value;
+        };
+        // The take's moves over the song's other points: [first, end]
+        // replaced, the song's value back at end when it sounds different.
+        const auto expected = [&](uint8_t cc, const std::vector<std::pair<uint64_t, int>> &before,
+                                  std::vector<std::pair<uint64_t, int>> moves, uint64_t end) {
+            const uint64_t first = moves.front().first;
+            const uint64_t last = std::max(end, moves.back().first);
+            std::vector<std::pair<uint64_t, int>> want;
+            for (const auto &pt : before) {
+                if (pt.first < first || pt.first > last)
+                    want.push_back(pt);
+            }
+            const int song = valueAt(before, end);
+            if (end > moves.back().first &&
+                RecordingTake::audible(cc, song) != RecordingTake::audible(cc, moves.back().second))
+                moves.push_back({end, song});
+            want.insert(want.end(), moves.begin(), moves.end());
+            std::sort(want.begin(), want.end());
+            return want;
+        };
+        const auto sorted = [](std::vector<std::pair<uint64_t, int>> v) {
+            std::sort(v.begin(), v.end());
+            return v;
+        };
+        const uint64_t cursor = tpb * 16;
+        view->setEditCursorTick(cursor);
+        // One bend point inside the range the take will move through, one
+        // well after it.
+        const uint64_t inside = cursor + tpb / 2;
+        doc.addLanePoint(a, DOC_CC_BEND, inside, 1000);
+        doc.addLanePoint(a, DOC_CC_BEND, cursor + tpb * 8, 2000);
+        const auto bendBefore = lane(DOC_CC_BEND);
+        const auto modBefore = lane(0x01);
+        const int modMax = view->laneDisplayMax(a, 0x01);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        const uint64_t pBend = playhead();
+        send(0xE0, 0x00, 0x60); // +4096
+        send(0x90, 64, 100);
+        pumpMs(40);
+        const uint64_t pMod = playhead();
+        send(0xB0, 1, 127);
+        pumpMs(400);
+        const uint64_t pBack = playhead();
+        send(0xE0, 0x00, 0x40); // centre
+        send(0xB0, 1, 0);
+        send(0x80, 64, 0);
+        pumpMs(50);
+        const uint64_t pStop = playhead();
+        m_stopAction->trigger();
+        // The setup point sits where the take replaces, and the stop before
+        // the point after it.
+        check(tickOf(pBend) < inside && inside < tickOf(pBack) && tickOf(pBack) < tickOf(pStop) &&
+                  tickOf(pStop) < cursor + tpb * 8,
+              "record: the bend take did not span the setup point (timing)");
+        check(undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Record 1 note(s) with pitch bend and mod"),
+              "record: a take with bend and mod did not commit one step naming them");
+        check(message() == QStringLiteral("Recorded 1 note(s) with pitch bend and mod."),
+              "record: the status bar does not report the recorded bend and mod");
+        // Here the song's 1000 comes back at the stop.
+        const auto wantBend = expected(DOC_CC_BEND, bendBefore,
+                                       {{tickOf(pBend), 4096}, {tickOf(pBack), 0}}, tickOf(pStop));
+        const auto gotBend = sorted(lane(DOC_CC_BEND));
+        if (!check(gotBend == wantBend && std::count(gotBend.begin(), gotBend.end(),
+                                                     std::make_pair(tickOf(pStop), 1000)) == 1,
+                   "record: the bend lane is not the take's moves over the song's other points, "
+                   "the song's value back at the stop")) {
+            for (const auto &[tick, value] : gotBend)
+                std::fprintf(stderr, "reccheck:   bend %llu %d\n", (unsigned long long)tick, value);
+        }
+        const auto wantMod =
+            expected(0x01, modBefore, {{tickOf(pMod), modMax}, {tickOf(pBack), 0}}, tickOf(pStop));
+        check(sorted(lane(0x01)) == wantMod,
+              "record: the mod lane is not the take's moves, scaled as heard");
+        check(find(a, 64, tickOf(pBend)).has_value(), "record: the note with the bend was lost");
+        undo->undo();
+        check(lane(DOC_CC_BEND) == bendBefore && lane(0x01) == modBefore,
+              "record: undo did not restore the bend and mod lanes");
+        undo->undo(); // the two setup points
+        undo->undo();
+
+        // Moves alone are a take too.
+        const int undoAlone = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        send(0xB0, 1, 64);
+        pumpMs(50);
+        m_stopAction->trigger();
+        check(undo->index() == undoAlone + 1 && lastUndoText() == QStringLiteral("Record mod"),
+              "record: a take of only a mod move did not commit \"Record mod\"");
+        check(message() == QStringLiteral("Recorded mod."),
+              "record: the status bar does not report a mod-only take");
+        undo->undo();
+        send(0xB0, 1, 0);
+        pumpMs(30);
+
+        // Reset All Controllers (CC121) centres the bend and zeroes the mod,
+        // and the take records both.
+        const auto bendReset = lane(DOC_CC_BEND);
+        const auto modReset = lane(0x01);
+        const int undoReset = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        const uint64_t pUp = playhead();
+        send(0xE0, 0x00, 0x60); // +4096
+        pumpMs(100);
+        const uint64_t pReset = playhead();
+        send(0xB0, 121, 0);
+        pumpMs(50);
+        const uint64_t pEnd = playhead();
+        m_stopAction->trigger();
+        check(undo->index() == undoReset + 1 &&
+                  lastUndoText() == QStringLiteral("Record pitch bend and mod"),
+              "record: Reset All Controllers did not record a bend and a mod");
+        check(sorted(lane(DOC_CC_BEND)) == expected(DOC_CC_BEND, bendReset,
+                                                    {{tickOf(pUp), 4096}, {tickOf(pReset), 0}},
+                                                    tickOf(pEnd)),
+              "record: Reset All Controllers did not centre the recorded bend");
+        check(sorted(lane(0x01)) == expected(0x01, modReset, {{tickOf(pReset), 0}}, tickOf(pEnd)),
+              "record: Reset All Controllers did not zero the recorded mod");
+        undo->undo();
     }
 
     // Record's key is the roll's, like M/S: R in the focused roll starts and

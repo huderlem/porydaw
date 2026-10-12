@@ -24,12 +24,16 @@ struct CaptureEvent {
                   // end there
         Boundary, // the segment ended at samplePos; segment `segment` starts
                   // at resumePos (a loop wrap: loop end to loop start)
+        Bend,     // a pitch-bend move: value is the bend, -8192..8191
+        Mod,      // a mod-wheel move: value is the MOD it set (the wheel
+                  // scaled to the lane's range, as heard)
     };
     uint64_t samplePos = 0;
     uint64_t resumePos = 0;   // Boundary only
     uint32_t generation = 0;  // the arm this belongs to (AudioEngine::armCapture)
     uint32_t segment = 0;     // Boundary: the segment it starts
-    uint32_t lateSamples = 0; // NoteOn/NoteOff: arrival to callback, in samples
+    uint32_t lateSamples = 0; // NoteOn/NoteOff/Bend/Mod: arrival to callback, in samples
+    int16_t value = 0;        // Bend/Mod
     uint8_t kind = NoteOn;
     uint8_t key = 0;
     uint8_t velocity = 0;

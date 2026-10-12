@@ -5683,9 +5683,13 @@ void MainWindow::finishRecording()
     m_audio.captureClock(&stopSample, &stopSegment);
     drainCapture();
     std::vector<SongDocument::NewNote> notes;
-    if (m_take.started())
+    std::vector<RecordingTake::LaneWrite> lanes;
+    if (m_take.started()) {
         notes =
             m_take.toNotes(*session->timeline, stopSample, stopSegment, recordingLatencySamples());
+        lanes = m_take.toLaneWrites(*session->timeline, stopSample, stopSegment,
+                                    recordingLatencySamples());
+    }
     const int track = m_take.track();
     const uint32_t take = m_take.generation();
     m_take.clear();
@@ -5698,7 +5702,7 @@ void MainWindow::finishRecording()
     session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.
-    commitTake(&session->doc, session->view, take, track, notes,
+    commitTake(&session->doc, session->view, take, track, notes, lanes,
                m_audio.captureDropped() != m_takeDropsAtStart);
     if (session == m_active)
         publishLiveTarget();
@@ -5707,16 +5711,18 @@ void MainWindow::finishRecording()
 
 void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
                             uint32_t take, int track,
-                            const std::vector<SongDocument::NewNote> &notes, bool inputLost)
+                            const std::vector<SongDocument::NewNote> &notes,
+                            const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost)
 {
-    if (doc && doc->editGroupDepth() > 0 && !notes.empty()) {
+    const bool empty = notes.empty() && lanes.empty();
+    if (doc && doc->editGroupDepth() > 0 && !empty) {
         // Something holds an edit group open (a script transaction that
         // stopped the transport, say): written now, the take would join
         // that group's step under its name, and go if it is rolled back.
         // It lands as its own step once the group has closed.
         QTimer::singleShot(kTakeCommitRetryMs, this,
-                           [this, doc, view, take, track, notes, inputLost] {
-                               commitTake(doc, view, take, track, notes, inputLost);
+                           [this, doc, view, take, track, notes, lanes, inputLost] {
+                               commitTake(doc, view, take, track, notes, lanes, inputLost);
                            });
         return;
     }
@@ -5724,18 +5730,47 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
     // owns its preview now.
     if (view && view->recordingPreview().take == take)
         view->clearRecordingPreview();
+    // "pitch bend", "mod", or both: what the take moved besides notes.
+    bool bend = false, mod = false;
+    for (const RecordingTake::LaneWrite &w : lanes)
+        (w.cc == DOC_CC_BEND ? bend : mod) = true;
+    const QString moved = bend && mod ? tr("pitch bend and mod")
+                          : bend      ? tr("pitch bend")
+                                      : tr("mod");
+    const int count = int(notes.size());
     bool written = false;
-    if (doc && !notes.empty() && !doc->isLocked()) {
+    if (doc && !empty && !doc->isLocked()) {
         const uint64_t revision = doc->revision();
-        doc->beginEditGroup(tr("Record %n note(s)", nullptr, int(notes.size())));
-        doc->addNotes(track, notes);
+        doc->beginEditGroup(lanes.empty() ? tr("Record %n note(s)", nullptr, count)
+                            : notes.empty()
+                                ? tr("Record %1").arg(moved)
+                                : tr("Record %n note(s) with %1", nullptr, count).arg(moved));
+        if (!notes.empty())
+            doc->addNotes(track, notes);
+        // Each write's end goes back to what the song had there, read before
+        // any of the take lands: a later pass's write must not restore an
+        // earlier pass's value.
+        std::vector<RecordingTake::LaneWrite> writes = lanes;
+        for (RecordingTake::LaneWrite &w : writes) {
+            SongDocument::LanePointValue restore;
+            if (w.restorePoint(doc->lanePoints(track, w.cc), &restore))
+                w.points.push_back(restore);
+        }
+        // In segment order: a later loop pass replaces what an earlier one
+        // wrote where they overlap.
+        for (const RecordingTake::LaneWrite &w : writes)
+            doc->writeLanePoints(track, w.cc, w.tickBegin, w.tickEnd, w.points);
         doc->endEditGroup();
         written = doc->revision() != revision;
     }
-    QString text = notes.empty() ? tr("Nothing was recorded.")
-                   : written     ? tr("Recorded %n note(s).", nullptr, int(notes.size()))
-                                 : tr("The %n recorded note(s) could not be added to the song.",
-                                      nullptr, int(notes.size()));
+    QString text =
+        empty ? tr("Nothing was recorded.")
+        : !written && lanes.empty()
+            ? tr("The %n recorded note(s) could not be added to the song.", nullptr, count)
+        : !written      ? tr("The recording could not be added to the song.")
+        : lanes.empty() ? tr("Recorded %n note(s).", nullptr, count)
+        : notes.empty() ? tr("Recorded %1.").arg(moved)
+                        : tr("Recorded %n note(s) with %1.", nullptr, count).arg(moved);
     if (inputLost)
         text += QLatin1Char(' ') + tr("Some MIDI input was lost while recording.");
     statusBar()->showMessage(text, 6000);

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -35,6 +36,11 @@ class MidiTimeline;
 //    only, not within its own batch). So an earlier note that outlasts a
 //    later one on the same (tick, key) keeps its tail, and one take of two
 //    passes lands as two takes would.
+//  - Pitch-bend and mod-wheel moves are played times too (the same wait
+//    and offset shifts and segment floor), written as BEND and MOD lane
+//    points; where the segment they were played in ends (an imposed end,
+//    like an open note's: not shifted), the lane goes back to what the song
+//    had there. See toLaneWrites.
 class RecordingTake
 {
   public:
@@ -50,6 +56,38 @@ class RecordingTake
         bool open = true;
         bool playedEnd = false; // closed by a played note-off (shifted by the offset)
     };
+
+    // A played pitch-bend or mod-wheel move.
+    struct Control {
+        uint64_t sample = 0;
+        uint64_t floorSample = 0; // the start of its segment
+        uint32_t late = 0;        // how long its message waited for its callback
+        uint32_t segment = 0;
+        uint8_t cc = 0; // DOC_CC_BEND, or 0x01 (MOD)
+        int value = 0;  // bend -8192..8191; MOD 0-127
+    };
+    // One lane's moves from one segment (a loop pass, a seek's landing):
+    // they replace the lane's points in [tickBegin, tickEnd]
+    // (SongDocument::writeLanePoints), from its first move to the segment's
+    // end, or to its last move when the segment ended on that tick.
+    struct LaneWrite {
+        uint8_t cc = 0;
+        uint64_t tickBegin = 0;
+        uint64_t tickEnd = 0;
+        std::vector<SongDocument::LanePointValue> points;
+        // tickEnd is the segment's end, past the last move: the commit puts
+        // back, at tickEnd, the value the song had there before the take,
+        // when it sounds different from the take's last (restorePoint).
+        bool restoreEnd = false;
+        // The point that does it, given the lane's points before the take
+        // (sorted by tick); false when the take's last value already sounds
+        // like the song's.
+        bool restorePoint(const std::vector<DocLanePoint> &before,
+                          SongDocument::LanePointValue *out) const;
+    };
+    // What the engine plays of a lane value: m4a's BEND keeps the bend's
+    // top 7 bits; MOD as it is.
+    static int audible(uint8_t cc, int value);
 
     RecordingTake() { clear(); }
 
@@ -89,6 +127,23 @@ class RecordingTake
     std::vector<std::pair<uint64_t, uint64_t>> recordedSpans(uint64_t endSample,
                                                              uint32_t endSegment) const;
 
+    // In arrival order.
+    const std::vector<Control> &controls() const { return m_controls; }
+    // The take's bend and mod moves as lane writes, in segment order (later
+    // passes win where they overlap), MOD before BEND within a segment.
+    // Ticks round to the nearest and never run backwards within a write; on
+    // a shared tick the last move wins, and a move that changes nothing the
+    // engine plays (the same MOD, or the same bend to its 7-bit resolution)
+    // is dropped, its exact value taken by the point it sounds like (a
+    // bend's spring back to centre rests at 0). Each write runs to its
+    // segment's end, unshifted: the Boundary that ended it, or for the
+    // current segment endSample under toNotes' rule for an open note
+    // (endSample when read in it, else the last position seen); there the
+    // commit restores the song's value (LaneWrite::restoreEnd). A take with
+    // no moves writes nothing, so the lanes keep what the song had.
+    std::vector<LaneWrite> toLaneWrites(const MidiTimeline &timeline, uint64_t endSample,
+                                        uint32_t endSegment, uint64_t latencySamples) const;
+
     // The latest position the take saw in its current segment (where an
     // open note read in another segment ends).
     uint64_t lastSample() const { return m_lastSample; }
@@ -113,6 +168,9 @@ class RecordingTake
     uint64_t m_lastSample = 0; // the latest stamp seen in the current segment
     int m_unmatchedOffs = 0;
     std::vector<Note> m_notes;
+    std::vector<Control> m_controls;
+    // Where each segment left so far ended, by segment.
+    std::map<uint32_t, uint64_t> m_segmentEnds;
     // The segments left so far, merged (see recordedSpans).
     std::vector<std::pair<uint64_t, uint64_t>> m_spans;
     int m_open[128];

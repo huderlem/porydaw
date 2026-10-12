@@ -55,9 +55,13 @@ When the take ends they become real notes. -->
 <!-- TODO: What lands in the song: one undo step per take ("Record N
 notes") — one Ctrl+Z removes the whole take. Notes are placed on the
 nearest tick (no quantizing — the Note Tools example plugin's Quantize
-can tidy them afterwards, see plugins.md). Only notes are recorded: pitch
-bend and the mod wheel are heard while you play but not written into the
-song (draw them in the automation lanes). The sustain pedal lengthens recorded notes. Takes are added on top
+can tidy them afterwards, see plugins.md). Pitch bend and the mod wheel
+are recorded too, onto the track's BEND and MOD lanes (MOD as heard: the
+wheel scaled to the lane's range) — they replace the lane's points from
+your first move to where the take ends (Stop, or a loop wrap), and there
+the lane goes back to the value the song had, so a wheel left up doesn't
+carry on through the rest of the song; they show up once the take ends (no
+faded preview). The sustain pedal lengthens recorded notes. Takes are added on top
 of what's there (overdub); where a new note overlaps an old one on the same
 pitch, the new one wins, the same as drawing a note over another. -->
 

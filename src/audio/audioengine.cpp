@@ -775,11 +775,7 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
     case 0xB0:
         switch (msg.d1) {
         case 1: // mod wheel: the whole track's LFO depth
-            if (m_liveTrack >= 0) {
-                m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01,
-                              uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
-                m_liveBent = true;
-            }
+            applyLiveMod(uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
             break;
         case 64: // sustain pedal
             if (msg.d2 >= 64)
@@ -787,8 +783,10 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             else
                 liftLivePedal();
             break;
-        case 121: // reset all controllers: the pedal is up
+        case 121: // reset all controllers: the pedal is up, bend and mod at rest
             liftLivePedal();
+            applyLiveBend(0);
+            applyLiveMod(0);
             break;
         case 120: // all sound off
         case 123: // all notes off
@@ -800,14 +798,29 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
         }
         break;
     case 0xE0:
-        // The whole track's bend, song notes included; the engine scales
-        // the signed 14-bit value to its -64..63 and BENDR sets the range.
-        if (m_liveTrack >= 0) {
-            m4a_engine_pitch_bend(m_engine.get(), m_liveTrack,
-                                  int16_t(((int(msg.d2) << 7) | msg.d1) - 8192));
-            m_liveBent = true;
-        }
+        applyLiveBend(int16_t((((msg.d2 & 0x7F) << 7) | (msg.d1 & 0x7F)) - 8192));
         break;
+    }
+}
+
+void AudioEngine::applyLiveBend(int16_t bend)
+{
+    // The whole track's bend, song notes included; the engine scales the
+    // signed 14-bit value to its -64..63 and BENDR sets the range.
+    pushCapture(CaptureEvent::Bend, m_player.position(), 0, 0, 0, bend);
+    if (m_liveTrack >= 0) {
+        m4a_engine_pitch_bend(m_engine.get(), m_liveTrack, bend);
+        m_liveBent = true;
+    }
+}
+
+void AudioEngine::applyLiveMod(uint8_t mod)
+{
+    // Captured as heard, whether or not it sounds (as notes are).
+    pushCapture(CaptureEvent::Mod, m_player.position(), 0, 0, 0, mod);
+    if (m_liveTrack >= 0) {
+        m4a_engine_cc(m_engine.get(), m_liveTrack, 0x01, mod);
+        m_liveBent = true;
     }
 }
 
@@ -893,7 +906,7 @@ void AudioEngine::syncCapture()
 }
 
 void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
-                              uint64_t resumePos)
+                              uint64_t resumePos, int16_t value)
 {
     if (!capturing())
         return;
@@ -910,7 +923,11 @@ void AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uin
     ev.kind = kind;
     ev.key = key;
     ev.velocity = velocity;
-    ev.lateSamples = kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff ? m_liveLate : 0;
+    ev.value = value;
+    ev.lateSamples = kind == CaptureEvent::NoteOn || kind == CaptureEvent::NoteOff ||
+                             kind == CaptureEvent::Bend || kind == CaptureEvent::Mod
+                         ? m_liveLate
+                         : 0;
     m_captureWrite.store(w + 1, std::memory_order_release);
 }
 

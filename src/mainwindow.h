@@ -267,7 +267,7 @@ class MainWindow : public QMainWindow
     // is cleared, not a newer take's.
     void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
                     uint32_t take, int track, const std::vector<SongDocument::NewNote> &notes,
-                    bool inputLost);
+                    const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost);
     static constexpr int kTakeCommitRetryMs = 20;
     // "Recording into N: Name…", for the take's current track.
     void showRecordingStatus();

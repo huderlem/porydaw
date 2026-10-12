@@ -366,6 +366,10 @@ class AudioEngine
     // after the sustain pedal has had its say; a recording take captures it here,
     // before the sound target is consulted.
     void applyLiveNote(uint8_t key, uint8_t velocity);
+    // The same for a bend (-8192..8191) and a MOD (the wheel scaled to the
+    // lane's range): the whole track's, captured whether or not it sounds.
+    void applyLiveBend(int16_t bend);
+    void applyLiveMod(uint8_t mod);
     // Applies a note-off for every key the keyboard has on.
     void releaseLiveNotes();
     // The same on the app's say-so (a panic, a tab switch, the target
@@ -382,7 +386,7 @@ class AudioEngine
     bool capturing() const;
     void syncCapture();
     void pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key = 0, uint8_t velocity = 0,
-                     uint64_t resumePos = 0);
+                     uint64_t resumePos = 0, int16_t value = 0);
     // The player jumped from `from` to `to`: the take's segment ends.
     void captureBoundary(uint64_t from, uint64_t to);
     void publishCaptureClock();
@@ -513,7 +517,8 @@ class AudioEngine
     bool m_liveOn[128] = {};   // applied on: held, or released under the pedal
     bool m_liveSustain = false;
     // The message being applied waited this long for its callback
-    // (pushCapture stamps it on a played note on/off); 0 otherwise.
+    // (pushCapture stamps it on a played note on/off, bend or mod); 0
+    // otherwise.
     uint32_t m_liveLate = 0;
     int64_t m_callbackNs = 0;      // midiClockNs at the callback's entry
     uint32_t m_callbackFrames = 0; // the callback's length

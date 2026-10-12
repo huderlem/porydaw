@@ -25,6 +25,8 @@ void RecordingTake::clear()
     m_lastSample = 0;
     m_unmatchedOffs = 0;
     m_notes.clear();
+    m_controls.clear();
+    m_segmentEnds.clear();
     m_spans.clear();
     std::fill(std::begin(m_open), std::end(m_open), -1);
 }
@@ -71,6 +73,7 @@ void addSpan(std::vector<std::pair<uint64_t, uint64_t>> &spans, uint64_t start, 
 
 void RecordingTake::leaveSegment(uint64_t end)
 {
+    m_segmentEnds[m_segment] = end;
     addSpan(m_spans, m_segmentStart, std::max(end, m_segmentStart));
 }
 
@@ -166,10 +169,32 @@ void RecordingTake::push(const CaptureEvent &ev)
     case CaptureEvent::Cut:
         closeOpen(ev.samplePos, /*played=*/false);
         break;
+    case CaptureEvent::Bend:
+    case CaptureEvent::Mod: {
+        Control control;
+        control.sample = ev.samplePos;
+        control.floorSample = m_segmentStart;
+        control.late = ev.lateSamples;
+        control.segment = m_segment;
+        control.cc = ev.kind == CaptureEvent::Bend ? DOC_CC_BEND : 0x01;
+        control.value = ev.kind == CaptureEvent::Bend ? std::clamp<int>(ev.value, -8192, 8191)
+                                                      : std::clamp<int>(ev.value, 0, 127);
+        m_controls.push_back(control);
+        break;
+    }
     default:
         break;
     }
 }
+
+namespace {
+
+uint64_t samplesEarlier(uint64_t sample, uint64_t by)
+{
+    return sample > by ? sample - by : 0;
+}
+
+} // namespace
 
 std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &timeline,
                                                           uint64_t endSample, uint32_t endSegment,
@@ -199,13 +224,10 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
                            sameSegment && endSample >= note.onSample ? endSample : m_lastSample);
             played = false;
         }
-        const auto earlier = [](uint64_t sample, uint64_t by) {
-            return sample > by ? sample - by : 0;
-        };
         const uint64_t on =
-            std::max(note.floorSample, earlier(note.onSample, latencySamples + note.onLate));
+            std::max(note.floorSample, samplesEarlier(note.onSample, latencySamples + note.onLate));
         if (played)
-            off = std::max(on, earlier(off, latencySamples + note.offLate));
+            off = std::max(on, samplesEarlier(off, latencySamples + note.offLate));
         const uint64_t tick = tickAt(on);
         const uint64_t end = std::max(tick + 1, tickAt(off));
         spans.push_back({tick, end, note.key, note.velocity, true});
@@ -265,4 +287,89 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
                          return a.tick != b.tick ? a.tick < b.tick : a.key < b.key;
                      });
     return out;
+}
+
+int RecordingTake::audible(uint8_t cc, int value)
+{
+    return cc == DOC_CC_BEND ? (value + 8192) >> 7 : value;
+}
+
+std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTimeline &timeline,
+                                                                  uint64_t endSample,
+                                                                  uint32_t endSegment,
+                                                                  uint64_t latencySamples) const
+{
+    const auto tickAt = [&](uint64_t sample) {
+        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
+    };
+    // Segments only grow, so a map by (segment, lane) keeps segment order.
+    std::map<std::pair<uint32_t, int>, LaneWrite> writes;
+    std::map<std::pair<uint32_t, int>, uint64_t> lastMove; // its sample, unshifted
+    for (const Control &c : m_controls) {
+        const uint64_t sample =
+            std::max(c.floorSample, samplesEarlier(c.sample, latencySamples + c.late));
+        uint64_t tick = tickAt(sample);
+        // MOD sorts first: 0x01 against BEND's 0xFF.
+        auto [it, fresh] = writes.try_emplace({c.segment, c.cc});
+        LaneWrite &w = it->second;
+        if (fresh) {
+            w.cc = c.cc;
+            w.tickBegin = tick;
+        }
+        lastMove[it->first] = c.sample;
+        // The wait shift can reorder two moves of one callback; they keep
+        // the order they were played in.
+        tick = std::max(tick, w.tickEnd);
+        w.tickEnd = std::max(w.tickEnd, tick);
+        if (!w.points.empty() && w.points.back().tick == tick)
+            w.points.pop_back();
+        if (!w.points.empty() && audible(c.cc, w.points.back().value) == audible(c.cc, c.value)) {
+            w.points.back().value = c.value;
+            continue;
+        }
+        w.points.push_back({tick, c.value});
+    }
+    std::vector<LaneWrite> out;
+    out.reserve(writes.size());
+    for (auto &[key, w] : writes) {
+        // Where the segment ended, as toNotes ends an open note: the stop
+        // position when it was read in the take's current segment, else the
+        // last position seen; an earlier segment ended at its Boundary.
+        uint64_t end = m_lastSample;
+        if (key.first == m_segment) {
+            const bool sameSegment = (endSegment & kSegmentMask) == (m_segment & kSegmentMask);
+            if (sameSegment && endSample >= lastMove[key])
+                end = endSample;
+        } else if (const auto seg = m_segmentEnds.find(key.first); seg != m_segmentEnds.end()) {
+            end = seg->second;
+        }
+        const uint64_t endTick = tickAt(end);
+        if (endTick > w.tickEnd) {
+            w.tickEnd = endTick;
+            w.restoreEnd = true;
+        }
+        out.push_back(std::move(w));
+    }
+    return out;
+}
+
+bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &before,
+                                            SongDocument::LanePointValue *out) const
+{
+    if (!restoreEnd || points.empty())
+        return false;
+    // The song's value at tickEnd: its last point there or before, or the
+    // engine's track-init value, 0 for both lanes. A point on tickEnd
+    // itself, which the write's range takes, comes back this way (or goes
+    // when the take's last value already sounds like it).
+    int value = 0;
+    for (const DocLanePoint &pt : before) {
+        if (pt.tick > tickEnd)
+            break;
+        value = pt.value;
+    }
+    if (audible(cc, value) == audible(cc, points.back().value))
+        return false;
+    *out = {tickEnd, value};
+    return true;
 }
