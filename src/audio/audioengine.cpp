@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "audio/midiinput.h"
+#include "audio/midiroutes.h"
 #include "miniaudio.h"
 
 #ifdef __linux__
@@ -51,7 +52,12 @@ namespace {
 constexpr double kTailSeconds = 3.0;
 } // namespace
 
-AudioEngine::AudioEngine() = default;
+AudioEngine::AudioEngine()
+{
+    // The default routes until the owner publishes the user's.
+    m_liveRoutes.store(MidiRoutes().packed());
+    syncLiveRoutes();
+}
 
 AudioEngine::~AudioEngine()
 {
@@ -689,6 +695,22 @@ void AudioEngine::forgetLiveNotes()
     m_liveHeldHi.store(0, std::memory_order_relaxed);
 }
 
+void AudioEngine::syncLiveRoutes()
+{
+    const uint64_t packed = m_liveRoutes.load();
+    if (packed == m_appliedLiveRoutes)
+        return;
+    m_appliedLiveRoutes = packed;
+    std::fill(std::begin(m_liveRouteOf), std::end(m_liveRouteOf), uint8_t(0xFF));
+    // The publisher packs a valid MidiRoutes; anything else is skipped, so
+    // a reserved CC never reaches the routed path.
+    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+        const int cc = int((packed >> (8 * i)) & 0xFF);
+        if (MidiRoutes::assignable(cc) && m_liveRouteOf[cc] == 0xFF)
+            m_liveRouteOf[cc] = MidiRoutes::kLanes[i];
+    }
+}
+
 void AudioEngine::applyMidiInput()
 {
     // After the transport transition, the seek and a settled wrap: a fresh
@@ -723,6 +745,7 @@ void AudioEngine::applyMidiInput()
         m_liveTrack = target;
     }
 
+    syncLiveRoutes();
     if (MidiInputRing *ring = m_midiRing.load(std::memory_order_acquire)) {
         MidiMsg msg;
         // Bounded by a few periods (or callbacks, when the backend hands
@@ -774,9 +797,6 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
         break;
     case 0xB0:
         switch (msg.d1) {
-        case 1: // mod wheel: the whole track's LFO depth
-            applyLiveMod(uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
-            break;
         case 64: // sustain pedal
             if (msg.d2 >= 64)
                 m_liveSustain = true;
@@ -794,6 +814,17 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             // note-off.
             releaseLiveNotes();
             m_liveSustain = false;
+            break;
+        default:
+            // A routed control (reserved CCs never route). Only MOD sounds
+            // so far; the other lanes join in step 2.
+            switch (m_liveRouteOf[msg.d1 & 0x7F]) {
+            case 0x01: // MOD: the whole track's LFO depth, at the lane's scale
+                applyLiveMod(uint8_t((msg.d2 * m_liveModMax.load() + 63) / 127));
+                break;
+            default:
+                break;
+            }
             break;
         }
         break;

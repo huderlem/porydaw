@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QImage>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include "audio/midiinput.h"
+#include "audio/midiroutes.h"
 #include "mainwindow.h"
 #include "ui/midisettingspage.h"
 #include "ui/settingsdialog.h"
@@ -58,6 +60,14 @@
 // held mask and a key released after it sends no stray note-off, and live
 // play off / no target / panic drain silently. Panic, CC123 and CC121 lift
 // the sustain pedal, so a lost pedal-up can't defer every later note-off.
+//
+// docs/midi-controls/PLAN.md step 1 adds the route table (defaults,
+// reserved-CC refusal, move-on-conflict, both encodings), its persistence
+// in midi/routes, Learn through the injector (first assignable CC, swallowed
+// from live play while armed, cancel, a shortened timeout), the Settings
+// page's Controls table (spinners skip reserved CCs, Learn, second click and
+// Esc cancel), and MOD following its routed CC live and into the capture
+// ring while the CC it left does nothing.
 
 namespace {
 
@@ -319,6 +329,189 @@ void checkService()
     drain(ring);
 }
 
+// docs/midi-controls/PLAN.md step 1: the route table on its own.
+void checkRoutesTable()
+{
+    const MidiRoutes defaults;
+    check(defaults.ccFor(0x01) == 1 && defaults.ccFor(0x07) == 7 && defaults.ccFor(0x0A) == 10 &&
+              defaults.ccFor(0x14) == MidiRoutes::kNone &&
+              defaults.ccFor(0x15) == MidiRoutes::kNone,
+          "routes: the defaults are not CC1 MOD, CC7 VOL, CC10 PAN, BENDR and LFOS none");
+    check(defaults.laneFor(1) == 0x01 && defaults.laneFor(10) == 0x0A &&
+              defaults.laneFor(74) == MidiRoutes::kNone &&
+              defaults.laneFor(-1) == MidiRoutes::kNone,
+          "routes: laneFor does not invert the defaults");
+    bool reservedOk = true;
+    for (int cc = -1; cc <= 128; cc++) {
+        const bool reserved = cc < 0 || cc > 127 || cc == 0 || cc == 32 || cc == 6 || cc == 38 ||
+                              cc == 64 || cc >= 120;
+        reservedOk &= MidiRoutes::assignable(cc) == !reserved;
+    }
+    check(reservedOk, "routes: assignable() does not refuse exactly CC0/6/32/38/64/120-127");
+
+    // Reserved CCs and lanes that aren't routable are refused unchanged.
+    MidiRoutes routes;
+    int moved = 99;
+    check(!routes.assign(0x01, 64, &moved) && !routes.assign(0x07, 121) &&
+              !routes.assign(0x0A, 0) && !routes.assign(0x14, 6) && !routes.assign(0x15, 38) &&
+              !routes.assign(0x02, 20) && routes == MidiRoutes() && moved == MidiRoutes::kNone,
+          "routes: a reserved CC or an unroutable lane was assigned");
+    // One CC drives one lane: assigning a taken CC moves it.
+    check(routes.assign(0x14, 7, &moved) && moved == 0x07 && routes.ccFor(0x14) == 7 &&
+              routes.ccFor(0x07) == MidiRoutes::kNone && routes.laneFor(7) == 0x14,
+          "routes: assigning VOL's CC to BENDR did not move it (VOL to none)");
+    check(routes.assign(0x01, 74, &moved) && moved == MidiRoutes::kNone &&
+              routes.ccFor(0x01) == 74 && routes.laneFor(1) == MidiRoutes::kNone,
+          "routes: remapping MOD to CC74 did not free CC1");
+    check(routes.assign(0x0A, MidiRoutes::kNone) && routes.ccFor(0x0A) == MidiRoutes::kNone,
+          "routes: a lane could not be set to none");
+
+    // Both encodings round-trip.
+    check(MidiRoutes::fromPacked(routes.packed()) == routes &&
+              MidiRoutes::fromPacked(defaults.packed()) == defaults,
+          "routes: the packed form does not round-trip");
+    check(MidiRoutes::fromStrings(routes.toStrings()) == routes &&
+              MidiRoutes::fromStrings(defaults.toStrings()) == defaults,
+          "routes: the settings form does not round-trip");
+    check(defaults.toStrings() ==
+              QStringList({"MOD=1", "VOL=7", "PAN=10", "BENDR=none", "LFOS=none"}),
+          "routes: the settings form is not NAME=cc per lane");
+    // Hand-edited settings: unknown names, reserved and repeated CCs read
+    // as none; an unlisted lane keeps its default unless its CC is taken.
+    const MidiRoutes edited = MidiRoutes::fromStrings(
+        {"vol=64", "PAN=1", "LFOS=1", "BENDR=x", "TEMPO=3", "garbage", "MOD=200"});
+    check(edited.ccFor(0x07) == MidiRoutes::kNone && edited.ccFor(0x0A) == 1 &&
+              edited.ccFor(0x15) == MidiRoutes::kNone && edited.ccFor(0x14) == MidiRoutes::kNone &&
+              edited.ccFor(0x01) == MidiRoutes::kNone,
+          "routes: hand-edited settings were not read defensively");
+    const MidiRoutes partial = MidiRoutes::fromStrings({"PAN=1"});
+    check(partial.ccFor(0x0A) == 1 && partial.ccFor(0x07) == 7 &&
+              partial.ccFor(0x01) == MidiRoutes::kNone,
+          "routes: an unlisted lane did not keep its default (or kept a taken CC)");
+}
+
+// Routes and Learn through the service (QSettings and the injector).
+void checkRoutesService()
+{
+    MidiInput midi;
+    const QString key = QStringLiteral("midi/routes");
+    check(midi.routes() == MidiRoutes() && !QSettings().contains(key),
+          "routes: a fresh MidiInput does not start on the defaults with no midi/routes");
+    int changed = 0;
+    QObject::connect(&midi, &MidiInput::settingsChanged, &midi, [&changed] { ++changed; });
+
+    // Reserved CCs are refused without a write or a signal.
+    check(!midi.setRoute(0x01, 64) && !midi.setRoute(0x07, 123) && !midi.setRoute(0x0A, 32) &&
+              midi.routes() == MidiRoutes() && changed == 0 && !QSettings().contains(key),
+          "routes: the service accepted a reserved CC");
+    check(midi.setRoute(0x01, 74) && midi.routes().ccFor(0x01) == 74 && changed == 1 &&
+              MidiRoutes::fromStrings(QSettings().value(key).toStringList()) == midi.routes(),
+          "routes: remapping MOD did not apply, signal and persist");
+    check(midi.setRoute(0x15, 7) && midi.routes().ccFor(0x07) == MidiRoutes::kNone &&
+              midi.routes().ccFor(0x15) == 7,
+          "routes: the service did not move a taken CC");
+    {
+        MidiInput reread;
+        check(reread.routes() == midi.routes(), "routes: a new MidiInput did not read them back");
+    }
+    // Back to the defaults clears the key.
+    midi.setRoute(0x15, MidiRoutes::kNone);
+    midi.setRoute(0x07, 7);
+    midi.setRoute(0x01, 1);
+    check(midi.routes() == MidiRoutes() && !QSettings().contains(key),
+          "routes: returning to the defaults did not remove midi/routes");
+
+    MidiInputRing &ring = midi.ring();
+    drain(ring);
+    std::vector<std::pair<int, int>> learned; // lane, cc
+    int movedFrom = -2;
+    std::vector<std::pair<int, bool>> cancelled; // lane, timed out
+    QObject::connect(&midi, &MidiInput::learnFinished, &midi, [&](int lane, int cc, int moved) {
+        learned.push_back({lane, cc});
+        movedFrom = moved;
+    });
+    QObject::connect(&midi, &MidiInput::learnCancelled, &midi,
+                     [&](int lane, bool timedOut) { cancelled.push_back({lane, timedOut}); });
+    const auto settle = [&] { wait(MidiInput::kLearnPollMs * 4); };
+
+    // Learn takes the first assignable CC and swallows it from live play;
+    // reserved CCs (sustain, bank select, data entry, mode messages) pass
+    // through untouched and aren't learned.
+    midi.startLearn(0x07);
+    check(midi.learnLane() == 0x07, "learn: startLearn did not arm the lane");
+    midi.injectForTest({0xB0, 64, 127});
+    midi.injectForTest({0xB0, 0, 1});
+    midi.injectForTest({0xB0, 32, 0});
+    midi.injectForTest({0xB0, 6, 2});
+    midi.injectForTest({0xB0, 38, 0});
+    midi.injectForTest({0xB0, 121, 0});
+    midi.injectForTest({0x90, 60, 100});
+    check(ring.size() == 7, "learn: reserved CCs or a note were kept from live play");
+    drain(ring);
+    settle();
+    check(learned.empty() && midi.learnLane() == 0x07, "learn: a reserved CC was learned");
+    midi.injectForTest({0xB3, 74, 20}); // any channel
+    midi.injectForTest({0xB0, 74, 21});
+    midi.injectForTest({0xB0, 75, 22}); // a second knob in the same instant
+    check(ring.size() == 0, "learn: the CC being learned reached live play");
+    settle();
+    check(learned.size() == 1 && learned[0] == std::pair(0x07, 74) &&
+              movedFrom == MidiRoutes::kNone && midi.learnLane() == MidiRoutes::kNone &&
+              midi.routes().ccFor(0x07) == 74 && midi.routes().laneFor(75) == MidiRoutes::kNone,
+          "learn: the first CC was not routed to the lane");
+    check(MidiRoutes::fromStrings(QSettings().value(key).toStringList()).ccFor(0x07) == 74,
+          "learn: the learned route was not persisted");
+    // Learned and disarmed: the knob plays again.
+    midi.injectForTest({0xB0, 74, 30});
+    check(ring.size() == 1, "learn: after learning, the CC still did not reach live play");
+    drain(ring);
+
+    // Learning a CC another lane has moves it there.
+    midi.startLearn(0x14);
+    midi.injectForTest({0xB0, 10, 64});
+    settle();
+    check(learned.size() == 2 && learned[1] == std::pair(0x14, 10) && movedFrom == 0x0A &&
+              midi.routes().ccFor(0x14) == 10 && midi.routes().ccFor(0x0A) == MidiRoutes::kNone,
+          "learn: learning PAN's CC for BENDR did not move it (PAN to none)");
+
+    // Cancel: nothing changes, and the CC plays again.
+    const MidiRoutes before = midi.routes();
+    midi.startLearn(0x15);
+    midi.cancelLearn();
+    check(cancelled.size() == 1 && cancelled[0] == std::pair(0x15, false) &&
+              midi.learnLane() == MidiRoutes::kNone,
+          "learn: cancelLearn did not report a cancel");
+    midi.injectForTest({0xB0, 80, 5});
+    settle();
+    check(ring.size() == 1 && midi.routes() == before && learned.size() == 2,
+          "learn: a cancelled learn still swallowed or learned a CC");
+    drain(ring);
+    // Starting another lane cancels the first.
+    midi.startLearn(0x15);
+    midi.startLearn(0x0A);
+    check(cancelled.size() == 2 && cancelled[1] == std::pair(0x15, false) &&
+              midi.learnLane() == 0x0A,
+          "learn: a second lane's learn did not cancel the first");
+    midi.cancelLearn();
+    // Timeout (shortened for the harness).
+    cancelled.clear();
+    midi.startLearn(0x15, 40);
+    wait(200);
+    check(cancelled.size() == 1 && cancelled[0] == std::pair(0x15, true) &&
+              midi.learnLane() == MidiRoutes::kNone && midi.routes() == before,
+          "learn: an unanswered learn did not time out");
+    midi.injectForTest({0xB0, 80, 5});
+    check(ring.size() == 1, "learn: a timed-out learn still swallowed a CC");
+    drain(ring);
+
+    // Back to the defaults for the later checks.
+    midi.setRoute(0x14, MidiRoutes::kNone);
+    midi.setRoute(0x07, 7);
+    midi.setRoute(0x0A, 10);
+    check(midi.routes() == MidiRoutes() && !QSettings().contains(key),
+          "routes: could not return to the defaults");
+}
+
 QString g_shotPath;
 
 // With a shot path, saves widget as <shot>-<name>.png for visual review.
@@ -468,6 +661,106 @@ void checkSettingsPage()
     }
 }
 
+// The Settings page's Controls table (docs/midi-controls/PLAN.md step 1).
+void checkControlsPage()
+{
+    MidiInput midi;
+    MidiSettingsPage page(midi, nullptr, /*showWithoutBackend=*/true);
+    page.show();
+    QApplication::processEvents();
+    std::array<QSpinBox *, MidiRoutes::kLaneCount> cc{};
+    std::array<QPushButton *, MidiRoutes::kLaneCount> learn{};
+    bool found = true;
+    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+        const QString name = MidiRoutes::laneName(MidiRoutes::kLanes[i]);
+        cc[i] = page.findChild<QSpinBox *>(QStringLiteral("settingsMidiRoute") + name);
+        learn[i] = page.findChild<QPushButton *>(QStringLiteral("settingsMidiLearn") + name);
+        found &= cc[i] && learn[i];
+    }
+    auto *status = page.findChild<QLabel *>(QStringLiteral("settingsMidiLearnStatus"));
+    if (!check(found && status, "controls: the Controls table's rows were not found"))
+        return;
+    enum { Mod, Vol, Pan, BendR, Lfos };
+    check(cc[Mod]->value() == 1 && cc[Vol]->value() == 7 && cc[Pan]->value() == 10 &&
+              cc[BendR]->value() == MidiRoutes::kNone && cc[BendR]->text() == "None" &&
+              cc[Lfos]->value() == MidiRoutes::kNone && cc[Mod]->text() == "CC 1",
+          "controls: the table did not show the default routes");
+    check(!QSettings().contains(QStringLiteral("midi/routes")),
+          "controls: building the table wrote QSettings");
+
+    // A spinner applies and persists; the arrows step over reserved CCs.
+    cc[Lfos]->setValue(21);
+    check(midi.routes().ccFor(0x15) == 21 && QSettings().contains(QStringLiteral("midi/routes")),
+          "controls: the LFOS spinner did not apply and persist");
+    cc[Lfos]->setValue(63);
+    cc[Lfos]->stepBy(1);
+    check(cc[Lfos]->value() == 65 && midi.routes().ccFor(0x15) == 65,
+          "controls: stepping up from CC63 did not skip the sustain pedal");
+    cc[Lfos]->setValue(MidiRoutes::kNone);
+    cc[Lfos]->stepBy(1);
+    check(cc[Lfos]->value() == 1 && midi.routes().ccFor(0x15) == 1 &&
+              midi.routes().ccFor(0x01) == MidiRoutes::kNone &&
+              cc[Mod]->value() == MidiRoutes::kNone,
+          "controls: stepping up from None did not skip CC0, or did not move CC1 off MOD");
+    cc[Lfos]->setValue(119);
+    cc[Lfos]->stepBy(1);
+    check(cc[Lfos]->value() == 119 && cc[Lfos]->maximum() == 119,
+          "controls: the spinner reached the channel mode messages");
+    // A typed reserved CC never commits.
+    QString typed = QStringLiteral("CC 64");
+    int pos = typed.size();
+    check(static_cast<QAbstractSpinBox *>(cc[Lfos])->validate(typed, pos) != QValidator::Acceptable,
+          "controls: typing CC64 was accepted");
+    typed = QStringLiteral("CC 65");
+    pos = typed.size();
+    check(static_cast<QAbstractSpinBox *>(cc[Lfos])->validate(typed, pos) == QValidator::Acceptable,
+          "controls: typing an assignable CC was refused");
+    // A reserved value set from code is refused by the service and shown back.
+    cc[Vol]->setValue(6);
+    check(midi.routes().ccFor(0x07) == 7 && cc[Vol]->value() == 7,
+          "controls: a reserved CC set on the spinner was not refused");
+    cc[Lfos]->setValue(MidiRoutes::kNone);
+    cc[Mod]->setValue(1);
+
+    // Learn: the button listens, the injected knob lands in its row.
+    learn[Pan]->click();
+    check(midi.learnLane() == 0x0A && learn[Pan]->isChecked() && !learn[Vol]->isChecked() &&
+              !status->text().isEmpty(),
+          "controls: Learn did not arm PAN and say so");
+    midi.injectForTest({0xB0, 7, 99}); // VOL's knob: moves to PAN
+    wait(MidiInput::kLearnPollMs * 4);
+    check(midi.learnLane() == MidiRoutes::kNone && !learn[Pan]->isChecked() &&
+              cc[Pan]->value() == 7 && cc[Vol]->value() == MidiRoutes::kNone &&
+              status->text().contains(QStringLiteral("VOL")),
+          "controls: a learned CC did not move into the PAN row (VOL to None)");
+    // A second click cancels.
+    learn[BendR]->click();
+    learn[BendR]->click();
+    check(midi.learnLane() == MidiRoutes::kNone && !learn[BendR]->isChecked(),
+          "controls: a second click did not cancel Learn");
+    // Esc cancels wherever the focus is in the window, and leaves it open.
+    learn[Lfos]->click();
+    learn[Lfos]->setFocus();
+    QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+    QApplication::sendEvent(cc[Vol], &esc);
+    check(midi.learnLane() == MidiRoutes::kNone && !learn[Lfos]->isChecked(),
+          "controls: Esc did not cancel Learn");
+    midi.injectForTest({0xB0, 90, 1});
+    wait(MidiInput::kLearnPollMs * 4);
+    check(midi.routes().laneFor(90) == MidiRoutes::kNone, "controls: a cancelled Learn learned");
+    // Hiding the page (closing Settings) cancels its learn.
+    learn[Lfos]->click();
+    page.hide();
+    check(midi.learnLane() == MidiRoutes::kNone, "controls: hiding the page left Learn armed");
+    drain(midi.ring());
+
+    // Back to the defaults.
+    cc[Pan]->setValue(10);
+    cc[Vol]->setValue(7);
+    check(midi.routes() == MidiRoutes() && !QSettings().contains(QStringLiteral("midi/routes")),
+          "controls: the table did not return to the defaults");
+}
+
 } // namespace
 
 // The window's side, with the song open: the Settings window's MIDI
@@ -509,6 +802,7 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     dialog->reject();
 
     checkLivePlay();
+    checkLiveRoutes();
     return g_failures - before;
 }
 
@@ -857,6 +1151,79 @@ void MainWindow::checkLivePlay()
     m_audio.holdDeviceForTest(false);
 }
 
+// docs/midi-controls/PLAN.md step 1: MOD follows its routed CC, live and
+// into the capture ring; the CC it left does nothing.
+void MainWindow::checkLiveRoutes()
+{
+    if (!m_audioOk) {
+        std::printf("midicheck: live routes SKIP (no audio device)\n");
+        return;
+    }
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const int a = m_audio.liveTarget();
+    if (!check(a >= 0, "live routes: no live target"))
+        return;
+    m_audio.holdDeviceForTest(true);
+    drain(midi.ring());
+    const M4AEngine *engine = m_audio.engineForTest();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t d1, uint8_t d2) { midi.injectForTest({0xB0, d1, d2}); };
+    const int modMax = view->laneDisplayMax(a, 0x01);
+
+    check(midi.setRoute(0x01, 74), "live routes: MOD could not be routed to CC74");
+    send(74, 0);
+    pumpMs(30);
+    check(engine->tracks[a].mod == 0, "live routes: CC74 at rest did not set MOD 0");
+    send(1, 127); // the old mod wheel: now unrouted
+    pumpMs(30);
+    check(engine->tracks[a].mod == 0, "live routes: CC1 still drove MOD after it was remapped");
+    send(74, 127);
+    pumpMs(30);
+    check(engine->tracks[a].mod == modMax,
+          "live routes: CC74 did not drive MOD at the lane's scale");
+    // MOD to none: no CC drives it.
+    midi.setRoute(0x01, MidiRoutes::kNone);
+    send(74, 0);
+    send(1, 0);
+    pumpMs(30);
+    check(engine->tracks[a].mod == modMax, "live routes: an unrouted MOD still moved");
+
+    // Recording follows the route: a capture sees CC74's moves as MOD, and
+    // none from CC1.
+    midi.setRoute(0x01, 74);
+    const auto mods = [&] {
+        std::vector<int> values;
+        CaptureEvent ev;
+        while (m_audio.popCapture(&ev)) {
+            if (ev.kind == CaptureEvent::Mod)
+                values.push_back(ev.value);
+        }
+        return values;
+    };
+    mods(); // stale
+    m_audio.armCapture(0x7E57);
+    m_audio.play();
+    pumpMs(30);
+    send(1, 127);
+    pumpMs(30);
+    send(74, 127);
+    pumpMs(30);
+    send(74, 0);
+    pumpMs(30);
+    m_audio.armCapture(0);
+    m_audio.stop();
+    pumpMs(30);
+    check(mods() == std::vector<int>{modMax, 0},
+          "live routes: the capture did not record CC74 (and only CC74) as MOD");
+
+    midi.setRoute(0x01, 1);
+    check(midi.routes() == MidiRoutes(), "live routes: could not return to the defaults");
+    drain(midi.ring());
+    m_audio.holdDeviceForTest(false);
+}
+
 int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QString &shotPath)
 {
     g_shotPath = shotPath;
@@ -876,7 +1243,10 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
     checkPortIdentities();
     checkRing();
     checkService();
+    checkRoutesTable();
+    checkRoutesService();
     checkSettingsPage();
+    checkControlsPage();
     {
         MainWindow window;
         window.runMidiWindowCheck(projectRoot, songLabel);

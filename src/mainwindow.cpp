@@ -5357,6 +5357,7 @@ void MainWindow::syncLiveSettings()
 {
     m_audio.setLivePlay(m_midiInput->livePlay());
     m_audio.setLiveFixedVelocity(m_midiInput->fixedVelocity());
+    m_audio.setLiveRoutes(m_midiInput->routes().packed());
 }
 
 void MainWindow::pollLiveKeys()

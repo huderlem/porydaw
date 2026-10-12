@@ -5,6 +5,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "audio/midiroutes.h"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -200,6 +202,26 @@ class MidiInput : public QObject
     void setFixedVelocity(int velocity);
     int latencyMs() const { return m_latencyMs; } // midi/latencyMs, kLatencyAuto default
     void setLatencyMs(int ms);
+    // Which CC drives which lane (midi/routes, MidiRoutes' defaults when
+    // unset). setRoute moves a CC already on another lane (that lane goes to
+    // none) and is false, changing nothing, for a lane that isn't routable
+    // or a CC that isn't assignable (MidiRoutes::assignable).
+    const MidiRoutes &routes() const { return m_routes; }
+    bool setRoute(int lane, int cc);
+
+    // MIDI Learn (docs/midi-controls/PLAN.md J1): the next assignable CC any
+    // port sends is routed to lane (a CC that drove another lane moves).
+    // While armed, every assignable CC is kept from live play, so turning
+    // the knob doesn't change the song; the script tap still sees it. The
+    // MIDI threads fill a one-message slot that a UI timer polls; the result
+    // arrives as learnFinished, or learnCancelled when cancelLearn() is
+    // called, another lane starts learning, or timeoutMs passes.
+    static constexpr int kLearnTimeoutMs = 10000;
+    static constexpr int kLearnPollMs = 15;
+    void startLearn(int lane, int timeoutMs = kLearnTimeoutMs);
+    void cancelLearn();
+    // The lane being learned, or MidiRoutes::kNone.
+    int learnLane() const { return m_learnLane; }
 
     // The audio thread's end of the input (step 2): drain with
     // ring().pop(&msg) at the top of each callback.
@@ -233,7 +255,7 @@ class MidiInput : public QObject
     static bool parseTap(const unsigned char *bytes, size_t size, MidiTapMsg *out);
 
     // Harness entry: the message's bytes take the same path as a port's
-    // callback (parse, ring push, tap, activity), as if port (an identity;
+    // callback (Learn, parse, ring push, tap, activity), as if port (an identity;
     // empty = none) sent them. Its arrivalNs is kept as given: 0 (the
     // default) means it waited for no callback.
     void injectForTest(const MidiMsg &msg, const QString &port = QString());
@@ -264,6 +286,11 @@ class MidiInput : public QObject
     // The script tap has messages (UI thread; at most one hop in flight).
     void tapReady();
     void settingsChanged();
+    // Learn routed cc to lane; movedFrom is the lane cc drove before, or
+    // MidiRoutes::kNone. settingsChanged() has already been emitted.
+    void learnFinished(int lane, int cc, int movedFrom);
+    // Learn for lane stopped without a CC: cancelled, or timed out.
+    void learnCancelled(int lane, bool timedOut);
 
   private:
     struct OpenPort;
@@ -295,6 +322,11 @@ class MidiInput : public QObject
     static std::vector<ScannedPort> scanned(const QStringList &raw, PortNaming naming);
     static QStringList rawNames(const std::vector<ScannedPort> &scan);
     void saveDisabledPorts();
+    void saveRoutes();
+    // UI thread: takes a learned CC from the slot, if one arrived.
+    void pollLearn();
+    // Disarms the MIDI threads' side and stops the timers.
+    void stopLearn();
 
     MidiInputRing m_ring;
     MidiTapRing m_tap;
@@ -324,6 +356,16 @@ class MidiInput : public QObject
     bool m_livePlay = true;
     int m_fixedVelocity = 0;
     int m_latencyMs = kLatencyAuto;
+    MidiRoutes m_routes;
+
+    // Learn: armed (UI writes, MIDI threads read) and the first assignable
+    // CC to arrive while armed (any producer CASes it in from empty, -1; the
+    // UI thread takes it).
+    std::atomic<bool> m_learnArmed{false};
+    std::atomic<int> m_learnSlot{-1};
+    int m_learnLane = MidiRoutes::kNone;
+    QTimer *m_learnPoll = nullptr;
+    QTimer *m_learnTimeout = nullptr;
 
     std::atomic<uint64_t> m_received{0};
     // Set by the producer that posts the activity hop; cleared on the UI

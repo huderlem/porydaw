@@ -31,6 +31,7 @@ const QString kDisabledPortsKey = QStringLiteral("midi/disabledPorts");
 const QString kLivePlayKey = QStringLiteral("midi/livePlay");
 const QString kFixedVelocityKey = QStringLiteral("midi/fixedVelocity");
 const QString kLatencyKey = QStringLiteral("midi/latencyMs");
+const QString kRoutesKey = QStringLiteral("midi/routes");
 
 // The ALSA client name other MIDI tools show for porydaw's connections.
 const char *const kClientName = "porydaw";
@@ -125,6 +126,22 @@ MidiInput::MidiInput(QObject *parent) : QObject(parent)
     m_fixedVelocity = std::clamp(settings.value(kFixedVelocityKey, 0).toInt(), 0, 127);
     m_latencyMs =
         std::clamp(settings.value(kLatencyKey, kLatencyAuto).toInt(), kLatencyAuto, kLatencyMaxMs);
+    if (settings.contains(kRoutesKey))
+        m_routes = MidiRoutes::fromStrings(settings.value(kRoutesKey).toStringList());
+
+    m_learnPoll = new QTimer(this);
+    m_learnPoll->setInterval(kLearnPollMs);
+    connect(m_learnPoll, &QTimer::timeout, this, &MidiInput::pollLearn);
+    m_learnTimeout = new QTimer(this);
+    m_learnTimeout->setSingleShot(true);
+    connect(m_learnTimeout, &QTimer::timeout, this, [this] {
+        pollLearn(); // a CC that arrived just now still counts
+        if (m_learnLane == MidiRoutes::kNone)
+            return;
+        const int lane = m_learnLane;
+        stopLearn();
+        emit learnCancelled(lane, /*timedOut=*/true);
+    });
 
     m_activityTimer = new QTimer(this);
     m_activityTimer->setSingleShot(true);
@@ -509,6 +526,83 @@ void MidiInput::setLatencyMs(int ms)
     emit settingsChanged();
 }
 
+void MidiInput::saveRoutes()
+{
+    QSettings settings;
+    if (m_routes == MidiRoutes())
+        settings.remove(kRoutesKey);
+    else
+        settings.setValue(kRoutesKey, m_routes.toStrings());
+}
+
+bool MidiInput::setRoute(int lane, int cc)
+{
+    MidiRoutes routes = m_routes;
+    if (!routes.assign(lane, cc))
+        return false;
+    if (routes != m_routes) {
+        m_routes = routes;
+        saveRoutes();
+        emit settingsChanged();
+    }
+    return true;
+}
+
+void MidiInput::startLearn(int lane, int timeoutMs)
+{
+    if (MidiRoutes::laneIndex(lane) < 0)
+        return;
+    if (m_learnLane != MidiRoutes::kNone) {
+        const int was = m_learnLane;
+        stopLearn();
+        emit learnCancelled(was, /*timedOut=*/false);
+    }
+    m_learnLane = lane;
+    // Emptied before arming, so nothing from an earlier learn is taken.
+    m_learnSlot.store(-1, std::memory_order_relaxed);
+    m_learnArmed.store(true, std::memory_order_release);
+    m_learnPoll->start();
+    m_learnTimeout->start(std::max(timeoutMs, 1));
+}
+
+void MidiInput::cancelLearn()
+{
+    if (m_learnLane == MidiRoutes::kNone)
+        return;
+    const int lane = m_learnLane;
+    stopLearn();
+    emit learnCancelled(lane, /*timedOut=*/false);
+}
+
+void MidiInput::stopLearn()
+{
+    m_learnArmed.store(false, std::memory_order_release);
+    m_learnSlot.store(-1, std::memory_order_relaxed);
+    m_learnLane = MidiRoutes::kNone;
+    m_learnPoll->stop();
+    m_learnTimeout->stop();
+}
+
+void MidiInput::pollLearn()
+{
+    if (m_learnLane == MidiRoutes::kNone)
+        return;
+    const int cc = m_learnSlot.exchange(-1, std::memory_order_acq_rel);
+    if (cc < 0)
+        return;
+    const int lane = m_learnLane;
+    stopLearn();
+    MidiRoutes routes = m_routes;
+    int movedFrom = MidiRoutes::kNone;
+    routes.assign(lane, cc, &movedFrom); // the MIDI threads only take assignable CCs
+    if (routes != m_routes) {
+        m_routes = routes;
+        saveRoutes();
+        emit settingsChanged();
+    }
+    emit learnFinished(lane, cc, movedFrom);
+}
+
 bool MidiInput::parse(const unsigned char *bytes, size_t size, MidiMsg *out)
 {
     if (!bytes || size < 3)
@@ -648,10 +742,20 @@ int64_t midiClockNs()
 
 void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port)
 {
+    // Learn: an assignable CC while armed is the one to learn (the first
+    // to arrive) and never reaches live play, so the knob being learned
+    // doesn't move the song. The tap below still sees it.
+    bool swallow = false;
+    if (m_learnArmed.load(std::memory_order_acquire) && bytes && size >= 3 &&
+        (bytes[0] & 0xF0) == 0xB0 && MidiRoutes::assignable(bytes[1] & 0x7F)) {
+        int empty = -1;
+        m_learnSlot.compare_exchange_strong(empty, bytes[1] & 0x7F, std::memory_order_acq_rel);
+        swallow = true;
+    }
     // Live play first: the script tap's lock and queued hop never delay
     // the audio thread's input.
     MidiMsg msg;
-    if (parse(bytes, size, &msg)) {
+    if (!swallow && parse(bytes, size, &msg)) {
         msg.arrivalNs = arrivalNs;
         if (m_ring.push(msg))
             m_received.fetch_add(1, std::memory_order_relaxed);

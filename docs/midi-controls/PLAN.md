@@ -186,4 +186,123 @@ before the next step, as on `midi-input`.
 
 ## Progress
 
-(none yet)
+### Step 1 — routes, Settings → MIDI Controls table, Learn (2026-10-12, uncommitted)
+
+**What landed**
+
+- `src/audio/midiroutes.{h,cpp}`: `MidiRoutes`, lane → CC per routable
+  lane (`kLanes` = 0x01, 0x07, 0x0A, 0x14, 0x15, the Settings order), with
+  `laneFor(cc)` as the reverse lookup. `assign(lane, cc, &movedFrom)` moves a
+  CC that another lane holds (that lane goes to none). `assignable(cc)`
+  refuses CC0/32, CC6/38, CC64 and CC120–127. Two encodings: `packed()`
+  (lane i's CC in byte i, 0xFF none) and `toStrings()`
+  (`"MOD=1", …, "BENDR=none"`).
+- `MidiInput`: `routes()` / `setRoute(lane, cc)` persisted under
+  `midi/routes` as that string list. The key is removed when the routes
+  equal the defaults, as `midi/disabledPorts` is. `fromStrings` reads
+  defensively: unknown names, unassignable CCs and a repeated CC read as
+  none, and a lane the list doesn't name keeps its default where that CC is
+  free. Route changes emit `settingsChanged()`, and `MainWindow::syncLiveSettings`
+  publishes them with `AudioEngine::setLiveRoutes(packed)`.
+- Learn lives on `MidiInput`: `startLearn(lane, timeoutMs = 10 s)`,
+  `cancelLearn()`, `learnLane()`, and the signals `learnFinished(lane, cc,
+  movedFrom)` and `learnCancelled(lane, timedOut)`. `receive()` checks an
+  atomic armed flag **before** the live parse. While armed, an assignable CC
+  is CASed into an `std::atomic<int>` slot (first wins, -1 = empty) and
+  kept out of the input ring. The script tap still sees it. A 15 ms UI
+  timer inside `MidiInput` takes the slot and routes it. Starting a second
+  lane cancels the first.
+- Engine: the 0xB0 `default:` branch looks the CC up in
+  `m_liveRouteOf[128]`. Only the `0x01` (MOD) entry acts so far, through the
+  unchanged `applyLiveMod`, so capture follows the route. CC64, 120, 121
+  and 123 keep their fixed cases, which run before the lookup. CC121 still
+  zeroes bend and MOD whatever MOD is routed to (J5 is step 2).
+- Settings → MIDI gets a **Controls** group: one row per lane, a CC
+  spinner with the special value "None" (-1), and a checkable **Learn**
+  button that reads "Listening…" while armed. A status line below says
+  what Learn did ("CC 74 now drives VOL instead of PAN."). Object names
+  are `settingsMidiRoute<LANE>`, `settingsMidiLearn<LANE>` and
+  `settingsMidiLearnStatus`.
+- `--midicheck`:
+  - `checkRoutesTable` covers the pure value type.
+  - `checkRoutesService` covers persistence, reserved refusal,
+    move-on-conflict, and Learn through the injector: reserved CCs pass
+    through, the first CC wins and is swallowed, a second knob in the same
+    burst isn't learned, cancel works, a second lane cancels the first, and
+    a 40 ms timeout fires.
+  - `checkControlsPage` covers the table, spinner stepping and validation,
+    Learn with move, second-click cancel, Esc cancel and hide cancel.
+  - `MainWindow::checkLiveRoutes` covers MOD on CC74 driving the engine at
+    the lane's scale while CC1 does nothing, MOD set to None, and a capture
+    that records CC74's moves (and none from CC1) as `CaptureEvent::Mod`.
+  - Mutation-tested 11 ways: the engine ignoring the table, no swallow,
+    CC64 assignable, no move, timeout ignored, no spinner skip, no Esc
+    filter, no save, no hide-cancel, no second-click cancel, and validate
+    accepting a reserved CC. Each failed the expected checks and was
+    restored.
+- `docsrc/manual/settings.md`: the MIDI TODO stub mentions the Controls
+  table.
+
+**Judgment calls**
+
+- **Packed word instead of a pointer swap.** Since one CC drives one lane
+  and there are 5 lanes, lane → CC fits in one `uint64_t`.
+  `setLiveRoutes` is a single atomic store of that immutable value. The
+  audio thread compares the word each callback and, when it changed,
+  unpacks it into its own `m_liveRouteOf[128]` table (an O(1) lookup). No
+  heap table means no retire and no lifetime hazard. This meets §3.1's
+  intent (immutable, lock-free, nothing freed under the audio thread)
+  more simply. The packing has room for 8 lanes; if a step ever needs more
+  than 8, switch to a pointer swap.
+- **Reserved CCs are refused everywhere**, in Learn, the spinner and
+  `setRoute`. The list is J1's: 0/32, 6/38, 64 and 120–127.
+  - The spinner's range is -1..119, so 120–127 can't be reached.
+  - Its arrows step over 0, 6, 32, 38 and 64.
+  - A typed reserved number validates as Intermediate, so it never commits.
+- **Move-on-conflict applies to the spinner too**, not just Learn. One rule,
+  one CC per lane.
+- **What Learn swallows.** While armed, *every* assignable CC is swallowed,
+  not only the first one learned. Several knobs in the same instant can't
+  leak into live play before the UI poll disarms (≤15 ms). Reserved CCs,
+  notes and bend pass through, so the sustain pedal and playing still work
+  during Learn. Swallowed messages don't count toward `receivedCount()` or
+  `activity()`.
+- **Learn's poll and timeout timers live inside `MidiInput`**, so a step-6
+  lane menu only calls `startLearn` and listens to the two signals.
+- **Settings page cancel rules.** Esc is caught by an app-wide event filter,
+  installed only while *this page's* learn runs. It catches Esc on any
+  widget in the page's window, claiming the ShortcutOverride and consuming
+  the KeyPress, so the dialog stays open. Hiding the page also cancels a
+  learn the page started, including switching Settings sections or closing
+  the dialog. A learn started elsewhere (the step-6 lane menu) shows on the
+  buttons but isn't cancelled by the page.
+- **Timeout feedback.** A timed-out learn says "Nothing was moved on the
+  keyboard, so nothing changed." on the status line. A plain cancel clears
+  the line.
+
+**Gotchas for step 2**
+
+- `AudioEngine::m_liveRouteOf[cc]` holds the lane's document CC (0x01,
+  0x07, 0x0A, 0x14, 0x15) or 0xFF. `syncLiveRoutes()` runs at the top of
+  the input drain in `applyMidiInput`, so a route change takes effect at the
+  next callback, before that callback's messages. Add the other lanes in
+  the `switch (m_liveRouteOf[...])` in `handleLiveMessage`'s 0xB0
+  `default:`. The fixed cases (64/120/121/123) can't collide, because they
+  are never assignable.
+- **CC121 still calls `applyLiveMod(0)` unconditionally.** J5 should make it
+  reset every routed lane, and decide whether MOD routed to None is still
+  reset.
+- `setLiveModMax` (`MainWindow::publishLiveTarget`) is unchanged. BENDR's
+  0–24 scaling (D2) belongs next to it in the dispatch.
+- The engine starts on `MidiRoutes().packed()` from its constructor, so
+  harnesses that build an `AudioEngine` without a `MainWindow` get the
+  defaults.
+- reccheck's e2e mod case still sends CC1 and relies on the default route.
+  midicheck's `checkLiveRoutes` leaves the routes at the defaults.
+- The live-routes check pumps with the device held, like `checkLivePlay`.
+  It arms capture with a private generation (0x7E57) and pops the capture
+  ring directly, with no take, so it doesn't touch `m_take`.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan (35/35
+each). `--midicheck` passes on build-nomidi, build-off and build-dummy too,
+and all five trees build cleanly.

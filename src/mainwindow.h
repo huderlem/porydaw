@@ -246,6 +246,8 @@ class MainWindow : public QMainWindow
     void pollLiveKeys();
     // runMidiWindowCheck's live-play half (midicheck.cpp).
     void checkLivePlay();
+    // Its routed-controls half (docs/midi-controls/PLAN.md step 1).
+    void checkLiveRoutes();
     // MIDI recording (D5): Record while stopped starts playback from the
     // edit cursor and records; while playing it punches in; again it punches
     // out, commits and keeps playing. Stop, Space and Pause commit too, as

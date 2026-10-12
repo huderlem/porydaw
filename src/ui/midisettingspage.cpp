@@ -3,10 +3,13 @@
 #include "audio/midiinput.h"
 #include "layout.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -14,9 +17,72 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include <cstdlib>
+
 namespace {
 
 constexpr int kPortNameRole = Qt::UserRole;
+
+// A CC number box that never offers a reserved CC (MidiRoutes::assignable):
+// the arrows step over them and typing one doesn't commit. -1 is None.
+// CC120–127 are reserved too, so they're simply past the maximum.
+class CcSpinBox : public QSpinBox
+{
+  public:
+    explicit CcSpinBox(QWidget *parent) : QSpinBox(parent)
+    {
+        setRange(MidiRoutes::kNone, 119);
+        setSpecialValueText(QCoreApplication::translate("MidiSettingsPage", "None"));
+        setPrefix(QStringLiteral("CC "));
+        setKeyboardTracking(false);
+    }
+
+    void stepBy(int steps) override
+    {
+        const int dir = steps < 0 ? -1 : 1;
+        int v = value();
+        for (int n = std::abs(steps); n > 0; n--) {
+            int next = v + dir;
+            while (next >= minimum() && next <= maximum() && next != MidiRoutes::kNone &&
+                   !MidiRoutes::assignable(next))
+                next += dir;
+            if (next < minimum() || next > maximum())
+                break;
+            v = next;
+        }
+        setValue(v);
+    }
+
+  protected:
+    QValidator::State validate(QString &text, int &pos) const override
+    {
+        const QValidator::State state = QSpinBox::validate(text, pos);
+        if (state != QValidator::Acceptable)
+            return state;
+        const int v = valueFromText(text);
+        // Intermediate, not Invalid: "6" may still become "65".
+        return v == MidiRoutes::kNone || MidiRoutes::assignable(v) ? state
+                                                                   : QValidator::Intermediate;
+    }
+};
+
+QString laneDescription(int lane)
+{
+    switch (lane) {
+    case 0x01:
+        return MidiSettingsPage::tr("Modulation depth. The control's full travel covers the MOD "
+                                    "lane's range as drawn.");
+    case 0x07:
+        return MidiSettingsPage::tr("Track volume.");
+    case 0x0A:
+        return MidiSettingsPage::tr("Track pan.");
+    case 0x14:
+        return MidiSettingsPage::tr("Pitch-bend range.");
+    case 0x15:
+        return MidiSettingsPage::tr("LFO speed.");
+    }
+    return QString();
+}
 
 } // namespace
 
@@ -112,8 +178,54 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
                              "the audio device's own latency."));
     playForm->addRow(tr("Recording &offset:"), m_latency);
 
+    // Controls: which knob, slider or button drives each lane.
+    auto *controlsGroup = new QGroupBox(tr("Controls"), m_controls);
+    auto *controlsLayout = new QVBoxLayout(controlsGroup);
+    auto *grid = new QGridLayout;
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setColumnStretch(3, 1);
+    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+        const int lane = MidiRoutes::kLanes[i];
+        const QString name = MidiRoutes::laneName(lane);
+        auto *label = new QLabel(name, m_controls);
+        label->setToolTip(laneDescription(lane));
+        auto *cc = new CcSpinBox(m_controls);
+        cc->setObjectName(QStringLiteral("settingsMidiRoute%1").arg(name));
+        cc->setToolTip(tr("The MIDI control (CC number, any channel) that drives %1: %2 "
+                          "None leaves it to the song.")
+                           .arg(name, laneDescription(lane)));
+        label->setBuddy(cc);
+        auto *learn = new QPushButton(tr("Learn"), m_controls);
+        learn->setObjectName(QStringLiteral("settingsMidiLearn%1").arg(name));
+        learn->setCheckable(true);
+        learn->setAutoDefault(false);
+        learn->setToolTip(tr("Press, then move the knob, slider or button on your keyboard "
+                             "that should drive %1. Press again or Esc to cancel.")
+                              .arg(name));
+        grid->addWidget(label, i, 0, Qt::AlignRight | Qt::AlignVCenter);
+        grid->addWidget(cc, i, 1);
+        grid->addWidget(learn, i, 2);
+        m_routeCc[i] = cc;
+        m_learn[i] = learn;
+        connect(cc, &QSpinBox::valueChanged, this, [this, lane](int value) {
+            // Refused (only a reserved CC set from code): show the route
+            // that stands.
+            if (!m_midi.setRoute(lane, value))
+                loadPreferences();
+        });
+        connect(learn, &QPushButton::clicked, this,
+                [this, lane](bool checked) { learnClicked(lane, checked); });
+    }
+    m_learnStatus = new QLabel(m_controls);
+    m_learnStatus->setObjectName(QStringLiteral("settingsMidiLearnStatus"));
+    m_learnStatus->setForegroundRole(QPalette::PlaceholderText);
+    m_learnStatus->setWordWrap(true);
+    controlsLayout->addLayout(grid);
+    controlsLayout->addWidget(m_learnStatus);
+
     pageLayout->addWidget(portsGroup, 1);
     pageLayout->addWidget(playGroup);
+    pageLayout->addWidget(controlsGroup);
 
     loadPreferences();
     rebuildPorts();
@@ -135,6 +247,83 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     connect(m_livePlay, &QCheckBox::toggled, &m_midi, &MidiInput::setLivePlay);
     connect(m_fixedVelocity, &QSpinBox::valueChanged, &m_midi, &MidiInput::setFixedVelocity);
     connect(m_latency, &QSpinBox::valueChanged, &m_midi, &MidiInput::setLatencyMs);
+    connect(&m_midi, &MidiInput::learnFinished, this, [this](int lane, int cc, int movedFrom) {
+        m_startedLearn = false;
+        syncLearn();
+        const QString name = MidiRoutes::laneName(lane);
+        m_learnStatus->setText(movedFrom == MidiRoutes::kNone
+                                   ? tr("CC %1 now drives %2.").arg(cc).arg(name)
+                                   : tr("CC %1 now drives %2 instead of %3.")
+                                         .arg(cc)
+                                         .arg(name, MidiRoutes::laneName(movedFrom)));
+    });
+    connect(&m_midi, &MidiInput::learnCancelled, this, [this](int, bool timedOut) {
+        m_startedLearn = false;
+        syncLearn();
+        m_learnStatus->setText(timedOut ? tr("Nothing was moved on the keyboard, so nothing "
+                                             "changed.")
+                                        : QString());
+    });
+    syncLearn();
+}
+
+void MidiSettingsPage::learnClicked(int lane, bool checked)
+{
+    if (checked) {
+        m_midi.startLearn(lane);
+        m_startedLearn = m_midi.learnLane() == lane;
+        if (m_startedLearn)
+            qApp->installEventFilter(this); // Esc cancels, wherever the focus is
+    } else if (m_midi.learnLane() == lane) {
+        m_midi.cancelLearn(); // the second click
+    }
+    syncLearn();
+}
+
+void MidiSettingsPage::syncLearn()
+{
+    const int learning = m_midi.learnLane();
+    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+        const bool on = MidiRoutes::kLanes[i] == learning;
+        const QSignalBlocker block(m_learn[i]);
+        m_learn[i]->setChecked(on);
+        m_learn[i]->setText(on ? tr("Listening…") : tr("Learn"));
+    }
+    if (learning != MidiRoutes::kNone) {
+        m_learnStatus->setText(tr("Move the knob, slider or button that should drive %1. Esc "
+                                  "cancels.")
+                                   .arg(MidiRoutes::laneName(learning)));
+    } else {
+        qApp->removeEventFilter(this);
+    }
+}
+
+bool MidiSettingsPage::eventFilter(QObject *watched, QEvent *event)
+{
+    // Only while this page's learn runs (the filter is removed after).
+    if ((event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
+        m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (key->key() == Qt::Key_Escape && widget && widget->window() == window()) {
+            // Claimed at the override, so no Esc shortcut takes it, and
+            // consumed at the press, so the dialog stays open.
+            event->accept();
+            if (event->type() == QEvent::KeyPress)
+                m_midi.cancelLearn();
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void MidiSettingsPage::hideEvent(QHideEvent *event)
+{
+    // Closing the Settings window mid-learn: the knob shouldn't be learned
+    // unseen later.
+    if (m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone)
+        m_midi.cancelLearn();
+    QWidget::hideEvent(event);
 }
 
 void MidiSettingsPage::syncBackend()
@@ -155,6 +344,12 @@ void MidiSettingsPage::loadPreferences()
     m_livePlay->setChecked(m_midi.livePlay());
     m_fixedVelocity->setValue(m_midi.fixedVelocity());
     m_latency->setValue(m_midi.latencyMs());
+    for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
+        if (!m_routeCc[i])
+            continue; // still building
+        const QSignalBlocker block(m_routeCc[i]);
+        m_routeCc[i]->setValue(m_midi.routes().ccFor(MidiRoutes::kLanes[i]));
+    }
 }
 
 void MidiSettingsPage::rebuildPorts()
