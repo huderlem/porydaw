@@ -335,6 +335,16 @@ class VoiceEditCommand : public QUndoCommand
     bool m_structural;
 };
 
+// The lane menus' MIDI section as midi has it (MainWindow::syncMidiControls).
+static SongView::MidiControls midiControlsOf(const MidiInput &midi)
+{
+    SongView::MidiControls controls;
+    controls.keyboard = !midi.openPorts().isEmpty();
+    controls.routes = midi.routes();
+    controls.learning = midi.learnLane();
+    return controls;
+}
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 {
     setAcceptDrops(true); // song bundles (dragEnterEvent/dropEvent)
@@ -794,6 +804,37 @@ void MainWindow::buildUi()
     // Record shows only while a keyboard is connected.
     connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::syncRecordAction);
     syncRecordAction();
+    // So do the lane menus' Learn items.
+    connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::syncMidiControls);
+    connect(m_midiInput.get(), &MidiInput::settingsChanged, this, &MainWindow::syncMidiControls);
+    connect(m_midiInput.get(), &MidiInput::learnStarted, this, &MainWindow::syncMidiControls);
+    connect(m_midiInput.get(), &MidiInput::learnFinished, this,
+            [this](int lane, int cc, int movedFrom) {
+                syncMidiControls();
+                if (!m_laneLearn)
+                    return; // the Settings page's: it says so itself
+                m_laneLearn = false;
+                qApp->removeEventFilter(this);
+                const QString name = MidiRoutes::laneName(lane);
+                statusBar()->showMessage(movedFrom == MidiRoutes::kNone
+                                             ? tr("CC %1 now drives %2.").arg(cc).arg(name)
+                                             : tr("CC %1 now drives %2 instead of %3.")
+                                                   .arg(cc)
+                                                   .arg(name, MidiRoutes::laneName(movedFrom)),
+                                         6000);
+            });
+    connect(m_midiInput.get(), &MidiInput::learnCancelled, this, [this](int, bool timedOut) {
+        syncMidiControls();
+        if (!m_laneLearn)
+            return;
+        m_laneLearn = false;
+        qApp->removeEventFilter(this);
+        if (timedOut)
+            statusBar()->showMessage(tr("Nothing was moved on the keyboard, so nothing changed."),
+                                     6000);
+        else
+            statusBar()->clearMessage();
+    });
     // A port closing (unplugged, disabled, reopened) can never send the
     // note-offs, or the pedal-up, for what it held.
     connect(m_midiInput.get(), &MidiInput::portsClosed, this, [this] {
@@ -1424,6 +1465,7 @@ SongSession *MainWindow::createSession()
     s->view->setVelocityColorMode(m_velocityColorsAction->isChecked());
     s->view->setNoteNameMode(m_noteNamesAction->isChecked());
     s->view->setFollowPlayhead(m_followPlayheadAction->isChecked());
+    s->view->setMidiControls(midiControlsOf(*m_midiInput));
     s->view->setVelocityLaneVisible(m_velocityLaneAction->isChecked());
     s->view->setAutomationLanesVisible(m_automationLanesAction->isChecked());
     connect(s->view, &SongView::muteMaskChanged, this, [this, s](uint32_t mask) {
@@ -1497,6 +1539,9 @@ SongSession *MainWindow::createSession()
             s->view->setPlayheadSample(targetSample, m_audio.transport() == Transport::Playing);
         }
     });
+    connect(s->view, &SongView::midiLearnRequested, this, &MainWindow::startLaneLearn);
+    connect(s->view, &SongView::midiLearnCancelRequested, m_midiInput.get(),
+            &MidiInput::cancelLearn);
     connect(s->view, &SongView::recordRequested, this, [this, s] {
         if (s == m_active && m_recordAction->isVisible() && m_recordAction->isEnabled())
             m_recordAction->trigger();
@@ -5365,6 +5410,28 @@ void MainWindow::syncLiveSettings()
     m_audio.setLiveRoutes(m_midiInput->routes().packed());
 }
 
+void MainWindow::syncMidiControls()
+{
+    const SongView::MidiControls controls = midiControlsOf(*m_midiInput);
+    for (const auto &session : m_sessions)
+        session->view->setMidiControls(controls);
+}
+
+void MainWindow::startLaneLearn(int lane)
+{
+    m_midiInput->startLearn(lane);
+    // Set after the start: the learn it replaced (another lane's, or the
+    // Settings page's) was cancelled on the way, and that isn't this one.
+    m_laneLearn = m_midiInput->learnLane() == lane;
+    if (!m_laneLearn)
+        return;
+    qApp->installEventFilter(this); // Esc cancels, wherever the focus is
+    statusBar()->showMessage(
+        tr("Move the knob, slider or button that should drive %1. Esc cancels.")
+            .arg(MidiRoutes::laneName(lane)),
+        MidiInput::kLearnTimeoutMs);
+}
+
 void MainWindow::pollLiveKeys()
 {
     uint64_t lo = 0, hi = 0;
@@ -5966,6 +6033,20 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
+    // A lane menu's learn (the application filter is installed only while
+    // it runs): Esc in this window cancels it.
+    if (m_laneLearn &&
+        (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
+        static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
+        auto *widget = qobject_cast<QWidget *>(watched);
+        if (widget && widget->window() == this && m_midiInput->learnLane() != MidiRoutes::kNone) {
+            // Claimed at the override, so no Esc shortcut takes it.
+            event->accept();
+            if (event->type() == QEvent::KeyPress)
+                m_midiInput->cancelLearn();
+            return true;
+        }
+    }
     const auto isSpinOrEdit = [watched](QSpinBox *spin) {
         return watched == spin || watched->parent() == spin;
     };

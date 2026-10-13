@@ -5143,9 +5143,32 @@ class AutomationArea : public TimelineSurface
                 rangeActions.emplace_back(action, opt.first);
             }
         }
+        // Which keyboard control drives this lane (MOD, VOL, PAN, BENDR and
+        // LFOS only), and Learn to pick another by moving it. The Voice row
+        // has no menu here: program changes need no route.
+        QAction *learn = nullptr;
+        const SongView::MidiControls &midi = m_sv->midiControls();
+        const bool learning = midi.learning == cc;
+        if (midi.keyboard && MidiRoutes::laneIndex(cc) >= 0) {
+            menu.addSeparator();
+            const int routed = midi.routes.ccFor(cc);
+            QAction *route = menu.addAction(routed == MidiRoutes::kNone
+                                                ? SongView::tr("MIDI: none")
+                                                : SongView::tr("MIDI: CC%1").arg(routed));
+            route->setEnabled(false);
+            learn = menu.addAction(learning ? SongView::tr("Cancel MIDI learn")
+                                            : SongView::tr("Learn MIDI control…"));
+        }
         QAction *chosen = menu.exec(globalPos);
         if (!chosen)
             return;
+        if (chosen == learn) {
+            if (learning)
+                emit m_sv->midiLearnCancelRequested();
+            else
+                emit m_sv->midiLearnRequested(cc);
+            return;
+        }
         for (const std::pair<QAction *, int> &opt : rangeActions) {
             if (chosen == opt.first) {
                 setLaneRange(track, cc, opt.second);
@@ -10903,6 +10926,11 @@ std::optional<QPointF> SongView::recordingPreviewLanePoint(uint8_t cc, uint64_t 
                                                            int value) const
 {
     return m_lanes->lanePointAt(m_recordingPreview.track, cc, tick, value);
+}
+
+std::optional<QPointF> SongView::lanePoint(int track, uint8_t cc, uint64_t tick, int value) const
+{
+    return m_lanes->lanePointAt(track, cc, tick, value);
 }
 
 void SongView::selectTrack(int track)

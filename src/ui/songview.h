@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "audio/midiroutes.h"
 #include "core/miditimeline.h"
 #include "core/ripplescope.h"
 #include "core/songdocument.h"
@@ -328,6 +329,19 @@ class SongView : public QWidget
     // DOC_CC_VOICE: a voice change's chip line at tick, near its top (the
     // value is ignored).
     std::optional<QPointF> recordingPreviewLanePoint(uint8_t cc, uint64_t tick, int value) const;
+    // The same on any track's row (harness probes).
+    std::optional<QPointF> lanePoint(int track, uint8_t cc, uint64_t tick, int value) const;
+    // The gutter menu's MIDI section on a routable lane's row
+    // (docs/midi-controls/PLAN.md step 6), fed by the main window: whether
+    // a keyboard is connected (no keyboard, no section), the routes and
+    // the lane being learned (a document CC, or MidiRoutes::kNone).
+    struct MidiControls {
+        bool keyboard = false;
+        MidiRoutes routes;
+        int learning = MidiRoutes::kNone;
+    };
+    void setMidiControls(const MidiControls &controls) { m_midiControls = controls; }
+    const MidiControls &midiControls() const { return m_midiControls; }
     // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
     // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
     void setLiveHeldKeys(uint64_t lo, uint64_t hi);
@@ -924,6 +938,10 @@ class SongView : public QWidget
     // The Record key (transport.record) from the focused roll or lanes; the
     // main window triggers its Record action, if Record is available.
     void recordRequested();
+    // The lane menu's "Learn MIDI control…" on a routable lane (its
+    // document CC), and its "Cancel MIDI learn" while that lane learns.
+    void midiLearnRequested(int lane);
+    void midiLearnCancelRequested();
 
   protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -990,6 +1008,7 @@ class SongView : public QWidget
     int m_selectedTrack = 0;
     uint64_t m_liveHeldKeys[2] = {0, 0};
     RecordingPreview m_recordingPreview;
+    MidiControls m_midiControls;
     double m_playheadTick = 0.0;
     uint64_t m_editCursorTick = 0;
     bool m_playing = false;

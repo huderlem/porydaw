@@ -10,10 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.
+   - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR` and `LFOS` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
 - Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.
+- Fixed `LFOS` changes restarting the modulation wave during playback. It now keeps going, like on the GBA.
 
 ## [1.3.0] - 2026-10-04
 

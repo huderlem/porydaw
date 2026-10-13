@@ -1676,3 +1676,52 @@ build-off and build-dummy, and all five trees build cleanly.
 each). `--reccheck`, `--midicheck` and `--primecheck` pass on build-nomidi,
 build-off and build-dummy; all five trees build cleanly (exit 0, no new
 warnings).
+
+### Step 6 — lane-menu Learn + docs (2026-10-13)
+
+**What changed**
+
+- A routable lane's gutter menu (MOD, VOL, PAN, BENDR, LFOS) ends with a
+  MIDI section while a keyboard is connected:
+  - a disabled "MIDI: CC74" (or "MIDI: none") line;
+  - "Learn MIDI control…", which arms `MidiInput::startLearn` for that
+    lane, or "Cancel MIDI learn" while that lane learns.
+- BEND, other CC lanes and the Voice row have no MIDI section. The Voice
+  row has no gutter menu at all.
+- `SongView::MidiControls` (keyboard, routes, learning lane) is pushed to
+  every tab's view by `MainWindow::syncMidiControls` on `portsChanged`,
+  `settingsChanged` and the three learn signals, and seeded at view
+  creation.
+- A lane-menu learn (`startLaneLearn`):
+  - says what to do in the status bar for the learn's 10 s;
+  - lets Esc in the main window cancel it, through an application event
+    filter installed only while it runs;
+  - reports "CC n now drives X." (or "… instead of Y.") or the timeout.
+  - A learn the Settings page started keeps its reports on the page.
+- Docs:
+  - a CHANGELOG line under the MIDI keyboard entry, plus the LFOS phase fix;
+  - a "Knobs, sliders and program buttons" TODO outline in
+    `docsrc/manual/midi-keyboard.md`;
+  - the lane-menu Learn in the `settings.md` stub.
+  - `mkdocs build --strict` passes.
+
+**Harness:** `--midicheck` `checkLaneLearn` drives the gutter menus for
+real. It checks:
+
+- no section without a keyboard;
+- the disabled CC line and Learn on VOL;
+- none on BEND or the Voice row;
+- Learn arms the lane, and the status bar says what to do;
+- Esc cancels (and is the window's again after);
+- Cancel MIDI learn cancels;
+- a learned CC routes, is reported and shows in the menu;
+- a CC moved off PAN is reported with "instead of PAN";
+- an unrouted lane reads none;
+- a Settings-started learn leaves the status bar alone.
+
+Mutation-tested 4 ways, each failing the expected checks:
+
+- the keyboard gate removed;
+- Cancel wired to Learn;
+- the Esc filter off;
+- the status-bar guard removed.

@@ -18,7 +18,8 @@ the per-song [Song Settings](song-settings.md). Restore Defaults. -->
 <!-- TODO: The MIDI keyboard settings: the input port list (checkbox per
 port, Refresh), Play incoming notes, Fixed velocity, Recording offset
 (Auto (N ms) or a fixed value), and the Controls table (which keyboard CC
-drives MOD/VOL/PAN/BENDR/LFOS; None; Learn). Details in
+drives MOD/VOL/PAN/BENDR/LFOS; None; Learn — also on a lane's right-click
+menu). Details in
 [Playing & Recording with a MIDI Keyboard](midi-keyboard.md). -->
 
 ## Appearance

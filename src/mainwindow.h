@@ -303,6 +303,14 @@ class MainWindow : public QMainWindow
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
     void syncRecordAction();
+    // The lane menus' MIDI section (SongView::MidiControls) on every tab:
+    // the keyboard, the routes and the lane learning.
+    void syncMidiControls();
+    // "Learn MIDI control…" from a lane menu: arms Learn for lane, with the
+    // status bar saying what to do; Esc in this window cancels it.
+    void startLaneLearn(int lane);
+    // The lane-menu half of checkLiveRoutes (midicheck.cpp).
+    void checkLaneLearn();
     // runRecordWindowCheck's halves (reccheck.cpp).
     void checkRecordingTakes(const QString &scratchDir);
     void checkRecordingDisplay();
@@ -702,6 +710,9 @@ class MainWindow : public QMainWindow
     // timer only runs during playback).
     QTimer *m_liveKeysTimer = nullptr;
     int m_liveKeysIdleTicks = 0;
+    // A learn a lane menu started is armed (startLaneLearn): the status bar
+    // follows it and Esc cancels it.
+    bool m_laneLearn = false;
     // AudioEngine::liveIgnoredProgram as last reported, and how many
     // reports there have been (for --midicheck).
     uint32_t m_liveIgnoredSeen = 0;

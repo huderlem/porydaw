@@ -9,6 +9,8 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
@@ -967,6 +969,7 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     checkLivePlay();
     checkLiveRoutes();
     checkLiveControls();
+    checkLaneLearn();
     return g_failures - before;
 }
 
@@ -1657,4 +1660,154 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
     if (g_failures == 0)
         std::printf("midicheck: OK\n");
     return g_failures ? 1 : 0;
+}
+
+// docs/midi-controls/PLAN.md step 6: the lane menu's MIDI section, driven
+// for real: a gutter press blocks in QMenu::exec(), so a zero-delay timer
+// scheduled first reads the menu and picks an entry by keyboard.
+void MainWindow::checkLaneLearn()
+{
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const MidiRoutes routesWere = midi.routes();
+    const bool lanesWere = view->automationLanesVisible();
+    view->setAutomationLanesVisible(true);
+    const int track = view->selectedTrack();
+    view->addEmptyLane(track, 0x07); // VOL; a no-op if the song has one
+    view->addEmptyLane(track, DOC_CC_BEND);
+    QCoreApplication::processEvents();
+    auto *lanes = view->findChild<QWidget *>(QStringLiteral("automationArea"));
+    if (!check(lanes, "lane learn: no automation area"))
+        return;
+
+    // Opens cc's gutter menu, records its entries, and picks the one named
+    // pick (none: Esc). False when no menu opened.
+    QStringList entries, disabled;
+    const auto openMenu = [&](uint8_t cc, const QString &pick = QString()) {
+        entries.clear();
+        disabled.clear();
+        bool opened = false;
+        const std::optional<QPointF> at = view->lanePoint(track, cc, 0, 64);
+        if (!at)
+            return false;
+        QTimer::singleShot(0, [&] {
+            QMenu *menu = nullptr;
+            for (QWidget *w : QApplication::topLevelWidgets())
+                if (auto *m = qobject_cast<QMenu *>(w); m && m->isVisible())
+                    menu = m;
+            if (!menu)
+                return;
+            opened = true;
+            QAction *chosen = nullptr;
+            for (QAction *action : menu->actions()) {
+                if (action->isSeparator() || action->menu())
+                    continue;
+                entries << action->text();
+                if (!action->isEnabled())
+                    disabled << action->text();
+                if (action->text() == pick)
+                    chosen = action;
+            }
+            if (chosen)
+                menu->setActiveAction(chosen);
+            QKeyEvent key(QEvent::KeyPress, chosen ? Qt::Key_Return : Qt::Key_Escape,
+                          Qt::NoModifier);
+            QCoreApplication::sendEvent(menu, &key);
+        });
+        const QPointF pos(8, at->y());
+        QMouseEvent press(QEvent::MouseButtonPress, pos, lanes->mapToGlobal(pos), Qt::RightButton,
+                          Qt::RightButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, pos, lanes->mapToGlobal(pos),
+                            Qt::RightButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &release);
+        QCoreApplication::processEvents();
+        return opened;
+    };
+    const QString learnText = QStringLiteral("Learn MIDI control…");
+    const QString cancelText = QStringLiteral("Cancel MIDI learn");
+    const auto settle = [&] { wait(MidiInput::kLearnPollMs * 4); };
+
+    // No keyboard, no MIDI section.
+    midi.setOpenPortsForTest({});
+    check(openMenu(0x07) && !entries.contains(learnText) &&
+              !entries.contains(QStringLiteral("MIDI: CC7")),
+          "lane learn: the VOL menu offers Learn with no keyboard connected");
+
+    midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
+    check(openMenu(0x07) && entries.contains(learnText) &&
+              disabled.contains(QStringLiteral("MIDI: CC7")),
+          "lane learn: the VOL menu does not show its CC (disabled) and Learn");
+    // Not on BEND (the wheel isn't a CC) or the Voice row (no route needed).
+    check(openMenu(DOC_CC_BEND) && !entries.contains(learnText),
+          "lane learn: the pitch bend lane's menu offers Learn");
+    check(!openMenu(DOC_CC_VOICE) || !entries.contains(learnText),
+          "lane learn: the Voice row offers Learn");
+
+    // Learn, then Esc in the window cancels it, saying nothing.
+    check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+          "lane learn: Learn MIDI control… did not arm VOL");
+    check(statusBar()->currentMessage().contains(QStringLiteral("VOL")) &&
+              statusBar()->currentMessage().contains(QStringLiteral("Esc")),
+          "lane learn: the status bar does not say what to do");
+    check(view->midiControls().learning == 0x07, "lane learn: the views don't know VOL learns");
+    {
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &esc);
+    }
+    check(midi.learnLane() == MidiRoutes::kNone && statusBar()->currentMessage().isEmpty() &&
+              view->midiControls().learning == MidiRoutes::kNone,
+          "lane learn: Esc did not cancel the learn");
+    {
+        // Disarmed: Esc is the window's again (the filter is gone).
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &esc);
+        check(midi.learnLane() == MidiRoutes::kNone, "lane learn: a stray Esc armed something");
+    }
+
+    // While learning, the menu offers Cancel instead, and it cancels.
+    check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+          "lane learn: Learn did not re-arm VOL");
+    check(openMenu(0x07, cancelText) && !entries.contains(learnText) &&
+              midi.learnLane() == MidiRoutes::kNone,
+          "lane learn: Cancel MIDI learn did not cancel");
+
+    // A knob learned: the route moves, the status bar says so, and the
+    // menu shows the new CC.
+    check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+          "lane learn: Learn did not arm VOL a third time");
+    midi.injectForTest({0xB0, 74, 40});
+    settle();
+    check(midi.routes().ccFor(0x07) == 74 &&
+              statusBar()->currentMessage() == QStringLiteral("CC 74 now drives VOL."),
+          "lane learn: learning CC74 for VOL did not route it or report it");
+    check(openMenu(0x07) && disabled.contains(QStringLiteral("MIDI: CC74")),
+          "lane learn: the menu does not show the learned CC");
+    // A CC another lane had moves; the report names it.
+    check(openMenu(0x07, learnText), "lane learn: Learn did not arm VOL a fourth time");
+    midi.injectForTest({0xB0, 10, 40});
+    settle();
+    check(midi.routes().ccFor(0x07) == 10 && midi.routes().ccFor(0x0A) == MidiRoutes::kNone &&
+              statusBar()->currentMessage() ==
+                  QStringLiteral("CC 10 now drives VOL instead of PAN."),
+          "lane learn: learning PAN's CC for VOL did not move it or report it");
+    // A lane with no CC reads none (PAN, if its row shows).
+    view->addEmptyLane(track, 0x0A);
+    QCoreApplication::processEvents();
+    check(openMenu(0x0A) && disabled.contains(QStringLiteral("MIDI: none")),
+          "lane learn: an unrouted lane's menu does not say none");
+    // A learn the Settings page starts doesn't touch the status bar.
+    statusBar()->clearMessage();
+    midi.startLearn(0x15);
+    midi.injectForTest({0xB0, 80, 1});
+    settle();
+    check(midi.routes().ccFor(0x15) == 80 && statusBar()->currentMessage().isEmpty(),
+          "lane learn: another learn's result reached the status bar");
+
+    for (const uint8_t lane : MidiRoutes::kLanes)
+        midi.setRoute(lane, routesWere.ccFor(lane));
+    check(midi.routes() == routesWere, "lane learn: could not restore the routes");
+    drain(midi.ring());
+    midi.setOpenPortsForTest({});
+    view->setAutomationLanesVisible(lanesWere);
 }

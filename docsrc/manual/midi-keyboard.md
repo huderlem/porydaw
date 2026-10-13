@@ -30,6 +30,33 @@ whole track's modulation, scaled to the MOD lane's visible range (MOD
 defaults to 0..16). Switching tracks hands the old track's bend/mod back to
 the song. -->
 
+## Knobs, sliders and program buttons
+
+<!-- TODO: Routing: Settings → MIDI → Controls says which knob (MIDI CC)
+drives MOD, VOL, PAN, BENDR and LFOS. Defaults: CC1 (mod wheel) → MOD, CC7 →
+VOL, CC10 → PAN; BENDR and LFOS none. Pick a CC number, None, or Learn: click
+Learn and move the knob within 10 seconds (Esc cancels). Or right-click a
+lane's name → "Learn MIDI control…" (the menu shows its current knob, e.g.
+"MIDI: CC74"; only while a keyboard is connected). One knob per lane: learning
+a knob another lane has moves it there (the message says which). Routes apply
+to every song and every keyboard channel. The sustain pedal, bank select,
+data entry and channel mode messages can't be routed. -->
+
+<!-- TODO: What a full turn reaches: VOL, PAN and LFOS 0..127 as the knob
+sends it; BENDR 0..24 (the BENDR lane shows 0..24 by default); MOD follows
+the MOD lane's visible range, like the mod wheel. A knob moves the whole
+selected track, song notes too, like pitch bend. -->
+
+<!-- TODO: Program change buttons switch the selected track's voice (program
+N = voicegroup slot N); a program past the voicegroup's last voice is
+ignored, and the status bar says so once. -->
+
+<!-- TODO: While recording, once you move a control the song's own events
+for that lane on the track stop playing (so the song doesn't fight your
+knob) until you stop, the loop wraps or you seek. Switching tracks hands the
+old track's lanes back to the song. A "reset all controllers" message (some
+keyboards send it from a panic button) resets every routed lane. -->
+
 <!-- TODO: Settings → MIDI → "Play incoming notes" turns the sound off
 (recording still works). "Fixed velocity" makes every note the same
 loudness instead of how hard you hit the key. -->
