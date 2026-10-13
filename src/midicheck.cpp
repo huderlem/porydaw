@@ -2,6 +2,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QDialog>
+#include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
@@ -20,6 +21,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
+#include <QUndoStack>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
@@ -1731,12 +1733,12 @@ void MainWindow::checkLaneLearn()
     // No keyboard, no MIDI section.
     midi.setOpenPortsForTest({});
     check(openMenu(0x07) && !entries.contains(learnText) &&
-              !entries.contains(QStringLiteral("MIDI: CC7")),
+              !entries.contains(QStringLiteral("MIDI: CC 7")),
           "lane learn: the VOL menu offers Learn with no keyboard connected");
 
     midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
     check(openMenu(0x07) && entries.contains(learnText) &&
-              disabled.contains(QStringLiteral("MIDI: CC7")),
+              disabled.contains(QStringLiteral("MIDI: CC 7")),
           "lane learn: the VOL menu does not show its CC (disabled) and Learn");
     // Not on BEND (the wheel isn't a CC) or the Voice row (no route needed).
     check(openMenu(DOC_CC_BEND) && !entries.contains(learnText),
@@ -1781,7 +1783,7 @@ void MainWindow::checkLaneLearn()
     check(midi.routes().ccFor(0x07) == 74 &&
               statusBar()->currentMessage() == QStringLiteral("CC 74 now drives VOL."),
           "lane learn: learning CC74 for VOL did not route it or report it");
-    check(openMenu(0x07) && disabled.contains(QStringLiteral("MIDI: CC74")),
+    check(openMenu(0x07) && disabled.contains(QStringLiteral("MIDI: CC 74")),
           "lane learn: the menu does not show the learned CC");
     // A CC another lane had moves; the report names it.
     check(openMenu(0x07, learnText), "lane learn: Learn did not arm VOL a fourth time");
@@ -1796,6 +1798,64 @@ void MainWindow::checkLaneLearn()
     QCoreApplication::processEvents();
     check(openMenu(0x0A) && disabled.contains(QStringLiteral("MIDI: none")),
           "lane learn: an unrouted lane's menu does not say none");
+    // Unplugging the keyboard mid-learn cancels it, and its prompt goes.
+    check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+          "lane learn: Learn did not arm VOL before the unplug");
+    midi.setOpenPortsForTest({});
+    check(midi.learnLane() == MidiRoutes::kNone && statusBar()->currentMessage().isEmpty() &&
+              view->midiControls().learning == MidiRoutes::kNone,
+          "lane learn: unplugging the keyboard did not cancel the learn");
+    midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
+    // Esc in a floating dock cancels too.
+    check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+          "lane learn: Learn did not arm VOL before the floating dock");
+    {
+        const bool floatingWas = m_vgDock->isFloating();
+        m_vgDock->setFloating(true);
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(m_vgDock->widget() ? m_vgDock->widget() : m_vgDock, &esc);
+        check(midi.learnLane() == MidiRoutes::kNone,
+              "lane learn: Esc in a floating dock did not cancel the learn");
+        m_vgDock->setFloating(floatingWas);
+        midi.cancelLearn();
+    }
+    // During a take, the "Recording into" status comes back after a
+    // cancel at once, and after a result's message.
+    if (!m_audioOk) {
+        std::printf("midicheck: lane learn during a take SKIP (no audio device)\n");
+    } else {
+        m_audio.holdDeviceForTest(true);
+        QUndoStack *undo = m_active->doc.undoStack();
+        const int undoWas = undo->index();
+        const auto recordingStatus = [&] {
+            return statusBar()->currentMessage().startsWith(QStringLiteral("Recording into "));
+        };
+        m_recordAction->trigger();
+        check(m_takeSession && recordingStatus(), "lane learn: Record did not start a take");
+        check(openMenu(0x07, learnText) && midi.learnLane() == 0x07 && !recordingStatus(),
+              "lane learn: Learn did not arm VOL during the take");
+        {
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(lanes, &esc);
+        }
+        check(midi.learnLane() == MidiRoutes::kNone && recordingStatus(),
+              "lane learn: a cancel during a take did not bring the recording status back");
+        check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
+              "lane learn: Learn did not re-arm VOL during the take");
+        midi.injectForTest({0xB0, 75, 40});
+        settle();
+        check(statusBar()->currentMessage() == QStringLiteral("CC 75 now drives VOL."),
+              "lane learn: a learn during a take did not report its result");
+        wait(kLaneLearnResultMs + 300);
+        check(m_takeSession && recordingStatus(),
+              "lane learn: the recording status did not come back after the result");
+        m_stopAction->trigger();
+        check(!m_takeSession, "lane learn: Stop did not end the take");
+        while (undo->index() > undoWas)
+            undo->undo();
+        drain(midi.ring());
+        m_audio.holdDeviceForTest(false);
+    }
     // A learn the Settings page starts doesn't touch the status bar.
     statusBar()->clearMessage();
     midi.startLearn(0x15);

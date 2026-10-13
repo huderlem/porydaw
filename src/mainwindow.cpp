@@ -816,12 +816,11 @@ void MainWindow::buildUi()
                 m_laneLearn = false;
                 qApp->removeEventFilter(this);
                 const QString name = MidiRoutes::laneName(lane);
-                statusBar()->showMessage(movedFrom == MidiRoutes::kNone
-                                             ? tr("CC %1 now drives %2.").arg(cc).arg(name)
-                                             : tr("CC %1 now drives %2 instead of %3.")
-                                                   .arg(cc)
-                                                   .arg(name, MidiRoutes::laneName(movedFrom)),
-                                         6000);
+                showLaneLearnResult(movedFrom == MidiRoutes::kNone
+                                        ? tr("CC %1 now drives %2.").arg(cc).arg(name)
+                                        : tr("CC %1 now drives %2 instead of %3.")
+                                              .arg(cc)
+                                              .arg(name, MidiRoutes::laneName(movedFrom)));
             });
     connect(m_midiInput.get(), &MidiInput::learnCancelled, this, [this](int, bool timedOut) {
         syncMidiControls();
@@ -829,11 +828,14 @@ void MainWindow::buildUi()
             return;
         m_laneLearn = false;
         qApp->removeEventFilter(this);
-        if (timedOut)
-            statusBar()->showMessage(tr("Nothing was moved on the keyboard, so nothing changed."),
-                                     6000);
-        else
-            statusBar()->clearMessage();
+        showLaneLearnResult(timedOut ? tr("Nothing was moved on the keyboard, so nothing changed.")
+                                     : QString());
+    });
+    // The last keyboard gone: nothing can answer a lane menu's learn, so
+    // it stops now rather than at the timeout (the Settings page's keeps).
+    connect(m_midiInput.get(), &MidiInput::portsChanged, this, [this] {
+        if (m_laneLearn && m_midiInput->openPorts().isEmpty())
+            m_midiInput->cancelLearn();
     });
     // A port closing (unplugged, disabled, reopened) can never send the
     // note-offs, or the pedal-up, for what it held.
@@ -5425,11 +5427,33 @@ void MainWindow::startLaneLearn(int lane)
     m_laneLearn = m_midiInput->learnLane() == lane;
     if (!m_laneLearn)
         return;
-    qApp->installEventFilter(this); // Esc cancels, wherever the focus is
+    qApp->installEventFilter(this); // Esc cancels, in this window or a floating dock
     statusBar()->showMessage(
         tr("Move the knob, slider or button that should drive %1. Esc cancels.")
             .arg(MidiRoutes::laneName(lane)),
         MidiInput::kLearnTimeoutMs);
+}
+
+void MainWindow::showLaneLearnResult(const QString &message)
+{
+    const int serial = ++m_laneLearnResultSerial;
+    if (message.isEmpty()) {
+        if (m_takeSession)
+            showRecordingStatus();
+        else
+            statusBar()->clearMessage();
+        return;
+    }
+    statusBar()->showMessage(message, kLaneLearnResultMs);
+    if (!m_takeSession)
+        return;
+    // Only if the take still runs and nothing newer has replaced the
+    // message (it may have timed out already, or be about to).
+    QTimer::singleShot(kLaneLearnResultMs, this, [this, serial, message] {
+        const QString now = statusBar()->currentMessage();
+        if (m_takeSession && serial == m_laneLearnResultSerial && (now.isEmpty() || now == message))
+            showRecordingStatus();
+    });
 }
 
 void MainWindow::pollLiveKeys()
@@ -6034,12 +6058,16 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     // A lane menu's learn (the application filter is installed only while
-    // it runs): Esc in this window cancels it.
+    // it runs): Esc in this window, or in one of its floating docks, cancels
+    // it. Not in a dialog (the Settings page runs its own learn).
     if (m_laneLearn &&
         (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
         static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
         auto *widget = qobject_cast<QWidget *>(watched);
-        if (widget && widget->window() == this && m_midiInput->learnLane() != MidiRoutes::kNone) {
+        QWidget *top = widget ? widget->window() : nullptr;
+        auto *dock = qobject_cast<QDockWidget *>(top);
+        if (top && (top == this || (dock && dock->parentWidget() == this)) &&
+            m_midiInput->learnLane() != MidiRoutes::kNone) {
             // Claimed at the override, so no Esc shortcut takes it.
             event->accept();
             if (event->type() == QEvent::KeyPress)

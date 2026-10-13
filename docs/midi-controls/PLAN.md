@@ -165,7 +165,7 @@ the take.
    (J3), voice ghosts, restore-after-take, and latch for the voice.
    **Windows checkpoint.**
 6. **Lane-menu Learn + docs.** Adds "Learn MIDI control…" to the lane
-   context menu (with the current CC shown, e.g. "MIDI: CC74"), a CHANGELOG
+   context menu (with the current CC shown, e.g. "MIDI: CC 74"), a CHANGELOG
    entry (simple), a TODO outline section in
    `docsrc/manual/midi-keyboard.md` (the user writes the prose) and a
    settings.md stub. Ends with the final Opus branch review.
@@ -1683,7 +1683,7 @@ warnings).
 
 - A routable lane's gutter menu (MOD, VOL, PAN, BENDR, LFOS) ends with a
   MIDI section while a keyboard is connected:
-  - a disabled "MIDI: CC74" (or "MIDI: none") line;
+  - a disabled "MIDI: CC 74" (or "MIDI: none") line;
   - "Learn MIDI control…", which arms `MidiInput::startLearn` for that
     lane, or "Cancel MIDI learn" while that lane learns.
 - BEND, other CC lanes and the Voice row have no MIDI section. The Voice
@@ -1725,3 +1725,33 @@ Mutation-tested 4 ways, each failing the expected checks:
 - Cancel wired to Learn;
 - the Esc filter off;
 - the status-bar guard removed.
+
+### Step 6 review fixes (2026-10-13)
+
+**What changed**
+
+- A lane-menu learn during a take no longer wipes "Recording into X…":
+  `MainWindow::showLaneLearnResult` brings it back at once after a cancel,
+  and after the 6 s result (or timeout) message through a single-shot
+  timer. The timer restores only while the take runs, for the latest
+  result, and while that message (or nothing) is up.
+- Unplugging the last keyboard mid-learn cancels a lane-menu learn on
+  `portsChanged`, so its "Move the knob…" prompt goes at once. A
+  Settings-started learn is left alone.
+- Esc also cancels from a floating dock of the main window (the filter
+  accepts a top-level that is the window or one of its `QDockWidget`s),
+  not from dialogs; the comments say so.
+- The menu line reads "MIDI: CC 74", matching the status bar and the
+  Settings page (manual outline and this plan updated).
+
+**Harness:** `checkLaneLearn` adds: unplug mid-learn cancels and clears
+the status; Esc in a floating Voicegroup dock cancels; during a real take
+(Record, audio held) a cancel restores the recording status at once, and a
+learned CC's result is shown, then the recording status is back after
+6.3 s (skipped without an audio device). Mutation-tested 4 ways, each
+failing its check: the cancel restore, the after-result timer, the
+unplug cancel, the dock clause.
+
+**Sweeps:** `tools/run_checks.sh` PASS on build and build-asan.
+`--midicheck` passes on build-nomidi, build-off and build-dummy; all five
+trees build cleanly (exit 0).

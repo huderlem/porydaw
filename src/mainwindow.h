@@ -307,8 +307,14 @@ class MainWindow : public QMainWindow
     // the keyboard, the routes and the lane learning.
     void syncMidiControls();
     // "Learn MIDI control…" from a lane menu: arms Learn for lane, with the
-    // status bar saying what to do; Esc in this window cancels it.
+    // status bar saying what to do; Esc in this window or its floating docks
+    // cancels it.
     void startLaneLearn(int lane);
+    // A lane-menu learn ended: shows message for kLaneLearnResultMs (none: a
+    // plain cancel). During a take, the "Recording into" status comes back
+    // after it.
+    void showLaneLearnResult(const QString &message);
+    static constexpr int kLaneLearnResultMs = 6000;
     // The lane-menu half of checkLiveRoutes (midicheck.cpp).
     void checkLaneLearn();
     // runRecordWindowCheck's halves (reccheck.cpp).
@@ -713,6 +719,9 @@ class MainWindow : public QMainWindow
     // A learn a lane menu started is armed (startLaneLearn): the status bar
     // follows it and Esc cancels it.
     bool m_laneLearn = false;
+    // Bumped per showLaneLearnResult, so only the latest restores the
+    // recording status.
+    int m_laneLearnResultSerial = 0;
     // AudioEngine::liveIgnoredProgram as last reported, and how many
     // reports there have been (for --midicheck).
     uint32_t m_liveIgnoredSeen = 0;

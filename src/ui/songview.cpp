@@ -5154,7 +5154,7 @@ class AutomationArea : public TimelineSurface
             const int routed = midi.routes.ccFor(cc);
             QAction *route = menu.addAction(routed == MidiRoutes::kNone
                                                 ? SongView::tr("MIDI: none")
-                                                : SongView::tr("MIDI: CC%1").arg(routed));
+                                                : SongView::tr("MIDI: CC %1").arg(routed));
             route->setEnabled(false);
             learn = menu.addAction(learning ? SongView::tr("Cancel MIDI learn")
                                             : SongView::tr("Learn MIDI control…"));

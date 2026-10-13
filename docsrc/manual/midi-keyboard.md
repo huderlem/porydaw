@@ -37,7 +37,7 @@ drives MOD, VOL, PAN, BENDR and LFOS. Defaults: CC1 (mod wheel) → MOD, CC7 →
 VOL, CC10 → PAN; BENDR and LFOS none. Pick a CC number, None, or Learn: click
 Learn and move the knob within 10 seconds (Esc cancels). Or right-click a
 lane's name → "Learn MIDI control…" (the menu shows its current knob, e.g.
-"MIDI: CC74"; only while a keyboard is connected). One knob per lane: learning
+"MIDI: CC 74"; only while a keyboard is connected). One knob per lane: learning
 a knob another lane has moves it there (the message says which). Routes apply
 to every song and every keyboard channel. The sustain pedal, bank select,
 data entry and channel mode messages can't be routed. -->
