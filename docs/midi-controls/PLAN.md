@@ -1795,3 +1795,61 @@ too easy to miss.
   height removed. Each fails its check. (The status mutation survived at
   the old 520 px width, where the prompt fit on one line, so the check now
   runs at the minimum width.)
+
+### Polish review fixes (2026-10-13)
+
+**What changed**
+
+- **Settings → MIDI width.** The scroll area's minimum width is refitted
+  whenever the settings' layout changes (`LayoutRequest` on the content,
+  `fitWidth`), not only at build and font changes. `setAutoLatencyMs` also
+  calls `updateGeometry` on the latency box: `QAbstractSpinBox` doesn't
+  when its special text changes, so "Auto (23 ms)" never reached the
+  layout and the box was squeezed.
+- **Port list.** No horizontal scrollbar. A long name is elided in the
+  middle and shown whole in its tooltip. The "(unavailable)" tooltip is
+  kept as it was. A small delegate caps each row at the list's width,
+  since QListView lays rows out at their own width, and the list relays
+  its rows out on resize (`QListView::Adjust`).
+- **Esc cancels any learn** in the main window or its floating docks,
+  including one started from the Settings page, as the gutter caption
+  says. MainWindow's application filter is now installed whenever a learn
+  is armed and removed when none is (`syncLearnEscFilter`, on
+  learnStarted/Finished/Cancelled). `m_laneLearn` now only governs the
+  status-bar messages. The two filters never act on the same key press:
+  the page's filter only acts in the Settings window, and MainWindow's
+  only in its own window and docks.
+- **Gutter.** The pulse, the learned-caption timeout and learn changes
+  repaint only the gutters of rows on the affected lanes (nothing if
+  there are none). The learn captions are elided to the space they have.
+- **Settings initial size: checked, unchanged.** At the default font the
+  dialog is 748 px tall because the Appearance page sets the height. The
+  MIDI viewport is 700 px and its content needs 501 px, so it doesn't
+  scroll on first open. The MIDI page's own size hint is now capped by
+  QScrollArea at 384 px, but that doesn't set the dialog's height.
+
+**`--midicheck` LFOS flake.** "A nonzero LFOS restarted the LFO's phase"
+failed in about 2 of 25 runs. The cause was the harness, not the engine.
+The LFO steps once per song tick, which at mus_abandoned_ship's tempo is
+roughly once per 30 ms. The check's final fixed 30 ms pump sometimes
+contained no step (advanced = 0), depending on the tick accumulator's
+phase, which the device left behind before `holdDeviceForTest`. The check
+now pumps 1 ms at a time up to the next step and requires that step to be
+exactly the new speed (3). That's stricter than the old `0 < advanced <=
+30`. After the fix: 0 failures in 70 runs. Mutation: putting the old
+`lfoSpeedC = 0` back in poryaaaa's LFOS handler fails it (restored; no
+poryaaaa change).
+
+**Harness** (`--midicheck`):
+
+- The latency box gets the width its Auto text needs.
+- The scroll area widens with content that grows later, and still fits
+  after the content shrinks.
+- At minimum width, a long port name is elided: no horizontal scrollbar,
+  its row stays inside the viewport, and its tooltip has the full name.
+- A learn started with `midi.startLearn` (as the Settings page starts
+  one) is cancelled by Esc sent to the automation area, and the status bar
+  stays out of it.
+- Each new check was mutation-tested: without the `LayoutRequest` filter,
+  without the latency `updateGeometry`, without the delegate, and with
+  MainWindow's filter gated on `m_laneLearn` again. Each fails its check.

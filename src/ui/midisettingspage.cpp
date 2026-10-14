@@ -18,6 +18,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -29,6 +30,24 @@
 namespace {
 
 constexpr int kPortNameRole = Qt::UserRole;
+
+// The port list's rows are never wider than the list, so a long port name
+// is elided (the view's textElideMode) instead of scrolling sideways. A
+// list view lays its rows out at their own width; this caps it, and the
+// list relays its rows out on a resize (QListView::Adjust).
+class PortDelegate : public QStyledItemDelegate
+{
+  public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        if (const auto *view = qobject_cast<const QAbstractItemView *>(parent()))
+            size.setWidth(std::min(size.width(), view->viewport()->width()));
+        return size;
+    }
+};
 
 // A CC number box that never offers a reserved CC (MidiRoutes::assignable):
 // the arrows step over them and typing one doesn't commit. -1 is None.
@@ -209,6 +228,12 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     m_ports = new QListWidget(m_controls);
     m_ports->setObjectName(QStringLiteral("settingsMidiPorts"));
     m_ports->setSelectionMode(QAbstractItemView::NoSelection);
+    // A long port name is cut in the middle (the tooltip has it whole)
+    // rather than bringing up a scrollbar over one of the few rows.
+    m_ports->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_ports->setTextElideMode(Qt::ElideMiddle);
+    m_ports->setItemDelegate(new PortDelegate(m_ports));
+    m_ports->setResizeMode(QListView::Adjust);
     m_ports->setToolTip(tr("Notes from every checked port play on the selected track, on any "
                            "MIDI channel. New ports are checked when they appear."));
     m_portsStatus = new QLabel(m_controls);
@@ -327,6 +352,9 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     pageLayout->addWidget(controlsGroup);
     pageLayout->addStretch(1);
     m_controlsScroll->setWidget(m_controls);
+    // Content that grows later ("Auto (23 ms)" in the latency box) widens
+    // the scroll area with it (fitWidth).
+    m_controls->installEventFilter(this);
     fitToFont();
 
     loadPreferences();
@@ -412,6 +440,9 @@ void MidiSettingsPage::syncLearn()
 
 bool MidiSettingsPage::eventFilter(QObject *watched, QEvent *event)
 {
+    // The settings' layout changed: their minimum width may have too.
+    if (watched == m_controls && event->type() == QEvent::LayoutRequest)
+        fitWidth();
     // Only while this page's learn runs (the filter is removed after).
     if ((event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
         m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone) {
@@ -481,6 +512,11 @@ void MidiSettingsPage::fitToFont()
         learn->setMinimumWidth(widest);
     }
     fitPortList();
+    fitWidth();
+}
+
+void MidiSettingsPage::fitWidth()
+{
     // It scrolls only vertically, so it's never narrower than the settings.
     m_controlsScroll->setMinimumWidth(
         m_controls->minimumSizeHint().width() +
@@ -524,6 +560,7 @@ void MidiSettingsPage::rebuildPorts()
                                 "it; close that program, then press Refresh."));
         } else {
             item->setText(name);
+            item->setToolTip(name); // whole, where the row cuts it
         }
     }
     m_loading = false;
@@ -552,4 +589,7 @@ void MidiSettingsPage::portItemChanged(QListWidgetItem *item)
 void MidiSettingsPage::setAutoLatencyMs(int ms)
 {
     m_latency->setSpecialValueText(ms >= 0 ? tr("Auto (%1 ms)").arg(ms) : tr("Auto"));
+    // The box is wider now, but QAbstractSpinBox doesn't tell the layout so
+    // (and the page's minimum width follows it, fitWidth).
+    m_latency->updateGeometry();
 }

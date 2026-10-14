@@ -13,11 +13,14 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
@@ -813,6 +816,58 @@ void checkControlsPage()
         const int rowCap = 5 * std::max(1, ports->sizeHintForRow(0)) + 2 * ports->frameWidth();
         check(ports && ports->height() <= std::max(rowCap, 5 * (ports->fontMetrics().height() + 8)),
               "controls: the port list is taller than its rows");
+
+        // Content that widens later (the latency box's "Auto (23 ms)" comes
+        // after the page is built) widens the scroll area too: it doesn't
+        // scroll sideways, so a stale minimum would clip the right edge.
+        auto *scroll = page.findChild<QScrollArea *>();
+        auto *latency = page.findChild<QSpinBox *>(QStringLiteral("settingsMidiLatency"));
+        const auto fits = [&] {
+            return scroll->minimumWidth() >=
+                   scroll->widget()->minimumSizeHint().width() +
+                       scroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent);
+        };
+        // A layout change climbs one nesting level per event loop pass.
+        const auto settleLayout = [] {
+            for (int i = 0; i < 4; i++)
+                QApplication::processEvents();
+        };
+        if (check(scroll && scroll->widget() && latency, "controls: no scroll area or latency")) {
+            // The page's own update: the box gets the room its text needs.
+            page.setAutoLatencyMs(2147483647);
+            settleLayout();
+            check(latency->width() >= latency->sizeHint().width() && fits(),
+                  "controls: the latency box or the page did not widen for its Auto text");
+            // Anything else that widens (here, a far longer text).
+            const int narrow = scroll->minimumWidth();
+            latency->setSpecialValueText(QStringLiteral("Auto (a much longer wait than any real "
+                                                        "device has, in ms)"));
+            latency->updateGeometry();
+            settleLayout();
+            check(fits() && scroll->minimumWidth() > narrow,
+                  "controls: the scroll area did not widen with its content");
+            page.setAutoLatencyMs(-1);
+            settleLayout();
+            check(fits(), "controls: the scroll area is narrower than its content");
+        }
+
+        // A long port name: cut, whole in the tooltip, no sideways scrollbar
+        // taking one of the list's rows.
+        const QString longName =
+            QStringLiteral("USB MIDI Interface With A Rather Long Name Port 1 (Client 128:0)");
+        midi.setPortListForTest({longName, QStringLiteral("Keys B")});
+        dialog.resize(dialog.minimumSizeHint().width(), 640);
+        settleLayout();
+        if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+            page.grab().save(QString::fromLocal8Bit(dir) + QStringLiteral("/midi_page_ports.png"));
+        QListWidgetItem *longItem = ports && ports->count() > 0 ? ports->item(0) : nullptr;
+        check(longItem && longItem->toolTip() == longName &&
+                  ports->fontMetrics().horizontalAdvance(longName) > ports->viewport()->width() &&
+                  !ports->horizontalScrollBar()->isVisible() &&
+                  ports->visualItemRect(longItem).right() <= ports->viewport()->width(),
+              "controls: a long port name scrolls the list sideways, or loses its tooltip");
+        midi.setPortListForTest({});
+        QApplication::processEvents();
     }
 
     // A spinner applies and persists; the arrows step over reserved CCs.
@@ -1617,10 +1672,15 @@ void MainWindow::checkLiveControls()
                    ((lfoTrack.lfoSpeedC == phase && lfoTrack.modM == offset) ||
                     lfoTrack.lfoSpeedC == phase + speed);
     }
+    // The LFO steps once per song tick (at this song's tempo about one per
+    // 30 ms, so a fixed 30 ms window sometimes held none): pump a
+    // millisecond at a time up to the next step, which goes on from the
+    // kept phase by exactly the new speed.
     const int phaseBefore = lfoTrack.lfoSpeedC;
-    pumpMs(30);
+    for (int ms = 0; ms < 500 && lfoTrack.lfoSpeedC == phaseBefore; ms++)
+        pumpMs(1);
     const int advanced = (lfoTrack.lfoSpeedC - phaseBefore) & 0xFF;
-    lfoKept &= advanced > 0 && advanced <= 30;
+    lfoKept &= advanced == 3;
     check(lfoKept, "live controls: a nonzero LFOS restarted the LFO's phase or cleared its offset");
     send(21, 0);
     m_audio.pumpForTest(1);
@@ -1814,6 +1874,19 @@ void MainWindow::checkLaneLearn()
         QCoreApplication::sendEvent(lanes, &esc);
         check(midi.learnLane() == MidiRoutes::kNone, "lane learn: a stray Esc armed something");
     }
+    // A learn started elsewhere (as the Settings page starts one): Esc in
+    // the window cancels it too, as VOL's gutter caption says, and the
+    // status bar, which never showed it, stays out of it.
+    midi.startLearn(0x0A);
+    check(midi.learnLane() == 0x0A && view->midiControls().learning == 0x0A &&
+              statusBar()->currentMessage().isEmpty(),
+          "lane learn: a learn started outside the lane menu did not arm PAN quietly");
+    {
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QCoreApplication::sendEvent(lanes, &esc);
+    }
+    check(midi.learnLane() == MidiRoutes::kNone && statusBar()->currentMessage().isEmpty(),
+          "lane learn: Esc in the window did not cancel a learn the Settings page started");
 
     // While learning, the menu offers Cancel instead, and it cancels.
     check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,

@@ -55,6 +55,8 @@ class MidiSettingsPage : public QWidget
     // buttons' width, the port list's rows.
     void fitToFont();
     void fitPortList();
+    // The scroll area's minimum width: the settings' own plus a scrollbar.
+    void fitWidth();
     static constexpr int kMinPortRows = 2;
     static constexpr int kMaxPortRows = 5;
     // Shows the controls or the no-backend message, whichever applies.

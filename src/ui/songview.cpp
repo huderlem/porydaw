@@ -56,6 +56,7 @@
 #include <climits>
 #include <cmath>
 #include <functional>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -3360,23 +3361,38 @@ class AutomationArea : public TimelineSurface
         m_learnPulse->setInterval(SongView::kMidiLearnPulseMs);
         connect(m_learnPulse, &QTimer::timeout, this, [this] {
             m_learnPulseOn = !m_learnPulseOn;
-            invalidateGutters();
+            invalidateGutters({m_sv->midiControls().learning});
         });
         m_learnedTimer = new QTimer(this);
         m_learnedTimer->setSingleShot(true);
         connect(m_learnedTimer, &QTimer::timeout, this, [this] {
-            m_learnedLane = MidiRoutes::kNone;
-            invalidateGutters();
+            const int was = std::exchange(m_learnedLane, MidiRoutes::kNone);
+            invalidateGutters({was});
         });
     }
 
-    // The gutter column only: what the learn display paints.
-    void invalidateGutters() { invalidateContent(QRegion(0, 0, kGutterW, height())); }
+    // What the learn display paints: the gutters of the rows of these lanes
+    // (any track's), nothing else.
+    void invalidateGutters(std::initializer_list<int> lanes)
+    {
+        QRegion region;
+        int y = 0;
+        for (const Row &row : m_rows) {
+            const int h = rowHeight(row);
+            if (row.kind == Row::Lane &&
+                std::find(lanes.begin(), lanes.end(), int(row.cc)) != lanes.end())
+                region += QRect(0, y, kGutterW, h);
+            y += h;
+        }
+        if (!region.isEmpty())
+            invalidateContent(region);
+    }
 
-    // SongView::setMidiControls: the learning lane changed.
-    void midiLearnChanged()
+    // SongView::setMidiControls: the learning lane changed from was.
+    void midiLearnChanged(int was)
     {
         m_learnPulseOn = true;
+        const int learned = m_learnedLane;
         if (m_sv->midiControls().learning != MidiRoutes::kNone) {
             m_learnPulse->start();
             m_learnedLane = MidiRoutes::kNone; // a new learn replaces the old result
@@ -3384,15 +3400,15 @@ class AutomationArea : public TimelineSurface
         } else {
             m_learnPulse->stop();
         }
-        invalidateGutters();
+        invalidateGutters({was, m_sv->midiControls().learning, learned});
     }
 
     void showMidiLearned(int lane, int cc)
     {
-        m_learnedLane = lane;
+        const int was = std::exchange(m_learnedLane, lane);
         m_learnedCc = cc;
         m_learnedTimer->start(SongView::kMidiLearnedMs);
-        invalidateGutters();
+        invalidateGutters({was, lane});
     }
 
     // View-state plumbing for the .porydaw sidecar: the shared row height
@@ -6067,9 +6083,10 @@ class AutomationArea : public TimelineSurface
             p.restore();
             p.setPen(themes::color(themes::Role::song_view_primary_text));
             const QRect text = textBoxes.secondary.adjusted(int(std::ceil(d)) + 5, 0, 0, 0);
+            const QString caption = learning ? SongView::tr("Move a knob… · Esc cancels")
+                                             : SongView::tr("Now CC %1").arg(m_learnedCc);
             p.drawText(text, Qt::AlignLeft | Qt::AlignVCenter,
-                       learning ? SongView::tr("Move a knob… · Esc cancels")
-                                : SongView::tr("Now CC %1").arg(m_learnedCc));
+                       p.fontMetrics().elidedText(caption, Qt::ElideRight, text.width()));
         } else if (points && !points->empty()) {
             p.setPen(themes::color(themes::Role::song_view_secondary_text));
             p.drawText(textBoxes.secondary, Qt::AlignLeft | Qt::AlignVCenter,
@@ -11019,10 +11036,10 @@ std::optional<QPointF> SongView::lanePoint(int track, uint8_t cc, uint64_t tick,
 
 void SongView::setMidiControls(const MidiControls &controls)
 {
-    const bool learningChanged = controls.learning != m_midiControls.learning;
+    const int was = m_midiControls.learning;
     m_midiControls = controls;
-    if (learningChanged)
-        m_lanes->midiLearnChanged();
+    if (controls.learning != was)
+        m_lanes->midiLearnChanged(was);
 }
 
 void SongView::showMidiLearned(int lane, int cc)

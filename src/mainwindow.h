@@ -310,6 +310,9 @@ class MainWindow : public QMainWindow
     // status bar saying what to do; Esc in this window or its floating docks
     // cancels it.
     void startLaneLearn(int lane);
+    // The Esc filter (eventFilter) is on qApp exactly while a learn, any
+    // learn, is armed.
+    void syncLearnEscFilter();
     // A lane-menu learn ended: shows message for kLaneLearnResultMs (none: a
     // plain cancel). During a take, the "Recording into" status comes back
     // after it.
@@ -717,7 +720,7 @@ class MainWindow : public QMainWindow
     QTimer *m_liveKeysTimer = nullptr;
     int m_liveKeysIdleTicks = 0;
     // A learn a lane menu started is armed (startLaneLearn): the status bar
-    // follows it and Esc cancels it.
+    // follows it. (Esc cancels any learn: syncLearnEscFilter.)
     bool m_laneLearn = false;
     // Bumped per showLaneLearnResult, so only the latest restores the
     // recording status.

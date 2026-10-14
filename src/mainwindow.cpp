@@ -808,15 +808,16 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::portsChanged, this, &MainWindow::syncMidiControls);
     connect(m_midiInput.get(), &MidiInput::settingsChanged, this, &MainWindow::syncMidiControls);
     connect(m_midiInput.get(), &MidiInput::learnStarted, this, &MainWindow::syncMidiControls);
+    connect(m_midiInput.get(), &MidiInput::learnStarted, this, &MainWindow::syncLearnEscFilter);
     connect(m_midiInput.get(), &MidiInput::learnFinished, this,
             [this](int lane, int cc, int movedFrom) {
                 syncMidiControls();
+                syncLearnEscFilter();
                 for (const auto &session : m_sessions)
                     session->view->showMidiLearned(lane, cc);
                 if (!m_laneLearn)
                     return; // the Settings page's: it says so itself
                 m_laneLearn = false;
-                qApp->removeEventFilter(this);
                 const QString name = MidiRoutes::laneName(lane);
                 showLaneLearnResult(movedFrom == MidiRoutes::kNone
                                         ? tr("CC %1 now drives %2.").arg(cc).arg(name)
@@ -826,10 +827,10 @@ void MainWindow::buildUi()
             });
     connect(m_midiInput.get(), &MidiInput::learnCancelled, this, [this](int, bool timedOut) {
         syncMidiControls();
+        syncLearnEscFilter();
         if (!m_laneLearn)
             return;
         m_laneLearn = false;
-        qApp->removeEventFilter(this);
         showLaneLearnResult(timedOut ? tr("Nothing was moved on the keyboard, so nothing changed.")
                                      : QString());
     });
@@ -5421,6 +5422,17 @@ void MainWindow::syncMidiControls()
         session->view->setMidiControls(controls);
 }
 
+void MainWindow::syncLearnEscFilter()
+{
+    // Any learn, the Settings page's too (the gutter's caption says Esc
+    // cancels): Esc in this window or a floating dock cancels it while it
+    // runs (see eventFilter). Installing again only moves it to the front.
+    if (m_midiInput->learnLane() != MidiRoutes::kNone)
+        qApp->installEventFilter(this);
+    else
+        qApp->removeEventFilter(this);
+}
+
 void MainWindow::startLaneLearn(int lane)
 {
     m_midiInput->startLearn(lane);
@@ -5429,7 +5441,6 @@ void MainWindow::startLaneLearn(int lane)
     m_laneLearn = m_midiInput->learnLane() == lane;
     if (!m_laneLearn)
         return;
-    qApp->installEventFilter(this); // Esc cancels, in this window or a floating dock
     statusBar()->showMessage(
         tr("Move the knob, slider or button that should drive %1. Esc cancels.")
             .arg(MidiRoutes::laneName(lane)),
@@ -6059,11 +6070,11 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    // A lane menu's learn (the application filter is installed only while
-    // it runs): Esc in this window, or in one of its floating docks, cancels
-    // it. Not in a dialog (the Settings page runs its own learn).
-    if (m_laneLearn &&
-        (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
+    // A learn, from a lane menu or the Settings page (the application filter
+    // is installed only while one runs, syncLearnEscFilter): Esc in this
+    // window, or in one of its floating docks, cancels it. Not in a dialog
+    // (the Settings page's own filter takes Esc there).
+    if ((event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
         static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
         auto *widget = qobject_cast<QWidget *>(watched);
         QWidget *top = widget ? widget->window() : nullptr;
