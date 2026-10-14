@@ -110,6 +110,13 @@ struct MidiTapMsg {
 class MidiTapRing : public MidiRing<MidiTapMsg, 1024>
 {};
 
+// A control surface port's messages (docs/control-surface/PLAN.md §3.1):
+// MIDI threads to the UI thread, drained there once per queued hop
+// (MidiInput::surfaceReady), as the script tap is. Small: they are button
+// presses, and the UI thread drains them as they come.
+class MidiSurfaceRing : public MidiRing<MidiTapMsg, 256>
+{};
+
 // MIDI keyboard input (docs/midi-input/PLAN.md, step 1): owns the RtMidi
 // ports, the input ring they feed, and the MIDI preferences. Lives on the UI
 // thread (owned by MainWindow); only the RtMidi callbacks and the ring's
@@ -121,6 +128,11 @@ class MidiTapRing : public MidiRing<MidiTapMsg, 1024>
 // backend's order. Every port is enabled unless its identity is in
 // midi/disabledPorts, so a newly plugged keyboard plays at once. A 2 s poll
 // reopens enabled ports as they appear and closes the ones that vanish.
+//
+// Every port also has a role (docs/control-surface/PLAN.md): a Keyboard
+// port plays, records and learns; a Control surface port (a keyboard's
+// Mackie Control "DAW" port) never does, and its messages go to the
+// surface ring instead (popSurface) and to the script tap.
 //
 // Without a usable backend (a build without RtMidi or with only its dummy
 // API, or a system where the backend fails to start — WSL has no ALSA
@@ -159,6 +171,17 @@ class MidiInput : public QObject
     static bool identityStable(const QStringList &before, const QStringList &now, const QString &id,
                                PortNaming naming);
 
+    // What a port is for (docs/control-surface/PLAN.md D1). A Surface port's
+    // messages skip Learn, live play, recording and the activity signal:
+    // they go to the surface ring and the script tap only.
+    enum class PortRole { Keyboard, Surface };
+    // The role a port has until the user picks one: Surface for a name that
+    // says DAW, MCU or Mackie as a word of its own (letters on neither side,
+    // any case: "KeyLab Essential 61 DAW", "X-Touch MCU 1", not
+    // "Dawson Keys"), and for a KeyLab's second port as Windows names it
+    // ("MIDIIN2 (KeyLab Essential 61)"); Keyboard for everything else.
+    static PortRole defaultRole(const QString &name);
+
     explicit MidiInput(QObject *parent = nullptr);
     ~MidiInput() override;
 
@@ -175,6 +198,9 @@ class MidiInput : public QObject
     QStringList ports() const;
     // The ports currently open (receiving), in the order they opened.
     QStringList openPorts() const;
+    // The open ports whose role is Keyboard: what "a keyboard is connected"
+    // means (Record, a lane menu's Learn). A control surface alone isn't one.
+    QStringList openKeyboardPorts() const;
     bool isPortOpen(const QString &name) const;
     bool isPortEnabled(const QString &name) const;
     // An enabled port that is listed but would not open (in use by another
@@ -182,6 +208,16 @@ class MidiInput : public QObject
     bool portFailed(const QString &name) const;
     // Persists midi/disabledPorts, then opens or closes the port to match.
     void setPortEnabled(const QString &name, bool enabled);
+    // The user's choice (midi/surfacePorts, midi/keyboardPorts), or
+    // defaultRole when there is none. Listed or not, open or not.
+    PortRole portRole(const QString &name) const;
+    // Records the user's choice, which then always wins over defaultRole
+    // (both lists hold explicit choices, so a name default never comes back
+    // to a port the user turned around). A real change of role emits
+    // settingsChanged and portsChanged, and an open port is closed and
+    // reopened with it, so a MIDI thread never sees the role flip under a
+    // running callback.
+    void setPortRole(const QString &name, PortRole role);
     // Opens a listed port; false (never a throw) when it can't. Open ports
     // are not re-opened.
     bool openPort(const QString &name);
@@ -250,6 +286,15 @@ class MidiInput : public QObject
     bool popTap(MidiTapMsg *out) { return m_tap.pop(out); }
     // Messages lost to a full tap (the UI thread was busy for 1024 of them).
     uint64_t tapDropped() const { return m_tap.dropped(); }
+    // Control surface ports (docs/control-surface/PLAN.md §3.1): each
+    // channel-voice message a Surface-role port sends, as sent (parseTap's
+    // shape, port token filled), goes into a third ring the UI thread
+    // drains: one queued hop at a time posts surfaceReady(), and the
+    // receiver drains everything with popSurface. UI thread only; false
+    // when empty.
+    bool popSurface(MidiTapMsg *out) { return m_surface.pop(out); }
+    // Messages lost to a full surface ring.
+    uint64_t surfaceDropped() const { return m_surface.dropped(); }
     // The port identity a MidiTapMsg::port token stands for ("" for 0).
     QString portForToken(uint16_t token) const;
     // The tap's view of one raw message: false for system messages (sysex,
@@ -259,8 +304,9 @@ class MidiInput : public QObject
 
     // Harness entry: the message's bytes take the same path as a port's
     // callback (Learn, parse, ring push, tap, activity), as if port (an identity;
-    // empty = none) sent them. Its arrivalNs is kept as given: 0 (the
-    // default) means it waited for no callback.
+    // empty = none) sent them: a port whose role is Surface sends to the
+    // surface ring instead, whether or not it is open. Its arrivalNs is kept
+    // as given: 0 (the default) means it waited for no callback.
     void injectForTest(const MidiMsg &msg, const QString &port = QString());
     // The same with raw bytes (a two-byte program change, say).
     void injectBytesForTest(const std::vector<unsigned char> &bytes,
@@ -288,6 +334,8 @@ class MidiInput : public QObject
     void activity();
     // The script tap has messages (UI thread; at most one hop in flight).
     void tapReady();
+    // The surface ring has messages (UI thread; at most one hop in flight).
+    void surfaceReady();
     void settingsChanged();
     // Learn for lane is armed (after any learn it replaced was cancelled).
     void learnStarted(int lane);
@@ -307,10 +355,14 @@ class MidiInput : public QObject
     };
 
     static void onMessage(double timeStamp, std::vector<unsigned char> *message, void *userData);
-    // Any thread: parse, push, flag activity. port is the sender's token.
-    void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port);
+    // Any thread: parse, push, flag activity. port is the sender's token;
+    // surface, whether its role is Surface (then only the surface ring and
+    // the tap see the message).
+    void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port,
+                 bool surface);
     void deliverActivity();
     void deliverTap();
+    void deliverSurface();
     // UI thread: the token for a port identity, assigned on first use and
     // kept (the list only grows, by one per identity ever opened).
     uint16_t portToken(const QString &id);
@@ -327,6 +379,7 @@ class MidiInput : public QObject
     static std::vector<ScannedPort> scanned(const QStringList &raw, PortNaming naming);
     static QStringList rawNames(const std::vector<ScannedPort> &scan);
     void saveDisabledPorts();
+    void savePortRoles();
     void saveRoutes();
     // UI thread: takes a learned CC from the slot, if one arrived.
     void pollLearn();
@@ -340,6 +393,9 @@ class MidiInput : public QObject
     // just before tapReady() (so a message pushed during the drain posts
     // again).
     std::atomic<bool> m_tapPosted{false};
+    MidiSurfaceRing m_surface;
+    // As m_tapPosted, for surfaceReady().
+    std::atomic<bool> m_surfacePosted{false};
     // Token → identity (index 0 = none). UI thread only; tokens reach the
     // MIDI threads through OpenPort::token, set before the port opens.
     QStringList m_tokenNames{QString()};
@@ -356,6 +412,10 @@ class MidiInput : public QObject
     QStringList m_failed;
     // midi/disabledPorts, read once and kept in step with every write.
     QStringList m_disabled;
+    // midi/surfacePorts and midi/keyboardPorts: the user's explicit roles
+    // (an identity is in at most one), likewise kept in step.
+    QStringList m_surfacePorts;
+    QStringList m_keyboardPorts;
     QTimer *m_poll = nullptr;
 
     bool m_livePlay = true;

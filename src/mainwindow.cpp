@@ -342,7 +342,7 @@ class VoiceEditCommand : public QUndoCommand
 static SongView::MidiControls midiControlsOf(const MidiInput &midi)
 {
     SongView::MidiControls controls;
-    controls.keyboard = !midi.openPorts().isEmpty();
+    controls.keyboard = !midi.openKeyboardPorts().isEmpty();
     controls.routes = midi.routes();
     controls.learning = midi.learnLane();
     return controls;
@@ -837,10 +837,11 @@ void MainWindow::buildUi()
         showLaneLearnResult(timedOut ? tr("Nothing was moved on the keyboard, so nothing changed.")
                                      : QString());
     });
-    // The last keyboard gone: nothing can answer a lane menu's learn, so
+    // The last keyboard gone (a control surface is never learned from, so
+    // it doesn't count): nothing can answer a lane menu's learn, so
     // it stops now rather than at the timeout (the Settings page's keeps).
     connect(m_midiInput.get(), &MidiInput::portsChanged, this, [this] {
-        if (m_laneLearn && m_midiInput->openPorts().isEmpty())
+        if (m_laneLearn && m_midiInput->openKeyboardPorts().isEmpty())
             m_midiInput->cancelLearn();
     });
     // A port closing (unplugged, disabled, reopened) can never send the
@@ -5656,7 +5657,7 @@ void MainWindow::updateTransportActions()
 
 QString MainWindow::recordUnavailableReason() const
 {
-    if (m_midiInput->openPorts().isEmpty())
+    if (m_midiInput->openKeyboardPorts().isEmpty())
         return tr("Connect a MIDI keyboard to record.");
     if (!m_audioOk)
         return tr("Recording needs an audio device.");
@@ -5680,10 +5681,11 @@ void MainWindow::syncRecordAction()
     const QString why = recording ? QString() : recordUnavailableReason();
     m_recordAction->setChecked(recording);
     m_recordAction->setEnabled(recording || why.isEmpty());
-    // No MIDI input, no button: there is nothing it could record. (A
-    // hidden action's shortcut is off too.) A take whose keyboard went away
+    // No keyboard port, no button: there is nothing it could record (a
+    // control surface's notes never reach a take). (A hidden action's
+    // shortcut is off too.) A take whose keyboard went away
     // keeps it, so the take can still be stopped from it.
-    m_recordAction->setVisible(recording || !m_midiInput->openPorts().isEmpty());
+    m_recordAction->setVisible(recording || !m_midiInput->openKeyboardPorts().isEmpty());
     // The reason shows on hover, in the tooltip and the status bar.
     const QString tip = why.isEmpty() ? tr("Record from the MIDI keyboard into the selected track")
                                       : tr("Record\n%1").arg(why);

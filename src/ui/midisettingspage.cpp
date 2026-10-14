@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -14,6 +15,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -30,23 +32,111 @@
 namespace {
 
 constexpr int kPortNameRole = Qt::UserRole;
+// The row's MidiInput::PortRole, as an int; its role box edits it.
+constexpr int kPortRoleRole = Qt::UserRole + 1;
 
-// The port list's rows are never wider than the list, so a long port name
-// is elided (the view's textElideMode) instead of scrolling sideways. A
-// list view lays its rows out at their own width; this caps it, and the
-// list relays its rows out on a resize (QListView::Adjust).
+// A port's role box: Keyboard or Control surface. Like the CC boxes, the
+// wheel changes it only while it has focus, so scrolling the page past
+// the port list never turns a keyboard into a surface.
+class RoleComboBox : public QComboBox
+{
+  public:
+    explicit RoleComboBox(QWidget *parent) : QComboBox(parent)
+    {
+        setObjectName(QStringLiteral("settingsMidiPortRole"));
+        addItem(MidiSettingsPage::tr("Keyboard"), int(MidiInput::PortRole::Keyboard));
+        addItem(MidiSettingsPage::tr("Control surface"), int(MidiInput::PortRole::Surface));
+        setFocusPolicy(Qt::StrongFocus);
+        setSizeAdjustPolicy(QComboBox::AdjustToContents);
+        setToolTip(MidiSettingsPage::tr("Keyboard: the port's notes and controls play, record "
+                                        "and can be learned. Control surface: a keyboard's "
+                                        "Mackie Control (DAW) port, whose buttons drive the "
+                                        "transport; its notes never play."));
+    }
+
+  protected:
+    void wheelEvent(QWheelEvent *event) override
+    {
+        if (!hasFocus()) {
+            event->ignore(); // the page (or the list) gets it
+            return;
+        }
+        QComboBox::wheelEvent(event);
+    }
+};
+
+// The port list's rows: the checkbox and name on the left, the role box
+// (a persistent editor, so it always shows) on the right.
+//
+// The rows are never wider than the list, so a long port name is elided
+// (the view's textElideMode) instead of scrolling sideways. A list view
+// lays its rows out at their own width; this caps it, and the list relays
+// its rows out on a resize (QListView::Adjust). The name is painted short
+// of the role box, so it's cut there rather than under it.
 class PortDelegate : public QStyledItemDelegate
 {
   public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
+    // The role box's size (it follows the font: MidiSettingsPage::fitToFont).
+    void setRoleSize(QSize size) { m_roleSize = size; }
+
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
         QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.setWidth(size.width() + roleSpan());
+        size.setHeight(std::max(size.height(), m_roleSize.height()));
         if (const auto *view = qobject_cast<const QAbstractItemView *>(parent()))
             size.setWidth(std::min(size.width(), view->viewport()->width()));
         return size;
     }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option,
+               const QModelIndex &index) const override
+    {
+        QStyleOptionViewItem left = option;
+        left.rect.setRight(option.rect.right() - roleSpan());
+        QStyledItemDelegate::paint(painter, left, index);
+    }
+
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &,
+                          const QModelIndex &) const override
+    {
+        auto *box = new RoleComboBox(parent);
+        // Commits at once: the page applies the role as the box changes.
+        connect(box, &QComboBox::currentIndexChanged, this,
+                [this, box] { emit const_cast<PortDelegate *>(this)->commitData(box); });
+        return box;
+    }
+
+    void setEditorData(QWidget *editor, const QModelIndex &index) const override
+    {
+        auto *box = static_cast<QComboBox *>(editor);
+        const QSignalBlocker block(box); // showing the role isn't choosing it
+        box->setCurrentIndex(std::max(0, box->findData(index.data(kPortRoleRole).toInt())));
+    }
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model,
+                      const QModelIndex &index) const override
+    {
+        model->setData(index, static_cast<QComboBox *>(editor)->currentData(), kPortRoleRole);
+    }
+
+    void updateEditorGeometry(QWidget *editor, const QStyleOptionViewItem &option,
+                              const QModelIndex &) const override
+    {
+        const QRect row = option.rect;
+        const int width = std::min(m_roleSize.width(), row.width());
+        const int height = std::min(m_roleSize.height(), row.height());
+        editor->setGeometry(row.right() + 1 - width, row.top() + (row.height() - height) / 2, width,
+                            height);
+    }
+
+  private:
+    // The role box's width and the gap before it.
+    int roleSpan() const { return m_roleSize.width() + ::layout::space(::layout::Space::Two); }
+
+    QSize m_roleSize;
 };
 
 // A CC number box that never offers a reserved CC (MidiRoutes::assignable):
@@ -232,10 +322,20 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     // rather than bringing up a scrollbar over one of the few rows.
     m_ports->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_ports->setTextElideMode(Qt::ElideMiddle);
-    m_ports->setItemDelegate(new PortDelegate(m_ports));
+    m_portDelegate = new PortDelegate(m_ports);
+    m_ports->setItemDelegate(m_portDelegate);
     m_ports->setResizeMode(QListView::Adjust);
-    m_ports->setToolTip(tr("Notes from every checked port play on the selected track, on any "
-                           "MIDI channel. New ports are checked when they appear."));
+    // Rows are laid out again when the list's width changes (eventFilter).
+    m_ports->viewport()->installEventFilter(this);
+    m_ports->setToolTip(tr("Notes from every checked Keyboard port play on the selected track, "
+                           "on any MIDI channel. New ports are checked when they appear."));
+    // What the role boxes mean (docs/control-surface/PLAN.md §3.4).
+    auto *rolesNote = new QLabel(tr("Control surface ports drive the transport (Mackie "
+                                    "Control) and never play notes."),
+                                 m_controls);
+    rolesNote->setObjectName(QStringLiteral("settingsMidiRolesNote"));
+    rolesNote->setForegroundRole(QPalette::PlaceholderText);
+    rolesNote->setWordWrap(true);
     m_portsStatus = new QLabel(m_controls);
     m_portsStatus->setObjectName(QStringLiteral("settingsMidiPortsStatus"));
     m_portsStatus->setForegroundRole(QPalette::PlaceholderText);
@@ -252,6 +352,7 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     statusRow->addWidget(refresh);
     auto *portsLayout = new QVBoxLayout(portsGroup);
     portsLayout->addWidget(m_ports);
+    portsLayout->addWidget(rolesNote);
     portsLayout->addLayout(statusRow);
 
     // Playing and recording.
@@ -443,6 +544,14 @@ bool MidiSettingsPage::eventFilter(QObject *watched, QEvent *event)
     // The settings' layout changed: their minimum width may have too.
     if (watched == m_controls && event->type() == QEvent::LayoutRequest)
         fitWidth();
+    // The list got narrower or wider: Adjust relays its rows out only when a
+    // top-to-bottom list's height changes, and the role boxes, placed at the
+    // rows' right ends, would stay where the old width put them.
+    if (m_ports && watched == m_ports->viewport() && event->type() == QEvent::Resize) {
+        auto *resize = static_cast<QResizeEvent *>(event);
+        if (resize->size().width() != resize->oldSize().width())
+            m_ports->doItemsLayout();
+    }
     // Only while this page's learn runs (the filter is removed after).
     if ((event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride) &&
         m_startedLearn && m_midi.learnLane() != MidiRoutes::kNone) {
@@ -511,6 +620,11 @@ void MidiSettingsPage::fitToFont()
         learn->setText(text);
         learn->setMinimumWidth(widest);
     }
+    // The port rows' role boxes: as big as one with the list's font.
+    RoleComboBox sample(m_ports);
+    sample.setFont(m_ports->font());
+    static_cast<PortDelegate *>(m_portDelegate)->setRoleSize(sample.sizeHint());
+    m_ports->doItemsLayout(); // rows sized for the old box
     fitPortList();
     fitWidth();
 }
@@ -552,6 +666,9 @@ void MidiSettingsPage::rebuildPorts()
         auto *item = new QListWidgetItem(m_ports);
         item->setData(kPortNameRole, name);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        // An unchecked port's role can still be set: marking a DAW port a
+        // control surface before enabling it means it never plays a note.
+        item->setData(kPortRoleRole, int(m_midi.portRole(name)));
         const bool enabled = m_midi.isPortEnabled(name);
         item->setCheckState(enabled ? Qt::Checked : Qt::Unchecked);
         if (enabled && m_midi.portFailed(name)) {
@@ -563,6 +680,8 @@ void MidiSettingsPage::rebuildPorts()
             item->setToolTip(name); // whole, where the row cuts it
         }
     }
+    for (int i = 0; i < m_ports->count(); i++)
+        m_ports->openPersistentEditor(m_ports->item(i));
     m_loading = false;
     fitPortList();
 
@@ -582,6 +701,12 @@ void MidiSettingsPage::portItemChanged(QListWidgetItem *item)
     if (m_loading || !item)
         return;
     const QString name = item->data(kPortNameRole).toString();
+    // The role box committed (the check state is unchanged then).
+    const auto role = MidiInput::PortRole(item->data(kPortRoleRole).toInt());
+    if (role != m_midi.portRole(name)) {
+        m_midi.setPortRole(name, role);
+        return;
+    }
     const bool on = item->checkState() == Qt::Checked;
     m_midi.setPortEnabled(name, on);
 }

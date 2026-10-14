@@ -171,3 +171,136 @@ Exactly standard MCU, so the device is in Mackie mode. The jog wheel sent
 nothing on MIDIIN2. Releases (velocity-0 Note On / Note Off) weren't
 reported at first; the user confirmed every button sends a Note Off on
 release, so Rewind/FF hold-to-repeat (J3) works as planned.
+
+### Step 1 — port roles + surface ring (2026-10-13, uncommitted)
+
+**What landed**
+
+- **`MidiInput::PortRole { Keyboard, Surface }`** with `portRole(name)` /
+  `setPortRole(name, role)` and the pure `defaultRole(name)`. The user's
+  choices persist in `midi/surfacePorts` and `midi/keyboardPorts`; both
+  hold *explicit* choices (choosing a port's default role pins it too), so
+  a name default never comes back to a port the user turned around, and a
+  later change to the default rules can't flip a choice. An identity in
+  both lists (a hand-edited file) reads as Surface, the safe side. A real
+  change emits `settingsChanged` and `portsChanged`; re-choosing the same
+  role signals nothing.
+- **Name default (D1):** `DAW`, `MCU` or `Mackie` as a word of its own,
+  any case, where a "word" means no *letter* on either side (digits and
+  punctuation are boundaries): "KeyLab Essential 61 DAW", "LKMK3_DAW",
+  "X-Touch MCU1" are surfaces; "Dawson Keys", "MCUxyz", "MackieControl"
+  aren't. Plus Windows' KeyLab second port: starts with `MIDIIN2 (` and
+  contains `KeyLab` (both any case). `MIDIIN3 (KeyLab…)` and
+  `MIDIIN2 (<anything else>)` stay keyboards.
+- **`OpenPort::surface`**, set in `openQuietly` before the port opens and
+  passed by `onMessage` to `receive()`. `setPortRole` on an open port runs
+  `closeQuietly` + `openQuietly` (so `portsClosed` releases anything it held
+  as a keyboard, and the old callback is gone before the new role exists).
+- **`receive(…, surface)`**: a Surface port's message is parsed with
+  `parseTap` (velocity-0 note on stays 0x9n), stamped with the port token
+  and pushed to **`m_surface`** (`MidiSurfaceRing`, `MidiRing<MidiTapMsg,
+  256>`), with one queued hop in flight (`m_surfacePosted`,
+  `deliverSurface` → **`surfaceReady()`**, same exchange-before-emit as the
+  tap). It skips Learn, `parse`→input ring, `receivedCount` and the
+  activity hop (so the roll's keyboard poll never starts for it). The
+  script tap still sees it, with its token (J1). `popSurface`,
+  `surfaceDropped`.
+- **The injectors honour the named port's role** (`portRole(port)`, open
+  or not); an unnamed injection is a keyboard.
+- **`openKeyboardPorts()`**: `openPorts()` filtered to Keyboard role (test
+  ports from `setOpenPortsForTest` included).
+- **Settings → MIDI:** each port row has a role box (Keyboard / Control
+  surface) on its right, a persistent editor of `PortDelegate`, which now
+  paints the check and name short of it (the name elides there) and makes
+  rows as tall as the box. The box commits through the model
+  (`kPortRoleRole` → `itemChanged` → `setPortRole`). Like the CC boxes, the
+  wheel changes it only with focus. Under the list: "Control surface ports
+  drive the transport (Mackie Control) and never play notes."
+- Nothing drains the surface ring yet (step 2 connects `surfaceReady`); until
+  then a surface's messages fill it and are dropped and counted, harmlessly.
+
+**Call-site audit (`openPorts()`)**
+
+| Site | Decision |
+|---|---|
+| `mainwindow.cpp` `midiControlsOf` (`controls.keyboard`, lane-menu Learn) | → `openKeyboardPorts`: a surface is never learned from. |
+| `mainwindow.cpp` portsChanged → cancel a lane learn | → `openKeyboardPorts`: the last *keyboard* leaving stops it. |
+| `mainwindow.cpp` `recordUnavailableReason` | → `openKeyboardPorts` ("Connect a MIDI keyboard to record."), so `toggleRecord` refuses with a surface alone. |
+| `mainwindow.cpp` `syncRecordAction` visibility | → `openKeyboardPorts` (J4). |
+| `reccheck.cpp` no-keyboard SKIP guard | → `openKeyboardPorts`: what Record depends on. |
+| `scripthost.cpp` `midiPorts()` (`porydaw.midi.ports()`) | **kept: all ports.** It reports each port's open/enabled state; a surface is open. (No `role` field added; see open items.) |
+| `midisettingspage.cpp` "Listening to N port(s)" | **kept: all open ports.** A surface port is listened to; its row shows its role. |
+| `midicheck.cpp` `checkService` plumbing | kept: port consistency, not keyboards. |
+
+**Judgment calls**
+
+- **Explicit choices are stored even when they equal the default** (both
+  lists are "the user said so"), rather than storing only overrides.
+- **Word boundary = letters only** (see above), so vendor spellings with
+  digits or underscores still match.
+- **An unchecked port's role box stays enabled:** marking a DAW port a
+  control surface *before* enabling it means it never plays a note.
+- **The surface ring has no enable gate** (unlike the tap): the window will
+  always listen from step 2.
+- **Role-change reopen goes through `closeQuietly`/`openQuietly`**, not
+  `refresh()`, so only that port reopens. `portsClosed` fires for it.
+- **Port-list resize fix:** `QListView::Adjust` only relays a top-to-bottom
+  list out when its *height* changes, so a width change left the role boxes
+  where the old width put them (seen in the harness: box past the right
+  edge). The page now relays the rows out on a viewport width change.
+
+**Verification**
+
+- `--midicheck` additions: `checkPortRoles` (default table both ways;
+  fresh-start defaults with nothing written; Keyboard override on a DAW
+  port persists, signals once, sticks across a fresh `MidiInput`; re-set is
+  silent; lists move; default pinning; both-lists reads Surface; surface
+  injection → nothing in the input ring or `receivedCount`, one async
+  `surfaceReady` hop for three messages, messages as sent with the right
+  token, tap sees them, no activity; burst = one hop, re-armed after drain;
+  overflow counted; keyboard port beside it unaffected; Learn stays armed
+  through a surface CC and a keyboard CC answers it; role flip makes the
+  same port play; `openKeyboardPorts` + role change; real-port reopen when
+  a port is open, else SKIP), the Settings page (role boxes show defaults,
+  sit at the row's right end and follow resizes, choice applies + persists
+  + survives the rebuild, unchecked port settable and stays disabled, the
+  wheel needs focus, the note line), and `MainWindow::checkSurfacePorts`
+  (Record + lane Learn shown for a keyboard and not for a surface alone,
+  `toggleRecord` refuses and the reason names the keyboard, a lane learn
+  cancelled when only a surface remains, role flips both ways, and a
+  surface's note 94 neither held by live play nor lit on the roll while the
+  keyboard's is).
+- Mutation-tested, each FAILed then restored by hand: regex lookahead
+  dropped; KeyLab rule dropped; both-lists precedence flipped; no save; no
+  same-role early return; no `settingsChanged`; no `portsChanged`; no
+  default pinning; surface to the input ring; no surface push; hop per
+  message; synchronous hop; token 0; surface learns; surface posts activity;
+  injector ignores the role; `openKeyboardPorts` = all; no persistent
+  editors; page ignores the role; unguarded wheel; note line hidden; no
+  width relayout; and each of the four `mainwindow.cpp` sites reverted to
+  `openPorts()`.
+- Not covered in WSL: a real port's close-and-reopen on a role change (the
+  check runs when a port is open; Windows checks it by hand below).
+- `tools/run_checks.sh` normal and ASAN: PASS. clang-format 22 clean.
+
+**Windows manual check (user)**
+
+1. Settings → MIDI with the KeyLab plugged in: `MIDIIN2 (KeyLab Essential
+   61)` shows **Control surface**, the main port **Keyboard**.
+2. Select a track, press the KeyLab's **Play**: no A#6 sounds and the roll's
+   keyboard doesn't light (no transport action yet; that's step 2).
+3. Set MIDIIN2 to **Keyboard**: Play now sounds A#6. Set it back to Control
+   surface: silent again. Restart Porydaw: the choice is kept.
+4. Uncheck the main KeyLab port, leaving only MIDIIN2 (Control surface)
+   checked: the **Record** button disappears and lane menus offer no Learn.
+   Re-check the main port: Record returns.
+5. Optional, with `midi-monitor` running: MIDIIN2's button presses still
+   show there.
+
+**Open**
+
+- `porydaw.midi.ports()` has no `role` field; a plugin can't tell a
+  surface port from a keyboard except by name. Easy to add (with docs) if
+  wanted.
+- With the window at its minimum width the role box leaves a long port name
+  little room (it elides in the middle; the tooltip has it whole).

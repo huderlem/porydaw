@@ -320,6 +320,10 @@ class MainWindow : public QMainWindow
     static constexpr int kLaneLearnResultMs = 6000;
     // The lane-menu half of checkLiveRoutes (midicheck.cpp).
     void checkLaneLearn();
+    // Control surface ports in the window (docs/control-surface/PLAN.md
+    // step 1): a surface alone shows no Record button, offers no lane Learn
+    // and plays nothing (midicheck.cpp).
+    void checkSurfacePorts();
     // runRecordWindowCheck's halves (reccheck.cpp).
     void checkRecordingTakes(const QString &scratchDir);
     void checkRecordingDisplay();

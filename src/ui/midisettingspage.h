@@ -14,10 +14,12 @@ class QListWidgetItem;
 class QPushButton;
 class QScrollArea;
 class QSpinBox;
+class QStyledItemDelegate;
 
 // Settings window, MIDI page (docs/midi-input/PLAN.md step 1): which input
-// ports porydaw listens to, how incoming notes play and record, and which
-// keyboard control drives which lane (the Controls table,
+// ports porydaw listens to and what each one is (a keyboard, or a control
+// surface: docs/control-surface/PLAN.md), how incoming notes play and
+// record, and which keyboard control drives which lane (the Controls table,
 // docs/midi-controls/PLAN.md step 1: a CC or None per lane, and Learn). Like
 // every Settings page it applies as controls change; the MidiInput service
 // owns persisting (midi/* keys) and reopening ports.
@@ -71,6 +73,8 @@ class MidiSettingsPage : public QWidget
     QWidget *m_unavailable = nullptr;
     QLabel *m_unavailableLabel = nullptr;
     QListWidget *m_ports = nullptr;
+    // The port rows' delegate (a PortDelegate: role boxes, elided names).
+    QStyledItemDelegate *m_portDelegate = nullptr;
     QLabel *m_portsStatus = nullptr;
     QCheckBox *m_livePlay = nullptr;
     QSpinBox *m_fixedVelocity = nullptr;

@@ -1147,8 +1147,8 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
               m_recordAction->isCheckable(),
           "Record is not a checkable action on the transport toolbar");
     // No keyboard, no Record button; a connected one brings it back.
-    if (!midiInput().openPorts().isEmpty()) {
-        std::printf("reccheck: no-keyboard checks SKIP (a real MIDI port is open)\n");
+    if (!midiInput().openKeyboardPorts().isEmpty()) {
+        std::printf("reccheck: no-keyboard checks SKIP (a real MIDI keyboard port is open)\n");
     } else {
         check(!m_recordAction->isVisible(), "with no MIDI input the Record button is shown");
         toggleRecord();

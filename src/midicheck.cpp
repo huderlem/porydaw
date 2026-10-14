@@ -1,6 +1,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QDockWidget>
 #include <QElapsedTimer>
@@ -93,6 +94,14 @@
 // touched lane and the voice back to the song. The handback's "untouched
 // lanes stay untouched" half is --primecheck's (TimelinePlayer::chaseTouched
 // on a synthetic song).
+//
+// docs/control-surface/PLAN.md step 1 adds port roles: the name defaults,
+// the user's choice persisting and winning over them (midi/surfacePorts,
+// midi/keyboardPorts), a Surface port's messages reaching the surface ring
+// (one queued hop, token filled, as sent) and the script tap but never the
+// input ring, activity or Learn, openKeyboardPorts, the Settings page's
+// role boxes, and in the window Record and lane Learn counting keyboard
+// ports only while a surface's note never sounds.
 
 namespace {
 
@@ -354,6 +363,229 @@ void checkService()
     check(midi.receivedCount() == receivedBefore + MidiInputRing::kCapacity,
           "dropped messages were counted as received");
     drain(ring);
+}
+
+// docs/control-surface/PLAN.md step 1: port roles. The name defaults, the
+// user's choice persisting (and winning over a default, across a fresh
+// MidiInput), and a Surface-role port's messages reaching the surface ring
+// and the script tap but never the input ring, the activity signal or
+// Learn. Injected as if from a port, which honours that port's role open or
+// not; a real port's close-and-reopen on a role change needs hardware (it is
+// checked when this machine has an open port, and on Windows by hand).
+void checkPortRoles()
+{
+    using Role = MidiInput::PortRole;
+    const auto role = [](const char *name) {
+        return MidiInput::defaultRole(QString::fromUtf8(name));
+    };
+    check(role("KeyLab Essential 61 DAW") == Role::Surface &&
+              role("MIDIIN2 (KeyLab Essential 61)") == Role::Surface &&
+              role("midiin2 (keylab mkII 49)") == Role::Surface &&
+              role("Launchkey MK3 49 LKMK3 DAW Out") == Role::Surface &&
+              role("KeyLab Essential 61:KeyLab Essential 61 DAW") == Role::Surface &&
+              role("X-Touch MCU1") == Role::Surface && role("LKMK3_daw") == Role::Surface &&
+              role("Mackie Control Universal") == Role::Surface,
+          "roles: a DAW, MCU, Mackie or KeyLab second port did not default to Surface");
+    check(role("KeyLab Essential 61") == Role::Keyboard &&
+              role("MIDIIN2 (USB MIDI Interface)") == Role::Keyboard &&
+              role("MIDIIN3 (KeyLab Essential 61)") == Role::Keyboard &&
+              role("Dawson Keys") == Role::Keyboard && role("MCUxyz") == Role::Keyboard &&
+              role("MackieControl") == Role::Keyboard && role("Keystation 49") == Role::Keyboard &&
+              role("") == Role::Keyboard,
+          "roles: a port without a surface word in its name did not default to Keyboard");
+
+    const QString surfaceKey = QStringLiteral("midi/surfacePorts");
+    const QString keyboardKey = QStringLiteral("midi/keyboardPorts");
+    const QString daw = QStringLiteral("midicheck KeyLab DAW");
+    const QString keys = QStringLiteral("midicheck Keys");
+    {
+        MidiInput midi;
+        check(midi.portRole(daw) == Role::Surface && midi.portRole(keys) == Role::Keyboard &&
+                  !QSettings().contains(surfaceKey) && !QSettings().contains(keyboardKey),
+              "roles: a fresh MidiInput did not start on the name defaults, or wrote them");
+        int settingsSignals = 0, portsSignals = 0;
+        QObject::connect(&midi, &MidiInput::settingsChanged, &midi,
+                         [&settingsSignals] { ++settingsSignals; });
+        QObject::connect(&midi, &MidiInput::portsChanged, &midi,
+                         [&portsSignals] { ++portsSignals; });
+        // The user turns a name-default surface back into a keyboard.
+        midi.setPortRole(daw, Role::Keyboard);
+        check(midi.portRole(daw) == Role::Keyboard &&
+                  QSettings().value(keyboardKey).toStringList() == QStringList{daw} &&
+                  !QSettings().contains(surfaceKey) && settingsSignals == 1 && portsSignals == 1,
+              "roles: turning a DAW port into a keyboard did not apply, persist and signal");
+        midi.setPortRole(daw, Role::Keyboard);
+        check(settingsSignals == 1 && portsSignals == 1,
+              "roles: setting the role a port already has signalled a change");
+        midi.setPortRole(keys, Role::Surface);
+        check(midi.portRole(keys) == Role::Surface &&
+                  QSettings().value(surfaceKey).toStringList() == QStringList{keys} &&
+                  settingsSignals == 2 && portsSignals == 2,
+              "roles: making a keyboard a control surface did not apply, persist and signal");
+    }
+    {
+        // A relaunch: the user's choices win over the name defaults.
+        MidiInput midi;
+        check(midi.portRole(daw) == Role::Keyboard && midi.portRole(keys) == Role::Surface,
+              "roles: a new MidiInput did not keep the user's choices over the name defaults");
+        // Back to the default is still an explicit choice, and moves lists.
+        midi.setPortRole(daw, Role::Surface);
+        midi.setPortRole(keys, Role::Keyboard);
+        check(QSettings().value(surfaceKey).toStringList() == QStringList{daw} &&
+                  QSettings().value(keyboardKey).toStringList() == QStringList{keys},
+              "roles: a choice did not move its port from one list to the other");
+        // Choosing a port's default role pins it (no signal: nothing changed).
+        int settingsSignals = 0;
+        QObject::connect(&midi, &MidiInput::settingsChanged, &midi,
+                         [&settingsSignals] { ++settingsSignals; });
+        const QString mcu = QStringLiteral("midicheck MCU");
+        midi.setPortRole(mcu, Role::Surface);
+        check(settingsSignals == 0 && QSettings().value(surfaceKey).toStringList().contains(mcu),
+              "roles: choosing a port's default role was not kept, or signalled a change");
+    }
+    {
+        // An identity in both lists (an edited file) reads as a surface.
+        QSettings().setValue(keyboardKey, QStringList{daw, keys});
+        MidiInput midi;
+        check(midi.portRole(daw) == Role::Surface && midi.portRole(keys) == Role::Keyboard,
+              "roles: an identity in both lists did not read as a surface");
+    }
+
+    MidiInput midi;
+    const QString surface = QStringLiteral("midicheck Surface");
+    const QString keyboard = QStringLiteral("midicheck Keyboard");
+    midi.setPortRole(surface, Role::Surface);
+    MidiInputRing &ring = midi.ring();
+    drain(ring);
+    midi.setTapEnabled(true);
+    int activity = 0, surfaceHops = 0, tapHops = 0;
+    QObject::connect(&midi, &MidiInput::activity, &midi, [&activity] { ++activity; });
+    QObject::connect(&midi, &MidiInput::surfaceReady, &midi, [&surfaceHops] { ++surfaceHops; });
+    QObject::connect(&midi, &MidiInput::tapReady, &midi, [&tapHops] { ++tapHops; });
+    const auto popAll = [&](bool fromTap) {
+        std::vector<MidiTapMsg> out;
+        MidiTapMsg msg;
+        while (fromTap ? midi.popTap(&msg) : midi.popSurface(&msg))
+            out.push_back(msg);
+        return out;
+    };
+    const auto sameTap = [&](const MidiTapMsg &m, uint8_t status, uint8_t d1, uint8_t d2) {
+        return m.status == status && m.d1 == d1 && m.d2 == d2 &&
+               midi.portForToken(m.port) == surface;
+    };
+
+    // Play pressed and released (MCU), and a jog CC: as sent, with the
+    // port's token, to the surface ring and the tap; nothing to live play.
+    const uint64_t received = midi.receivedCount();
+    midi.injectForTest({0x90, 94, 127}, surface);
+    midi.injectForTest({0x90, 94, 0}, surface);
+    midi.injectForTest({0xB0, 60, 1}, surface);
+    midi.injectBytesForTest({0xF8}, surface); // clock: no channel-voice message, dropped
+    check(ring.size() == 0 && midi.receivedCount() == received,
+          "surface: a control surface's messages reached the input ring");
+    check(surfaceHops == 0, "surface: surfaceReady was signalled synchronously, not on the UI hop");
+    QApplication::processEvents();
+    check(surfaceHops == 1, "surface: three messages did not post exactly one surfaceReady hop");
+    const std::vector<MidiTapMsg> got = popAll(false);
+    check(got.size() == 3 && sameTap(got[0], 0x90, 94, 127) && sameTap(got[1], 0x90, 94, 0) &&
+              sameTap(got[2], 0xB0, 60, 1),
+          "surface: the surface ring did not hold the three messages as sent, with the port's "
+          "token (a velocity-0 note on stays 0x9n)");
+    const std::vector<MidiTapMsg> tapped = popAll(true);
+    check(tapHops == 1 && tapped.size() == 3 && sameTap(tapped[0], 0x90, 94, 127) &&
+              sameTap(tapped[2], 0xB0, 60, 1),
+          "surface: the script tap did not see the control surface's messages");
+    wait(MidiInput::kActivityIntervalMs * 3);
+    check(activity == 0, "surface: a control surface's messages signalled keyboard activity");
+
+    // One hop at a time, re-armed by the drain: a burst is one hop, and
+    // input after it posts the next.
+    for (int i = 0; i < 50; ++i)
+        midi.injectForTest({0x90, uint8_t(i), 127}, surface);
+    QApplication::processEvents();
+    check(surfaceHops == 2 && popAll(false).size() == 50,
+          "surface: a burst was not one surfaceReady hop, or lost messages");
+    midi.injectForTest({0x80, 1, 0}, surface);
+    QApplication::processEvents();
+    check(surfaceHops == 3 && popAll(false).size() == 1,
+          "surface: input after a drained hop did not post a new one");
+    // Full: past its capacity the ring drops and counts.
+    const uint64_t droppedBefore = midi.surfaceDropped();
+    for (int i = 0; i < 300; ++i)
+        midi.injectForTest({0x90, uint8_t(i & 0x7F), 127}, surface);
+    check(midi.surfaceDropped() == droppedBefore + (300 - MidiSurfaceRing::kCapacity) &&
+              popAll(false).size() == MidiSurfaceRing::kCapacity,
+          "surface: overflowing the surface ring did not count every dropped message");
+    QApplication::processEvents();
+    popAll(false);
+    popAll(true);
+
+    // A keyboard port beside it plays as before, and reaches no surface.
+    midi.injectForTest({0x90, 60, 100}, keyboard);
+    MidiMsg msg;
+    QApplication::processEvents();
+    check(ring.size() == 1 && ring.pop(&msg) && same(msg, {0x90, 60, 100}) && popAll(false).empty(),
+          "surface: a keyboard port's note did not play, or reached the surface ring");
+
+    // Learn never takes a surface's CC (it stays armed), and a keyboard's
+    // knob still answers it.
+    std::vector<std::pair<int, int>> learned;
+    QObject::connect(&midi, &MidiInput::learnFinished, &midi,
+                     [&](int lane, int cc, int) { learned.push_back({lane, cc}); });
+    midi.startLearn(0x07);
+    midi.injectForTest({0xB0, 74, 20}, surface);
+    wait(MidiInput::kLearnPollMs * 4);
+    check(learned.empty() && midi.learnLane() == 0x07 && midi.routes() == MidiRoutes() &&
+              ring.size() == 0,
+          "surface: Learn took a control surface's CC, or it reached live play");
+    midi.injectForTest({0xB0, 74, 20}, keyboard);
+    wait(MidiInput::kLearnPollMs * 4);
+    check(learned.size() == 1 && learned[0] == std::pair(0x07, 74),
+          "surface: a keyboard's CC did not answer the learn a surface left armed");
+    midi.setRoute(0x07, 7); // back to the defaults
+    drain(ring);
+    popAll(false);
+
+    // The role of the port named is what counts: turned into a keyboard,
+    // the same port plays.
+    midi.setPortRole(surface, Role::Keyboard);
+    midi.injectForTest({0x90, 94, 127}, surface);
+    QApplication::processEvents();
+    check(ring.size() == 1 && popAll(false).empty(),
+          "surface: a port turned back into a keyboard did not play");
+    drain(ring);
+    midi.setPortRole(surface, Role::Surface);
+
+    // openKeyboardPorts: the open ports whose role is Keyboard.
+    midi.setOpenPortsForTest({surface, keyboard});
+    check(midi.openKeyboardPorts() == QStringList{keyboard} && midi.openPorts().contains(surface),
+          "surface: openKeyboardPorts counted a control surface, or openPorts lost it");
+    midi.setPortRole(keyboard, Role::Surface);
+    check(midi.openKeyboardPorts().isEmpty(),
+          "surface: openKeyboardPorts did not follow a role change");
+    midi.setPortRole(keyboard, Role::Keyboard);
+    midi.setOpenPortsForTest({});
+    midi.setTapEnabled(false);
+
+    // A real open port is closed and reopened by a role change (only on a
+    // machine with one; WSL and CI have none).
+    const QStringList real = midi.openPorts();
+    if (real.isEmpty()) {
+        std::printf("midicheck: role-change reopen SKIP (no open MIDI port)\n");
+    } else {
+        int closed = 0;
+        QObject::connect(&midi, &MidiInput::portsClosed, &midi, [&closed] { ++closed; });
+        const QString port = real.first();
+        const Role was = midi.portRole(port);
+        midi.setPortRole(port, was == Role::Surface ? Role::Keyboard : Role::Surface);
+        check(closed == 1 && midi.isPortOpen(port),
+              "surface: a role change did not close and reopen the open port");
+        midi.setPortRole(port, was);
+    }
+
+    // The later checks start from no explicit roles.
+    QSettings().remove(surfaceKey);
+    QSettings().remove(keyboardKey);
 }
 
 // docs/midi-controls/PLAN.md step 1: the route table on its own.
@@ -649,6 +881,99 @@ void checkSettingsPage()
                   "disabling the second same-named port did not persist its identity");
             midi.setPortEnabled(QStringLiteral("Twin (2)"), true);
         }
+
+        // Each row's role box (docs/control-surface/PLAN.md §3.4): the name
+        // default, a choice that applies, persists and survives the
+        // rebuild, settable on an unchecked port, and the wheel needing
+        // focus.
+        using Role = MidiInput::PortRole;
+        const QString keyLab = QStringLiteral("MIDIIN2 (KeyLab Essential 61)");
+        const QString plain = QStringLiteral("Page Keys");
+        midi.setPortListForTest({plain, keyLab});
+        page.resize(560, 480);
+        page.show();
+        // The list relays its rows (and their role boxes) out 100 ms after a
+        // resize (QListView::Adjust).
+        wait(200);
+        const auto roleBox = [&](int row) {
+            return row < ports->count()
+                       ? qobject_cast<QComboBox *>(ports->itemWidget(ports->item(row)))
+                       : nullptr;
+        };
+        auto *rolesNote = page.findChild<QLabel *>(QStringLiteral("settingsMidiRolesNote"));
+        check(rolesNote && rolesNote->isVisibleTo(&page) &&
+                  rolesNote->text() == QStringLiteral("Control surface ports drive the transport "
+                                                      "(Mackie Control) and never play notes."),
+              "roles page: the line explaining control surfaces is missing");
+        if (check(ports->count() == 2 && roleBox(0) && roleBox(1),
+                  "roles page: a port row has no role box")) {
+            check(roleBox(0)->currentData().toInt() == int(Role::Keyboard) &&
+                      roleBox(1)->currentData().toInt() == int(Role::Surface) &&
+                      roleBox(1)->currentText() == QStringLiteral("Control surface"),
+                  "roles page: the role boxes do not show the name defaults");
+            // In the row, right of the name, inside the list.
+            const QRect row = ports->visualItemRect(ports->item(1));
+            const QRect box = roleBox(1)->geometry();
+            check(roleBox(1)->isVisible() && row.contains(box.center()) &&
+                      box.right() <= ports->viewport()->width() && box.left() > row.center().x(),
+                  "roles page: the role box is not at the right of its row");
+            // And stays there as the list narrows and widens.
+            for (const int width : {420, 640}) {
+                page.resize(width, 480);
+                wait(200);
+                const QRect r = ports->visualItemRect(ports->item(1));
+                check(roleBox(1)->geometry().right() == r.right() &&
+                          r.right() < ports->viewport()->width(),
+                      "roles page: the role box did not follow its row's right end on a resize");
+            }
+            page.resize(560, 480);
+            wait(200);
+            check(!QSettings().contains(QStringLiteral("midi/surfacePorts")) &&
+                      !QSettings().contains(QStringLiteral("midi/keyboardPorts")),
+                  "roles page: showing the role boxes wrote a role");
+            roleBox(0)->setCurrentIndex(roleBox(0)->findData(int(Role::Surface)));
+            QApplication::processEvents();
+            check(midi.portRole(plain) == Role::Surface && midi.isPortEnabled(plain) &&
+                      QSettings().value(QStringLiteral("midi/surfacePorts")).toStringList() ==
+                          QStringList{plain},
+                  "roles page: choosing Control surface did not apply and persist");
+            check(roleBox(0) && roleBox(0)->currentData().toInt() == int(Role::Surface) &&
+                      ports->item(0)->checkState() == Qt::Checked,
+                  "roles page: the rebuilt row does not show the chosen role");
+            // Unchecked, its role can still be chosen.
+            ports->item(1)->setCheckState(Qt::Unchecked);
+            QApplication::processEvents();
+            if (check(roleBox(1) && roleBox(1)->isEnabled(),
+                      "roles page: an unchecked port's role box is disabled")) {
+                roleBox(1)->setCurrentIndex(roleBox(1)->findData(int(Role::Keyboard)));
+                QApplication::processEvents();
+                check(midi.portRole(keyLab) == Role::Keyboard && !midi.isPortEnabled(keyLab) &&
+                          QSettings().value(QStringLiteral("midi/keyboardPorts")).toStringList() ==
+                              QStringList{keyLab},
+                      "roles page: choosing Keyboard for an unchecked port did not apply, or "
+                      "enabled it");
+            }
+            // The wheel over an unfocused box scrolls past it (up, toward
+            // Keyboard: this box shows Control surface, the last entry).
+            if (QComboBox *box0 = roleBox(0)) {
+                box0->clearFocus();
+                const QPointF at(box0->width() / 2.0, box0->height() / 2.0);
+                QWheelEvent wheel(at, box0->mapToGlobal(at), QPoint(), QPoint(0, 120), Qt::NoButton,
+                                  Qt::NoModifier, Qt::NoScrollPhase, false);
+                QApplication::sendEvent(box0, &wheel);
+                QApplication::processEvents();
+                check(midi.portRole(plain) == Role::Surface,
+                      "roles page: the wheel over an unfocused role box changed the role");
+            }
+            shoot(&page, "roles");
+            if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+                page.grab().save(QString::fromLocal8Bit(dir) +
+                                 QStringLiteral("/midi_page_roles.png"));
+        }
+        page.hide();
+        midi.setPortEnabled(keyLab, true);
+        QSettings().remove(QStringLiteral("midi/surfacePorts"));
+        QSettings().remove(QStringLiteral("midi/keyboardPorts"));
     }
 
     // Without a backend the window's page explains why and offers to try
@@ -1062,7 +1387,79 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     checkLiveRoutes();
     checkLiveControls();
     checkLaneLearn();
+    checkSurfacePorts();
     return g_failures - before;
+}
+
+// docs/control-surface/PLAN.md step 1, the window's half: "a keyboard is
+// connected" counts Keyboard-role ports only, and a surface's notes never
+// sound or light the roll's keyboard.
+void MainWindow::checkSurfacePorts()
+{
+    using Role = MidiInput::PortRole;
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const QString surface = QStringLiteral("KeyLab Essential 61 DAW"); // a Surface by name
+    const QString keyboard = QStringLiteral("KeyLab Essential 61");
+    if (!midi.openKeyboardPorts().isEmpty()) {
+        std::printf("midicheck: surface window checks SKIP (a real MIDI keyboard port is open)\n");
+        return;
+    }
+    // Only the surface open: no Record button, and the lane menus offer no
+    // Learn; a lane learn under way stops as the last keyboard leaves.
+    midi.setOpenPortsForTest({keyboard});
+    check(m_recordAction->isVisible() && view->midiControls().keyboard,
+          "surface window: a keyboard port did not show Record or lane Learn");
+    m_laneLearn = true;
+    midi.startLearn(0x07);
+    midi.setOpenPortsForTest({surface});
+    check(!m_recordAction->isVisible(), "surface window: a control surface alone shows Record");
+    check(recordUnavailableReason() == tr("Connect a MIDI keyboard to record."),
+          "surface window: with a control surface alone, Record's reason is not the keyboard");
+    toggleRecord(); // its shortcut is off while hidden; called anyway
+    check(m_takeSession == nullptr, "surface window: a control surface alone started a take");
+    check(!view->midiControls().keyboard,
+          "surface window: a control surface alone offers lane Learn");
+    check(midi.learnLane() == MidiRoutes::kNone && !m_laneLearn,
+          "surface window: a lane learn outlived the last keyboard port");
+    // Turned into a keyboard, it is one; turned back, it isn't.
+    midi.setPortRole(surface, Role::Keyboard);
+    check(m_recordAction->isVisible() && view->midiControls().keyboard,
+          "surface window: a surface turned into a keyboard did not show Record");
+    midi.setPortRole(surface, Role::Surface);
+    check(!m_recordAction->isVisible() && !view->midiControls().keyboard,
+          "surface window: a keyboard turned into a surface kept Record");
+
+    // Its Play button (MCU note 94) neither sounds nor lights a key.
+    if (!m_audioOk) {
+        std::printf("midicheck: surface live play SKIP (no audio device)\n");
+    } else {
+        m_audio.holdDeviceForTest(true);
+        drain(midi.ring());
+        midi.injectForTest({0x90, 94, 127}, surface);
+        m_audio.pumpForTest(uint32_t(m_audio.sampleRate() * 0.03));
+        uint64_t lo = 0, hi = 0;
+        m_audio.liveHeldKeys(&lo, &hi);
+        check(lo == 0 && hi == 0, "surface window: a control surface's note is held by live play");
+        QApplication::processEvents();
+        check(view->liveHeldKeysLo() == 0 && view->liveHeldKeysHi() == 0,
+              "surface window: a control surface's note lit the roll's keyboard");
+        // The same note from the keyboard does (the check above can fail).
+        midi.injectForTest({0x90, 94, 127}, keyboard);
+        m_audio.pumpForTest(uint32_t(m_audio.sampleRate() * 0.03));
+        m_audio.liveHeldKeys(&lo, &hi);
+        check(hi == uint64_t(1) << (94 - 64),
+              "surface window: the keyboard's note 94 is not held (live play is off?)");
+        midi.injectForTest({0x80, 94, 0}, keyboard);
+        m_audio.pumpForTest(uint32_t(m_audio.sampleRate() * 0.03));
+        MidiTapMsg msg;
+        while (midi.popSurface(&msg)) {
+        }
+        m_audio.holdDeviceForTest(false);
+    }
+    midi.setOpenPortsForTest({});
+    QSettings().remove(QStringLiteral("midi/surfacePorts"));
+    QSettings().remove(QStringLiteral("midi/keyboardPorts"));
 }
 
 // Step 2: live play on the selected track (see the file comment).
@@ -1745,6 +2142,7 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
     checkPortIdentities();
     checkRing();
     checkService();
+    checkPortRoles();
     checkRoutesTable();
     checkRoutesService();
     checkSettingsPage();

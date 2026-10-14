@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <exception>
+#include <utility>
 
 #ifdef PORYDAW_MIDI
 #include "RtMidi.h"
@@ -28,6 +29,8 @@ class RtMidiIn
 namespace {
 
 const QString kDisabledPortsKey = QStringLiteral("midi/disabledPorts");
+const QString kSurfacePortsKey = QStringLiteral("midi/surfacePorts");
+const QString kKeyboardPortsKey = QStringLiteral("midi/keyboardPorts");
 const QString kLivePlayKey = QStringLiteral("midi/livePlay");
 const QString kFixedVelocityKey = QStringLiteral("midi/fixedVelocity");
 const QString kLatencyKey = QStringLiteral("midi/latencyMs");
@@ -61,6 +64,9 @@ struct MidiInput::OpenPort {
     // driver's thread then drops its message (see shutPort).
     std::atomic<bool> closing{false};
     uint16_t token = 0; // portToken(id), for the script tap
+    // Its role was Surface when it opened; a role change reopens the port,
+    // so this never changes while the callback can run.
+    bool surface = false;
     std::unique_ptr<RtMidiIn> in;
 };
 
@@ -118,10 +124,35 @@ bool MidiInput::identityStable(const QStringList &before, const QStringList &now
     return sameNamed(before) == sameNamed(now);
 }
 
+MidiInput::PortRole MidiInput::defaultRole(const QString &name)
+{
+    // Letters on neither side, so "DAW" in "KeyLab Essential 61 DAW" or
+    // "MIDI DAW Out" counts and "Dawson" or "Pseudawn" don't. Digits and
+    // punctuation are boundaries: "MCU1", "LKMK3_DAW".
+    static const QRegularExpression surfaceWord(
+        QStringLiteral("(?<![A-Za-z])(DAW|MCU|Mackie)(?![A-Za-z])"),
+        QRegularExpression::CaseInsensitiveOption);
+    if (surfaceWord.match(name).hasMatch())
+        return PortRole::Surface;
+    // Windows names a device's second port "MIDIIN2 (<device>)". Narrowed to
+    // KeyLabs (whose second port is their DAW port): a multi-port
+    // interface's second DIN input is named the same way and is a keyboard.
+    if (name.startsWith(QStringLiteral("MIDIIN2 ("), Qt::CaseInsensitive) &&
+        name.contains(QStringLiteral("KeyLab"), Qt::CaseInsensitive))
+        return PortRole::Surface;
+    return PortRole::Keyboard;
+}
+
 MidiInput::MidiInput(QObject *parent) : QObject(parent)
 {
     QSettings settings;
     m_disabled = settings.value(kDisabledPortsKey).toStringList();
+    m_surfacePorts = settings.value(kSurfacePortsKey).toStringList();
+    m_keyboardPorts = settings.value(kKeyboardPortsKey).toStringList();
+    // An identity in both (an edited settings file) is a surface: the safe
+    // reading, since it then never plays.
+    for (const QString &name : std::as_const(m_surfacePorts))
+        m_keyboardPorts.removeAll(name);
     m_livePlay = settings.value(kLivePlayKey, true).toBool();
     m_fixedVelocity = std::clamp(settings.value(kFixedVelocityKey, 0).toInt(), 0, 127);
     m_latencyMs =
@@ -293,6 +324,16 @@ QStringList MidiInput::openPorts() const
     return names;
 }
 
+QStringList MidiInput::openKeyboardPorts() const
+{
+    QStringList names;
+    for (const QString &name : openPorts()) {
+        if (portRole(name) == PortRole::Keyboard)
+            names.append(name);
+    }
+    return names;
+}
+
 bool MidiInput::isPortOpen(const QString &name) const
 {
     return std::any_of(m_open.begin(), m_open.end(),
@@ -331,6 +372,57 @@ void MidiInput::setPortEnabled(const QString &name, bool enabled)
     emit portsChanged(); // the page shows the setting even when nothing opened
 }
 
+MidiInput::PortRole MidiInput::portRole(const QString &name) const
+{
+    if (m_surfacePorts.contains(name))
+        return PortRole::Surface;
+    if (m_keyboardPorts.contains(name))
+        return PortRole::Keyboard;
+    return defaultRole(name);
+}
+
+void MidiInput::savePortRoles()
+{
+    QSettings settings;
+    if (m_surfacePorts.isEmpty())
+        settings.remove(kSurfacePortsKey);
+    else
+        settings.setValue(kSurfacePortsKey, m_surfacePorts);
+    if (m_keyboardPorts.isEmpty())
+        settings.remove(kKeyboardPortsKey);
+    else
+        settings.setValue(kKeyboardPortsKey, m_keyboardPorts);
+}
+
+void MidiInput::setPortRole(const QString &name, PortRole role)
+{
+    if (name.isEmpty())
+        return;
+    const PortRole was = portRole(name);
+    QStringList &mine = role == PortRole::Surface ? m_surfacePorts : m_keyboardPorts;
+    QStringList &other = role == PortRole::Surface ? m_keyboardPorts : m_surfacePorts;
+    // Kept even when it matches the name default: it is the user's choice
+    // now, whatever a later default says.
+    if (!mine.contains(name) || other.contains(name)) {
+        other.removeAll(name);
+        if (!mine.contains(name))
+            mine.append(name);
+        savePortRoles();
+    }
+    if (was == role)
+        return;
+    // The new role reaches the MIDI thread through OpenPort::surface, set
+    // before a port opens: reopened, the old callback is gone first (see
+    // shutPort). Closing reports portsClosed, so keys it held as a keyboard
+    // are released.
+    if (isPortOpen(name)) {
+        closeQuietly(name);
+        openQuietly(name);
+    }
+    emit settingsChanged();
+    emit portsChanged(); // the open keyboards changed, and the page shows the role
+}
+
 bool MidiInput::openPort(const QString &name)
 {
     if (isPortOpen(name))
@@ -359,6 +451,7 @@ bool MidiInput::openQuietly(const QString &name)
     port->id = name;
     port->rawAtOpen = rawNames(now);
     port->token = portToken(name);
+    port->surface = portRole(name) == PortRole::Surface;
     try {
         port->in = std::make_unique<RtMidiIn>(RtMidi::Api(m_api), kClientName);
         port->in->setErrorCallback(&onRtMidiError, nullptr);
@@ -646,18 +739,21 @@ void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *use
     if (!port || port->closing.load(std::memory_order_acquire))
         return;
     if (message && !message->empty())
-        port->owner->receive(message->data(), message->size(), midiClockNs(), port->token);
+        port->owner->receive(message->data(), message->size(), midiClockNs(), port->token,
+                             port->surface);
 }
 
 void MidiInput::injectForTest(const MidiMsg &msg, const QString &port)
 {
     const unsigned char bytes[3] = {msg.status, msg.d1, msg.d2};
-    receive(bytes, sizeof bytes, msg.arrivalNs, port.isEmpty() ? 0 : portToken(port));
+    receive(bytes, sizeof bytes, msg.arrivalNs, port.isEmpty() ? 0 : portToken(port),
+            !port.isEmpty() && portRole(port) == PortRole::Surface);
 }
 
 void MidiInput::injectBytesForTest(const std::vector<unsigned char> &bytes, const QString &port)
 {
-    receive(bytes.data(), bytes.size(), 0, port.isEmpty() ? 0 : portToken(port));
+    receive(bytes.data(), bytes.size(), 0, port.isEmpty() ? 0 : portToken(port),
+            !port.isEmpty() && portRole(port) == PortRole::Surface);
 }
 
 bool MidiInput::parseTap(const unsigned char *bytes, size_t size, MidiTapMsg *out)
@@ -718,6 +814,13 @@ void MidiInput::deliverTap()
     emit tapReady();
 }
 
+void MidiInput::deliverSurface()
+{
+    // As deliverTap.
+    m_surfacePosted.exchange(false, std::memory_order_acq_rel);
+    emit surfaceReady();
+}
+
 void MidiInput::setPortListForTest(const QStringList &names)
 {
     m_scan = scanned(names, PortNaming::Plain);
@@ -749,14 +852,29 @@ int64_t midiClockNs()
         .count();
 }
 
-void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port)
+void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port,
+                        bool surface)
 {
+    // A control surface's buttons are notes and CCs too, but they never
+    // play, record, light the keyboard or get learned: only the surface
+    // ring and the script tap see them (docs/control-surface/PLAN.md J1).
+    if (surface) {
+        MidiTapMsg msg;
+        if (parseTap(bytes, size, &msg)) {
+            msg.port = port;
+            m_surface.push(msg);
+            // One queued hop at a time; deliverSurface re-arms it.
+            if (!m_surfacePosted.exchange(true, std::memory_order_acq_rel))
+                QMetaObject::invokeMethod(this, &MidiInput::deliverSurface, Qt::QueuedConnection);
+        }
+    }
     // Learn: an assignable CC while armed is the one to learn (the first
     // to arrive) and never reaches live play, so the knob being learned
-    // doesn't move the song. The tap below still sees it.
-    bool swallow = false;
+    // doesn't move the song. The tap below still sees it. A surface's
+    // messages are swallowed outright.
+    bool swallow = surface;
     const uint32_t learnGen = m_learnArmedGen.load(std::memory_order_acquire);
-    if (learnGen != 0 && bytes && size >= 3 && (bytes[0] & 0xF0) == 0xB0 &&
+    if (!surface && learnGen != 0 && bytes && size >= 3 && (bytes[0] & 0xF0) == 0xB0 &&
         MidiRoutes::assignable(bytes[1] & 0x7F)) {
         uint64_t empty = 0;
         m_learnSlot.compare_exchange_strong(empty, uint64_t(learnGen) << 8 | (bytes[1] & 0x7F),
