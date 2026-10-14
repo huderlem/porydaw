@@ -470,4 +470,13 @@ Setup: KeyLab plugged in (in its Mackie/MCU DAW mode), a song open.
 
 - Jog, Save and Undo are harness-tested only (the KeyLab sends none of
   them on MIDIIN2).
-- `porydaw.midi.ports()` still has no `role` field (from step 1).
+- ~~`porydaw.midi.ports()` has no `role` field~~: added 2026-10-14 (user asked), see below.
+
+### `porydaw.midi.ports()` role (2026-10-14)
+
+User asked for it after step 1. Each port now carries `role`:
+`"keyboard"` or `"surface"`. A role change counts as a change, so
+`on("ports")` fires. Documented in `docs/scripting/API.md` (and the
+generated `docsrc/reference/scripting.md`). `--scriptcheck` checks the
+field and that `on("ports")` fires both ways. Mutation tested: a role that
+always reads keyboard FAILs. Sweeps normal and ASAN: PASS.

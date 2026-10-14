@@ -1007,10 +1007,14 @@ QVariantList ScriptHost::midiPorts() const
         return out;
     const QStringList open = m_midi->openPorts();
     for (const QString &name : m_midi->ports()) {
-        out.append(QVariantMap{{QStringLiteral("name"), name},
-                               {QStringLiteral("open"), open.contains(name)},
-                               {QStringLiteral("enabled"), m_midi->isPortEnabled(name)},
-                               {QStringLiteral("failed"), m_midi->portFailed(name)}});
+        out.append(QVariantMap{
+            {QStringLiteral("name"), name},
+            {QStringLiteral("open"), open.contains(name)},
+            {QStringLiteral("enabled"), m_midi->isPortEnabled(name)},
+            {QStringLiteral("failed"), m_midi->portFailed(name)},
+            {QStringLiteral("role"), m_midi->portRole(name) == MidiInput::PortRole::Surface
+                                         ? QStringLiteral("surface")
+                                         : QStringLiteral("keyboard")}});
     }
     return out;
 }

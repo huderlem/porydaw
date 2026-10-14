@@ -1442,14 +1442,17 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
     midi.setPortEnabled(QStringLiteral("Pads"), false);
     settle();
     const QString expectedPorts =
-        QString::fromUtf8(R"j([{"enabled":true,"failed":false,"name":"Keys A","open":false},)j"
-                          R"j({"enabled":true,"failed":false,"name":"Keys A (2)","open":true},)j"
-                          R"j({"enabled":false,"failed":false,"name":"Pads","open":false}])j");
+        QString::fromUtf8(R"j([{"enabled":true,"failed":false,"name":"Keys A","open":false,)j"
+                          R"j("role":"keyboard"},)j"
+                          R"j({"enabled":true,"failed":false,"name":"Keys A (2)","open":true,)j"
+                          R"j("role":"keyboard"},)j"
+                          R"j({"enabled":false,"failed":false,"name":"Pads","open":false,)j"
+                          R"j("role":"keyboard"}])j");
     // JSON.stringify keeps insertion order; sort the keys to compare.
     runc("function mpSorted(list) { return JSON.stringify(list.map(function (p) { var o = {}; "
          "Object.keys(p).sort().forEach(function (k) { o[k] = p[k]; }); return o; })); }");
     check(runc("mpSorted(porydaw.midi.ports())") == expectedPorts,
-          "midi.ports() does not report names, open, enabled and failed");
+          "midi.ports() does not report names, open, enabled, failed and role");
     check(runc("mpLog.length") == QStringLiteral("1") &&
               runc("mpLog[0].indexOf('true:') === 0") == QStringLiteral("true") &&
               runc("mpSorted(JSON.parse(mpLog[0].slice(5)))") == expectedPorts,
@@ -1457,10 +1460,24 @@ void runMidiChecks(const Check &check, scripting::ScriptHost &host, MainWindow &
     midi.setOpenPortsForTest({QStringLiteral("Keys A (2)")}); // no change
     settle();
     check(runc("mpLog.length") == QStringLiteral("1"), "midi.ports fired without a change");
+    // A port's role (docs/control-surface/PLAN.md) shows, and changing it
+    // is a change.
+    midi.setPortRole(QStringLiteral("Pads"), MidiInput::PortRole::Surface);
+    settle();
+    check(runc("porydaw.midi.ports()[2].role") == QStringLiteral("surface") &&
+              runc("porydaw.midi.ports()[0].role") == QStringLiteral("keyboard") &&
+              runc("mpLog.length") == QStringLiteral("2") &&
+              runc("JSON.parse(mpLog[1].slice(5))[2].role") == QStringLiteral("surface"),
+          "midi.ports() did not report a control surface's role, or midi.ports didn't fire");
+    midi.setPortRole(QStringLiteral("Pads"), MidiInput::PortRole::Keyboard);
+    settle();
+    check(runc("porydaw.midi.ports()[2].role") == QStringLiteral("keyboard") &&
+              runc("mpLog.length") == QStringLiteral("3"),
+          "midi.ports() did not follow a role set back to keyboard");
     runc("mpOff()");
     midi.setPortEnabled(QStringLiteral("Pads"), true);
     settle();
-    check(runc("mpLog.length") == QStringLiteral("1"), "midi.ports fired after unsubscribing");
+    check(runc("mpLog.length") == QStringLiteral("3"), "midi.ports fired after unsubscribing");
 
     // --- messages: the tap runs only while somebody listens ---
     check(!midi.tapEnabled(), "the MIDI script tap runs with no midi.message listener");
