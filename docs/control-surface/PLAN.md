@@ -439,13 +439,16 @@ Setup: KeyLab plugged in (in its Mackie/MCU DAW mode), a song open.
 3. **Stop** while playing: stops, the playhead returns to the edit cursor.
    **Stop** again: the edit cursor goes to the start of the song.
 4. **Seek right** (Fast-forward) while stopped: the edit cursor moves one
-   bar per press, landing on bar lines. **Seek left**: one bar back; from
-   mid-bar it goes to that bar's start; it stops at the song start.
+   bar per press, landing on bar lines, and stops at the song's end.
+   **Seek left**: one bar back; from mid-bar it goes to that bar's start;
+   it stops at the song start.
 5. **Hold** Seek right: one bar, then after a short pause it repeats, and
    after about a second it speeds up (two bars a step). Let go: it stops at
    once. Same holding Seek left, which stops at the start.
 6. Seek right/left **while playing**: playback jumps a bar from where it
-   is (not from where it started); holding it keeps jumping. While paused:
+   is (not from where it started); holding it keeps jumping. Holding (or
+   quickly double-pressing) Seek left keeps going back a bar each step; it
+   never replays the same bar's start over and over. While paused:
    the paused position moves a bar.
 7. **Loop**: the toolbar's Loop button toggles with each press.
 8. **Record**: a take starts (Record lit), play a few notes on the keys,
@@ -480,3 +483,33 @@ User asked for it after step 1. Each port now carries `role`:
 generated `docsrc/reference/scripting.md`). `--scriptcheck` checks the
 field and that `on("ports")` fires both ways. Mutation tested: a role that
 always reads keyboard FAILs. Sweeps normal and ASAN: PASS.
+
+### Review of steps 1–2 + port role (2026-10-14)
+
+`/code-review high 5ff6be0..HEAD`: 8 findings, no crash or data loss.
+
+**Fixed** (each mutation-tested in `--midicheck`):
+
+- **Rewind while playing landed on the same bar line again and again**
+  (the playhead moves past the line a step lands on). Within 1 s of a
+  step, Rewind now steps back from where that step landed
+  (`m_surfaceLastTo`, per session).
+- **Fast-forward and jog had no end**: forward steps stop at the song's
+  `lengthTicks`, and a cursor already past it stays put.
+- **A role change closed and reopened the port.** A failed reopen left it
+  dead until Refresh. `OpenPort::surface` is now an atomic the callback
+  reads per message, so the role flips in place. An open port still reports
+  `portsClosed`, so keys or a surface button it held are let go.
+- **Arrow keys in a focused role box lost focus** after one press (the
+  rebuild deleted the box). `rebuildPorts` now updates the same port list
+  in place.
+- **Undo acted on the document under a focused text field**: it's skipped
+  while a `QLineEdit` or spin box has focus, as Ctrl+Z would be.
+
+**Skipped**:
+
+- jog two's-complement decoding (non-standard MCU; the user doesn't
+  support non-standard devices);
+- a surface message parsed twice when the script tap is on (negligible).
+
+Sweeps normal and ASAN: PASS.

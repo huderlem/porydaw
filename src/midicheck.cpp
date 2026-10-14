@@ -10,6 +10,7 @@
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
@@ -388,8 +389,7 @@ void checkService()
 // MidiInput), and a Surface-role port's messages reaching the surface ring
 // and the script tap but never the input ring, the activity signal or
 // Learn. Injected as if from a port, which honours that port's role open or
-// not; a real port's close-and-reopen on a role change needs hardware (it is
-// checked when this machine has an open port, and on Windows by hand).
+// not. An open port's role flips in place and reports portsClosed.
 // docs/control-surface/PLAN.md §3.2: the MCU decoder's table.
 void checkMcuDecoder()
 {
@@ -666,20 +666,22 @@ void checkPortRoles()
     midi.setOpenPortsForTest({});
     midi.setTapEnabled(false);
 
-    // A real open port is closed and reopened by a role change (only on a
-    // machine with one; WSL and CI have none).
-    const QStringList real = midi.openPorts();
-    if (real.isEmpty()) {
-        std::printf("midicheck: role-change reopen SKIP (no open MIDI port)\n");
-    } else {
+    // An open port's role flips in place (no reopen that could fail) and
+    // reports portsClosed once, so what it held is let go; a closed port's
+    // doesn't.
+    {
         int closed = 0;
-        QObject::connect(&midi, &MidiInput::portsClosed, &midi, [&closed] { ++closed; });
-        const QString port = real.first();
-        const Role was = midi.portRole(port);
-        midi.setPortRole(port, was == Role::Surface ? Role::Keyboard : Role::Surface);
-        check(closed == 1 && midi.isPortOpen(port),
-              "surface: a role change did not close and reopen the open port");
-        midi.setPortRole(port, was);
+        const QMetaObject::Connection counter =
+            QObject::connect(&midi, &MidiInput::portsClosed, &midi, [&closed] { ++closed; });
+        midi.setOpenPortsForTest({keyboard});
+        midi.setPortRole(keyboard, Role::Surface);
+        check(closed == 1 && midi.openPorts().contains(keyboard) && !midi.portFailed(keyboard),
+              "surface: an open port's role change did not report it closed once, in place");
+        midi.setPortRole(keyboard, Role::Surface); // no change
+        midi.setOpenPortsForTest({});
+        midi.setPortRole(keyboard, Role::Keyboard); // not open
+        check(closed == 1, "surface: portsClosed without an open port's real role change");
+        QObject::disconnect(counter);
     }
 
     // The later checks start from no explicit roles.
@@ -1072,6 +1074,25 @@ void checkSettingsPage()
                 QApplication::processEvents();
                 check(midi.portRole(plain) == Role::Surface,
                       "roles page: the wheel over an unfocused role box changed the role");
+            }
+            // Arrow keys in a focused box change the role each press, and the
+            // box (rows updated in place, not rebuilt) keeps its focus.
+            if (QComboBox *box0 = roleBox(0)) {
+                page.activateWindow();
+                box0->setFocus();
+                QApplication::processEvents();
+                if (check(box0->hasFocus(), "roles page: could not focus a role box")) {
+                    for (const Qt::Key key : {Qt::Key_Up, Qt::Key_Down}) {
+                        QKeyEvent down(QEvent::KeyPress, key, Qt::NoModifier);
+                        QApplication::sendEvent(box0, &down);
+                        QApplication::processEvents();
+                        const Role want = key == Qt::Key_Up ? Role::Keyboard : Role::Surface;
+                        check(midi.portRole(plain) == want && roleBox(0) == box0 &&
+                                  box0->hasFocus() && box0->currentData().toInt() == int(want),
+                              "roles page: an arrow key in a focused role box lost its focus "
+                              "or didn't apply");
+                    }
+                }
             }
             shoot(&page, "roles");
             if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
@@ -1716,6 +1737,22 @@ void MainWindow::checkSurfaceTransport()
         QUndoStack *undo = m_active->doc.undoStack();
         const int index = undo->index();
         undo->push(new QUndoCommand(QStringLiteral("Surface check")));
+        // A focused text field keeps Undo off the document (its own text is
+        // Ctrl+Z's there).
+        {
+            QLineEdit field; // its own window: this one may never be shown
+            field.show();
+            field.activateWindow();
+            field.setFocus();
+            QApplication::processEvents();
+            if (check(QApplication::focusWidget() == &field,
+                      "surface transport: could not focus a text field")) {
+                tap(mcu::kUndo);
+                check(undo->index() == index + 1,
+                      "surface transport: Undo changed the document under a focused text field");
+            }
+        }
+        QApplication::processEvents();
         tap(mcu::kUndo);
         check(undo->index() == index, "surface transport: Undo did not undo");
     }
@@ -1794,9 +1831,7 @@ void MainWindow::checkSurfaceTransport()
     check(!m_surfaceRepeat->isActive(),
           "surface transport: a velocity-0 note on did not end Rewind's repeat");
     // A port closing ends a hold (its release can never come), and so does
-    // a song switch. A role change reopens the port, so it ends one through
-    // the same portsClosed; only a real open port emits that, so the
-    // harness emits it.
+    // a song switch. A role change of an open port reports portsClosed too.
     press(mcu::kFastForward);
     emit midi.portsClosed();
     check(!m_surfaceRepeat->isActive(), "surface transport: a port closing did not end a hold");
@@ -1815,6 +1850,18 @@ void MainWindow::checkSurfaceTransport()
     check(cursor() == L(2) - 2 * beat, "surface transport: a fast jog turn did not count");
     send(0xB0, mcu::kJogCc, 0x7F);
     check(cursor() == 0, "surface transport: jogging back past the start went below 0");
+    // Forward stops at the song's end; a cursor already past it stays put.
+    const uint64_t end = tl->lengthTicks;
+    view->commitEditCursor(end - 1);
+    tap(mcu::kFastForward);
+    check(cursor() == end, "surface transport: Fast-forward did not stop at the song's end");
+    tap(mcu::kFastForward);
+    send(0xB0, mcu::kJogCc, 0x05);
+    check(cursor() == end, "surface transport: Fast-forward or jog went past the song's end");
+    view->commitEditCursor(end + 10 * bar);
+    tap(mcu::kFastForward);
+    check(cursor() == end + 10 * bar,
+          "surface transport: Fast-forward past the song's end moved the cursor");
 
     // Playing: Rewind/FF step from the playhead (not the edit cursor, where
     // playback started) and seek there; held repeats chain from the seek's
@@ -1837,8 +1884,20 @@ void MainWindow::checkSurfaceTransport()
     check(m_audio.playheadSamples() > sampleOf(L(5)) && m_audio.playheadSamples() < sampleOf(L(6)),
           "surface transport: playback did not seek to where Fast-forward landed");
     synchronizePlayhead();
+    // Soon after a step, Rewind goes back from where it landed (the
+    // playhead is just past L(5) now; from it, Rewind would land on L(5)).
     tap(mcu::kRewind);
-    check(cursor() == L(5), "surface transport: Rewind while playing did not step back");
+    check(cursor() == L(4), "surface transport: Rewind soon after a step did not chain from it");
+    tap(mcu::kRewind);
+    check(cursor() == L(3), "surface transport: a second quick Rewind did not go a bar further");
+    // Long after one, from the playhead: to the bar line it last passed.
+    pumpMs(30); // the seek to L(3) lands
+    for (int i = 0; i < 1000 && tickOf(m_audio.playheadSamples()) <= L(3) + beat; i++)
+        pumpMs(10);
+    synchronizePlayhead();
+    m_surfaceLastStep.invalidate();
+    tap(mcu::kRewind);
+    check(cursor() == L(3), "surface transport: Rewind while playing did not step back");
     // Paused: from where it paused.
     pumpMs(30);
     tap(mcu::kPlay);

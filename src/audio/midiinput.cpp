@@ -64,9 +64,9 @@ struct MidiInput::OpenPort {
     // driver's thread then drops its message (see shutPort).
     std::atomic<bool> closing{false};
     uint16_t token = 0; // portToken(id), for the script tap
-    // Its role was Surface when it opened; a role change reopens the port,
-    // so this never changes while the callback can run.
-    bool surface = false;
+    // Its role is Surface. Written on the UI thread (setPortRole), read once
+    // per message by the callback, so a role change needs no reopen.
+    std::atomic<bool> surface{false};
     std::unique_ptr<RtMidiIn> in;
 };
 
@@ -411,16 +411,19 @@ void MidiInput::setPortRole(const QString &name, PortRole role)
     }
     if (was == role)
         return;
-    // The new role reaches the MIDI thread through OpenPort::surface, set
-    // before a port opens: reopened, the old callback is gone first (see
-    // shutPort). Closing reports portsClosed, so keys it held as a keyboard
-    // are released.
-    if (isPortOpen(name)) {
-        closeQuietly(name);
-        openQuietly(name);
+    // An open port flips in place: its callback routes each message by one
+    // read of OpenPort::surface. A key it holds as a keyboard would now
+    // release into the surface ring, and a held surface button into live
+    // play, so report it closed: held notes and a held repeat are let go.
+    for (auto &port : m_open) {
+        if (port->id == name)
+            port->surface.store(role == PortRole::Surface, std::memory_order_release);
     }
+    const bool open = openPorts().contains(name);
     emit settingsChanged();
     emit portsChanged(); // the open keyboards changed, and the page shows the role
+    if (open)
+        emit portsClosed();
 }
 
 bool MidiInput::openPort(const QString &name)
@@ -451,7 +454,7 @@ bool MidiInput::openQuietly(const QString &name)
     port->id = name;
     port->rawAtOpen = rawNames(now);
     port->token = portToken(name);
-    port->surface = portRole(name) == PortRole::Surface;
+    port->surface.store(portRole(name) == PortRole::Surface, std::memory_order_release);
     try {
         port->in = std::make_unique<RtMidiIn>(RtMidi::Api(m_api), kClientName);
         port->in->setErrorCallback(&onRtMidiError, nullptr);
@@ -740,7 +743,7 @@ void MidiInput::onMessage(double, std::vector<unsigned char> *message, void *use
         return;
     if (message && !message->empty())
         port->owner->receive(message->data(), message->size(), midiClockNs(), port->token,
-                             port->surface);
+                             port->surface.load(std::memory_order_acquire));
 }
 
 void MidiInput::injectForTest(const MidiMsg &msg, const QString &port)

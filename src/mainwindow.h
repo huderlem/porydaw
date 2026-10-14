@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QMainWindow>
 #include <QPointer>
 
@@ -801,6 +802,13 @@ class MainWindow : public QMainWindow
     QTimer *m_surfaceRepeat = nullptr;
     int m_surfaceRepeatDir = 0;
     int m_surfaceRepeats = 0;
+    // Where the last Rewind/FF/jog step landed, when, and in which session:
+    // a Rewind soon after (a held repeat, a quick second press) steps back
+    // from there, not from the playhead that has since moved past it.
+    uint64_t m_surfaceLastTo = 0;
+    QElapsedTimer m_surfaceLastStep;
+    const SongSession *m_surfaceLastSession = nullptr;
+    static constexpr int kSurfaceChainMs = 1000;
     QAction *m_followPlayheadAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_exportWavAction = nullptr;

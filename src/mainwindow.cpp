@@ -5718,6 +5718,11 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
         press(m_saveAction);
         break;
     case SurfaceEvent::Undo:
+        // Not while a text field has focus: Ctrl+Z there undoes its text,
+        // and the document mustn't change under an open editor.
+        if (QWidget *focus = QApplication::focusWidget();
+            qobject_cast<QLineEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus))
+            break;
         press(m_undoAction);
         break;
     case SurfaceEvent::Rewind:
@@ -5745,10 +5750,23 @@ void MainWindow::surfaceStep(int steps, bool bars)
     // While playing or paused the edit cursor is where playback started, so
     // stepping from it would jump back; the view's playhead already shows a
     // seek's target before the engine lands there, so held repeats chain.
-    const uint64_t from =
-        stopped ? view->editCursorTick()
-                : uint64_t(std::max<long long>(0, std::llround(view->playheadTick())));
-    const uint64_t to = view->timeline()->stepGridLines(from, steps, bars);
+    uint64_t from = stopped ? view->editCursorTick()
+                            : uint64_t(std::max<long long>(0, std::llround(view->playheadTick())));
+    // Back while playing: the playhead has moved on from where the last step
+    // landed, and stepping back from it would land on that same line again
+    // (a held Rewind replaying one bar's start). Soon after a step, go back
+    // from where it landed.
+    if (!stopped && steps < 0 && m_surfaceLastSession == m_active && m_surfaceLastStep.isValid() &&
+        m_surfaceLastStep.elapsed() < kSurfaceChainMs)
+        from = std::min(from, m_surfaceLastTo);
+    uint64_t to = view->timeline()->stepGridLines(from, steps, bars);
+    // Forward stops at the song's end (or where the cursor already is past
+    // it): beyond is silence, off the scrollable view.
+    if (steps > 0)
+        to = std::min(to, std::max(from, view->timeline()->lengthTicks));
+    m_surfaceLastTo = to;
+    m_surfaceLastSession = m_active;
+    m_surfaceLastStep.start();
     // Seeks playback when it isn't stopped (the editCursorMoved connect),
     // which a take sees as a Boundary.
     view->commitEditCursor(to);

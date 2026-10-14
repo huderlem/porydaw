@@ -214,9 +214,10 @@ class MidiInput : public QObject
     // Records the user's choice, which then always wins over defaultRole
     // (both lists hold explicit choices, so a name default never comes back
     // to a port the user turned around). A real change of role emits
-    // settingsChanged and portsChanged, and an open port is closed and
-    // reopened with it, so a MIDI thread never sees the role flip under a
-    // running callback.
+    // settingsChanged and portsChanged. An open port flips in place (its
+    // callback reads the role per message) and reports portsClosed: keys
+    // or a surface button it held now release the other way, so they are
+    // let go.
     void setPortRole(const QString &name, PortRole role);
     // Opens a listed port; false (never a throw) when it can't. Open ports
     // are not re-opened.

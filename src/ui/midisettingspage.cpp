@@ -669,10 +669,18 @@ void MidiSettingsPage::changeEvent(QEvent *event)
 void MidiSettingsPage::rebuildPorts()
 {
     m_loading = true;
-    m_ports->clear();
     const QStringList ports = m_midi.ports();
-    for (const QString &name : ports) {
-        auto *item = new QListWidgetItem(m_ports);
+    // The same ports (a role or check change, a failure): rows are updated
+    // in place, so a focused role box keeps its focus and its arrow keys
+    // keep working. A persistent editor follows its row's data.
+    bool same = m_ports->count() == ports.size();
+    for (int i = 0; same && i < m_ports->count(); i++)
+        same = m_ports->item(i)->data(kPortNameRole).toString() == ports.at(i);
+    if (!same)
+        m_ports->clear();
+    for (int i = 0; i < ports.size(); i++) {
+        const QString &name = ports.at(i);
+        QListWidgetItem *item = same ? m_ports->item(i) : new QListWidgetItem(m_ports);
         item->setData(kPortNameRole, name);
         item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
         // An unchecked port's role can still be set: marking a DAW port a
@@ -689,7 +697,7 @@ void MidiSettingsPage::rebuildPorts()
             item->setToolTip(name); // whole, where the row cuts it
         }
     }
-    for (int i = 0; i < m_ports->count(); i++)
+    for (int i = 0; !same && i < m_ports->count(); i++)
         m_ports->openPersistentEditor(m_ports->item(i));
     m_loading = false;
     fitPortList();
