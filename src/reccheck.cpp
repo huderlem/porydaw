@@ -32,6 +32,7 @@
 #include <random>
 #include <vector>
 
+#include "audio/mcu.h"
 #include "audio/midiinput.h"
 #include "core/miditimeline.h"
 #include "core/recordingtake.h"
@@ -2037,6 +2038,49 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         check(landedIn(62, p2 - cap, p2 - cap - period),
               "record: a stalled callback's wait was not capped at four periods");
         undo->undo();
+    }
+
+    // A control surface's Fast-forward during a take
+    // (docs/control-surface/PLAN.md step 2) seeks as the edit cursor does:
+    // a new segment, and a note held across it ends where it happened.
+    {
+        const QString surface = QStringLiteral("KeyLab Essential 61 DAW"); // a Surface by name
+        const auto surfaceSend = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+            midi.injectForTest({status, d1, d2}, surface);
+            QApplication::processEvents(); // the surface hop
+        };
+        view->setEditCursorTick(tpb * 8);
+        const int undoBefore = undo->index();
+        const auto before = noteList(a);
+        m_recordAction->trigger();
+        pumpMs(20);
+        synchronizePlayhead();
+        const uint32_t segmentBefore = m_take.segment();
+        const uint64_t pS = playhead();
+        send(0x90, 79, 100);
+        pumpMs(40);
+        synchronizePlayhead(); // the view's playhead is where FF steps from
+        const uint64_t pSeek = playhead();
+        surfaceSend(0x90, mcu::kFastForward, 127);
+        surfaceSend(0x80, mcu::kFastForward, 0);
+        const uint64_t landing = session->timeline->stepGridLines(tickOf(pSeek), 1, true);
+        check(recording() && view->editCursorTick() == landing && landing > tickOf(pSeek),
+              "record: a surface's Fast-forward did not move to the next bar during a take");
+        pumpMs(20);
+        check(playhead() >= sampleOf(landing) && playhead() < sampleOf(landing + tpb),
+              "record: a surface's Fast-forward did not seek the take's playback");
+        send(0x80, 79, 0);
+        pumpMs(20);
+        synchronizePlayhead();
+        check(m_take.segment() == segmentBefore + 1,
+              "record: the take did not see a surface's Fast-forward as a new segment");
+        m_stopAction->trigger();
+        const std::optional<DocNote> held = find(a, 79, tickOf(pS));
+        check(undo->index() == undoBefore + 1 && held &&
+                  held->tick + held->duration == tickOf(pSeek),
+              "record: a note held across a surface's Fast-forward did not end at the seek");
+        undo->undo();
+        check(noteList(a) == before, "record: undo after the surface-seek take did not restore");
     }
 
     // A loop wrap, a seek and a 2-pass overdub in one take: a note held

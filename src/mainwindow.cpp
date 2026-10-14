@@ -74,6 +74,7 @@
 #include <cstring>
 #include <functional>
 
+#include "audio/mcu.h"
 #include "audio/midiinput.h"
 #include "audio/sampleimport.h"
 #include "audio/sf2reader.h"
@@ -622,7 +623,7 @@ void MainWindow::buildUi()
     // Edit menu: undo/redo route to the active tab's stack.
     QMenu *editMenu = menuBar()->addMenu(tr("&Edit"));
     m_undoGroup = new QUndoGroup(this);
-    QAction *undoAction = m_undoGroup->createUndoAction(this, tr("&Undo"));
+    QAction *undoAction = m_undoAction = m_undoGroup->createUndoAction(this, tr("&Undo"));
     keys.attach(QStringLiteral("edit.undo"), undoAction);
     editMenu->addAction(undoAction);
     QAction *redoAction = m_undoGroup->createRedoAction(this, tr("&Redo"));
@@ -849,7 +850,15 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::portsClosed, this, [this] {
         if (m_audioOk)
             m_audio.liveAllNotesOff();
+        // Nor the release that ends a Rewind/FF hold (a role change
+        // reopens the port, so it lands here too).
+        stopSurfaceRepeat();
     });
+    // A control surface's MCU transport buttons (docs/control-surface/
+    // PLAN.md §3.3), and Rewind/FF's hold-to-repeat.
+    m_surfaceRepeat = new QTimer(this);
+    connect(m_surfaceRepeat, &QTimer::timeout, this, &MainWindow::surfaceRepeatTick);
+    connect(m_midiInput.get(), &MidiInput::surfaceReady, this, &MainWindow::drainSurface);
     // Live keys light the roll's keyboard: polled while input is arriving
     // and until the held set has stayed empty for a moment.
     m_liveKeysTimer = new QTimer(this);
@@ -1627,6 +1636,8 @@ void MainWindow::activateSession(SongSession *session, bool force)
     // A take commits to its own tab before the engine lets go of it.
     finishRecording();
     const SongSession *previous = m_active;
+    // A Rewind/FF hold belongs to the song it was moving through.
+    stopSurfaceRepeat();
     // Switching tabs stops playback in the tab being left, and lets go of
     // what the MIDI keyboard holds there.
     if (m_audioOk) {
@@ -5653,6 +5664,120 @@ void MainWindow::updateTransportActions()
     m_stopAction->setEnabled(loaded && t != Transport::Stopped);
     m_loopAction->setEnabled(loaded);
     syncRecordAction();
+}
+
+void MainWindow::drainSurface()
+{
+    MidiTapMsg msg;
+    while (m_midiInput->popSurface(&msg)) {
+        if (const std::optional<SurfaceEvent> event = mcu::decode(msg))
+            onSurfaceEvent(*event);
+    }
+}
+
+void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
+{
+    // Only a release ends a hold (J3), and it always may, even under a
+    // modal dialog that opened while the button was down.
+    if (!event.pressed) {
+        if ((event.kind == SurfaceEvent::Rewind && m_surfaceRepeatDir < 0) ||
+            (event.kind == SurfaceEvent::FastForward && m_surfaceRepeatDir > 0))
+            stopSurfaceRepeat();
+        return;
+    }
+    // As the keyboard's shortcuts are (J5). The window being in the
+    // background doesn't matter: that's what a hardware transport is for.
+    if (QApplication::activeModalWidget())
+        return;
+    // Each goes through the toolbar's own action, so its enabled state
+    // decides (J4): trigger() does nothing on a disabled action.
+    const auto press = [](QAction *action) {
+        if (action && action->isEnabled())
+            action->trigger();
+    };
+    switch (event.kind) {
+    case SurfaceEvent::Play:
+        // Play/Pause: Play when stopped (from the edit cursor) or paused
+        // (resuming), Pause while playing.
+        press(m_audio.transport() == Transport::Playing ? m_pauseAction : m_playAction);
+        break;
+    case SurfaceEvent::Stop:
+        // Stop while already stopped goes to the start (Stop is disabled
+        // then).
+        press(m_audio.transport() == Transport::Stopped ? m_goToStartAction : m_stopAction);
+        break;
+    case SurfaceEvent::Record:
+        // Hidden (no keyboard port) it is disabled too (syncRecordAction),
+        // so a surface alone never records.
+        press(m_recordAction);
+        break;
+    case SurfaceEvent::Cycle:
+        press(m_loopAction);
+        break;
+    case SurfaceEvent::Save:
+        press(m_saveAction);
+        break;
+    case SurfaceEvent::Undo:
+        press(m_undoAction);
+        break;
+    case SurfaceEvent::Rewind:
+    case SurfaceEvent::FastForward:
+        if (!m_active)
+            break;
+        m_surfaceRepeatDir = event.kind == SurfaceEvent::Rewind ? -1 : 1;
+        m_surfaceRepeats = 0;
+        surfaceStep(m_surfaceRepeatDir, /*bars=*/true);
+        m_surfaceRepeat->start(kSurfaceRepeatDelayMs);
+        break;
+    case SurfaceEvent::Jog:
+        surfaceStep(event.delta, /*bars=*/false);
+        break;
+    }
+}
+
+void MainWindow::surfaceStep(int steps, bool bars)
+{
+    if (!m_active || !m_active->view->timeline())
+        return;
+    SongView *view = m_active->view;
+    const bool stopped =
+        !m_audioOk || !m_audio.songLoaded() || m_audio.transport() == Transport::Stopped;
+    // While playing or paused the edit cursor is where playback started, so
+    // stepping from it would jump back; the view's playhead already shows a
+    // seek's target before the engine lands there, so held repeats chain.
+    const uint64_t from =
+        stopped ? view->editCursorTick()
+                : uint64_t(std::max<long long>(0, std::llround(view->playheadTick())));
+    const uint64_t to = view->timeline()->stepGridLines(from, steps, bars);
+    // Seeks playback when it isn't stopped (the editCursorMoved connect),
+    // which a take sees as a Boundary.
+    view->commitEditCursor(to);
+    // Playing, the view follows the playhead (or stays put by choice).
+    if (m_audio.transport() != Transport::Playing)
+        view->ensureTickVisible(to);
+}
+
+void MainWindow::surfaceRepeatTick()
+{
+    if (m_surfaceRepeatDir == 0) {
+        m_surfaceRepeat->stop();
+        return;
+    }
+    m_surfaceRepeats++;
+    m_surfaceRepeat->setInterval(kSurfaceRepeatIntervalMs);
+    // Held under a modal dialog: wait (its release still ends the hold).
+    if (QApplication::activeModalWidget())
+        return;
+    const int bars = m_surfaceRepeats >= kSurfaceRepeatFastAfter ? 2 : 1;
+    surfaceStep(m_surfaceRepeatDir * bars, /*bars=*/true);
+}
+
+void MainWindow::stopSurfaceRepeat()
+{
+    m_surfaceRepeatDir = 0;
+    m_surfaceRepeats = 0;
+    if (m_surfaceRepeat)
+        m_surfaceRepeat->stop();
 }
 
 QString MainWindow::recordUnavailableReason() const

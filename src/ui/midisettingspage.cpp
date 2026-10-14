@@ -336,6 +336,14 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     rolesNote->setObjectName(QStringLiteral("settingsMidiRolesNote"));
     rolesNote->setForegroundRole(QPalette::PlaceholderText);
     rolesNote->setWordWrap(true);
+    // The fixed MCU map (D5): what a control surface's buttons can do.
+    auto *buttonsNote =
+        new QLabel(tr("Control surface buttons: Play/Pause, Stop, Record, Loop, Rewind, "
+                      "Fast-forward, the jog wheel, Save and Undo."),
+                   m_controls);
+    buttonsNote->setObjectName(QStringLiteral("settingsMidiSurfaceButtons"));
+    buttonsNote->setForegroundRole(QPalette::PlaceholderText);
+    buttonsNote->setWordWrap(true);
     m_portsStatus = new QLabel(m_controls);
     m_portsStatus->setObjectName(QStringLiteral("settingsMidiPortsStatus"));
     m_portsStatus->setForegroundRole(QPalette::PlaceholderText);
@@ -353,6 +361,7 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     auto *portsLayout = new QVBoxLayout(portsGroup);
     portsLayout->addWidget(m_ports);
     portsLayout->addWidget(rolesNote);
+    portsLayout->addWidget(buttonsNote);
     portsLayout->addLayout(statusRow);
 
     // Playing and recording.

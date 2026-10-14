@@ -14,6 +14,7 @@
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QScopedValueRollback>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -25,6 +26,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
+#include <QUndoCommand>
 #include <QUndoStack>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -37,8 +39,10 @@
 #include <thread>
 #include <vector>
 
+#include "audio/mcu.h"
 #include "audio/midiinput.h"
 #include "audio/midiroutes.h"
+#include "core/miditimeline.h"
 #include "mainwindow.h"
 #include "ui/midisettingspage.h"
 #include "ui/settingsdialog.h"
@@ -102,6 +106,20 @@
 // input ring, activity or Learn, openKeyboardPorts, the Settings page's
 // role boxes, and in the window Record and lane Learn counting keyboard
 // ports only while a surface's note never sounds.
+//
+// Its step 2 adds the MCU decoder table (every mapped note pressed and
+// released both ways, other channels, unmapped notes and other messages
+// ignored, the jog wheel's relative encoding both ways), the bar/beat line
+// stepping Rewind/FF/jog move by (MidiTimeline::stepGridLines, across a
+// meter change), the Settings page's button list, and in the window the
+// buttons driving the transport through a Surface port: Play/Pause from
+// stopped, playing and paused, Stop and Stop-when-stopped, Loop, Record
+// following its action's rules, Save/Undo through their actions' enabled
+// state, Rewind/FF and jog moving the edit cursor (from the playhead while
+// playing or paused, clamped at 0), the hold-to-repeat fired by hand and
+// ended by a release, a closing port or a song switch, and a modal dialog
+// keeping every press out while a release still ends a hold. A seek from
+// a surface during a take is --reccheck's.
 
 namespace {
 
@@ -372,6 +390,87 @@ void checkService()
 // Learn. Injected as if from a port, which honours that port's role open or
 // not; a real port's close-and-reopen on a role change needs hardware (it is
 // checked when this machine has an open port, and on Windows by hand).
+// docs/control-surface/PLAN.md §3.2: the MCU decoder's table.
+void checkMcuDecoder()
+{
+    using K = SurfaceEvent::Kind;
+    const auto decoded = [](uint8_t status, uint8_t d1, uint8_t d2, K kind, bool pressed,
+                            int delta = 0) {
+        const std::optional<SurfaceEvent> e = mcu::decode(MidiTapMsg{status, d1, d2, 3});
+        return e && e->kind == kind && e->pressed == pressed && e->delta == delta;
+    };
+    const auto ignored = [](uint8_t status, uint8_t d1, uint8_t d2) {
+        return !mcu::decode(MidiTapMsg{status, d1, d2, 3}).has_value();
+    };
+    const std::pair<uint8_t, K> map[] = {
+        {0x5B, K::Rewind}, {0x5C, K::FastForward}, {0x5D, K::Stop}, {0x5E, K::Play},
+        {0x5F, K::Record}, {0x56, K::Cycle},       {0x50, K::Save}, {0x51, K::Undo},
+    };
+    for (const auto &[note, kind] : map) {
+        check(decoded(0x90, note, 127, kind, true) && decoded(0x90, note, 1, kind, true),
+              "mcu: a mapped button's note on is not its press");
+        check(decoded(0x80, note, 0, kind, false) && decoded(0x80, note, 64, kind, false) &&
+                  decoded(0x90, note, 0, kind, false),
+              "mcu: a mapped button's note off / velocity-0 note on is not its release");
+        check(ignored(0x91, note, 127) && ignored(0x8F, note, 0) && ignored(0x9F, note, 127),
+              "mcu: a mapped note on another channel was decoded");
+        check(ignored(0xA0, note, 127) && ignored(0xB0, note, 127) && ignored(0xD0, note, 0),
+              "mcu: a mapped note number in another message type was decoded");
+    }
+    for (const uint8_t note : {0, 60, 0x52, 0x55, 0x57, 0x5A, 0x60, 0x65, 94 + 12, 127})
+        check(ignored(0x90, uint8_t(note), 127) && ignored(0x80, uint8_t(note), 0),
+              "mcu: an unmapped note was decoded");
+    // The jog wheel: CC 60, bit 6 = backward, the low 6 bits count detents.
+    check(decoded(0xB0, 0x3C, 0x01, K::Jog, true, 1) && decoded(0xB0, 0x3C, 0x41, K::Jog, true, -1),
+          "mcu: one jog detent either way was not +1 / -1");
+    check(decoded(0xB0, 0x3C, 0x05, K::Jog, true, 5) &&
+              decoded(0xB0, 0x3C, 0x45, K::Jog, true, -5) &&
+              decoded(0xB0, 0x3C, 0x3F, K::Jog, true, 63) &&
+              decoded(0xB0, 0x3C, 0x7F, K::Jog, true, -63),
+          "mcu: a fast jog turn did not count its detents");
+    check(ignored(0xB0, 0x3C, 0x00) && ignored(0xB0, 0x3C, 0x40),
+          "mcu: a jog message of no detents was decoded");
+    check(ignored(0xB1, 0x3C, 0x01) && ignored(0xB0, 0x3B, 0x01) && ignored(0xB0, 0x3D, 0x41) &&
+              ignored(0xB0, 0x07, 0x01),
+          "mcu: another channel's or another CC's message was decoded as the jog wheel");
+    check(ignored(0xE0, 0x00, 0x40) && ignored(0xC0, 0x5E, 0x00),
+          "mcu: a fader or program change was decoded");
+}
+
+// Rewind/FF/jog's steps: bar and beat lines as the ruler draws them,
+// restarting at a meter change.
+void checkGridSteps()
+{
+    MidiTimeline tl;
+    tl.ticksPerBeat = 24;
+    // 4/4 from 0 (bars of 96), 3/4 from 200 (a partial bar before it; bars
+    // of 72), 6/8 from 416 (beats of 12, bars of 72).
+    tl.timeSigs = {{200, 3, 2}, {416, 6, 3}};
+    const auto bars = [&](uint64_t tick, int steps) { return tl.stepGridLines(tick, steps, true); };
+    const auto beats = [&](uint64_t tick, int steps) {
+        return tl.stepGridLines(tick, steps, false);
+    };
+    check(bars(0, 1) == 96 && bars(96, 1) == 192 && bars(0, 2) == 192 && bars(50, 1) == 96,
+          "grid steps: forward bars in 4/4 are not 96 ticks");
+    check(bars(192, 1) == 200 && bars(200, 1) == 272 && bars(272, 2) == 416 &&
+              bars(416, 1) == 488 && bars(192, 5) == 488,
+          "grid steps: forward bars do not restart at a meter change");
+    check(bars(96, -1) == 0 && bars(50, -1) == 0 && bars(200, -1) == 192 && bars(230, -1) == 200 &&
+              bars(416, -1) == 344 && bars(488, -3) == 272,
+          "grid steps: backward bars are not the lines before");
+    check(bars(0, -1) == 0 && bars(50, -5) == 0 && bars(96, -100) == 0,
+          "grid steps: stepping back past the start did not stop at 0");
+    check(beats(0, 1) == 24 && beats(10, 1) == 24 && beats(24, -1) == 0 && beats(10, -1) == 0 &&
+              beats(192, 1) == 200 && beats(200, 1) == 224 && beats(416, 1) == 428 &&
+              beats(428, -2) == 392 && beats(0, 3) == 72,
+          "grid steps: beats are not the ruler's beat lines");
+    check(bars(123, 0) == 123 && beats(123, 0) == 123, "grid steps: zero steps moved");
+    // No meter at all: the 4/4 default.
+    tl.timeSigs.clear();
+    check(bars(1000, 1) == 1056 && bars(1000, -1) == 960 && beats(1000, 1) == 1008,
+          "grid steps: a song without a meter is not 4/4");
+}
+
 void checkPortRoles()
 {
     using Role = MidiInput::PortRole;
@@ -905,6 +1004,15 @@ void checkSettingsPage()
                   rolesNote->text() == QStringLiteral("Control surface ports drive the transport "
                                                       "(Mackie Control) and never play notes."),
               "roles page: the line explaining control surfaces is missing");
+        // The fixed MCU map (D5), read-only, right under it.
+        auto *buttons = page.findChild<QLabel *>(QStringLiteral("settingsMidiSurfaceButtons"));
+        check(buttons && buttons->isVisibleTo(&page) && rolesNote &&
+                  buttons->parentWidget() == rolesNote->parentWidget() &&
+                  buttons->geometry().top() >= rolesNote->geometry().bottom() &&
+                  buttons->text() ==
+                      QStringLiteral("Control surface buttons: Play/Pause, Stop, Record, Loop, "
+                                     "Rewind, Fast-forward, the jog wheel, Save and Undo."),
+              "roles page: the control surface buttons line is missing or misplaced");
         if (check(ports->count() == 2 && roleBox(0) && roleBox(1),
                   "roles page: a port row has no role box")) {
             check(roleBox(0)->currentData().toInt() == int(Role::Keyboard) &&
@@ -1388,6 +1496,7 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     checkLiveControls();
     checkLaneLearn();
     checkSurfacePorts();
+    checkSurfaceTransport();
     return g_failures - before;
 }
 
@@ -1460,6 +1569,339 @@ void MainWindow::checkSurfacePorts()
     midi.setOpenPortsForTest({});
     QSettings().remove(QStringLiteral("midi/surfacePorts"));
     QSettings().remove(QStringLiteral("midi/keyboardPorts"));
+}
+
+// docs/control-surface/PLAN.md step 2, the window's half: a Surface port's
+// MCU buttons and jog wheel drive the transport (see the file comment).
+void MainWindow::checkSurfaceTransport()
+{
+    if (!m_audioOk) {
+        std::printf("midicheck: surface transport SKIP (no audio device)\n");
+        return;
+    }
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    const MidiTimeline *tl = view->timeline();
+    const QString surface = QStringLiteral("KeyLab Essential 61 DAW"); // a Surface by name
+    const QString keyboard = QStringLiteral("KeyLab Essential 61");
+    if (!midi.openKeyboardPorts().isEmpty()) {
+        std::printf("midicheck: surface transport SKIP (a real MIDI keyboard port is open)\n");
+        return;
+    }
+    m_audio.holdDeviceForTest(true);
+    stopPlayback();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    // As the surface sends it; the queued hop then lands (drainSurface).
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2}, surface);
+        QApplication::processEvents();
+    };
+    const auto press = [&](uint8_t note) { send(0x90, note, 127); };
+    const auto release = [&](uint8_t note) { send(0x80, note, 0); };
+    const auto tap = [&](uint8_t note) {
+        press(note);
+        release(note);
+    };
+    const auto transport = [&] { return m_audio.transport(); };
+    const auto cursor = [&] { return view->editCursorTick(); };
+    const auto viewPlayhead = [&] {
+        return uint64_t(std::max<long long>(0, std::llround(view->playheadTick())));
+    };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(m_active->timeline->tickForSample(sample)));
+    };
+    const auto sampleOf = [&](uint64_t tick) { return m_active->timeline->sampleForTick(tick); };
+    // Bar lines as the ruler draws them: this song restates its meter a
+    // little way into the first bar, so the lines are 0, then L(1) on, a
+    // bar apart.
+    const auto L = [&](int n) { return tl->stepGridLines(0, n, true); };
+    const uint64_t bar = L(2) - L(1);
+    const uint64_t beat = tl->stepGridLines(L(1), 1, false) - L(1);
+    // The checks below stay within the first 41 bars: one meter there.
+    bool uniform = L(1) > 0 && bar > 0 && beat > 0 && bar % beat == 0;
+    for (int n = 1; uniform && n <= 41; n++)
+        uniform = L(n + 1) - L(n) == bar &&
+                  tl->stepGridLines(L(n), int(bar / beat), false) == L(n + 1) &&
+                  tl->stepGridLines(L(n), 1, false) == L(n) + beat;
+    if (!check(uniform, "surface transport: the song's first 41 bars are not one meter")) {
+        m_audio.holdDeviceForTest(false);
+        return;
+    }
+    // The window needn't be active (J5): nothing here makes it so.
+
+    // Play/Pause: from stopped, Play from the edit cursor; playing, Pause;
+    // paused, resume where it paused. A release does nothing.
+    view->commitEditCursor(L(2));
+    press(mcu::kPlay);
+    check(transport() == Transport::Playing && viewPlayhead() == L(2),
+          "surface transport: Play while stopped did not play from the edit cursor");
+    release(mcu::kPlay);
+    check(transport() == Transport::Playing, "surface transport: Play's release changed something");
+    pumpMs(200);
+    press(mcu::kPlay);
+    release(mcu::kPlay);
+    const uint64_t pausedAt = m_audio.playheadSamples();
+    check(transport() == Transport::Paused && pausedAt > sampleOf(L(2)),
+          "surface transport: Play while playing did not pause");
+    tap(mcu::kPlay);
+    check(transport() == Transport::Playing && m_audio.playheadSamples() == pausedAt,
+          "surface transport: Play while paused did not resume where it paused");
+    pumpMs(50);
+    check(m_audio.playheadSamples() > pausedAt,
+          "surface transport: playback resumed from Play did not run");
+    // Velocity-0 note on is a release too: Play then pauses once, not twice.
+    send(0x90, mcu::kPlay, 127);
+    send(0x90, mcu::kPlay, 0);
+    check(transport() == Transport::Paused,
+          "surface transport: a press released by a velocity-0 note on did not pause once");
+
+    // Stop: stops (the edit cursor stays); stopped, goes to the start.
+    tap(mcu::kStop);
+    check(transport() == Transport::Stopped && cursor() == L(2),
+          "surface transport: Stop did not stop, or moved the edit cursor");
+    tap(mcu::kPlay);
+    tap(mcu::kStop);
+    check(transport() == Transport::Stopped && cursor() == L(2),
+          "surface transport: Stop while playing did not stop");
+    tap(mcu::kStop);
+    check(transport() == Transport::Stopped && cursor() == 0,
+          "surface transport: Stop while stopped did not go to the start");
+
+    // Loop toggles on press only.
+    const bool loopOn = m_loopAction->isChecked();
+    press(mcu::kCycle);
+    check(m_loopAction->isChecked() == !loopOn, "surface transport: Loop did not toggle Loop");
+    release(mcu::kCycle);
+    check(m_loopAction->isChecked() == !loopOn, "surface transport: Loop's release toggled");
+    tap(mcu::kCycle);
+    check(m_loopAction->isChecked() == loopOn, "surface transport: Loop did not toggle back");
+
+    // Record follows its action: hidden with no keyboard (the surface
+    // alone isn't one), a take with one; Stop ends it.
+    midi.setOpenPortsForTest({surface});
+    tap(mcu::kRecord);
+    check(m_takeSession == nullptr && transport() == Transport::Stopped,
+          "surface transport: Record started a take with no keyboard port");
+    midi.setOpenPortsForTest({keyboard});
+    view->commitEditCursor(L(1));
+    tap(mcu::kRecord);
+    check(m_takeSession != nullptr && transport() == Transport::Playing &&
+              m_recordAction->isChecked(),
+          "surface transport: Record did not start a take");
+    pumpMs(50);
+    tap(mcu::kStop);
+    check(m_takeSession == nullptr && transport() == Transport::Stopped,
+          "surface transport: Stop did not end the take");
+    midi.setOpenPortsForTest({});
+
+    // Save and Undo go through their actions, enabled state and all (J4).
+    {
+        int saves = 0;
+        const QMetaObject::Connection counter =
+            connect(m_saveAction, &QAction::triggered, this, [&] { saves++; });
+        // saveSession returns at once while a save is in progress: the
+        // harness counts the trigger without writing the song.
+        const QScopedValueRollback<bool> noWrite(m_saveInProgress, true);
+        const bool saveEnabled = m_saveAction->isEnabled();
+        m_saveAction->setEnabled(true);
+        tap(mcu::kSave);
+        check(saves == 1, "surface transport: Save did not trigger Save Song");
+        m_saveAction->setEnabled(false);
+        tap(mcu::kSave);
+        check(saves == 1, "surface transport: Save triggered a disabled Save Song");
+        m_saveAction->setEnabled(saveEnabled);
+        disconnect(counter);
+
+        QUndoStack *undo = m_active->doc.undoStack();
+        const int index = undo->index();
+        undo->push(new QUndoCommand(QStringLiteral("Surface check")));
+        tap(mcu::kUndo);
+        check(undo->index() == index, "surface transport: Undo did not undo");
+    }
+
+    // Rewind / Fast-forward, stopped: one bar line per press from the edit
+    // cursor, never below 0; the view keeps it in sight.
+    view->commitEditCursor(L(2));
+    tap(mcu::kFastForward);
+    check(cursor() == L(3), "surface transport: Fast-forward did not move one bar on");
+    tap(mcu::kRewind);
+    tap(mcu::kRewind);
+    check(cursor() == L(1), "surface transport: Rewind did not move one bar back");
+    view->commitEditCursor(L(2) + beat);
+    tap(mcu::kRewind);
+    check(cursor() == L(2), "surface transport: Rewind mid-bar did not land on its bar line");
+    view->commitEditCursor(L(2) + beat);
+    tap(mcu::kFastForward);
+    check(cursor() == L(3),
+          "surface transport: Fast-forward mid-bar did not land on the next bar line");
+    view->commitEditCursor(L(1) / 2);
+    tap(mcu::kRewind);
+    check(cursor() == 0, "surface transport: Rewind inside the first bar did not go to 0");
+    tap(mcu::kRewind);
+    check(cursor() == 0, "surface transport: Rewind at 0 went below 0");
+    {
+        view->goToStart();
+        // The last bar line a bar inside the song (the camera stops a
+        // viewport past its end), which a home view doesn't show.
+        int n = 1;
+        while (n < 40 && L(n + 1) + bar <= tl->lengthTicks)
+            n++;
+        const uint64_t far = L(n);
+        check(view->contentX(double(far)) > view->width(),
+              "surface transport: the song's last bars are already in sight at home");
+        for (int i = 0; i < n; i++)
+            tap(mcu::kFastForward);
+        const qreal x = view->contentX(double(far));
+        check(cursor() == far && x >= 0.0 && x < view->width(),
+              "surface transport: Fast-forward left the edit cursor out of sight");
+    }
+
+    // Held: a repeat after 400 ms, then every 150 ms, two bars a step from
+    // one second; a release ends it. The timer is fired by hand.
+    view->commitEditCursor(0);
+    press(mcu::kFastForward);
+    check(cursor() == L(1) && m_surfaceRepeat->isActive() &&
+              m_surfaceRepeat->interval() == kSurfaceRepeatDelayMs,
+          "surface transport: holding Fast-forward did not arm its 400 ms repeat");
+    surfaceRepeatTick();
+    check(cursor() == L(2) && m_surfaceRepeat->interval() == kSurfaceRepeatIntervalMs,
+          "surface transport: the first repeat did not move a bar and go to 150 ms");
+    surfaceRepeatTick();
+    surfaceRepeatTick();
+    surfaceRepeatTick();
+    check(cursor() == L(5),
+          "surface transport: the repeats within the first second did not move a bar each");
+    surfaceRepeatTick();
+    check(cursor() == L(7), "surface transport: a repeat at one second did not move two bars");
+    surfaceRepeatTick();
+    check(cursor() == L(9), "surface transport: a repeat past one second did not move two bars");
+    // Rewind's release doesn't end Fast-forward's hold; its own does.
+    release(mcu::kRewind);
+    check(m_surfaceRepeat->isActive(), "surface transport: another button's release ended a hold");
+    release(mcu::kFastForward);
+    check(!m_surfaceRepeat->isActive(), "surface transport: the release did not end the repeat");
+    surfaceRepeatTick();
+    check(cursor() == L(9), "surface transport: a repeat moved after the release");
+    // Rewind held runs back to 0 and stays there; a velocity-0 note on ends it.
+    view->commitEditCursor(L(2));
+    press(mcu::kRewind);
+    surfaceRepeatTick();
+    surfaceRepeatTick();
+    check(cursor() == 0 && m_surfaceRepeat->isActive(),
+          "surface transport: holding Rewind did not repeat back to 0");
+    send(0x90, mcu::kRewind, 0);
+    check(!m_surfaceRepeat->isActive(),
+          "surface transport: a velocity-0 note on did not end Rewind's repeat");
+    // A port closing ends a hold (its release can never come), and so does
+    // a song switch. A role change reopens the port, so it ends one through
+    // the same portsClosed; only a real open port emits that, so the
+    // harness emits it.
+    press(mcu::kFastForward);
+    emit midi.portsClosed();
+    check(!m_surfaceRepeat->isActive(), "surface transport: a port closing did not end a hold");
+    press(mcu::kFastForward);
+    activateSession(m_active, /*force=*/true);
+    check(!m_surfaceRepeat->isActive(), "surface transport: a song switch did not end a hold");
+
+    // The jog wheel: one beat per detent, fast turns several.
+    view->commitEditCursor(L(2));
+    send(0xB0, mcu::kJogCc, 0x01);
+    check(cursor() == L(2) + beat, "surface transport: a jog detent did not move a beat on");
+    send(0xB0, mcu::kJogCc, 0x41);
+    check(cursor() == L(2), "surface transport: a jog detent back did not move a beat back");
+    send(0xB0, mcu::kJogCc, 0x03);
+    send(0xB0, mcu::kJogCc, 0x45);
+    check(cursor() == L(2) - 2 * beat, "surface transport: a fast jog turn did not count");
+    send(0xB0, mcu::kJogCc, 0x7F);
+    check(cursor() == 0, "surface transport: jogging back past the start went below 0");
+
+    // Playing: Rewind/FF step from the playhead (not the edit cursor, where
+    // playback started) and seek there; held repeats chain from the seek's
+    // target before the engine reports it.
+    view->commitEditCursor(L(2));
+    tap(mcu::kPlay);
+    for (int i = 0; i < 1000 && tickOf(m_audio.playheadSamples()) <= L(3) + beat; i++)
+        pumpMs(10);
+    synchronizePlayhead();
+    check(viewPlayhead() > L(3) && viewPlayhead() < L(4),
+          "surface transport: playback never reached the fourth bar");
+    press(mcu::kFastForward);
+    check(cursor() == L(4) && viewPlayhead() == L(4),
+          "surface transport: Fast-forward while playing did not step from the playhead");
+    surfaceRepeatTick();
+    check(cursor() == L(5) && viewPlayhead() == L(5),
+          "surface transport: a held repeat while playing did not chain from the seek");
+    release(mcu::kFastForward);
+    pumpMs(30);
+    check(m_audio.playheadSamples() > sampleOf(L(5)) && m_audio.playheadSamples() < sampleOf(L(6)),
+          "surface transport: playback did not seek to where Fast-forward landed");
+    synchronizePlayhead();
+    tap(mcu::kRewind);
+    check(cursor() == L(5), "surface transport: Rewind while playing did not step back");
+    // Paused: from where it paused.
+    pumpMs(30);
+    tap(mcu::kPlay);
+    check(transport() == Transport::Paused, "surface transport: could not pause");
+    view->commitEditCursor(0); // seeks the paused engine to 0
+    pumpMs(10);
+    synchronizePlayhead();
+    tap(mcu::kFastForward);
+    check(cursor() == L(1) && transport() == Transport::Paused,
+          "surface transport: Fast-forward while paused did not step from the paused playhead");
+    tap(mcu::kStop);
+
+    // A modal dialog keeps every press out (J5); a release still ends a
+    // hold, and a repeat waits under it.
+    {
+        QDialog modal(this);
+        modal.setModal(true);
+        view->commitEditCursor(L(2));
+        press(mcu::kFastForward);
+        check(cursor() == L(3) && m_surfaceRepeat->isActive(),
+              "surface transport: could not hold Fast-forward");
+        modal.show();
+        QApplication::processEvents();
+        if (check(QApplication::activeModalWidget() == &modal,
+                  "surface transport: the modal dialog is not the active modal widget")) {
+            surfaceRepeatTick();
+            check(cursor() == L(3), "surface transport: a repeat moved under a modal dialog");
+            release(mcu::kFastForward);
+            check(!m_surfaceRepeat->isActive(),
+                  "surface transport: a release under a modal dialog did not end the hold");
+            const bool loop = m_loopAction->isChecked();
+            tap(mcu::kPlay);
+            tap(mcu::kCycle);
+            tap(mcu::kFastForward);
+            send(0xB0, mcu::kJogCc, 0x01);
+            check(transport() == Transport::Stopped && m_loopAction->isChecked() == loop &&
+                      cursor() == L(3) && !m_surfaceRepeat->isActive(),
+                  "surface transport: a button acted under a modal dialog");
+        }
+        modal.hide();
+        QApplication::processEvents();
+        tap(mcu::kPlay);
+        check(transport() == Transport::Playing,
+              "surface transport: Play did not work after the modal dialog closed");
+        tap(mcu::kStop);
+    }
+
+    // Anything else on the port does nothing (J7).
+    {
+        const bool loop = m_loopAction->isChecked();
+        view->commitEditCursor(L(2));
+        send(0x90, 60, 127);
+        send(0x91, mcu::kPlay, 127);
+        send(0xB0, 7, 100);
+        send(0xE0, 0, 64);
+        check(transport() == Transport::Stopped && cursor() == L(2) &&
+                  m_loopAction->isChecked() == loop,
+              "surface transport: a non-MCU message acted");
+    }
+    check(midi.surfaceDropped() == 0, "surface transport: the surface ring dropped a message");
+    stopPlayback();
+    view->commitEditCursor(0);
+    m_audio.holdDeviceForTest(false);
 }
 
 // Step 2: live play on the selected track (see the file comment).
@@ -2143,6 +2585,8 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
     checkRing();
     checkService();
     checkPortRoles();
+    checkMcuDecoder();
+    checkGridSteps();
     checkRoutesTable();
     checkRoutesService();
     checkSettingsPage();

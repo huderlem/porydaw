@@ -39,6 +39,7 @@ class NewSongWizard;
 class SmfFile;
 class SongListPanel;
 class SongView;
+struct SurfaceEvent;
 class VoicegroupBrowser;
 
 namespace themes {
@@ -324,6 +325,31 @@ class MainWindow : public QMainWindow
     // step 1): a surface alone shows no Record button, offers no lane Learn
     // and plays nothing (midicheck.cpp).
     void checkSurfacePorts();
+    // Step 2: MCU transport buttons and the jog wheel driving the
+    // transport from a surface port (midicheck.cpp).
+    void checkSurfaceTransport();
+
+    // Control surface dispatch (docs/control-surface/PLAN.md §3.3): drains
+    // MidiInput's surface ring (on surfaceReady) through mcu::decode into
+    // onSurfaceEvent, which presses the toolbar's actions. Ignored while a
+    // modal dialog is open, except that a release still ends a repeat.
+    void drainSurface();
+    void onSurfaceEvent(const SurfaceEvent &event);
+    // Rewind / Fast-forward / jog: moves the edit cursor steps bar lines
+    // (bars) or beat lines from where playback is (the edit cursor while
+    // stopped, the playhead otherwise), which seeks playback when it isn't
+    // stopped.
+    void surfaceStep(int steps, bool bars);
+    // Rewind/FF held: the first repeat after kSurfaceRepeatDelayMs, then
+    // every kSurfaceRepeatIntervalMs, two bars a step from repeat
+    // kSurfaceRepeatFastAfter on (held one second). The timer's slot, and
+    // what the harness calls to fire a repeat by hand.
+    void surfaceRepeatTick();
+    // Ends a Rewind/FF hold (release, a port closing, a song switch).
+    void stopSurfaceRepeat();
+    static constexpr int kSurfaceRepeatDelayMs = 400;
+    static constexpr int kSurfaceRepeatIntervalMs = 150;
+    static constexpr int kSurfaceRepeatFastAfter = 5; // 400 + 4 × 150 ms = 1 s
     // runRecordWindowCheck's halves (reccheck.cpp).
     void checkRecordingTakes(const QString &scratchDir);
     void checkRecordingDisplay();
@@ -769,6 +795,12 @@ class MainWindow : public QMainWindow
     QAction *m_pauseAction = nullptr;
     QAction *m_stopAction = nullptr;
     QAction *m_loopAction = nullptr;
+    QAction *m_undoAction = nullptr; // the undo group's (Edit → Undo)
+    // Rewind/FF hold-to-repeat (surfaceRepeatTick): the direction held (-1
+    // Rewind, +1 Fast-forward, 0 none) and the repeats so far.
+    QTimer *m_surfaceRepeat = nullptr;
+    int m_surfaceRepeatDir = 0;
+    int m_surfaceRepeats = 0;
     QAction *m_followPlayheadAction = nullptr;
     QAction *m_saveAction = nullptr;
     QAction *m_exportWavAction = nullptr;

@@ -464,6 +464,34 @@ std::vector<MidiTimeline::TimeSigSegment> MidiTimeline::timeSigSegments() const
     return segs;
 }
 
+uint64_t MidiTimeline::stepGridLines(uint64_t tick, int steps, bool bars) const
+{
+    const std::vector<TimeSigSegment> segs = timeSigSegments();
+    // The segment governing t: the last one starting at or before it.
+    const auto segAt = [&](uint64_t t) {
+        size_t i = 0;
+        while (i + 1 < segs.size() && segs[i + 1].tick <= t)
+            i++;
+        return i;
+    };
+    const auto unitOf = [&](const TimeSigSegment &seg) {
+        return std::max<uint64_t>(1, seg.beatTicks * (bars ? uint64_t(seg.beatsPerBar) : 1));
+    };
+    for (; steps > 0; steps--) {
+        const size_t i = segAt(tick);
+        const uint64_t unit = unitOf(segs[i]);
+        const uint64_t next = segs[i].tick + ((tick - segs[i].tick) / unit + 1) * unit;
+        tick = i + 1 < segs.size() ? std::min(next, segs[i + 1].tick) : next;
+    }
+    for (; steps < 0 && tick > 0; steps++) {
+        // The last line at or before tick - 1, in the segment holding it.
+        const size_t i = segAt(tick - 1);
+        const uint64_t unit = unitOf(segs[i]);
+        tick = segs[i].tick + (tick - 1 - segs[i].tick) / unit * unit;
+    }
+    return tick;
+}
+
 MidiTimeline::BarPosition MidiTimeline::barPositionForTick(double tick) const
 {
     const std::vector<TimeSigSegment> segs = timeSigSegments();

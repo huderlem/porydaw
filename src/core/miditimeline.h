@@ -143,4 +143,11 @@ class MidiTimeline
         uint64_t beatTicks;
     };
     BarPosition barPositionForTick(double tick) const;
+
+    // The tick |steps| bar lines (bars) or beat lines (!bars) after tick
+    // (steps > 0) or before it (steps < 0), on the grid timeSigSegments
+    // describes: lines restart at every meter change, whose tick is always
+    // one. From a tick between two lines, the first step lands on the
+    // nearer line in that direction. Never below 0; steps == 0 returns tick.
+    uint64_t stepGridLines(uint64_t tick, int steps, bool bars) const;
 };

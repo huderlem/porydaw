@@ -134,6 +134,8 @@ qt_add_library(porydaw_app STATIC
     src/audio/auditionslots.h
     src/audio/midiinput.cpp
     src/audio/midiinput.h
+    src/audio/mcu.cpp
+    src/audio/mcu.h
     src/audio/midiroutes.cpp
     src/audio/midiroutes.h
     src/audio/miniaudio_impl.c

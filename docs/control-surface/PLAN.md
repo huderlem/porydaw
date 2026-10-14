@@ -304,3 +304,170 @@ release, so Rewind/FF hold-to-repeat (J3) works as planned.
   wanted.
 - With the window at its minimum width the role box leaves a long port name
   little room (it elides in the middle; the tooltip has it whole).
+
+### Step 2 — MCU decoder + transport dispatch (2026-10-13, uncommitted)
+
+**What landed**
+
+- **`src/audio/mcu.{h,cpp}`** (pure): `struct SurfaceEvent { Kind kind;
+  bool pressed; int delta; }` (Kind: Play, Stop, Record, Cycle, Rewind,
+  FastForward, Save, Undo, Jog) and `std::optional<SurfaceEvent>
+  mcu::decode(const MidiTapMsg &)`, shaped as §3.2. Channel 1 only. Notes
+  0x5B Rewind, 0x5C Fast-forward, 0x5D Stop, 0x5E Play, 0x5F Record, 0x56
+  Cycle, 0x50 Save, 0x51 Undo: a note on with velocity > 0 is a press, a
+  note off (any velocity) or a velocity-0 note on is a release. CC 0x3C is
+  the jog wheel (bit 6 = backward, low 6 bits = detents; `delta` signed,
+  a zero-detent message ignored). Everything else (other channels,
+  unmapped notes, other CCs, faders, aftertouch, program change) is
+  nothing (J7). The note numbers are named constants (`mcu::kPlay`, …).
+- **`MidiTimeline::stepGridLines(tick, steps, bars)`**: the tick |steps|
+  bar (or beat) lines away, on the grid `timeSigSegments` describes, i.e.
+  the ruler's: lines restart at every meter change (whose tick is always a
+  line), never below 0.
+- **MainWindow dispatch** (§3.3): `surfaceReady` → `drainSurface` (pops
+  everything, decodes, `onSurfaceEvent`). Presses go through the toolbar's
+  own actions and only when enabled (J4):
+  - **Play** = Pause while playing, else Play (`m_playAction`:
+    `startPlayback()` seeks to the edit cursor when stopped and resumes in
+    place when paused; checked in the harness).
+  - **Stop** = Stop; while stopped (Stop is disabled then) Go to Start.
+  - **Record** = `m_recordAction` when enabled (with no keyboard port it
+    is hidden *and* disabled, so a surface alone never records).
+  - **Loop** = `m_loopAction`; **Save** = `m_saveAction`; **Undo** = the undo
+    group's action (now kept as `m_undoAction`).
+  - **Rewind / Fast-forward** = one bar line back/forward via
+    `surfaceStep` → `SongView::commitEditCursor` (seeks when not stopped;
+    a Boundary in a take), then `ensureTickVisible` unless playing.
+    Hold-to-repeat on one `QTimer` (`m_surfaceRepeat`): first repeat at
+    400 ms, then every 150 ms, two bars per step from the 5th repeat
+    (400 + 4 × 150 = 1 s held). Ended by that button's release, any
+    `portsClosed` (unplug, disable, Refresh, a role change's reopen) and
+    `activateSession` (song switch/close). No other safeguards (user).
+  - **Jog** = `delta` beat lines.
+  - Under a modal dialog (`QApplication::activeModalWidget()`) presses do
+    nothing and a held repeat skips its steps, but a release still ends
+    the hold (J5). The window's focus/activation is never consulted, so
+    the buttons work with Porydaw in the background.
+- **Settings → MIDI:** under the step-1 note, a second read-only line:
+  "Control surface buttons: Play/Pause, Stop, Record, Loop, Rewind,
+  Fast-forward, the jog wheel, Save and Undo." (`settingsMidiSurfaceButtons`,
+  same style as the note above it; the page layout is otherwise untouched.)
+
+**Judgment calls**
+
+- **Rewind/FF/jog step from where playback is**: the edit cursor while
+  stopped, the playhead while playing or paused. While playing, the edit
+  cursor sits where playback started, so stepping from it would make FF
+  jump *back* after a few bars. The playhead read is the view's
+  (`SongView::playheadTick`), which shows a seek's target at once, so a
+  held repeat chains from its own last seek rather than the engine's
+  not-yet-landed position. The edit cursor still moves (via
+  `commitEditCursor`), so the seek and the take's Boundary are the
+  existing path.
+- **Steps land on grid lines, not ± a bar's length**: FF goes to the next
+  bar line, Rewind to the previous one (so from mid-bar, Rewind goes to the
+  bar's start, as in most DAWs; on a line it is exactly one bar). This
+  matches the ruler, including songs that restate their meter mid-bar
+  (`mus_abandoned_ship` has a 4/4 at tick 36, so its bar lines are 0, 36,
+  132, …).
+- **The fast phase counts repeats, not wall time** (5th repeat on = held
+  ≥ 1 s at the nominal timing), so the harness can fire the timer by hand.
+- **A repeat under a modal dialog waits** (skips its step but keeps the
+  hold) rather than ending it; the release ends it as always.
+- **Only the held button's release ends a hold**: Rewind's release doesn't
+  stop Fast-forward's repeat. A new Rewind/FF press replaces the hold.
+- **Not scrolling while playing**: a step while playing leaves the camera
+  to Follow Playhead (or to the user, with it off).
+- **Save in the harness** is counted with `m_saveInProgress` set, so
+  `saveSession` returns before writing anything.
+
+**Verification**
+
+- `--midicheck`: `checkMcuDecoder` (every mapped note: press at 127 and 1,
+  release as note off at 0 and 64 and as velocity-0 note on; the same notes
+  on channels 2 and 16 and in aftertouch/CC/channel pressure ignored; ten
+  unmapped notes; jog ±1, ±5, ±63, zero detents both ways, other channels
+  and neighbouring CCs, a fader and a program change ignored),
+  `checkGridSteps` (a synthetic 4/4 → 3/4 → 6/8 timeline: forward and back
+  bars and beats across both changes, partial bar before a change, clamp at
+  0, zero steps, no meter = 4/4), the Settings line (text, visible, under
+  the note), and `MainWindow::checkSurfaceTransport` through
+  `injectForTest` on a Surface-role port: Play from stopped (from the edit
+  cursor), Play's release inert, Pause while playing, resume from paused at
+  the paused sample, a velocity-0 release; Stop while paused and playing
+  (cursor kept), Stop when stopped → cursor 0; Loop toggles on press only;
+  Record refused with only the surface open, a take with a keyboard, Stop
+  ends it; Save triggers Save Song once enabled, not when disabled; Undo
+  undoes; Rewind/FF stopped (bar lines, mid-bar, clamp at 0, the cursor
+  scrolled into view); the repeat (400 ms armed, 150 ms after the first,
+  one bar ×4 then two bars, another button's release ignored, its own
+  release stops it and a late tick doesn't move, Rewind held to 0 and a
+  velocity-0 release); a port closing and a song switch ending a hold; jog
+  ±1, +3/−5, −63 clamped; while playing FF from the playhead (not the
+  cursor), a hand-fired repeat chaining from the seek's target, the engine
+  landing there, Rewind back; while paused FF from the paused playhead; a
+  modal dialog: a repeat waits, the release still ends the hold, Play /
+  Loop / FF / jog do nothing, Play works once it closes; non-MCU traffic
+  inert; no surface ring drops.
+- `--reccheck`: a surface Fast-forward during a take moves the cursor to
+  the next bar line past the playhead, the engine seeks there, the take
+  counts one new segment, and a note held across it ends exactly where the
+  seek happened (one undo step, undo restores).
+- Mutation-tested (the agent was stopped before this; done by hand
+  2026-10-14, each restored from a saved copy): `--midicheck` caught the
+  channel filter dropped, a velocity-0 note on read as a press, the jog
+  sign flipped, Stop-when-stopped not going to start, Play never pausing,
+  the modal-dialog ignore dropped, a release not ending the hold, no fast
+  repeat phase, and stepping from the edit cursor while playing.
+  `--reccheck` caught Fast-forward not seeking in a take; it did NOT catch
+  stepping from the edit cursor in its take (the playhead hasn't passed a
+  bar line there, so both give the same bar), which `--midicheck` covers.
+- `tools/run_checks.sh` normal and ASAN: PASS (2026-10-14). clang-format 22
+  clean.
+
+**Windows manual check (user; covers steps 1 and 2)**
+
+Setup: KeyLab plugged in (in its Mackie/MCU DAW mode), a song open.
+
+1. Settings → MIDI: `MIDIIN2 (KeyLab Essential 61)` shows **Control
+   surface**, the main port **Keyboard**. Under the port list: the
+   control-surface note and the line "Control surface buttons: Play/Pause,
+   Stop, Record, Loop, Rewind, Fast-forward, the jog wheel, Save and Undo."
+2. Select a track and press **Play/Pause**: the song plays from the edit
+   cursor and no A#6 sounds (the roll's keyboard doesn't light). Press it
+   again: pauses. Again: resumes from where it paused.
+3. **Stop** while playing: stops, the playhead returns to the edit cursor.
+   **Stop** again: the edit cursor goes to the start of the song.
+4. **Seek right** (Fast-forward) while stopped: the edit cursor moves one
+   bar per press, landing on bar lines. **Seek left**: one bar back; from
+   mid-bar it goes to that bar's start; it stops at the song start.
+5. **Hold** Seek right: one bar, then after a short pause it repeats, and
+   after about a second it speeds up (two bars a step). Let go: it stops at
+   once. Same holding Seek left, which stops at the start.
+6. Seek right/left **while playing**: playback jumps a bar from where it
+   is (not from where it started); holding it keeps jumping. While paused:
+   the paused position moves a bar.
+7. **Loop**: the toolbar's Loop button toggles with each press.
+8. **Record**: a take starts (Record lit), play a few notes on the keys,
+   **Stop** ends it and the notes land. Seek right during a take: the take
+   carries on from the new bar, the notes before the jump are kept.
+9. **Background**: click another application so Porydaw isn't focused (keep
+   its window visible). Play/Pause, Stop, Seek and Loop still work.
+10. Open a modal dialog (Edit → Song Settings…): the buttons do nothing
+    while it is open; close it and they work again. (The Settings window
+    isn't modal: the buttons keep working while it's open.)
+11. Set MIDIIN2 to **Keyboard** in Settings → MIDI: Play now sounds A#6 and
+    drives nothing. Set it back to **Control surface**: silent, and the
+    buttons work again. Restart Porydaw: the choice is kept.
+12. Uncheck the main KeyLab port, leaving only MIDIIN2 checked: the
+    **Record** button disappears, lane menus offer no Learn, and the
+    KeyLab's Record button does nothing (Play/Stop still work). Re-check the
+    main port: Record returns.
+13. Optional, with `midi-monitor` running: MIDIIN2's presses still show
+    there.
+
+**Open**
+
+- Jog, Save and Undo are harness-tested only (the KeyLab sends none of
+  them on MIDIIN2).
+- `porydaw.midi.ports()` still has no `role` field (from step 1).
