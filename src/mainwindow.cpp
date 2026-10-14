@@ -811,6 +811,8 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::learnFinished, this,
             [this](int lane, int cc, int movedFrom) {
                 syncMidiControls();
+                for (const auto &session : m_sessions)
+                    session->view->showMidiLearned(lane, cc);
                 if (!m_laneLearn)
                     return; // the Settings page's: it says so itself
                 m_laneLearn = false;

@@ -340,8 +340,14 @@ class SongView : public QWidget
         MidiRoutes routes;
         int learning = MidiRoutes::kNone;
     };
-    void setMidiControls(const MidiControls &controls) { m_midiControls = controls; }
+    // A lane learning shows it in its gutter (a pulsing dot and what to do
+    // in place of the caption), so the change repaints the gutters.
+    void setMidiControls(const MidiControls &controls);
     const MidiControls &midiControls() const { return m_midiControls; }
+    // Learn routed cc to lane: its gutter says so for a few seconds.
+    void showMidiLearned(int lane, int cc);
+    static constexpr int kMidiLearnedMs = 3000;
+    static constexpr int kMidiLearnPulseMs = 500;
     // Keys held on a MIDI keyboard, lit on the roll's keyboard column like
     // a mouse-held key (bit k of lo for keys 0-63, of hi for 64-127).
     void setLiveHeldKeys(uint64_t lo, uint64_t hi);

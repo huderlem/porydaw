@@ -14,11 +14,14 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <cstdlib>
 #include <functional>
 #include <utility>
@@ -190,9 +193,15 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     unavailableLayout->addStretch(1);
     outerLayout->addWidget(m_unavailable, 1);
 
-    m_controls = new QWidget(this);
+    // The settings scroll when the window is too short for them, rather
+    // than squeezing.
+    m_controlsScroll = new QScrollArea(this);
+    m_controlsScroll->setFrameShape(QFrame::NoFrame);
+    m_controlsScroll->setWidgetResizable(true);
+    m_controlsScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_controls = new QWidget;
     auto *pageLayout = new QVBoxLayout(m_controls);
-    outerLayout->addWidget(m_controls, 1);
+    outerLayout->addWidget(m_controlsScroll, 1);
 
     // Input ports: every port plays unless unchecked, and a keyboard
     // plugged in later joins on its own.
@@ -217,7 +226,7 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     statusRow->addWidget(m_portsStatus, 1);
     statusRow->addWidget(refresh);
     auto *portsLayout = new QVBoxLayout(portsGroup);
-    portsLayout->addWidget(m_ports, 1);
+    portsLayout->addWidget(m_ports);
     portsLayout->addLayout(statusRow);
 
     // Playing and recording.
@@ -309,12 +318,16 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     m_learnStatus->setObjectName(QStringLiteral("settingsMidiLearnStatus"));
     m_learnStatus->setForegroundRole(QPalette::PlaceholderText);
     m_learnStatus->setWordWrap(true);
+    m_learnStatus->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     controlsLayout->addLayout(grid);
     controlsLayout->addWidget(m_learnStatus);
 
-    pageLayout->addWidget(portsGroup, 1);
+    pageLayout->addWidget(portsGroup);
     pageLayout->addWidget(playGroup);
     pageLayout->addWidget(controlsGroup);
+    pageLayout->addStretch(1);
+    m_controlsScroll->setWidget(m_controls);
+    fitToFont();
 
     loadPreferences();
     rebuildPorts();
@@ -430,7 +443,7 @@ void MidiSettingsPage::syncBackend()
     const bool controls = m_midi.backendAvailable() || m_showWithoutBackend;
     m_unavailableLabel->setText(m_midi.backendStatus());
     m_unavailable->setVisible(!controls);
-    m_controls->setVisible(controls);
+    m_controlsScroll->setVisible(controls);
 }
 
 // Controls follow the service (startup values, or a change made elsewhere);
@@ -449,6 +462,49 @@ void MidiSettingsPage::loadPreferences()
         const QSignalBlocker block(m_routeCc[i]);
         m_routeCc[i]->setValue(m_midi.routes().ccFor(MidiRoutes::kLanes[i]));
     }
+}
+
+void MidiSettingsPage::fitToFont()
+{
+    // Nothing moves when a learn starts: the status line keeps room for two
+    // lines of text, and a Learn button is as wide as "Listening…".
+    m_learnStatus->setMinimumHeight(2 * m_learnStatus->fontMetrics().lineSpacing());
+    for (QPushButton *learn : m_learn) {
+        const QString text = learn->text();
+        learn->setMinimumWidth(0);
+        int widest = 0;
+        for (const QString &t : {tr("Learn"), tr("Listening…")}) {
+            learn->setText(t);
+            widest = std::max(widest, learn->sizeHint().width());
+        }
+        learn->setText(text);
+        learn->setMinimumWidth(widest);
+    }
+    fitPortList();
+    // It scrolls only vertically, so it's never narrower than the settings.
+    m_controlsScroll->setMinimumWidth(
+        m_controls->minimumSizeHint().width() +
+        m_controlsScroll->style()->pixelMetric(QStyle::PM_ScrollBarExtent));
+}
+
+void MidiSettingsPage::fitPortList()
+{
+    // As tall as its ports, between kMinPortRows and kMaxPortRows rows (it
+    // scrolls past that), not the rest of the page.
+    const int rows = std::clamp(m_ports->count(), kMinPortRows, kMaxPortRows);
+    const int rowH = m_ports->count() > 0
+                         ? m_ports->sizeHintForRow(0)
+                         : m_ports->fontMetrics().height() + ::layout::space(::layout::Space::One);
+    m_ports->setFixedHeight(rows * rowH + 2 * m_ports->frameWidth());
+}
+
+void MidiSettingsPage::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    // (m_learnStatus: not during construction.)
+    if ((event->type() == QEvent::FontChange || event->type() == QEvent::StyleChange) &&
+        m_learnStatus)
+        fitToFont();
 }
 
 void MidiSettingsPage::rebuildPorts()
@@ -471,6 +527,7 @@ void MidiSettingsPage::rebuildPorts()
         }
     }
     m_loading = false;
+    fitPortList();
 
     if (!m_midi.backendAvailable())
         m_portsStatus->setText(m_midi.backendStatus());

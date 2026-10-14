@@ -19,6 +19,7 @@
 #include <QDialogButtonBox>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
@@ -45,6 +46,7 @@
 #include <QSpinBox>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QTimer>
 #include <QToolButton>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -3353,6 +3355,44 @@ class AutomationArea : public TimelineSurface
         // The aimed node's ring lifts with the popup (the aim itself must
         // survive the hide: QMenu hides before it emits triggered).
         connect(m_pointMenu, &QMenu::aboutToHide, this, [this] { invalidateContent(); });
+        // A learning lane's gutter dot pulses; a learned CC shows a while.
+        m_learnPulse = new QTimer(this);
+        m_learnPulse->setInterval(SongView::kMidiLearnPulseMs);
+        connect(m_learnPulse, &QTimer::timeout, this, [this] {
+            m_learnPulseOn = !m_learnPulseOn;
+            invalidateGutters();
+        });
+        m_learnedTimer = new QTimer(this);
+        m_learnedTimer->setSingleShot(true);
+        connect(m_learnedTimer, &QTimer::timeout, this, [this] {
+            m_learnedLane = MidiRoutes::kNone;
+            invalidateGutters();
+        });
+    }
+
+    // The gutter column only: what the learn display paints.
+    void invalidateGutters() { invalidateContent(QRegion(0, 0, kGutterW, height())); }
+
+    // SongView::setMidiControls: the learning lane changed.
+    void midiLearnChanged()
+    {
+        m_learnPulseOn = true;
+        if (m_sv->midiControls().learning != MidiRoutes::kNone) {
+            m_learnPulse->start();
+            m_learnedLane = MidiRoutes::kNone; // a new learn replaces the old result
+            m_learnedTimer->stop();
+        } else {
+            m_learnPulse->stop();
+        }
+        invalidateGutters();
+    }
+
+    void showMidiLearned(int lane, int cc)
+    {
+        m_learnedLane = lane;
+        m_learnedCc = cc;
+        m_learnedTimer->start(SongView::kMidiLearnedMs);
+        invalidateGutters();
     }
 
     // View-state plumbing for the .porydaw sidecar: the shared row height
@@ -5989,10 +6029,48 @@ class AutomationArea : public TimelineSurface
             ::layout::twoLineText(titleFont, titleFont, captionFont, ::layout::Space::Zero);
         const auto textBoxes = textLayout.align(QRect(8, r.top(), kGutterW - 16, r.height()),
                                                 ::layout::VerticalAlignment::Center);
+        // A MIDI learn on this lane (from its menu or the Settings page):
+        // the gutter lights up and says what to do, instead of the caption.
+        const bool learning = row.kind == Row::Lane && m_sv->midiControls().learning == int(row.cc);
+        const bool learned = row.kind == Row::Lane && !learning && m_learnedLane == int(row.cc);
+        // In the track's colour, like its curve: the theme's highlight can
+        // be too pale against the gutter.
+        const QColor accent = row.kind == Row::Lane ? SongView::trackColor(row.track) : QColor();
+        if (learning) {
+            QColor wash = accent;
+            wash.setAlpha(m_learnPulseOn ? 64 : 32);
+            p.fillRect(QRect(r.left(), r.top(), kGutterW, r.height() - 1), wash);
+            p.fillRect(QRect(r.left(), r.top(), lyt::space(Space::One), r.height() - 1), accent);
+        }
         p.setFont(titleFont);
         p.drawText(textBoxes.primary, Qt::AlignLeft | Qt::AlignVCenter, name);
         p.setFont(captionFont);
-        if (points && !points->empty()) {
+        if (learning || learned) {
+            // A little knob (its pointer swinging while it waits for one),
+            // then what to do or what was learned.
+            const qreal d = std::max<qreal>(9.0, QFontMetricsF(captionFont).height() * 0.85);
+            const QRectF knob(textBoxes.secondary.left() + 0.5,
+                              textBoxes.secondary.center().y() - d / 2.0 + 0.5, d, d);
+            p.save();
+            p.setRenderHint(QPainter::Antialiasing, true);
+            p.setPen(QPen(accent, 1.5));
+            p.setBrush(learned ? accent : Qt::NoBrush);
+            p.drawEllipse(knob);
+            const qreal angle = qDegreesToRadians(learning && !m_learnPulseOn ? 45.0 : 135.0);
+            const QPointF c = knob.center();
+            const qreal len = d / 2.0 - 1.0;
+            p.setPen(QPen(learned
+                              ? themes::color(themes::Role::song_view_timeline_chrome_background)
+                              : accent,
+                          1.5, Qt::SolidLine, Qt::RoundCap));
+            p.drawLine(c, c + QPointF(std::cos(angle) * len, -std::sin(angle) * len));
+            p.restore();
+            p.setPen(themes::color(themes::Role::song_view_primary_text));
+            const QRect text = textBoxes.secondary.adjusted(int(std::ceil(d)) + 5, 0, 0, 0);
+            p.drawText(text, Qt::AlignLeft | Qt::AlignVCenter,
+                       learning ? SongView::tr("Move a knob… · Esc cancels")
+                                : SongView::tr("Now CC %1").arg(m_learnedCc));
+        } else if (points && !points->empty()) {
             p.setPen(themes::color(themes::Role::song_view_secondary_text));
             p.drawText(textBoxes.secondary, Qt::AlignLeft | Qt::AlignVCenter,
                        SongView::tr("%1 points · %2..%3").arg(points->size()).arg(minV).arg(maxV));
@@ -6568,6 +6646,12 @@ class AutomationArea : public TimelineSurface
         uint64_t revision = 0;
     };
     ui::ContextMenu *m_pointMenu = nullptr; // kept alive like the roll's note menu
+    // The gutters' MIDI learn display (midiLearnChanged, showMidiLearned).
+    QTimer *m_learnPulse = nullptr;
+    QTimer *m_learnedTimer = nullptr;
+    bool m_learnPulseOn = true;
+    int m_learnedLane = MidiRoutes::kNone;
+    int m_learnedCc = 0;
     QAction *m_pointSetValue = nullptr;
     QAction *m_pointDelete = nullptr;
     std::optional<PointMenuTarget> m_pointMenuTarget;
@@ -10931,6 +11015,19 @@ std::optional<QPointF> SongView::recordingPreviewLanePoint(uint8_t cc, uint64_t 
 std::optional<QPointF> SongView::lanePoint(int track, uint8_t cc, uint64_t tick, int value) const
 {
     return m_lanes->lanePointAt(track, cc, tick, value);
+}
+
+void SongView::setMidiControls(const MidiControls &controls)
+{
+    const bool learningChanged = controls.learning != m_midiControls.learning;
+    m_midiControls = controls;
+    if (learningChanged)
+        m_lanes->midiLearnChanged();
+}
+
+void SongView::showMidiLearned(int lane, int cc)
+{
+    m_lanes->showMidiLearned(lane, cc);
 }
 
 void SongView::selectTrack(int track)

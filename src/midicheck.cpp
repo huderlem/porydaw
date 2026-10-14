@@ -28,6 +28,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <thread>
 #include <vector>
@@ -779,6 +780,40 @@ void checkControlsPage()
           "controls: the table did not show the default routes");
     check(!QSettings().contains(QStringLiteral("midi/routes")),
           "controls: building the table wrote QSettings");
+
+    // Starting a learn moves nothing: the status line has room for its two
+    // lines, and the button doesn't widen for "Listening…". The port list
+    // keeps to its rows rather than taking the page's spare height.
+    {
+        // Narrow enough that the learn prompt wraps to two lines.
+        dialog.resize(dialog.minimumSizeHint().width(), 640);
+        QApplication::processEvents();
+        const auto layoutOf = [&] {
+            std::vector<QRect> rects;
+            for (QWidget *w : std::initializer_list<QWidget *>{cc[0], cc[4], learn[0], learn[1],
+                                                               learn[4], status})
+                rects.push_back(QRect(w->mapTo(&page, QPoint(0, 0)), w->size()));
+            return rects;
+        };
+        const std::vector<QRect> before = layoutOf();
+        if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+            page.grab().save(QString::fromLocal8Bit(dir) + QStringLiteral("/midi_page.png"));
+        learn[1]->click();
+        QApplication::processEvents();
+        check(midi.learnLane() == 0x07 && !status->text().isEmpty() && layoutOf() == before,
+              "controls: starting a learn moved the Controls table or its status line");
+        if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+            page.grab().save(QString::fromLocal8Bit(dir) + QStringLiteral("/midi_page_learn.png"));
+        learn[1]->click();
+        QApplication::processEvents();
+        check(midi.learnLane() == MidiRoutes::kNone, "controls: the second Learn click did not "
+                                                     "cancel");
+        status->clear();
+        auto *ports = page.findChild<QListWidget *>(QStringLiteral("settingsMidiPorts"));
+        const int rowCap = 5 * std::max(1, ports->sizeHintForRow(0)) + 2 * ports->frameWidth();
+        check(ports && ports->height() <= std::max(rowCap, 5 * (ports->fontMetrics().height() + 8)),
+              "controls: the port list is taller than its rows");
+    }
 
     // A spinner applies and persists; the arrows step over reserved CCs.
     cc[Lfos]->setValue(21);
@@ -1753,6 +1788,18 @@ void MainWindow::checkLaneLearn()
               statusBar()->currentMessage().contains(QStringLiteral("Esc")),
           "lane learn: the status bar does not say what to do");
     check(view->midiControls().learning == 0x07, "lane learn: the views don't know VOL learns");
+    // VOL's gutter lights up: an accent bar down its left edge, which no
+    // other row (and not VOL once the learn ends) has.
+    const auto gutterEdge = [&](uint8_t cc) {
+        const std::optional<QPointF> at = view->lanePoint(track, cc, 0, 64);
+        const QImage image = lanes->grab().toImage();
+        return at ? image.pixelColor(QPoint(1, int(at->y())) * image.devicePixelRatio()) : QColor();
+    };
+    const QColor accent = SongView::trackColor(track);
+    check(gutterEdge(0x07) == accent && gutterEdge(DOC_CC_BEND) != accent,
+          "lane learn: the learning lane's gutter does not light up (or another's does)");
+    if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+        lanes->grab().save(QString::fromLocal8Bit(dir) + QStringLiteral("/lane_learn.png"));
     {
         QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
         QCoreApplication::sendEvent(lanes, &esc);
@@ -1760,6 +1807,7 @@ void MainWindow::checkLaneLearn()
     check(midi.learnLane() == MidiRoutes::kNone && statusBar()->currentMessage().isEmpty() &&
               view->midiControls().learning == MidiRoutes::kNone,
           "lane learn: Esc did not cancel the learn");
+    check(gutterEdge(0x07) != accent, "lane learn: the gutter stays lit after the learn ends");
     {
         // Disarmed: Esc is the window's again (the filter is gone).
         QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
@@ -1783,6 +1831,24 @@ void MainWindow::checkLaneLearn()
     check(midi.routes().ccFor(0x07) == 74 &&
               statusBar()->currentMessage() == QStringLiteral("CC 74 now drives VOL."),
           "lane learn: learning CC74 for VOL did not route it or report it");
+    // ...and VOL's gutter says it for a while: an accent dot by its caption.
+    const auto gutterDot = [&](uint8_t cc) {
+        const std::optional<QPointF> at = view->lanePoint(track, cc, 0, 64);
+        if (!at)
+            return false;
+        const QImage image = lanes->grab().toImage();
+        const qreal dpr = image.devicePixelRatio();
+        for (int y = int(at->y()) - 30; y < int(at->y()) + 30; y++)
+            for (int x = 8; x < 20; x++)
+                if (image.rect().contains(QPoint(x, y) * dpr) &&
+                    image.pixelColor(QPoint(x, y) * dpr) == accent)
+                    return true;
+        return false;
+    };
+    check(gutterDot(0x07) && gutterEdge(0x07) != accent && !gutterDot(DOC_CC_BEND),
+          "lane learn: the learned lane's gutter does not show the result");
+    if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
+        lanes->grab().save(QString::fromLocal8Bit(dir) + QStringLiteral("/lane_learned.png"));
     check(openMenu(0x07) && disabled.contains(QStringLiteral("MIDI: CC 74")),
           "lane learn: the menu does not show the learned CC");
     // A CC another lane had moves; the report names it.

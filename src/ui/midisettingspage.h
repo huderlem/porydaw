@@ -12,6 +12,7 @@ class QLabel;
 class QListWidget;
 class QListWidgetItem;
 class QPushButton;
+class QScrollArea;
 class QSpinBox;
 
 // Settings window, MIDI page (docs/midi-input/PLAN.md step 1): which input
@@ -39,6 +40,7 @@ class MidiSettingsPage : public QWidget
 
   protected:
     void hideEvent(QHideEvent *event) override;
+    void changeEvent(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
@@ -49,6 +51,12 @@ class MidiSettingsPage : public QWidget
     // The status line's "CC 74 now drives VOL (instead of PAN)."
     void reportRoute(int lane, int cc, int movedFrom);
     void rebuildPorts();
+    // Sizes that follow the font: the learn status's two lines, the Learn
+    // buttons' width, the port list's rows.
+    void fitToFont();
+    void fitPortList();
+    static constexpr int kMinPortRows = 2;
+    static constexpr int kMaxPortRows = 5;
     // Shows the controls or the no-backend message, whichever applies.
     void syncBackend();
     void portItemChanged(QListWidgetItem *item);
@@ -56,6 +64,7 @@ class MidiSettingsPage : public QWidget
 
     MidiInput &m_midi;
     bool m_showWithoutBackend = false;
+    QScrollArea *m_controlsScroll = nullptr;
     QWidget *m_controls = nullptr;
     QWidget *m_unavailable = nullptr;
     QLabel *m_unavailableLabel = nullptr;

@@ -1755,3 +1755,43 @@ unplug cancel, the dock clause.
 **Sweeps:** `tools/run_checks.sh` PASS on build and build-asan.
 `--midicheck` passes on build-nomidi, build-off and build-dummy; all five
 trees build cleanly (exit 0).
+
+### Polish after the step 6 Windows pass (2026-10-13)
+
+User feedback: the Controls section jumps when Learn is clicked, the Input
+ports list is needlessly tall, and a lane-menu learn's status-bar prompt is
+too easy to miss.
+
+**What changed**
+
+- **Settings → MIDI.**
+  - The page scrolls vertically when the window is short, and is never
+    narrower than its content.
+  - The port list is as tall as its ports (2–5 rows, scrolling past that)
+    instead of taking the spare height; a stretch sits under the groups.
+  - Nothing moves when a learn starts: the status line keeps room for two
+    lines, and each Learn button is as wide as "Listening…". Both follow
+    font and style changes.
+- **Lane gutter while learning** (from the lane menu or the Settings page):
+  - the row's gutter is washed in the track colour, pulsing, with a bar
+    down its left edge;
+  - a little knob icon, its pointer swinging, replaces the caption, with
+    "Move a knob… · Esc cancels";
+  - after a learn, the caption reads "Now CC n" next to a filled knob for
+    3 s.
+  - Repaints are gutter-only (`invalidateContent` on the gutter column).
+
+**Harness** (`--midicheck`):
+
+- The page at its minimum width: starting a learn leaves the spinners, the
+  Learn buttons and the status line exactly where they were. The port list
+  stays within its row cap.
+- The learning lane's gutter has the track-colour edge bar (BEND's
+  doesn't), which is gone after Esc. A learned lane shows the filled knob
+  (BEND doesn't).
+- `PORYDAW_MIDICHECK_SHOTS=<dir>` saves screenshots of the page and the
+  gutters.
+- Mutation-tested: the gutter display off, and the status line's reserved
+  height removed. Each fails its check. (The status mutation survived at
+  the old 520 px width, where the prompt fit on one line, so the check now
+  runs at the minimum width.)
