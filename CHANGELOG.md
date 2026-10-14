@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.
-- Fixed `LFOS` changes restarting the modulation wave during playback. It now keeps going, like on the GBA.
+- Fixed `LFOS` changes restarting the modulation wave during playback.
 
 ## [1.3.0] - 2026-10-04
 
