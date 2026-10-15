@@ -1,6 +1,6 @@
 # Control Surface — keyboard transport buttons via Mackie Control
 
-Status: **plan confirmed 2026-10-13** (D1, D2, D4, D5 and J1–J7 approved by the user; D3 LEDs dropped).
+Status: **steps 0–3 done 2026-10-14** (plan confirmed 2026-10-13: D1, D2, D4, D5 and J1–J7 approved by the user; D3 LEDs dropped). Branch unpushed, awaiting the merge decision.
 Branch `control-surface` off `main` at `5ff6be0`. As on `midi-controls`:
 steps run **in order, one agent per step**; each step leaves the branch
 green (`tools/run_checks.sh`, normal + ASAN) and ends with a progress entry
@@ -511,5 +511,37 @@ always reads keyboard FAILs. Sweeps normal and ASAN: PASS.
 - jog two's-complement decoding (non-standard MCU; the user doesn't
   support non-standard devices);
 - a surface message parsed twice when the script tap is on (negligible).
+
+Sweeps normal and ASAN: PASS.
+
+### Windows check of steps 1–2 (user, 2026-10-14)
+
+Everything passed except the port checkboxes, which couldn't be clicked: a
+row with an open persistent editor (its role box) hands the view's clicks to
+that editor, so the delegate never saw them. Fixed in 565d72b (the page's
+viewport filter toggles a click on the checkbox; midicheck sends a real
+click). User re-check: PASS.
+
+### Step 3 — docs (2026-10-14)
+
+CHANGELOG line under MIDI keyboard support; a "Transport buttons" TODO
+outline in `docsrc/manual/midi-keyboard.md` (user writes the prose); the
+Settings → MIDI stub mentions port roles. `mkdocs --strict`: PASS.
+
+**Final branch review** (Opus, `main...HEAD`): no high or medium findings.
+Three low ones fixed, each with a midicheck case that catches its revert:
+
+- Surface Undo under a text field while porydaw is in the background: the
+  app has no focus widget then. It now checks each visible window's own
+  focus widget.
+- Rewind's chain undid a seek made some other way (FF to bar 5, a ruler
+  click at bar 40, Rewind landed on bar 4). It chains only while the
+  playhead is within a bar of the last step; a tab switch also clears it.
+- A press still queued when its port closed (or flipped role) started a
+  hold whose release could never come. `portsClosed` drains the surface
+  ring before ending the hold.
+
+Not changed: a note-on racing a Surface→Keyboard flip can leave that one
+note held (milliseconds wide; All Notes Off clears it).
 
 Sweeps normal and ASAN: PASS.

@@ -1783,6 +1783,27 @@ void MainWindow::checkSurfaceTransport()
                       "surface transport: Undo changed the document under a focused text field");
             }
         }
+        // Nor with porydaw in the background: the app has no focus widget
+        // then, but the field's window keeps it as its own.
+        {
+            QLineEdit field;
+            QWidget other;
+            field.show();
+            other.show();
+            other.activateWindow();
+            QApplication::processEvents();
+            field.setFocus();
+            QApplication::processEvents();
+            if (check(field.window()->focusWidget() == &field &&
+                          QApplication::focusWidget() != &field,
+                      "surface transport: could not leave a text field focused in an inactive "
+                      "window")) {
+                tap(mcu::kUndo);
+                check(undo->index() == index + 1,
+                      "surface transport: Undo changed the document under a text field focused "
+                      "in an inactive window");
+            }
+        }
         QApplication::processEvents();
         tap(mcu::kUndo);
         check(undo->index() == index, "surface transport: Undo did not undo");
@@ -1866,6 +1887,12 @@ void MainWindow::checkSurfaceTransport()
     press(mcu::kFastForward);
     emit midi.portsClosed();
     check(!m_surfaceRepeat->isActive(), "surface transport: a port closing did not end a hold");
+    // A press still queued when the port closes doesn't start a hold after.
+    midi.injectForTest({0x90, mcu::kFastForward, 127}, surface);
+    emit midi.portsClosed();
+    QApplication::processEvents();
+    check(!m_surfaceRepeat->isActive(),
+          "surface transport: a press queued before a port closed started a hold");
     press(mcu::kFastForward);
     activateSession(m_active, /*force=*/true);
     check(!m_surfaceRepeat->isActive(), "surface transport: a song switch did not end a hold");
@@ -1921,6 +1948,17 @@ void MainWindow::checkSurfaceTransport()
     check(cursor() == L(4), "surface transport: Rewind soon after a step did not chain from it");
     tap(mcu::kRewind);
     check(cursor() == L(3), "surface transport: a second quick Rewind did not go a bar further");
+    // A seek made some other way since (a ruler click far ahead) isn't
+    // undone: Rewind steps back from the playhead.
+    {
+        const uint64_t lastTo = m_surfaceLastTo;
+        m_surfaceLastTo = L(1); // as if the last step had landed far behind
+        tap(mcu::kRewind);
+        check(cursor() == L(2),
+              "surface transport: Rewind chained from a step the playhead had left far behind");
+        m_surfaceLastTo = lastTo;
+        view->commitEditCursor(L(3));
+    }
     // Long after one, from the playhead: to the bar line it last passed.
     pumpMs(30); // the seek to L(3) lands
     for (int i = 0; i < 1000 && tickOf(m_audio.playheadSamples()) <= L(3) + beat; i++)

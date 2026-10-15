@@ -850,8 +850,10 @@ void MainWindow::buildUi()
     connect(m_midiInput.get(), &MidiInput::portsClosed, this, [this] {
         if (m_audioOk)
             m_audio.liveAllNotesOff();
-        // Nor the release that ends a Rewind/FF hold (a role change
-        // reopens the port, so it lands here too).
+        // Nor the release that ends a Rewind/FF hold (a role change lands
+        // here too). What it sent before closing is handled first, so a
+        // press still queued can't start a hold after this ends it.
+        drainSurface();
         stopSurfaceRepeat();
     });
     // A control surface's MCU transport buttons (docs/control-surface/
@@ -1636,8 +1638,10 @@ void MainWindow::activateSession(SongSession *session, bool force)
     // A take commits to its own tab before the engine lets go of it.
     finishRecording();
     const SongSession *previous = m_active;
-    // A Rewind/FF hold belongs to the song it was moving through.
+    // A Rewind/FF hold belongs to the song it was moving through, and so
+    // does Rewind's chain (surfaceStep).
     stopSurfaceRepeat();
+    m_surfaceLastSession = nullptr;
     // Switching tabs stops playback in the tab being left, and lets go of
     // what the MIDI keyboard holds there.
     if (m_audioOk) {
@@ -5719,9 +5723,14 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
         break;
     case SurfaceEvent::Undo:
         // Not while a text field has focus: Ctrl+Z there undoes its text,
-        // and the document mustn't change under an open editor.
-        if (QWidget *focus = QApplication::focusWidget();
-            qobject_cast<QLineEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus))
+        // and the document mustn't change under an open editor. With
+        // porydaw in the background the app has no focus widget, but each
+        // window keeps the one it will give focus back to.
+        if (const QWidgetList windows = QApplication::topLevelWidgets();
+            std::any_of(windows.begin(), windows.end(), [](QWidget *window) {
+                QWidget *focus = window->isVisible() ? window->focusWidget() : nullptr;
+                return qobject_cast<QLineEdit *>(focus) || qobject_cast<QAbstractSpinBox *>(focus);
+            }))
             break;
         press(m_undoAction);
         break;
@@ -5755,9 +5764,11 @@ void MainWindow::surfaceStep(int steps, bool bars)
     // Back while playing: the playhead has moved on from where the last step
     // landed, and stepping back from it would land on that same line again
     // (a held Rewind replaying one bar's start). Soon after a step, go back
-    // from where it landed.
+    // from where it landed. Only while the playhead is still within a bar
+    // of it: a seek made some other way (a ruler click) since isn't undone.
     if (!stopped && steps < 0 && m_surfaceLastSession == m_active && m_surfaceLastStep.isValid() &&
-        m_surfaceLastStep.elapsed() < kSurfaceChainMs)
+        m_surfaceLastStep.elapsed() < kSurfaceChainMs &&
+        from <= view->timeline()->stepGridLines(m_surfaceLastTo, 1, /*bars=*/true))
         from = std::min(from, m_surfaceLastTo);
     uint64_t to = view->timeline()->stepGridLines(from, steps, bars);
     // Forward stops at the song's end (or where the cursor already is past
