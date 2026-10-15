@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "clickgrid.h"
 #include "noteid.h"
 
 // Event type codes: MIDI status nibbles 0x8 (note off), 0x9 (note on),
@@ -111,6 +112,10 @@ class MidiTimeline
     std::vector<TempoPoint> tempoMap;    // sorted by tick, first entry at tick 0
     std::vector<TimeSigPoint> timeSigs;  // sorted by tick, may be empty
     std::vector<OtherEvent> otherEvents; // sorted by tick
+
+    // The metronome's beat lines in samples (audio thread; built with the
+    // timeline from tempoMap's changes and timeSigSegments()).
+    ClickGrid clickGrid;
 
     bool hasLoop() const
     {

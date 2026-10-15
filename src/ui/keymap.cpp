@@ -107,6 +107,9 @@ const Def kDefs[] = {
     // tree, the event list and combo boxes, which don't claim plain letters.
     {"transport.record", Context::PianoRoll, QT_TR_NOOP("Transport"), QT_TR_NOOP("Record"),
      QKeySequence::UnknownKey, "R"},
+    // Bare like Record's, for the same reason.
+    {"transport.metronome", Context::PianoRoll, QT_TR_NOOP("Transport"),
+     QT_TR_NOOP("Toggle Metronome"), QKeySequence::UnknownKey, "C"},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
     // Songs dock

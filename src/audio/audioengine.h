@@ -5,9 +5,11 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "audio/audiotap.h"
 #include "audio/auditionslots.h"
+#include "audio/metronome.h"
 #include "core/captureevent.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
@@ -262,7 +264,11 @@ class AudioEngine
     // While held, cold operations leave the device stopped; pumpForTest
     // renders `frames` frames through the real callback into scratch.
     void holdDeviceForTest(bool hold);
-    void pumpForTest(uint32_t frames);
+    // With `out`, the rendered interleaved frames are appended to it.
+    // `chunk` is the frames per callback.
+    void pumpForTest(uint32_t frames, std::vector<float> *out = nullptr, uint32_t chunk = 512);
+    // With the device held: metronome clicks queued so far, ever.
+    uint64_t clicksQueuedForTest() const { return m_clicksQueued; }
     // Harness only: the main engine's state, read with the device held.
     const M4AEngine *engineForTest() const { return m_engine.get(); }
     // With the device held: the recording latch as the callback left it.
@@ -331,6 +337,18 @@ class AudioEngine
     // 1.0 is unity; above it the device's float stream is left to clip.
     void setOutputGain(float gain) { m_outputGain.store(gain); }
     float outputGain() const { return m_outputGain.load(); }
+    // Hot: the metronome (docs/metronome/PLAN.md). While on and playing it
+    // clicks every beat of the song's meter (MidiTimeline::clickGrid),
+    // mixed after the audio tap, so meters, plugins and exported WAVs never
+    // hear it. Volume is linear 0-1, scaled by the output gain too. Turning
+    // it off lets a ringing click finish; stop and seek cut it.
+    void setMetronomeEnabled(bool on) { m_metronomeOn.store(on); }
+    bool metronomeEnabled() const { return m_metronomeOn.load(); }
+    void setMetronomeVolume(float volume)
+    {
+        m_metronomeVolume.store(std::clamp(volume, 0.0f, 1.0f));
+    }
+    float metronomeVolume() const { return m_metronomeVolume.load(); }
 
     // Hot: polyphony-overflow debug mode — mutes normal playback and plays
     // only the sounds lost to the polyphony limit (SPEC §6.1 Polyphony dock).
@@ -384,6 +402,13 @@ class AudioEngine
     void applyPendingSeek();
     void applyTransportTransition();
     void cutAllSound();
+    // The metronome's beats in the player's span [p0, p1) of one render
+    // chunk that wrapped the loop `wraps` times, queued for the click mix at
+    // frame offsets from `frame` (the chunk's start within the callback).
+    void scheduleClicks(const MidiTimeline *tl, uint64_t p0, uint64_t p1, uint32_t wraps,
+                        uint64_t frame, uint32_t frameCount);
+    void queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to, uint64_t frame,
+                     uint32_t frameCount);
     void applyMuteTransition();
     void applyPreviewNote();
     void applyTimedPreviews(uint32_t frameCount);
@@ -488,6 +513,8 @@ class AudioEngine
     std::atomic<uint32_t> m_muteMask{0};
     std::atomic<uint32_t> m_soloMask{0};
     std::atomic<float> m_outputGain{1.0f};
+    std::atomic<bool> m_metronomeOn{false};
+    std::atomic<float> m_metronomeVolume{0.7f};
     // Avoid stop/start stalls: publish the latest seek for the audio callback.
     static constexpr uint64_t kNoPendingSeek = UINT64_MAX;
     std::atomic<uint64_t> m_pendingSeek{kNoPendingSeek};
@@ -642,6 +669,12 @@ class AudioEngine
     uint32_t m_appliedRefreshVoices = 0;
     uint32_t m_appliedPolyReset = 0;
     TimelinePlayer m_player;
+    // Metronome (audio thread): this callback's clicks, mixed after the tap.
+    ClickVoice m_click;
+    static constexpr uint32_t kMaxClicksPerCallback = 64;
+    ClickVoice::Trigger m_clickQueue[kMaxClicksPerCallback];
+    uint32_t m_clickQueueCount = 0;
+    uint64_t m_clicksQueued = 0; // clicksQueuedForTest
 
     // Scratch deinterleave buffers (allocated in init)
     std::unique_ptr<float[]> m_bufL;

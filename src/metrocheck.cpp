@@ -1,0 +1,600 @@
+#include <QByteArray>
+#include <QString>
+#include <algorithm>
+#include <cmath>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <memory>
+#include <vector>
+
+#include "audio/audioengine.h"
+#include "core/clickgrid.h"
+#include "core/miditimeline.h"
+#include "core/smf.h"
+
+// --metrocheck: the metronome (docs/metronome/PLAN.md step 1), fully
+// self-contained (no project needed).
+//  - The click grid against the timeline: songs with tempo changes off the
+//    beat (three on one tick: the last wins) and meter changes (one
+//    mid-bar), at several tick rates and sample rates, carry a note on every
+//    beat line stepGridLines finds; every click must land on exactly its
+//    note's sample, accented exactly on bar lines, and clicksIn over
+//    arbitrary chunk boundaries must give the same list as one query. A
+//    capped query returns exactly the first `cap` clicks; a query far into
+//    the unbounded last meter still finds its beats.
+//  - The engine, device held: a silent looping song whose loop is not
+//    beat-aligned clicks at the expected output frames across wraps,
+//    accents bar lines, never reaches the audio tap, is silent when off,
+//    and is cut by Stop, a seek and a song switch. Turning it off mid-click
+//    lets that click finish and clicks no more. A loop shorter than a
+//    callback (several wraps per render) clicks once per pass. The
+//    auto-stop after the song's tail keeps the clicks its callback rendered
+//    before the stop.
+
+namespace {
+
+int g_failures = 0;
+
+void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void fail(const char *fmt, ...)
+{
+    std::fprintf(stderr, "metrocheck: FAIL: ");
+    va_list ap;
+    va_start(ap, fmt);
+    std::vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr, "\n");
+    g_failures++;
+}
+
+SmfEvent channelEvent(uint64_t tick, uint8_t status, uint8_t data0, uint8_t data1)
+{
+    SmfEvent ev;
+    ev.tick = tick;
+    ev.status = status;
+    ev.data0 = data0;
+    ev.data1 = data1;
+    return ev;
+}
+
+SmfEvent metaEvent(uint64_t tick, uint8_t metaType, const QByteArray &blob)
+{
+    SmfEvent ev;
+    ev.tick = tick;
+    ev.status = 0xFF;
+    ev.metaType = metaType;
+    ev.blob = blob;
+    return ev;
+}
+
+SmfEvent tempoUsEvent(uint64_t tick, uint32_t us)
+{
+    const char b[3] = {char((us >> 16) & 0xFF), char((us >> 8) & 0xFF), char(us & 0xFF)};
+    return metaEvent(tick, 0x51, QByteArray(b, 3));
+}
+
+SmfEvent tempoEvent(uint64_t tick, double bpm)
+{
+    return tempoUsEvent(tick, uint32_t(60000000.0 / bpm + 0.5));
+}
+
+SmfEvent meterEvent(uint64_t tick, int numerator, int denomPow2)
+{
+    const char b[4] = {char(numerator), char(denomPow2), 24, 8};
+    return metaEvent(tick, 0x58, QByteArray(b, 4));
+}
+
+// A conductor with tempo and meter changes at tpb-relative ticks, and one
+// channel track (a program change only) for the notes the caller adds.
+SmfFile gridSong(uint32_t tpb)
+{
+    SmfFile smf;
+    smf.format = 1;
+    smf.division = uint16_t(tpb);
+    smf.tracks.resize(2);
+    SmfTrack &c = smf.tracks[0];
+    c.events.push_back(tempoEvent(0, 120.0));
+    c.events.push_back(meterEvent(0, 4, 2));
+    c.events.push_back(tempoEvent(tpb * 5 / 2 + 1, 97.0)); // off the beat
+    c.events.push_back(meterEvent(tpb * 8, 6, 3));         // bar 3: 6/8
+    c.events.push_back(tempoEvent(tpb * 9, 151.0));
+    // 6/8 bars are 3 quarters; 3/4 starts mid-way through bar 5's 6/8.
+    c.events.push_back(meterEvent(tpb * 8 + tpb * 3 + tpb / 2 * 3, 3, 2));
+    c.events.push_back(tempoEvent(tpb * 16, 133.0));
+    // Three tempos on one tick, off the beat: the last in the file wins.
+    c.events.push_back(tempoEvent(tpb * 20 + tpb / 3, 80.0));
+    c.events.push_back(tempoEvent(tpb * 20 + tpb / 3, 177.0));
+    c.events.push_back(tempoEvent(tpb * 20 + tpb / 3, 140.0));
+    c.endTick = tpb * 40;
+    smf.tracks[1].events.push_back(channelEvent(0, 0xC0, 0, 0));
+    smf.tracks[1].endTick = tpb * 40;
+    return smf;
+}
+
+void checkGrid(uint32_t tpb, double sampleRate)
+{
+    // The beat lines the ruler draws, to tick tpb * 36.
+    std::unique_ptr<MidiTimeline> plain = MidiTimeline::build(gridSong(tpb), sampleRate);
+    const uint64_t limit = uint64_t(tpb) * 36;
+    std::vector<uint64_t> beats;
+    for (uint64_t t = 0; t < limit; t = plain->stepGridLines(t, 1, false))
+        beats.push_back(t);
+
+    SmfFile smf = gridSong(tpb);
+    for (const uint64_t t : beats) {
+        smf.tracks[1].events.push_back(channelEvent(t, 0x90, 60, 100));
+        smf.tracks[1].events.push_back(channelEvent(t + 1, 0x80, 60, 0));
+    }
+    std::stable_sort(smf.tracks[1].events.begin(), smf.tracks[1].events.end(),
+                     [](const SmfEvent &a, const SmfEvent &b) { return a.tick < b.tick; });
+    std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(smf, sampleRate);
+    std::vector<uint64_t> noteSamples;
+    std::vector<uint64_t> noteTicks;
+    for (const TimelineEvent &ev : tl->events) {
+        if (ev.type == 0x9) {
+            noteSamples.push_back(ev.samplePos);
+            noteTicks.push_back(ev.tick);
+        }
+    }
+    if (noteSamples.size() != beats.size()) {
+        fail("tpb %u @%.0f: %zu notes built for %zu beats", tpb, sampleRate, noteSamples.size(),
+             beats.size());
+        return;
+    }
+    const uint64_t end = tl->clickGrid.sampleAt(limit);
+    std::vector<ClickGrid::Click> clicks(beats.size() + 8);
+    const size_t n = tl->clickGrid.clicksIn(0, end, clicks.data(), clicks.size());
+    clicks.resize(n);
+    if (n != beats.size()) {
+        fail("tpb %u @%.0f: %zu clicks for %zu beats", tpb, sampleRate, n, beats.size());
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (clicks[i].sample != noteSamples[i])
+            fail("tpb %u @%.0f: beat %zu (tick %llu) clicks at %llu, its note at %llu", tpb,
+                 sampleRate, i, (unsigned long long)beats[i], (unsigned long long)clicks[i].sample,
+                 (unsigned long long)noteSamples[i]);
+        const double bar = tl->barPositionForTick(double(beats[i])).bar;
+        const bool barLine = bar == std::floor(bar);
+        if (clicks[i].accent != barLine)
+            fail("tpb %u @%.0f: beat %zu (tick %llu, bar %.3f) accent %d", tpb, sampleRate, i,
+                 (unsigned long long)beats[i], bar, int(clicks[i].accent));
+    }
+
+    // Arbitrary chunking: half-open spans neither drop nor repeat a beat.
+    std::vector<ClickGrid::Click> chunked;
+    uint64_t from = 0;
+    uint32_t step = 1;
+    while (from < end) {
+        const uint64_t to = std::min<uint64_t>(end, from + 1 + (step * 7919u) % 6007u);
+        ClickGrid::Click buf[64];
+        const size_t m = tl->clickGrid.clicksIn(from, to, buf, 64);
+        chunked.insert(chunked.end(), buf, buf + m);
+        from = to;
+        step++;
+    }
+    if (chunked.size() != clicks.size()) {
+        fail("tpb %u @%.0f: chunked queries found %zu clicks, one query %zu", tpb, sampleRate,
+             chunked.size(), clicks.size());
+    } else {
+        for (size_t i = 0; i < chunked.size(); i++) {
+            if (chunked[i].sample != clicks[i].sample || chunked[i].accent != clicks[i].accent) {
+                fail("tpb %u @%.0f: chunked click %zu differs", tpb, sampleRate, i);
+                break;
+            }
+        }
+    }
+    // A query starting exactly on a beat includes it; ending on one excludes it.
+    if (n > 3) {
+        ClickGrid::Click buf[8];
+        const size_t m = tl->clickGrid.clicksIn(clicks[2].sample, clicks[3].sample, buf, 8);
+        if (m != 1 || buf[0].sample != clicks[2].sample)
+            fail("tpb %u @%.0f: [beat 2, beat 3) found %zu clicks", tpb, sampleRate, m);
+    }
+
+    // A capped query returns exactly the first `cap` clicks, in order, from
+    // any start (n / 2 reaches across meter changes).
+    for (const size_t start : {size_t(0), size_t(5)}) {
+        for (const size_t cap : {size_t(1), size_t(7), n / 2, n - start - 1}) {
+            if (cap == 0 || start + cap >= n)
+                continue;
+            std::vector<ClickGrid::Click> buf(cap + 4);
+            const size_t m = tl->clickGrid.clicksIn(clicks[start].sample, end, buf.data(), cap);
+            bool same = m == cap;
+            for (size_t i = 0; same && i < m; i++)
+                same = buf[i].sample == clicks[start + i].sample &&
+                       buf[i].accent == clicks[start + i].accent;
+            if (!same)
+                fail("tpb %u @%.0f: clicksIn from beat %zu capped at %zu returned %zu clicks%s",
+                     tpb, sampleRate, start, cap, m, m == cap ? " that differ" : "");
+        }
+    }
+
+    // Far into the last meter, which runs forever: its beats k0..k0+3.
+    {
+        const MidiTimeline::TimeSigSegment last = tl->timeSigSegments().back();
+        const uint64_t k0 = 100000;
+        const auto tickOf = [&](uint64_t k) { return last.tick + k * last.beatTicks; };
+        ClickGrid::Click buf[8];
+        const size_t m = tl->clickGrid.clicksIn(tl->clickGrid.sampleAt(tickOf(k0)),
+                                                tl->clickGrid.sampleAt(tickOf(k0 + 4)), buf, 8);
+        bool same = m == 4;
+        for (size_t j = 0; same && j < m; j++)
+            same = buf[j].sample == tl->clickGrid.sampleAt(tickOf(k0 + j)) &&
+                   buf[j].accent == ((k0 + j) % uint64_t(last.beatsPerBar) == 0);
+        if (!same)
+            fail("tpb %u @%.0f: %zu clicks (expected 4) at tick %llu in the last meter%s", tpb,
+                 sampleRate, m, (unsigned long long)tickOf(k0), m == 4 ? ", wrong samples" : "");
+    }
+}
+
+// A minimal in-memory voicegroup (transportcheck's recipe); the songs here
+// play no notes, so it only has to be valid.
+struct TestVoicegroup {
+    int8_t sample[65];
+    WaveData wave;
+    LoadedVoiceGroup vg;
+
+    TestVoicegroup()
+    {
+        for (int i = 0; i < 64; i++)
+            sample[i] = i < 32 ? 100 : -100;
+        sample[64] = sample[63];
+        std::memset(&wave, 0, sizeof(wave));
+        wave.status = 0xC000;
+        wave.freq = 8363u * 1024u;
+        wave.size = 64;
+        wave.data = sample;
+        std::memset(&vg, 0, sizeof(vg));
+        for (ToneData &v : vg.voices) {
+            v.type = VOICE_DIRECTSOUND;
+            v.key = 60;
+            v.wav = &wave;
+            v.attack = 255;
+            v.sustain = 255;
+            v.release = 200;
+        }
+    }
+};
+
+// A silent song: 120 BPM (or usPerBeat), 4/4, a loop [loopStart, loopEnd)
+// in ticks.
+SmfFile silentLoopSong(uint32_t tpb, uint64_t loopStart, uint64_t loopEnd,
+                       uint32_t usPerBeat = 500000)
+{
+    SmfFile smf;
+    smf.format = 1;
+    smf.division = uint16_t(tpb);
+    smf.tracks.resize(2);
+    SmfTrack &c = smf.tracks[0];
+    c.events.push_back(tempoUsEvent(0, usPerBeat));
+    c.events.push_back(metaEvent(loopStart, 0x01, QByteArray("[")));
+    c.events.push_back(metaEvent(loopEnd, 0x01, QByteArray("]")));
+    c.endTick = loopEnd;
+    smf.tracks[1].events.push_back(channelEvent(0, 0xC0, 0, 0));
+    smf.tracks[1].endTick = loopEnd;
+    return smf;
+}
+
+constexpr float kSilent = 1e-7f;
+
+// Click onsets in interleaved output: the frame before the first sounding
+// one after at least `gap` silent frames (a click's first frame is 0: its
+// attack starts there). Peak of each click over its first `span` frames.
+struct Onset {
+    uint64_t frame;
+    float peak;
+};
+std::vector<Onset> findOnsets(const std::vector<float> &out, uint32_t gap, uint32_t span)
+{
+    std::vector<Onset> onsets;
+    const size_t frames = out.size() / 2;
+    uint64_t silentRun = gap; // the start counts as silence
+    for (size_t f = 0; f < frames; f++) {
+        const bool sounding =
+            std::fabs(out[f * 2]) > kSilent || std::fabs(out[f * 2 + 1]) > kSilent;
+        if (!sounding) {
+            silentRun++;
+            continue;
+        }
+        if (silentRun >= gap) {
+            float peak = 0.0f;
+            for (size_t g = f; g < std::min(frames, f + span); g++)
+                peak = std::max(peak, std::fabs(out[g * 2]));
+            onsets.push_back({f == 0 ? 0 : f - 1, peak});
+        }
+        silentRun = 0;
+    }
+    return onsets;
+}
+
+bool allSilent(const float *v, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (std::fabs(v[i]) > kSilent)
+            return false;
+    }
+    return true;
+}
+
+void checkEngine()
+{
+    AudioEngine engine;
+    QString error;
+    if (!engine.init(&error)) {
+        std::printf("metrocheck: engine part SKIPPED (no audio device: %s)\n",
+                    qUtf8Printable(error));
+        return;
+    }
+    const double rate = engine.sampleRate();
+    TestVoicegroup tvg;
+
+    // 24 tpb, 4/4: beats every 24 ticks, bar lines at 0 and 96. The loop
+    // [30, 150) starts and ends off the beat and holds beats 48-144, the
+    // bar line at 96 among them.
+    {
+        const uint64_t loopStartTick = 30, loopEndTick = 150;
+        std::unique_ptr<MidiTimeline> tl =
+            MidiTimeline::build(silentLoopSong(24, loopStartTick, loopEndTick), rate);
+        if (!tl || !tl->hasLoop()) {
+            fail("silent loop song built wrong");
+            return;
+        }
+        const ClickGrid &grid = tl->clickGrid;
+        // Expected output frames over three passes.
+        const uint64_t ls = tl->loopStartSample, le = tl->loopEndSample, len = le - ls;
+        std::vector<std::pair<uint64_t, bool>> expected;
+        for (uint64_t t = 0; t < loopEndTick; t += 24)
+            expected.push_back({grid.sampleAt(t), t % 96 == 0});
+        for (int pass = 1; pass <= 2; pass++) {
+            for (uint64_t t = 48; t < loopEndTick; t += 24)
+                expected.push_back({le + (pass - 1) * len + (grid.sampleAt(t) - ls), t % 96 == 0});
+        }
+        const uint64_t total = le + 2 * len;
+
+        engine.holdDeviceForTest(true);
+        engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+        engine.setOutputGain(1.0f);
+        engine.setMetronomeVolume(1.0f);
+
+        // Off: the song is silent, and so is the output.
+        engine.setMetronomeEnabled(false);
+        engine.play();
+        std::vector<float> out;
+        engine.pumpForTest(uint32_t(total), &out);
+        if (!allSilent(out.data(), out.size()))
+            fail("metronome off: output not silent (the silent song or a stray click)");
+        engine.stop();
+        engine.pumpForTest(512);
+
+        // On.
+        engine.setMetronomeEnabled(true);
+        engine.play();
+        out.clear();
+        engine.pumpForTest(uint32_t(total), &out);
+        std::vector<float> tap(size_t(engine.tap().capacity()) * 2);
+        engine.tap().readLatest(tap.data(), engine.tap().capacity());
+        if (!allSilent(tap.data(), tap.size()))
+            fail("the audio tap heard the metronome");
+        const std::vector<Onset> onsets = findOnsets(out, 64, 400);
+        if (onsets.size() != expected.size()) {
+            fail("%zu clicks heard, %zu expected", onsets.size(), expected.size());
+        } else {
+            for (size_t i = 0; i < onsets.size(); i++) {
+                if (onsets[i].frame != expected[i].first)
+                    fail("click %zu at frame %llu, expected %llu", i,
+                         (unsigned long long)onsets[i].frame,
+                         (unsigned long long)expected[i].first);
+                const bool accent =
+                    onsets[i].peak > (ClickVoice::kAccentPeak + ClickVoice::kBeatPeak) / 2;
+                if (accent != expected[i].second)
+                    fail("click %zu peak %.3f: accent %d, expected %d", i, onsets[i].peak,
+                         int(accent), int(expected[i].second));
+            }
+        }
+
+        // Volume scales the click.
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.setMetronomeVolume(0.5f);
+        engine.play();
+        out.clear();
+        engine.pumpForTest(uint32_t(grid.sampleAt(1)), &out);
+        {
+            const std::vector<Onset> o = findOnsets(out, 64, 400);
+            const float want = ClickVoice::kAccentPeak * 0.5f;
+            if (o.empty() || std::fabs(o[0].peak - want) > 0.02f)
+                fail("at 50%% volume the first click peaks at %.3f, expected about %.3f",
+                     o.empty() ? 0.0f : o[0].peak, want);
+        }
+        engine.setMetronomeVolume(1.0f);
+
+        // Stop cuts a ringing click: stop 100 frames into the beat at tick 24.
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.play();
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.stop();
+        out.clear();
+        engine.pumpForTest(2048, &out);
+        if (!allSilent(out.data(), out.size()))
+            fail("Stop left the click ringing");
+
+        // So does a seek, to tick 26: the next beat (48) is far off.
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.play();
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.seek(grid.sampleAt(26));
+        out.clear();
+        engine.pumpForTest(2048, &out);
+        if (!allSilent(out.data(), out.size()))
+            fail("a seek left the click ringing");
+
+        // Off mid-click: that click finishes, and no other follows.
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.play();
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.setMetronomeEnabled(false);
+        out.clear();
+        engine.pumpForTest(uint32_t(grid.sampleAt(24 * 4) - grid.sampleAt(24)), &out);
+        {
+            ClickVoice probe;
+            probe.setSampleRate(rate);
+            const size_t rest = probe.lengthFrames() - 100;
+            if (allSilent(out.data(), 128))
+                fail("turning the metronome off cut the ringing click");
+            if (!allSilent(out.data() + rest * 2, out.size() - rest * 2))
+                fail("the metronome clicked after it was turned off");
+        }
+        engine.setMetronomeEnabled(true);
+
+        // A song switch cuts the click too (loadSong stops without a
+        // transition).
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.play();
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+        out.clear();
+        engine.pumpForTest(2048, &out);
+        if (!allSilent(out.data(), out.size()))
+            fail("a song switch left the click ringing");
+
+        engine.unloadSong();
+        engine.holdDeviceForTest(false);
+    }
+
+    // A loop shorter than the callback: 960 tpb, 4/4, a 120-tick loop
+    // [900, 1020) holding beat 960. The tempo sets the loop to the click's
+    // length plus a silent gap, so with 8192-frame callbacks every render
+    // wraps two or more times and every pass clicks once. Above about 65 kHz
+    // a click is too long for that: the loop is then shorter than a click
+    // (clicks overlap) and only the click count is checked.
+    {
+        ClickVoice probe;
+        probe.setSampleRate(rate);
+        const uint64_t clickLen = probe.lengthFrames();
+        uint64_t wantLen = clickLen + 320;
+        const bool separable = wantLen * 2 <= 8192;
+        if (!separable)
+            wantLen = 2000;
+        // 120 ticks at 960 tpb is 1/8 beat.
+        const uint32_t usPerBeat = uint32_t(double(wantLen) * 8.0 * 1000000.0 / rate + 0.5);
+        std::unique_ptr<MidiTimeline> tl =
+            MidiTimeline::build(silentLoopSong(960, 900, 1020, usPerBeat), rate);
+        const uint64_t ls = tl->loopStartSample, le = tl->loopEndSample, len = le - ls;
+        const uint64_t beat = tl->clickGrid.sampleAt(960);
+        if (len * 2 > 8192) {
+            fail("short loop is %llu frames, too long for the multi-wrap case",
+                 (unsigned long long)len);
+            return;
+        }
+        engine.holdDeviceForTest(true);
+        engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+        engine.setMetronomeEnabled(true);
+        const uint64_t before = engine.clicksQueuedForTest();
+        engine.play();
+        const int passes = 40;
+        const uint64_t total = le + uint64_t(passes - 1) * len;
+        std::vector<float> out;
+        engine.pumpForTest(uint32_t(total), &out, 8192);
+        // Beats 0 and 960 in the first pass, then 960 every later pass.
+        const uint64_t want = 1 + uint64_t(passes);
+        const uint64_t got = engine.clicksQueuedForTest() - before;
+        if (got != want)
+            fail("short loop: %llu clicks over %d passes, expected %llu", (unsigned long long)got,
+                 passes, (unsigned long long)want);
+        // And where: tick 0, then the beat in each pass.
+        if (!separable) {
+            std::printf("metrocheck: short-loop click positions SKIPPED (a click is %llu frames "
+                        "at %.0f Hz, too long to fit a multi-wrap loop)\n",
+                        (unsigned long long)clickLen, rate);
+        } else {
+            const std::vector<Onset> onsets = findOnsets(out, 128, 64);
+            if (onsets.size() != want) {
+                fail("short loop: %zu clicks heard, expected %llu", onsets.size(),
+                     (unsigned long long)want);
+            } else {
+                for (size_t i = 0; i < onsets.size(); i++) {
+                    const uint64_t frame = i == 0 ? 0 : beat + (i - 1) * len;
+                    if (onsets[i].frame != frame) {
+                        fail("short loop: click %zu at frame %llu, expected %llu", i,
+                             (unsigned long long)onsets[i].frame, (unsigned long long)frame);
+                        break;
+                    }
+                }
+            }
+        }
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.unloadSong();
+        engine.holdDeviceForTest(false);
+    }
+
+    // The auto-stop, 3 s (audioengine.cpp's kTailSeconds) after a song
+    // without a loop ends, comes inside a callback's chunk loop: the clicks
+    // that callback queued before it still sound. 240 BPM, 24 tpb, one bar.
+    // The stop lands at the end of the first 8192-frame render chunk past
+    // the tail; it is pumped as the last chunk of one 8-chunk callback,
+    // which at 240 BPM holds at least one beat at any rate up to 192 kHz.
+    {
+        SmfFile smf = silentLoopSong(24, 0, 96, 250000);
+        smf.tracks[0].events.resize(1); // the tempo only: no loop
+        std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(smf, rate);
+        const ClickGrid &grid = tl->clickGrid;
+        const uint64_t tail = tl->lengthSamples + uint64_t(3.0 * rate);
+        constexpr uint64_t kRender = 8192, kCallback = kRender * 8;
+        const uint64_t stopAt = (tail / kRender + 1) * kRender;
+        std::vector<uint64_t> expected;
+        for (uint64_t t = 0; grid.sampleAt(t) < stopAt; t += 24)
+            expected.push_back(grid.sampleAt(t));
+        if (expected.empty() || expected.back() < stopAt - kCallback) {
+            fail("auto-stop: no beat in the stopping callback; the case tests nothing");
+        } else {
+            engine.holdDeviceForTest(true);
+            engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+            engine.setMetronomeEnabled(true);
+            engine.play();
+            std::vector<float> out;
+            engine.pumpForTest(uint32_t(stopAt - kCallback), &out, uint32_t(kRender));
+            engine.pumpForTest(uint32_t(kCallback), &out, uint32_t(kCallback));
+            if (engine.transport() != Transport::Stopped)
+                fail("auto-stop: the song is still playing at frame %llu",
+                     (unsigned long long)stopAt);
+            const std::vector<Onset> onsets = findOnsets(out, 64, 64);
+            if (onsets.size() != expected.size()) {
+                fail("auto-stop: %zu clicks heard, expected %zu", onsets.size(), expected.size());
+            } else {
+                for (size_t i = 0; i < onsets.size(); i++) {
+                    if (onsets[i].frame != expected[i]) {
+                        fail("auto-stop: click %zu at frame %llu, expected %llu", i,
+                             (unsigned long long)onsets[i].frame, (unsigned long long)expected[i]);
+                        break;
+                    }
+                }
+            }
+            engine.unloadSong();
+            engine.holdDeviceForTest(false);
+        }
+    }
+}
+
+} // namespace
+
+int runMetroCheck()
+{
+    for (const uint32_t tpb : {24u, 48u, 96u}) {
+        for (const double rate : {48000.0, 44100.0})
+            checkGrid(tpb, rate);
+    }
+    checkEngine();
+    if (g_failures) {
+        std::fprintf(stderr, "metrocheck: %d failure(s)\n", g_failures);
+        return 1;
+    }
+    std::printf("metrocheck: PASS\n");
+    return 0;
+}

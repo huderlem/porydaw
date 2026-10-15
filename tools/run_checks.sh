@@ -133,6 +133,7 @@ run primecheck       -    --primecheck
 run xcmdcheck        -    --xcmdcheck
 run smfcheck         -    --smfcheck
 run transportcheck   -    --transportcheck
+run metrocheck       -    --metrocheck
 run audiocheck       -    --audiocheck
 run keymapcheck      -    --keymapcheck
 run scriptcheck      base --scriptcheck SCRATCH mus_abandoned_ship

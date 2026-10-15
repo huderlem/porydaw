@@ -186,6 +186,10 @@ const QString kFollowPlayheadKey = QStringLiteral("followPlayhead");
 // Output level in percent of unity (0–200). App-wide, like Follow Playhead:
 // it's the user's listening level, not a property of any song or project.
 const QString kOutputLevelKey = QStringLiteral("outputLevel");
+// The metronome (docs/metronome/PLAN.md M4, M7): on/off and volume in
+// percent, app-wide like Follow Playhead.
+const QString kMetronomeKey = QStringLiteral("metronome");
+const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
 
 #ifdef Q_OS_WIN
 // These names and values come from the current Windows SDK. The bundled
@@ -252,6 +256,41 @@ QIcon recordIcon(QWidget &widget, const QSize &size)
                      QIcon::Off);
     result.addPixmap(dot(themes::color(themes::Role::disabled_text), 0.55), QIcon::Disabled,
                      QIcon::On);
+    return result;
+}
+// The metronome's glyph, painted (no style has one): a tapered body with a
+// pendulum leaning off center, tinted like the other transport glyphs.
+QIcon metronomeIcon(QWidget &widget, const QSize &size)
+{
+    const qreal dpr = widget.devicePixelRatioF();
+    const auto glyph = [&](themes::Role role) {
+        QPixmap pixmap(size * dpr);
+        pixmap.setDevicePixelRatio(dpr);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QColor color = themes::color(role);
+        const qreal s = std::min(size.width(), size.height());
+        const qreal x0 = (size.width() - s) / 2, y0 = (size.height() - s) / 2;
+        const auto at = [&](qreal fx, qreal fy) { return QPointF(x0 + fx * s, y0 + fy * s); };
+        QPen pen(color, std::max<qreal>(1.0, s * 0.09));
+        pen.setJoinStyle(Qt::RoundJoin);
+        pen.setCapStyle(Qt::RoundCap);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        const QPointF body[] = {at(0.38, 0.14), at(0.62, 0.14), at(0.80, 0.86), at(0.20, 0.86)};
+        painter.drawPolygon(body, 4);
+        painter.drawLine(at(0.24, 0.70), at(0.76, 0.70));
+        painter.drawLine(at(0.50, 0.70), at(0.70, 0.26));
+        painter.end();
+        return pixmap;
+    };
+    QIcon result(glyph(themes::Role::transport_text));
+    result.addPixmap(glyph(themes::Role::button_hover_text), QIcon::Active, QIcon::Off);
+    result.addPixmap(glyph(themes::Role::button_pressed_text), QIcon::Normal, QIcon::On);
+    result.addPixmap(glyph(themes::Role::button_pressed_text), QIcon::Active, QIcon::On);
+    result.addPixmap(glyph(themes::Role::disabled_text), QIcon::Disabled, QIcon::Off);
+    result.addPixmap(glyph(themes::Role::disabled_text), QIcon::Disabled, QIcon::On);
     return result;
 }
 } // namespace
@@ -775,6 +814,21 @@ void MainWindow::buildUi()
     m_loopAction->setChecked(true);
     connect(m_loopAction, &QAction::toggled, this, [this](bool on) { m_audio.setLoopEnabled(on); });
     transport->addAction(m_loopAction);
+
+    // The metronome (docs/metronome/PLAN.md M4). Its key
+    // (transport.metronome) is a bare letter, dispatched from the roll like
+    // Record's (SongView::metronomeRequested), so it carries no shortcut.
+    m_metronomeAction = new QAction(tr("Metronome"), this);
+    m_metronomeAction->setCheckable(true);
+    m_metronomeAction->setToolTip(tr("Click every beat during playback"));
+    m_metronomeAction->setChecked(QSettings().value(kMetronomeKey, false).toBool());
+    m_audio.setMetronomeEnabled(m_metronomeAction->isChecked());
+    connect(m_metronomeAction, &QAction::toggled, this, [this](bool on) {
+        m_audio.setMetronomeEnabled(on);
+        if (m_persistSession)
+            QSettings().setValue(kMetronomeKey, on);
+    });
+    transport->addAction(m_metronomeAction);
 
     // Whether playback drags the view along. Off, the playhead runs
     // offscreen and the camera stays where the user put it — zoomed in on a
@@ -1377,6 +1431,7 @@ void MainWindow::refreshTransportIcons()
     m_stopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaStop, size));
     m_recordAction->setIcon(recordIcon(*this, size));
     m_loopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
+    m_metronomeAction->setIcon(metronomeIcon(*this, size));
     m_followPlayheadAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaSeekForward, size));
 }
 
@@ -1565,6 +1620,10 @@ SongSession *MainWindow::createSession()
     connect(s->view, &SongView::recordRequested, this, [this, s] {
         if (s == m_active && m_recordAction->isVisible() && m_recordAction->isEnabled())
             m_recordAction->trigger();
+    });
+    connect(s->view, &SongView::metronomeRequested, this, [this, s] {
+        if (s == m_active)
+            m_metronomeAction->trigger();
     });
     connect(&s->doc, &SongDocument::tracksRemapped, this,
             [this, s](const TrackRemap &remap) { followTakeTrack(*s, remap); });
@@ -3194,6 +3253,21 @@ void MainWindow::buildSettingsDialog()
     m_settingsDialog = std::make_unique<SettingsDialog>(
         *m_themeController, outputLevel, m_engineSettings,
         m_themeSettings->value(kSystemFontKey, false).toBool(), *m_midiInput, pluginsPage, this);
+    {
+        const int volume =
+            std::clamp(QSettings()
+                           .value(kMetronomeVolumeKey, AudioSettingsPage::kMetronomeVolumeDefault)
+                           .toInt(),
+                       0, 100);
+        m_audio.setMetronomeVolume(float(volume) / 100.0f);
+        m_settingsDialog->audioPage()->setMetronomeVolume(volume);
+    }
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
+            [this](int percent) {
+                m_audio.setMetronomeVolume(float(percent) / 100.0f);
+                if (m_persistSession)
+                    QSettings().setValue(kMetronomeVolumeKey, percent);
+            });
     connect(m_settingsDialog.get(), &SettingsDialog::outputLevelChanged, this, [this](int percent) {
         m_audio.setOutputGain(float(percent) / 100.0f);
         if (m_persistSession)

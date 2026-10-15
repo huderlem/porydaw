@@ -138,6 +138,8 @@ qt_add_library(porydaw_app STATIC
     src/audio/mcu.h
     src/audio/midiroutes.cpp
     src/audio/midiroutes.h
+    src/audio/metronome.cpp
+    src/audio/metronome.h
     src/audio/miniaudio_impl.c
     src/audio/stb_vorbis_impl.c
     src/audio/wavexport.cpp
@@ -153,6 +155,8 @@ qt_add_library(porydaw_app STATIC
     src/audio/samplewav.h
     src/audio/sf2reader.cpp
     src/audio/sf2reader.h
+    src/core/clickgrid.cpp
+    src/core/clickgrid.h
     src/core/mid2agbtables.cpp
     src/core/mid2agbtables.h
     src/core/miditimeline.cpp
@@ -357,6 +361,7 @@ qt_add_executable(porydaw
     src/settingscheck.cpp
     src/keymapcheck.cpp
     src/midicheck.cpp
+    src/metrocheck.cpp
     src/reccheck.cpp
     src/velcheck.cpp
     resources/fonts.qrc
@@ -472,6 +477,7 @@ endif()
 # ---- Offline render CLI (development/testing: parity vs poryaaaa_render) ----
 add_executable(porydaw_render_cli
     tools/porydaw_render_cli.cpp
+    src/core/clickgrid.cpp
     src/core/mid2agbtables.cpp
     src/core/miditimeline.cpp
     src/core/smf.cpp

@@ -944,6 +944,8 @@ class SongView : public QWidget
     // The Record key (transport.record) from the focused roll or lanes; the
     // main window triggers its Record action, if Record is available.
     void recordRequested();
+    // The metronome key (transport.metronome) from the focused roll.
+    void metronomeRequested();
     // The lane menu's "Learn MIDI control…" on a routable lane (its
     // document CC), and its "Cancel MIDI learn" while that lane learns.
     void midiLearnRequested(int lane);

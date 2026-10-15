@@ -60,6 +60,9 @@ int runXcmdCheck(const QString &corpusDir);
 // smfcheck.cpp; SMF parse-validation + note-pairing check (self-contained,
 // no project needed).
 int runSmfCheck();
+// metrocheck.cpp; metronome click grid + engine mix (self-contained, no
+// project needed).
+int runMetroCheck();
 // transportcheck.cpp; playback-start halts ringing auditions (self-contained,
 // no project needed; SKIPs without an audio device).
 int runTransportCheck();
@@ -229,6 +232,8 @@ int main(int argc, char *argv[])
     const int bundleCheck = args.indexOf(QStringLiteral("--bundlecheck"));
     if (bundleCheck >= 0 && bundleCheck + 1 < args.size())
         return runBundleCheck(args[bundleCheck + 1]);
+    if (args.contains(QStringLiteral("--metrocheck")))
+        return runMetroCheck();
     if (args.contains(QStringLiteral("--transportcheck")))
         return runTransportCheck();
     if (args.contains(QStringLiteral("--audiocheck")))

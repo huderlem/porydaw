@@ -796,6 +796,7 @@ class MainWindow : public QMainWindow
     QAction *m_pauseAction = nullptr;
     QAction *m_stopAction = nullptr;
     QAction *m_loopAction = nullptr;
+    QAction *m_metronomeAction = nullptr;
     QAction *m_undoAction = nullptr; // the undo group's (Edit → Undo)
     // Rewind/FF hold-to-repeat (surfaceRepeatTick): the direction held (-1
     // Rewind, +1 Fast-forward, 0 none) and the repeats so far.

@@ -39,12 +39,13 @@ To change a decision later, update this table and every step it affects
    because the timeline is immutable once published (`updateTimeline` swaps
    it with the device stopped). The last piece runs forever, so the click
    continues past the song end (the 3 s tail, a take past the last note).
-2. **A pure scheduler.** `metronome::clicksIn(grid, fromSample, toSample,
+2. **A pure scheduler.** `ClickGrid::clicksIn(fromSample, toSample,
    out[], cap)` lists the beats in `[from, to)` as (sample, accent). It's pure
-   so `--metrocheck` can compare it with `sampleForTick` of
-   `stepGridLines(…, bars=false)` across tempo changes, meter changes and
-   odd tick rates. Beat samples round like `sampleForTick`, so a click and a
-   note on the same tick land on the same sample.
+   so `--metrocheck` can compare it with the `samplePos` of notes placed on
+   every `stepGridLines(…, bars=false)` line, across tempo changes, meter
+   changes and odd tick rates. Beat samples are computed bit-identically to
+   `build()`'s file-local `tickToSample` (which positions events), so a click
+   and a note on the same tick land on the same sample.
 3. **Loop wraps from what the player reports.** `process()` notes
    `m_player.position()` and `wrapCount()` around each `render()` chunk. No
    wrap: the chunk covered `[p0, p1)`. With wraps: `[p0, loopEnd)`, then
@@ -81,10 +82,11 @@ To change a decision later, update this table and every step it affects
 
 ## 3. Facts the steps rely on
 
-- `TimelinePlayer` dispatches events by `samplePos` computed from the tempo
-  map (`MidiTimeline::build`, `tickToSample`), the same arithmetic
-  `sampleForTick` (`miditimeline.cpp:418`) uses. A click at
-  `sampleForTick(beatTick)` is therefore exactly in time with notes.
+- `TimelinePlayer` dispatches events by `samplePos` computed by `build()`'s
+  file-local `tickToSample` (`miditimeline.cpp:52`). `sampleForTick`
+  (`miditimeline.cpp:427`) rounds from the tempo map's rounded points
+  instead and can be 1 sample off, so the click grid copies `tickToSample`'s arithmetic, not
+  `sampleForTick`'s.
 - `MidiTimeline::timeSigSegments()` (`miditimeline.h:129`) always has the
   4/4 segment at tick 0; `beatTicks = tpb*4 >> denomPow2`. `stepGridLines`
   restarts the grid at every meter change.
@@ -127,10 +129,10 @@ the user for a Windows test** before the next step.
   `transport.metronome` = `C`, QSettings `metronome` (default off).
   Settings → Audio: new "Metronome" group with *Volume* (0–100%, default
   70%, QSettings `metronomeVolume`).
-- `--metrocheck` harness, added to `run_checks.sh`: the scheduler vs
-  `sampleForTick`/`stepGridLines` on synthetic timelines (tempo change
-  mid-bar, 4/4→6/8→3/4, tpb 24/48/96, a loop that isn't beat-aligned, a
-  loop shorter than a chunk); the engine through `holdDeviceForTest` /
+- `--metrocheck` harness, added to `run_checks.sh`: the scheduler vs the
+  `samplePos` of notes on the `stepGridLines` beats, on synthetic timelines
+  (tempo change mid-bar, 4/4→6/8→3/4, tpb 24/48/96, a loop that isn't
+  beat-aligned, a loop shorter than a chunk); the engine through `holdDeviceForTest` /
   `pumpForTest`: clicks present in the output at the expected frames and
   **absent from the tap**, accent on bar starts, silence when off, a cut on
   stop. A negative test for each assertion.
@@ -165,4 +167,19 @@ the user for a Windows test** before the next step.
 
 ## 5. Progress
 
-(Filled in per step.)
+### Step 1 — done 2026-10-15
+
+- `ClickGrid` (src/core/clickgrid.{h,cpp}) built in `MidiTimeline::build`;
+  `ClickVoice` (src/audio/metronome.{h,cpp}); engine scheduling across
+  wraps, mixed after the tap; toolbar toggle (painted icon), bare `C`,
+  QSettings `metronome` / `metronomeVolume`, Settings → Audio "Metronome"
+  volume (double-click resets to 70%).
+- `--metrocheck` in `run_checks.sh`, every assertion negative-tested.
+- Opus review: no high/medium. Fixes applied: rate-robust short-loop case
+  (onset positions SKIP above ~65 kHz, count still asserted), song switch
+  cuts the click, 5 ms closing fade, auto-stop keeps the callback's earlier
+  clicks, more harness cases (seek cut, off mid-click, same-tick tempos,
+  cap truncation, far into the last meter, song switch, auto-stop), plan
+  text fixes, style nits. Not taken: computing event samples through the
+  grid (structural bit-exactness), caching per-loop clicks.
+- All 5 builds; normal + ASAN sweeps PASS.

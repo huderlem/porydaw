@@ -110,6 +110,7 @@ bool AudioEngine::init(QString *error)
         return false;
     }
     m_sampleRate = double(m_device->sampleRate);
+    m_click.setSampleRate(m_sampleRate);
     // When every real backend fails (headless CI, WSL without libpulse),
     // miniaudio's default context falls back to its null device: playback
     // runs but is silent. Record which backend won so the UI can warn.
@@ -206,6 +207,9 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     dropLiveLatch();
     m_liveFollow = LiveFollow();
 
+    // No transition will run cutAllSound for this stop: cut the click too.
+    m_click.cut();
+    m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
     m_captureBegun = 0;
@@ -293,6 +297,7 @@ void AudioEngine::applyPendingSeek()
         m4a_engine_all_notes_off(m_engine.get(), track);
     const uint64_t from = m_player.position();
     clearTimedPreviews();
+    m_click.cut();
     m_player.seek(samplePos, m_timeline);
     captureBoundary(from, samplePos);
     dropLiveLatch(); // the pass ends; the full chase covers its lanes
@@ -430,6 +435,8 @@ void AudioEngine::unloadSong()
     m_liveFollow = LiveFollow();
     resetPreviewEngine();
     clearTimedPreviews();
+    m_click.cut(); // the skipped transition would have cut it too
+    m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
     m_captureBegun = 0;
@@ -557,11 +564,53 @@ void AudioEngine::applyTransportTransition()
     m_appliedTransport = t;
 }
 
+// Audio thread. A wrap ends the chunk's first span at the loop end and
+// starts the next at the loop start; a loop shorter than the chunk may
+// wrap more than once, each extra pass a whole loop.
+void AudioEngine::scheduleClicks(const MidiTimeline *tl, uint64_t p0, uint64_t p1, uint32_t wraps,
+                                 uint64_t frame, uint32_t frameCount)
+{
+    if (wraps == 0) {
+        queueClicks(tl, p0, p1, frame, frameCount);
+        return;
+    }
+    uint64_t at = frame;
+    queueClicks(tl, p0, tl->loopEndSample, at, frameCount);
+    if (tl->loopEndSample > p0)
+        at += tl->loopEndSample - p0;
+    for (uint32_t w = 1; w < wraps; w++) {
+        queueClicks(tl, tl->loopStartSample, tl->loopEndSample, at, frameCount);
+        at += tl->loopEndSample - tl->loopStartSample;
+    }
+    queueClicks(tl, tl->loopStartSample, p1, at, frameCount);
+}
+
+void AudioEngine::queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to, uint64_t frame,
+                              uint32_t frameCount)
+{
+    if (from >= to || m_clickQueueCount >= kMaxClicksPerCallback)
+        return;
+    ClickGrid::Click clicks[kMaxClicksPerCallback];
+    const size_t n =
+        tl->clickGrid.clicksIn(from, to, clicks, kMaxClicksPerCallback - m_clickQueueCount);
+    for (size_t i = 0; i < n; i++) {
+        const uint64_t at = frame + (clicks[i].sample - from);
+        if (at >= frameCount)
+            break;
+        m_clickQueue[m_clickQueueCount++] = {uint32_t(at), clicks[i].accent};
+        m_clicksQueued++;
+    }
+}
+
 // Audio-thread: silence everything at once and drop preview bookkeeping,
-// queued and active.
+// queued and active. The ringing click is cut but this callback's queued
+// clicks are kept: process() resets the queue before scheduling, so a
+// transition at the callback's start queues none, while the auto-stop
+// inside the chunk loop keeps the clicks it rendered up to the stop.
 void AudioEngine::cutAllSound()
 {
     m4a_engine_all_sound_off(m_engine.get());
+    m_click.cut();
     m_timedActiveCount = 0;
     m_timedRead.store(m_timedWrite.load(std::memory_order_acquire), std::memory_order_release);
     forgetLiveNotes();
@@ -1213,15 +1262,17 @@ void AudioEngine::holdDeviceForTest(bool hold)
     }
 }
 
-void AudioEngine::pumpForTest(uint32_t frames)
+void AudioEngine::pumpForTest(uint32_t frames, std::vector<float> *captured, uint32_t chunk)
 {
     if (!m_deviceHeldForTest || !m_engine)
         return;
-    constexpr uint32_t kChunk = 512;
-    std::vector<float> out(kChunk * 2);
+    chunk = std::max<uint32_t>(chunk, 1);
+    std::vector<float> out(size_t(chunk) * 2);
     while (frames > 0) {
-        const uint32_t n = std::min(frames, kChunk);
+        const uint32_t n = std::min(frames, chunk);
         process(out.data(), n);
+        if (captured)
+            captured->insert(captured->end(), out.begin(), out.begin() + n * 2);
         frames -= n;
     }
 }
@@ -1294,6 +1345,9 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 
     M4AEngine *engine = m_engine.get();
     const float gain = m_outputGain.load();
+    const float clickGain = gain * m_metronomeVolume.load();
+    const bool metronomeOn = m_metronomeOn.load() && clickGain > 0.0f;
+    m_clickQueueCount = 0;
     uint32_t done = 0;
     const uint32_t wrapsBefore = m_player.wrapCount();
 
@@ -1305,9 +1359,14 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
 
         if (playing) {
             const bool looping = m_loopEnabled.load();
+            const uint64_t p0 = m_player.position();
+            const uint32_t w0 = m_player.wrapCount();
             // The only latched render: every offline path passes none.
             m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
                             &m_liveLatch);
+            if (metronomeOn)
+                scheduleClicks(tl, p0, m_player.position(), m_player.wrapCount() - w0, done,
+                               frameCount);
 
             // Auto-stop a non-looping song after the tail rings out.
             if (!(looping && tl->hasLoop()) &&
@@ -1331,6 +1390,10 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
         done += n;
     }
     m_tap.write(interleavedOut, frameCount);
+    // The metronome goes in after the tap (M8): meters and plugins hear only
+    // the song.
+    m_click.render(interleavedOut, frameCount, m_clickQueue, m_clickQueueCount, clickGain);
+    m_clickQueueCount = 0;
 
     // A take's segment ends at every loop wrap this callback rendered.
     for (uint32_t w = wrapsBefore; w != m_player.wrapCount(); w++)

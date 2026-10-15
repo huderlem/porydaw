@@ -399,6 +399,15 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                      [](const TimeSigPoint &a, const TimeSigPoint &b) { return a.tick < b.tick; });
     timeline->timeSigs = std::move(timeSigs);
 
+    std::vector<ClickGrid::Tempo> clickTempos;
+    clickTempos.reserve(tempos.size());
+    for (const TempoChange &tc : tempos)
+        clickTempos.push_back({tc.tick, tc.usPerBeat});
+    std::vector<ClickGrid::Meter> clickMeters;
+    for (const TimeSigSegment &seg : timeline->timeSigSegments())
+        clickMeters.push_back({seg.tick, seg.beatTicks, seg.beatsPerBar});
+    timeline->clickGrid = ClickGrid(clickTempos, std::move(clickMeters), tpqn, sampleRate);
+
     // Map the not-played events onto engine tracks (metas keep -1 unless their
     // SMF chunk got an engine slot) and time them for display.
     // stable: keeps same-tick strip entries in file order for display.

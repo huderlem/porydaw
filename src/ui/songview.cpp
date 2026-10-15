@@ -10771,6 +10771,12 @@ bool SongView::handleEditKey(QKeyEvent *event, keymap::Context surface)
         event->accept();
         return true;
     }
+    if (keys.matches(event, QStringLiteral("transport.metronome"))) {
+        if (!event->isAutoRepeat())
+            emit metronomeRequested();
+        event->accept();
+        return true;
+    }
     if (keys.matches(event, QStringLiteral("transport.record"))) {
         // A held key auto-repeats; only the real press starts or ends a take.
         if (!event->isAutoRepeat())

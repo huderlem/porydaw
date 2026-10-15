@@ -29,11 +29,36 @@ constexpr int kGbaDefaultRate = 13379;
 // stick there, so "back to normal" is findable without a reset gesture.
 constexpr int kOutputLevelDetent = 4;
 
-// Double-click resets to unity, and drags detent there.
-class OutputLevelSlider : public QSlider
+// A horizontal slider that double-click resets to its default.
+class ResettableSlider : public QSlider
 {
   public:
-    explicit OutputLevelSlider(QWidget *parent) : QSlider(Qt::Horizontal, parent)
+    ResettableSlider(int defaultValue, QWidget *parent)
+        : QSlider(Qt::Horizontal, parent)
+        , m_default(defaultValue)
+    {}
+
+  protected:
+    void mouseDoubleClickEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            setValue(m_default);
+            event->accept();
+            return;
+        }
+        QSlider::mouseDoubleClickEvent(event);
+    }
+
+  private:
+    int m_default;
+};
+
+// Double-click resets to unity, and drags detent there.
+class OutputLevelSlider : public ResettableSlider
+{
+  public:
+    explicit OutputLevelSlider(QWidget *parent)
+        : ResettableSlider(AudioSettingsPage::kOutputLevelDefault, parent)
     {
         setRange(0, AudioSettingsPage::kOutputLevelMax);
         setValue(AudioSettingsPage::kOutputLevelDefault);
@@ -45,17 +70,6 @@ class OutputLevelSlider : public QSlider
             if (std::abs(position - AudioSettingsPage::kOutputLevelDefault) <= kOutputLevelDetent)
                 setSliderPosition(AudioSettingsPage::kOutputLevelDefault);
         });
-    }
-
-  protected:
-    void mouseDoubleClickEvent(QMouseEvent *event) override
-    {
-        if (event->button() == Qt::LeftButton) {
-            setValue(AudioSettingsPage::kOutputLevelDefault);
-            event->accept();
-            return;
-        }
-        QSlider::mouseDoubleClickEvent(event);
     }
 };
 
@@ -95,6 +109,32 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     outputCaption->setForegroundRole(QPalette::PlaceholderText);
     outputCaption->setWordWrap(true);
     outputForm->addRow(QString(), outputCaption);
+
+    // Metronome: the click's own level, under the output level like the song.
+    auto *metronomeGroup = new QGroupBox(tr("Metronome"), this);
+    const QString metronomeTip = tr("How loud the metronome clicks, relative to the song. The "
+                                    "click never goes into exported WAVs. Double-click to reset "
+                                    "to %1%.")
+                                     .arg(kMetronomeVolumeDefault);
+    m_metronomeSlider = new ResettableSlider(kMetronomeVolumeDefault, this);
+    m_metronomeSlider->setObjectName(QStringLiteral("settingsMetronomeVolume"));
+    m_metronomeSlider->setRange(0, 100);
+    m_metronomeSlider->setSingleStep(5);
+    m_metronomeSlider->setPageStep(25);
+    m_metronomeSlider->setValue(kMetronomeVolumeDefault);
+    m_metronomeSlider->setToolTip(metronomeTip);
+    m_metronomeValue = new QLabel(this);
+    m_metronomeValue->setObjectName(QStringLiteral("settingsMetronomeValue"));
+    m_metronomeValue->setToolTip(metronomeTip);
+    m_metronomeValue->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_metronomeValue->setFixedWidth(m_outputValue->minimumWidth());
+    auto *metronomeRow = new QHBoxLayout;
+    metronomeRow->setContentsMargins(0, 0, 0, 0);
+    metronomeRow->addWidget(m_metronomeSlider, 1);
+    metronomeRow->addWidget(m_metronomeValue);
+    auto *metronomeForm = new QFormLayout(metronomeGroup);
+    metronomeForm->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    metronomeForm->addRow(tr("Volume:"), metronomeRow);
 
     // GBA engine: poryaaaa's global accuracy knobs (SPEC §7).
     auto *engineGroup = new QGroupBox(tr("GBA engine"), this);
@@ -148,6 +188,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
 
     auto *pageLayout = new QVBoxLayout(this);
     pageLayout->addWidget(outputGroup);
+    pageLayout->addWidget(metronomeGroup);
     pageLayout->addWidget(engineGroup);
     pageLayout->addStretch(1);
     pageLayout->addLayout(buttonRow);
@@ -157,12 +198,18 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         if (!m_loading)
             emit outputLevelChanged(percent);
     });
+    connect(m_metronomeSlider, &QSlider::valueChanged, this, [this](int percent) {
+        m_metronomeValue->setText(tr("%1%").arg(percent));
+        if (!m_loading)
+            emit metronomeVolumeChanged(percent);
+    });
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
     connect(m_analogFilter, &QCheckBox::toggled, this, &AudioSettingsPage::emitEngineSettings);
     connect(defaultsButton, &QPushButton::clicked, this, [this] {
         setOutputLevel(kOutputLevelDefault);
+        setMetronomeVolume(kMetronomeVolumeDefault);
         setEngineSettings(EngineSettings());
     });
 
@@ -174,6 +221,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_reported = engineSettings();
     // setValue is a no-op at the default, so seed the readout explicitly.
     m_outputValue->setText(tr("%1%").arg(m_outputSlider->value()));
+    m_metronomeValue->setText(tr("%1%").arg(m_metronomeSlider->value()));
 }
 
 int AudioSettingsPage::outputLevel() const
@@ -184,6 +232,16 @@ int AudioSettingsPage::outputLevel() const
 void AudioSettingsPage::setOutputLevel(int percent)
 {
     m_outputSlider->setValue(std::clamp(percent, 0, kOutputLevelMax));
+}
+
+int AudioSettingsPage::metronomeVolume() const
+{
+    return m_metronomeSlider->value();
+}
+
+void AudioSettingsPage::setMetronomeVolume(int percent)
+{
+    m_metronomeSlider->setValue(std::clamp(percent, 0, 100));
 }
 
 EngineSettings AudioSettingsPage::engineSettings() const
