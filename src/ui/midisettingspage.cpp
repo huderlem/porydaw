@@ -14,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -80,6 +81,22 @@ class PortDelegate : public QStyledItemDelegate
 
     // The role box's size (it follows the font: MidiSettingsPage::fitToFont).
     void setRoleSize(QSize size) { m_roleSize = size; }
+
+    // The row under `pos` (viewport coordinates) when `pos` is on its
+    // checkbox, else null.
+    QListWidgetItem *checkboxAt(QListWidget *list, QPoint pos) const
+    {
+        QListWidgetItem *item = list->itemAt(pos);
+        if (!item)
+            return nullptr;
+        QStyleOptionViewItem opt;
+        opt.initFrom(list->viewport());
+        opt.rect = list->visualItemRect(item);
+        initStyleOption(&opt, list->indexFromItem(item));
+        const QRect box =
+            list->style()->subElementRect(QStyle::SE_ItemViewItemCheckIndicator, &opt, list);
+        return box.contains(pos) ? item : nullptr;
+    }
 
     QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override
     {
@@ -556,6 +573,23 @@ bool MidiSettingsPage::eventFilter(QObject *watched, QEvent *event)
     // The list got narrower or wider: Adjust relays its rows out only when a
     // top-to-bottom list's height changes, and the role boxes, placed at the
     // rows' right ends, would stay where the old width put them.
+    // A click on a row's checkbox toggles it here: a row with an open
+    // editor (its role box) hands the view's clicks to that editor, so the
+    // delegate never sees them.
+    if (m_ports && watched == m_ports->viewport() &&
+        (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseButtonRelease ||
+         event->type() == QEvent::MouseButtonDblClick)) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            if (QListWidgetItem *item = static_cast<PortDelegate *>(m_portDelegate)
+                                            ->checkboxAt(m_ports, mouse->position().toPoint())) {
+                if (event->type() == QEvent::MouseButtonRelease)
+                    item->setCheckState(item->checkState() == Qt::Checked ? Qt::Unchecked
+                                                                          : Qt::Checked);
+                return true;
+            }
+        }
+    }
     if (m_ports && watched == m_ports->viewport() && event->type() == QEvent::Resize) {
         auto *resize = static_cast<QResizeEvent *>(event);
         if (resize->size().width() != resize->oldSize().width())

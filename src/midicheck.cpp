@@ -24,6 +24,7 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QStyle>
+#include <QStyleOption>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QToolBar>
@@ -1093,6 +1094,36 @@ void checkSettingsPage()
                               "or didn't apply");
                     }
                 }
+            }
+            // A click on a row's checkbox toggles it, though the row has a
+            // role box open (a persistent editor takes the row's clicks).
+            {
+                QListWidgetItem *item = ports->item(0);
+                QStyleOptionViewItem opt;
+                opt.initFrom(ports->viewport());
+                opt.rect = ports->visualItemRect(item);
+                opt.features =
+                    QStyleOptionViewItem::HasCheckIndicator | QStyleOptionViewItem::HasDisplay;
+                opt.text = item->text();
+                const QPoint at =
+                    ports->style()
+                        ->subElementRect(QStyle::SE_ItemViewItemCheckIndicator, &opt, ports)
+                        .center();
+                const bool was = midi.isPortEnabled(plain);
+                for (const QEvent::Type type :
+                     {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                    QMouseEvent click(type, at, ports->viewport()->mapToGlobal(at), Qt::LeftButton,
+                                      type == QEvent::MouseButtonPress ? Qt::LeftButton
+                                                                       : Qt::NoButton,
+                                      Qt::NoModifier);
+                    QApplication::sendEvent(ports->viewport(), &click);
+                }
+                QApplication::processEvents();
+                check(midi.isPortEnabled(plain) == !was &&
+                          ports->item(0)->checkState() == (was ? Qt::Unchecked : Qt::Checked),
+                      "roles page: clicking a port's checkbox did not toggle it");
+                midi.setPortEnabled(plain, was);
+                QApplication::processEvents();
             }
             shoot(&page, "roles");
             if (const char *dir = std::getenv("PORYDAW_MIDICHECK_SHOTS"))
