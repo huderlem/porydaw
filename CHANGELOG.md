@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.
    - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR` and `LFOS` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
+   - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Rewind, Fast-forward) control playback. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
 - Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
 
 ## Fixed

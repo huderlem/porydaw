@@ -116,6 +116,32 @@ on a typical PC (the developer's machine needed about 50 ms); Bluetooth
 headphones need much more. Find it by recording steady quarter notes
 against the beat. -->
 
+## Transport buttons
+
+<!-- TODO: Many keyboards (e.g. Arturia KeyLab) have Play, Stop, Record,
+Loop and Rewind/Fast-forward buttons. They're sent on a second "DAW" port
+using Mackie Control (MCU). Settings → MIDI gives each port a role,
+Keyboard or Control surface; ports named DAW/MCU/Mackie, and a KeyLab's
+"MIDIIN2 (...)" port, start as Control surface. The keyboard must be in its
+Mackie/MCU DAW mode. A control-surface port never plays notes, records or
+drives Learn. -->
+
+<!-- TODO: What each button does: Play/Pause plays from the edit cursor,
+pauses, resumes. Stop stops; Stop again goes to the start of the song.
+Record = the Record button (needs a Keyboard port enabled). Loop toggles
+Loop. Rewind/Fast-forward move one bar line per press (from mid-bar,
+Rewind goes to that bar's start); hold to repeat, speeding up to two bars
+a step; they stop at the song's start/end. While playing, playback jumps
+from where it is; during a take, the take carries on from the new bar.
+Jog wheel: one beat per click. Save and Undo buttons save the song and
+undo (Undo does nothing while you're typing in a text box). -->
+
+<!-- TODO: The buttons work while porydaw is in the background, but not
+while a dialog (e.g. Song Settings) is open. The button lights on the
+keyboard don't light up. Mixer controls (faders, pan knobs, track buttons)
+aren't supported. Plugins see a control surface's messages too
+(`porydaw.midi.ports()` reports each port's role). -->
+
 ## Things to know
 
 <!-- TODO: Keys held when you press Play/Stop/seek go silent (the engine
