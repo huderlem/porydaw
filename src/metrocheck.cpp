@@ -43,7 +43,7 @@ namespace {
 
 int g_failures = 0;
 
-void fail(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void fail(const char *fmt, ...) Q_ATTRIBUTE_FORMAT_PRINTF(1, 2);
 void fail(const char *fmt, ...)
 {
     std::fprintf(stderr, "metrocheck: FAIL: ");
