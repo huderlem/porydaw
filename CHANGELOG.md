@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Click (metronome), Rewind, Fast-forward, Save, Undo) are integrated. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
 - Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
 - Added a metronome. Toggle it with the new `Metronome` button on the transport toolbar (keyboard shortcut `C`). It clicks every beat, following the song's tempo and time signature. Set its volume in `Settings -> Audio`.
-   - Recording from a stopped song counts in first. Choose Off, 1 bar or 2 bars in `Settings -> Audio`.
-- Added `Settings -> Audio -> Output device` to lower playback latency when playing a MIDI keyboard. Choose a smaller buffer size, and on Windows turn on exclusive mode to bypass the Windows mixer for much lower latency (other apps can't play sound on that device while Porydaw runs; if another app already holds it, Porydaw falls back to shared mode).
+- Added `Settings -> Audio -> Output device` to configure playback latency when playing a MIDI keyboard.
+   - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.
