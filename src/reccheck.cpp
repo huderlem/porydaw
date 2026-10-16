@@ -37,7 +37,9 @@
 #include "core/miditimeline.h"
 #include "core/recordingtake.h"
 #include "mainwindow.h"
+#include "ui/audiosettingspage.h"
 #include "ui/keymap.h"
+#include "ui/settingsdialog.h"
 #include "ui/songview.h"
 #include "ui/theme/themeruntime.h"
 
@@ -157,8 +159,12 @@ std::vector<NewNote> referenceToNotes(const RecordingTake &take, const MidiTimel
         };
         const uint64_t on =
             std::max(note.floorSample, earlier(note.onSample, latencySamples + note.onLate));
-        if (played)
-            off = std::max(on, earlier(off, latencySamples + note.offLate));
+        if (played) {
+            off = earlier(off, latencySamples + note.offLate);
+            if (note.carried && off <= note.floorSample)
+                continue; // a count-in's key heard released before the start
+            off = std::max(on, off);
+        }
         const uint64_t tick = tickAt(on);
         spans.push_back({tick, std::max(tick + 1, tickAt(off)), note.key, note.velocity, true});
     }
@@ -195,7 +201,7 @@ struct Feed {
     uint32_t late = 0; // stamped on note ons and offs, bends and mods
 
     void push(uint8_t kind, uint64_t pos, uint8_t key = 0, uint8_t velocity = 0,
-              uint64_t resume = 0)
+              uint64_t resume = 0, uint8_t flags = 0)
     {
         CaptureEvent ev;
         ev.kind = kind;
@@ -205,6 +211,7 @@ struct Feed {
         ev.segment = segment;
         ev.key = key;
         ev.velocity = velocity;
+        ev.flags = flags;
         if (kind != CaptureEvent::Begin && kind != CaptureEvent::Cut &&
             kind != CaptureEvent::Boundary)
             ev.lateSamples = late;
@@ -245,6 +252,11 @@ struct Feed {
     void on(uint64_t pos, uint8_t key, uint8_t velocity = 100)
     {
         push(CaptureEvent::NoteOn, pos, key, velocity);
+    }
+    // A key held through a count-in, as the engine pushes it at the start.
+    void carried(uint64_t pos, uint8_t key, uint8_t velocity = 100)
+    {
+        push(CaptureEvent::NoteOn, pos, key, velocity, 0, CaptureEvent::Carried);
     }
     void off(uint64_t pos, uint8_t key) { push(CaptureEvent::NoteOff, pos, key); }
     void cut(uint64_t pos) { push(CaptureEvent::Cut, pos); }
@@ -452,6 +464,32 @@ void checkTakeRules()
                    "take: the latency offset was not applied or not clamped"))
             printNotes("got", notes);
     }
+    // A key carried over from a count-in but released within the latency
+    // of the start was heard released before it (let go just before the
+    // heard downbeat): dropped, not a one-tick blip (M6). One heard released
+    // a sample after the start stays; a key pressed after the start and
+    // heard released before it keeps the clamp above (a punch-in's); with
+    // no latency nothing is dropped.
+    {
+        take.begin(0, 9);
+        Feed feed{take, 9};
+        feed.begin(10000);
+        feed.carried(10000, 60);
+        feed.carried(10000, 62);
+        feed.carried(10000, 64);
+        feed.on(10000, 66);  // pressed in the start's callback: played
+        feed.off(11500, 60); // heard at 9500
+        feed.off(12000, 62); // heard at 10000, the start itself
+        feed.off(13001, 64); // heard at 11001
+        feed.off(11000, 66); // heard at 9000: clamped, kept
+        const auto notes = take.toNotes(tl, 60000, 0, 2000);
+        if (!check(sameNotes(notes, {{10, 64, 1, 100}, {10, 66, 1, 100}}),
+                   "take: a count-in's key heard released before the start was not dropped"))
+            printNotes("got", notes);
+        const auto direct = take.toNotes(tl, 60000, 0, 0);
+        if (!check(direct.size() == 4, "take: with no latency a count-in's key was dropped"))
+            printNotes("got", direct);
+    }
     // Later passes win, by SongDocument::resolveNoteOverlaps' rules: overlaps
     // keep the earlier note's head or tail, or remove it when covered; a
     // repeated (tick, key) keeps the earlier note's tail when it outlasts the
@@ -572,8 +610,9 @@ void checkTakeRules()
     }
     // The later-wins pass is indexed (a live preview runs it every playhead
     // tick): on randomized takes (loop passes, seeks, lost Boundaries,
-    // re-presses, cuts, shared starts, callback waits, held notes, a clock
-    // in another segment) it matches the plain pass exactly.
+    // re-presses, cuts, shared starts, callback waits, held notes, a
+    // count-in's carried keys, a clock in another segment) it matches the
+    // plain pass exactly.
     {
         std::mt19937 rng(20261011);
         const auto pick = [&](uint32_t n) { return uint32_t(rng() % n); };
@@ -583,6 +622,8 @@ void checkTakeRules()
             Feed feed{take, uint32_t(1000 + trial)};
             uint64_t pos = 10000 + pick(5000);
             feed.begin(pos);
+            for (uint32_t c = pick(3); c > 0; c--) // keys held through a count-in
+                feed.carried(pos, uint8_t(60 + pick(3)));
             const int events = 5 + int(pick(250));
             for (int e = 0; e < events; e++) {
                 pos += pick(4) == 0 ? 0 : pick(3000);
@@ -1235,6 +1276,9 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
     }
     const uint64_t tpb = session->timeline->ticksPerBeat;
     view->selectTrack(a);
+    // These takes start at once; checkRecordingCountIn covers the count-in.
+    const int countInBars = m_countInBars;
+    m_countInBars = 0;
     midi.setLatencyMs(0);
     midi.setFixedVelocity(0);
     midi.setLivePlay(true);
@@ -2485,7 +2529,217 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
 
     checkRecordingDisplay();
     checkRecordingFlood();
+    m_countInBars = countInBars;
+    checkRecordingCountIn(a);
     m_audio.holdDeviceForTest(false);
+}
+
+// Record's count-in (docs/metronome/PLAN.md step 2), the device held: from
+// Stopped the status bar counts in, the take begins at the cursor with a
+// key held through the count-in, Record again or Stop during it cancels
+// with nothing written, and Off, a pause or a punch-in have none.
+void MainWindow::checkRecordingCountIn(int track)
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto recording = [&] { return m_takeSession != nullptr; };
+    const auto message = [&] { return statusBar()->currentMessage(); };
+    const uint64_t tpb = session->timeline->ticksPerBeat;
+    const uint64_t cursor = tpb * 8;
+    view->selectTrack(track);
+    midi.setLatencyMs(0);
+    midi.setFixedVelocity(0);
+    midi.setLivePlay(true);
+    check(keymap::Registry::instance().bindings(QStringLiteral("transport.metronome")) ==
+              QList<QKeySequence>{QKeySequence(QStringLiteral("C"))},
+          "count-in: transport.metronome is not bound to C by default");
+    // Settings → Audio drives it.
+    if (m_settingsDialog) {
+        m_settingsDialog->audioPage()->setCountInBars(2);
+        check(m_countInBars == 2, "count-in: the Settings page did not set 2 bars");
+        m_settingsDialog->audioPage()->setCountInBars(1);
+    }
+    m_countInBars = 1;
+
+    // A take through the count-in: a key pressed during it and held is
+    // recorded from the cursor.
+    {
+        view->setEditCursorTick(cursor);
+        const ClickGrid::CountIn ci = session->timeline->clickGrid.countIn(cursor, 1);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        check(recording() && m_recordAction->isChecked() && m_audio.countingIn(),
+              "count-in: Record while stopped did not count in");
+        check(message().startsWith(QStringLiteral("Counting in")),
+              "count-in: the status bar does not say it is counting in");
+        pumpMs(100);
+        send(0x90, 67, 99);
+        m_audio.pumpForTest(uint32_t(ci.lengthSamples));
+        synchronizePlayhead();
+        check(!m_audio.countingIn() && message().startsWith(QStringLiteral("Recording into ")),
+              "count-in: once the song started the status bar does not say what is recording");
+        pumpMs(200);
+        send(0x80, 67, 0);
+        pumpMs(50);
+        stopPlayback();
+        bool found = false;
+        for (const DocNote &n : doc.notesForTrack(track))
+            found |= n.key == 67 && n.tick == cursor && n.velocity == 99;
+        check(found, "count-in: a key held through the count-in was not recorded at the cursor");
+        check(undo->index() == undoBefore + 1, "count-in: the take is not one undo step");
+        if (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // Another message over the count-in's line (a lane Learn's prompt)
+    // stays when the song starts: only the count-in's own line is swapped.
+    {
+        view->setEditCursorTick(cursor);
+        const ClickGrid::CountIn ci = session->timeline->clickGrid.countIn(cursor, 1);
+        m_recordAction->trigger();
+        statusBar()->showMessage(QStringLiteral("Another message"));
+        m_audio.pumpForTest(uint32_t(ci.lengthSamples) + 100);
+        synchronizePlayhead();
+        check(!m_audio.countingIn() && message() == QStringLiteral("Another message"),
+              "count-in: the song's start overwrote another status message");
+        stopPlayback();
+        pumpMs(50);
+    }
+
+    // A key held into the start but let go within the recording offset of
+    // it was heard released before the downbeat: not recorded (M6). One
+    // held on past the offset is, at the cursor.
+    {
+        midi.setLatencyMs(100);
+        view->setEditCursorTick(cursor);
+        const ClickGrid::CountIn ci = session->timeline->clickGrid.countIn(cursor, 1);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(100);
+        send(0x90, 71, 90);
+        send(0x90, 72, 90);
+        // To 30 ms past the start.
+        m_audio.pumpForTest(uint32_t(ci.lengthSamples - uint64_t(rate * 0.1)));
+        pumpMs(30);
+        check(!m_audio.countingIn(), "count-in: the song did not start (latency case)");
+        send(0x80, 71, 0);
+        pumpMs(300);
+        send(0x80, 72, 0);
+        pumpMs(50);
+        stopPlayback();
+        bool short71 = false, held72 = false;
+        for (const DocNote &n : doc.notesForTrack(track)) {
+            short71 |= n.key == 71 && n.tick >= cursor && n.tick < cursor + tpb;
+            held72 |= n.key == 72 && n.tick == cursor;
+        }
+        check(!short71, "count-in: a key heard released before the start was recorded");
+        check(held72, "count-in: a key held past the offset was not recorded at the cursor");
+        if (undo->index() > undoBefore)
+            undo->undo();
+        midi.setLatencyMs(0);
+    }
+
+    // At or past the loop end with the loop on, the song really starts at the
+    // loop start (the player wraps there at once): the count-in counts in to
+    // it, the playhead waits there, and a held key records there.
+    if (session->timeline->hasLoop() && m_loopAction->isChecked()) {
+        // Copied: the take's commit rebuilds the timeline.
+        const struct {
+            uint64_t loopStartTick, loopEndTick, loopStartSample, loopEndSample;
+        } tl{session->timeline->loopStartTick, session->timeline->loopEndTick,
+             session->timeline->loopStartSample, session->timeline->loopEndSample};
+        view->setEditCursorTick(tl.loopEndTick);
+        const ClickGrid::CountIn ci = session->timeline->clickGrid.countIn(tl.loopStartTick, 1);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(50);
+        check(m_audio.countingIn() && m_audio.playheadSamples() == tl.loopStartSample,
+              "count-in: at the loop end it does not wait at the loop start");
+        send(0x90, 74, 80);
+        m_audio.pumpForTest(uint32_t(ci.lengthSamples - uint64_t(rate * 0.05)) - 1);
+        check(m_audio.countingIn(), "count-in: at the loop end it ended early (wrong tempo?)");
+        m_audio.pumpForTest(uint32_t(rate * 0.2));
+        check(!m_audio.countingIn() && m_audio.playheadSamples() > tl.loopStartSample &&
+                  m_audio.playheadSamples() < tl.loopEndSample,
+              "count-in: at the loop end the song did not start at the loop start");
+        send(0x80, 74, 0);
+        pumpMs(50);
+        stopPlayback();
+        bool found = false;
+        for (const DocNote &n : doc.notesForTrack(track))
+            found |= n.key == 74 && n.tick == tl.loopStartTick;
+        check(found, "count-in: at the loop end a held key did not record at the loop start");
+        if (undo->index() > undoBefore)
+            undo->undo();
+    } else {
+        std::printf("reccheck: count-in at the loop end SKIP (the song has no loop)\n");
+    }
+
+    // Record again during the count-in cancels: playback stops, nothing lands.
+    {
+        view->setEditCursorTick(cursor);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(100);
+        send(0x90, 69, 80);
+        pumpMs(100);
+        m_recordAction->trigger();
+        pumpMs(50);
+        send(0x80, 69, 0);
+        pumpMs(50);
+        check(!recording() && !m_recordAction->isChecked() &&
+                  m_audio.transport() == Transport::Stopped && !m_audio.countingIn(),
+              "count-in: Record during the count-in did not cancel and stop");
+        check(undo->index() == undoBefore, "count-in: a cancelled count-in wrote an undo step");
+    }
+    // So does Stop.
+    {
+        view->setEditCursorTick(cursor);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(100);
+        stopPlayback();
+        pumpMs(50);
+        check(!recording() && !m_audio.countingIn() && undo->index() == undoBefore,
+              "count-in: Stop during the count-in did not cancel it");
+    }
+    // Off: Record starts at once.
+    {
+        m_countInBars = 0;
+        view->setEditCursorTick(cursor);
+        m_recordAction->trigger();
+        check(recording() && !m_audio.countingIn() &&
+                  message().startsWith(QStringLiteral("Recording into ")),
+              "count-in: with the count-in off Record did not start at once");
+        pumpMs(50);
+        stopPlayback();
+        m_countInBars = 1;
+    }
+    // Punching in while playing, or resuming a pause, has none.
+    {
+        view->setEditCursorTick(cursor);
+        startPlayback();
+        pumpMs(50);
+        m_recordAction->trigger();
+        check(recording() && !m_audio.countingIn(), "count-in: a punch-in counted in");
+        pumpMs(50);
+        m_recordAction->trigger(); // punch out
+        pausePlayback();
+        pumpMs(50);
+        m_recordAction->trigger();
+        check(recording() && !m_audio.countingIn(), "count-in: Record from a pause counted in");
+        pumpMs(50);
+        stopPlayback();
+        pumpMs(50);
+    }
 }
 
 // docs/midi-controls/PLAN.md step 4: the latch (D3, J2), as engine state.

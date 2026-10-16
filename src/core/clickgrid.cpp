@@ -33,6 +33,57 @@ uint64_t ClickGrid::sampleAt(uint64_t tick) const
     return static_cast<uint64_t>(samples + 0.5);
 }
 
+ClickGrid::CountIn ClickGrid::countIn(uint64_t cursorTick, int bars) const
+{
+    CountIn ci;
+    if (empty() || bars <= 0)
+        return ci;
+    // The tempo and meter the song starts in at the cursor.
+    const auto tempo =
+        std::upper_bound(m_tempo.begin(), m_tempo.end(), cursorTick,
+                         [](uint64_t t, const TempoPoint &p) { return t < p.tick; }) -
+        1;
+    const auto meter = std::upper_bound(m_meters.begin(), m_meters.end(), cursorTick,
+                                        [](uint64_t t, const Meter &m) { return t < m.tick; }) -
+                       1;
+    ci.cursorTick = cursorTick;
+    ci.samplesPerTick = tempo->usPerBeat / m_ticksPerBeat / 1000000.0 * m_sampleRate;
+    ci.gridTick = meter->tick;
+    ci.beatTicks = meter->beatTicks;
+    ci.beatsPerBar = meter->beatsPerBar;
+    ci.lengthTicks = uint64_t(bars) * meter->beatTicks * uint64_t(meter->beatsPerBar);
+    ci.lengthSamples = uint64_t(double(ci.lengthTicks) * ci.samplesPerTick + 0.5);
+    return ci;
+}
+
+size_t ClickGrid::countInClicksIn(const CountIn &ci, uint64_t from, uint64_t to, Click *out,
+                                  size_t cap)
+{
+    if (ci.lengthSamples == 0 || from >= to || cap == 0)
+        return 0;
+    const auto mod = [](int64_t a, int64_t m) { return ((a % m) + m) % m; };
+    const int64_t bt = int64_t(ci.beatTicks);
+    const int64_t bar = bt * ci.beatsPerBar;
+    // Count-in tick u in [0, lengthTicks) is grid tick r = start + u, the
+    // count-in starting `lengthTicks` before the cursor.
+    const int64_t start = int64_t(ci.cursorTick - ci.gridTick) - int64_t(ci.lengthTicks);
+    size_t n = 0;
+    for (int64_t u = mod(-start, bt); u < int64_t(ci.lengthTicks); u += bt) {
+        // Positioned back from the end, which is the cursor's sample.
+        const uint64_t back =
+            uint64_t(double(int64_t(ci.lengthTicks) - u) * ci.samplesPerTick + 0.5);
+        const uint64_t s = ci.lengthSamples - std::min(back, ci.lengthSamples);
+        if (s < from)
+            continue;
+        if (s >= to)
+            break;
+        out[n++] = {s, mod(start + u, bar) == 0};
+        if (n == cap)
+            break;
+    }
+    return n;
+}
+
 size_t ClickGrid::clicksIn(uint64_t from, uint64_t to, Click *out, size_t cap) const
 {
     if (empty() || from >= to || cap == 0)

@@ -147,6 +147,7 @@ void RecordingTake::push(const CaptureEvent &ev)
         note.onSample = ev.samplePos;
         note.onLate = ev.lateSamples;
         note.floorSample = m_segmentStart;
+        note.carried = (ev.flags & CaptureEvent::Carried) != 0;
         note.segment = m_segment;
         note.key = key;
         note.velocity = std::clamp<uint8_t>(ev.velocity, 1, 127);
@@ -241,8 +242,17 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
         }
         const uint64_t on =
             std::max(note.floorSample, samplesEarlier(note.onSample, latencySamples + note.onLate));
-        if (played)
-            off = std::max(on, samplesEarlier(off, latencySamples + note.offLate));
+        if (played) {
+            off = samplesEarlier(off, latencySamples + note.offLate);
+            // A key carried over from a count-in but heard released at or
+            // before the song's start: let go in the latency window before
+            // the heard downbeat, so to the ear it was a release during the
+            // count-in, and dropped as one (docs/metronome/PLAN.md M6), not
+            // left as a one-tick blip at the start.
+            if (note.carried && off <= note.floorSample)
+                continue;
+            off = std::max(on, off);
+        }
         const uint64_t tick = tickAt(on);
         const uint64_t end = std::max(tick + 1, tickAt(off));
         spans.push_back({tick, end, note.key, note.velocity, true});

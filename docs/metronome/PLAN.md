@@ -74,11 +74,18 @@ To change a decision later, update this table and every step it affects
    switches itself to Playing **at that sample within the callback** and
    renders the rest of the callback from the cursor. Stop, Space or Record
    during a count-in cancels it and the take (an empty take commits nothing).
+   With the loop on and the cursor at or past the loop end, the song really
+   starts at the loop start (the player wraps there at once), so the
+   count-in is computed for, and holds at, the loop start instead. A seek
+   during the count-in moves where the song will start; the count-in runs
+   its length regardless.
 7. **M6 lives where held keys live.** The engine already knows the live held
    keys (`liveHeldKeys`). During a count-in, note captures are suppressed.
    At the switch to Playing, a note-on is pushed at the cursor's sample for
-   every key still held, with its original velocity. Releases after that
-   capture normally.
+   every key still held, with its original velocity, flagged as carried
+   over. Releases after that capture normally, except that a carried key
+   whose release, moved back by the recording offset, lands at or before the
+   start was heard released during the count-in and is dropped too.
 
 ## 3. Facts the steps rely on
 
@@ -182,4 +189,27 @@ the user for a Windows test** before the next step.
   cap truncation, far into the last meter, song switch, auto-stop), plan
   text fixes, style nits. Not taken: computing event samples through the
   grid (structural bit-exactness), caching per-loop clicks.
+- All 5 builds; normal + ASAN sweeps PASS.
+
+### Step 2 — done 2026-10-15
+
+- `ClickGrid::countIn` / `countInClicksIn`; `AudioEngine::playWithCountIn`
+  with a seqlock handoff (state = generation + phase), count-in phase in
+  `process()`, sample-exact song start mid-callback, `finishCountIn` begins
+  the take and carries sounding keys (`CaptureEvent::Carried`; dropped if
+  released inside the latency window). `MidiTimeline::sampleForTick` now
+  uses the click grid (it could be 1 sample off build()'s event positions).
+- MainWindow: Record from Stopped counts in (loop-end cursor starts from
+  the loop start), "Counting in…" status swapped once the song starts (only
+  if still showing), Record/Stop during the count-in cancel. Settings →
+  Audio: Count-in Off / 1 / 2 bars (default 1).
+- Harnesses: metrocheck count-in grid + engine cases; reccheck
+  checkRecordingCountIn; midicheck and reccheck takes run with count-in
+  off; `--selftest` uses default metronome settings. All negative-tested.
+- Opus review: 2 medium (midicheck broken by the default count-in; loop-end
+  cursor droned loop-start notes and used the wrong tempo), lows (audio
+  thread could clobber a fresh request; torn request copy; latency-window
+  blip; status swap over Learn prompts) — all fixed. Left for the user:
+  knob/bend/voice moves during the count-in are heard but not recorded;
+  pedal-held keys count as held (M6).
 - All 5 builds; normal + ASAN sweeps PASS.

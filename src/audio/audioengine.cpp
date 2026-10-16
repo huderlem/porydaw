@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <iterator>
 #include <utility>
 #include <vector>
@@ -212,6 +213,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
+    resetCountIn();
     m_captureBegun = 0;
     m_muteMask.store(0);
     m_soloMask.store(0);
@@ -439,6 +441,7 @@ void AudioEngine::unloadSong()
     m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
+    resetCountIn();
     m_captureBegun = 0;
     m_player.reset();
     m_playhead.store(0);
@@ -452,10 +455,30 @@ void AudioEngine::play()
         m_transport.store(static_cast<int>(Transport::Playing));
 }
 
+void AudioEngine::playWithCountIn(uint64_t startSample, const ClickGrid::CountIn &countIn)
+{
+    if (!songLoaded() || transport() != Transport::Stopped)
+        return;
+    seek(startSample);
+    if (countIn.lengthSamples > 0) {
+        // The seqlock's write side (see m_countInState).
+        uint64_t words[kCountInWords] = {};
+        std::memcpy(words, &countIn, sizeof countIn);
+        std::atomic_thread_fence(std::memory_order_release);
+        for (size_t i = 0; i < kCountInWords; i++)
+            m_countInRequest[i].store(words[i], std::memory_order_relaxed);
+        m_countInGen += kCountInGenStep;
+        m_countInState.store(m_countInGen | kCountInRequested, std::memory_order_release);
+    }
+    m_transport.store(static_cast<int>(Transport::Playing));
+}
+
 void AudioEngine::pause()
 {
     if (transport() == Transport::Playing)
         m_transport.store(static_cast<int>(Transport::Paused));
+    // After the transport: a callback that sees the count-in gone sees why.
+    m_countInState.store(m_countInGen | kCountInIdle, std::memory_order_release);
 }
 
 void AudioEngine::stop()
@@ -464,6 +487,7 @@ void AudioEngine::stop()
     // see Stopped, no stale seek may survive to move the rewound playhead.
     m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
     m_transport.store(static_cast<int>(Transport::Stopped));
+    m_countInState.store(m_countInGen | kCountInIdle, std::memory_order_release);
 }
 
 uint64_t AudioEngine::polyLostTotal() const
@@ -550,9 +574,11 @@ void AudioEngine::applyTransportTransition()
     releaseLiveLatch(m_player.position());
     switch (static_cast<Transport>(t)) {
     case Transport::Stopped:
+        cancelCountIn();
         m_player.reset();
         break;
     case Transport::Paused:
+        cancelCountIn();
         break;
     case Transport::Playing:
         // No player reset here: the Stopped transition already rewound to 0,
@@ -562,6 +588,84 @@ void AudioEngine::applyTransportTransition()
         break;
     }
     m_appliedTransport = t;
+}
+
+// Audio thread: the count-in has run its length; the song starts where the
+// player holds (the start it seeked to). The capture armed for it begins
+// here, and every key sounding now (held, or under the pedal) is recorded
+// from here as played (M6); keys released during the count-in are gone.
+void AudioEngine::finishCountIn()
+{
+    cancelCountIn();
+    // A start at or past the loop end (a seek during the count-in) wraps
+    // now, before the take begins: settleLoopWrap held off while the song
+    // was held, and the take's Begin and held keys belong at the loop start.
+    m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
+                        &m_liveLatch);
+    syncCapture();
+    if (!capturing())
+        return;
+    const uint32_t late = m_liveLate;
+    m_liveLate = 0;
+    for (int k = 0; k < 128; k++) {
+        if (m_liveOn[k])
+            pushCapture(CaptureEvent::NoteOn, m_player.position(), uint8_t(k), m_liveVelocity[k], 0,
+                        0, CaptureEvent::Carried);
+    }
+    m_liveLate = late;
+}
+
+// Audio thread, after the transition and the seek: a requested count-in
+// starts holding the song where the seek put it. Not at the transition:
+// a Stop then Record inside one period never shows this thread Stopped.
+void AudioEngine::applyCountInRequest()
+{
+    if (m_countInActive && m_countInState.load(std::memory_order_acquire) != m_countInTaken) {
+        // The UI stopped, paused or replaced the running count-in. Stop and
+        // Pause publish the transport first, so it is visible now: apply it
+        // (and the seek a Stop leaves) before the held song renders a
+        // callback it should not. A Stop then Play or Record inside one
+        // period leaves the transport Playing: the seek already moved the
+        // player, and a new request is taken below.
+        m_countInActive = false;
+        applyTransportTransition();
+        applyPendingSeek();
+    }
+    if (m_appliedTransport != static_cast<int>(Transport::Playing) || !m_timeline)
+        return;
+    // The seqlock's read side (see m_countInState).
+    uint32_t state = m_countInState.load(std::memory_order_acquire);
+    while ((state & kCountInPhaseMask) == kCountInRequested) {
+        uint64_t words[kCountInWords];
+        for (size_t i = 0; i < kCountInWords; i++)
+            words[i] = m_countInRequest[i].load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        const uint32_t running = (state & ~kCountInPhaseMask) | kCountInRunning;
+        if (m_countInState.compare_exchange_weak(state, running, std::memory_order_acq_rel,
+                                                 std::memory_order_acquire)) {
+            std::memcpy(&m_countIn, words, sizeof m_countIn);
+            m_countInTaken = running;
+            m_countInPos = 0;
+            m_countInActive = true;
+            break;
+        }
+    }
+}
+
+void AudioEngine::cancelCountIn()
+{
+    if (!m_countInActive)
+        return;
+    m_countInActive = false;
+    uint32_t taken = m_countInTaken;
+    m_countInState.compare_exchange_strong(taken, (taken & ~kCountInPhaseMask) | kCountInIdle,
+                                           std::memory_order_acq_rel);
+}
+
+void AudioEngine::resetCountIn()
+{
+    m_countInActive = false;
+    m_countInState.store(m_countInGen | kCountInIdle, std::memory_order_release);
 }
 
 // Audio thread. A wrap ends the chunk's first span at the loop end and
@@ -583,6 +687,23 @@ void AudioEngine::scheduleClicks(const MidiTimeline *tl, uint64_t p0, uint64_t p
         at += tl->loopEndSample - tl->loopStartSample;
     }
     queueClicks(tl, tl->loopStartSample, p1, at, frameCount);
+}
+
+void AudioEngine::queueCountInClicks(uint64_t from, uint64_t to, uint64_t frame,
+                                     uint32_t frameCount)
+{
+    if (m_clickQueueCount >= kMaxClicksPerCallback)
+        return;
+    ClickGrid::Click clicks[kMaxClicksPerCallback];
+    const size_t n = ClickGrid::countInClicksIn(m_countIn, from, to, clicks,
+                                                kMaxClicksPerCallback - m_clickQueueCount);
+    for (size_t i = 0; i < n; i++) {
+        const uint64_t at = frame + (clicks[i].sample - from);
+        if (at >= frameCount)
+            break;
+        m_clickQueue[m_clickQueueCount++] = {uint32_t(at), clicks[i].accent};
+        m_clicksQueued++;
+    }
 }
 
 void AudioEngine::queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to, uint64_t frame,
@@ -883,6 +1004,7 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             applyLiveNote(key, 0);
         m_liveDown[key] = true;
         m_liveOn[key] = true;
+        m_liveVelocity[key] = velocity;
         applyLiveNote(key, velocity);
         break;
     }
@@ -1151,7 +1273,7 @@ void AudioEngine::publishLiveHeld()
 bool AudioEngine::capturing() const
 {
     return m_captureBegun != 0 && m_captureBegun == m_captureGen.load() && m_timeline &&
-           m_appliedTransport == static_cast<int>(Transport::Playing);
+           m_appliedTransport == static_cast<int>(Transport::Playing) && !m_countInActive;
 }
 
 void AudioEngine::syncCapture()
@@ -1163,7 +1285,9 @@ void AudioEngine::syncCapture()
     // the take before it, if any, has ended, and its latch with it.
     releaseLiveLatch(m_player.position());
     m_captureBegun = 0;
-    if (gen == 0 || !m_timeline || m_appliedTransport != static_cast<int>(Transport::Playing))
+    // A count-in holds the Begin back until the song starts (finishCountIn).
+    if (gen == 0 || !m_timeline || m_appliedTransport != static_cast<int>(Transport::Playing) ||
+        m_countInActive)
         return;
     m_captureBegun = gen;
     m_captureSegment = 0;
@@ -1222,7 +1346,10 @@ void AudioEngine::settleLoopWrap()
     // Before the input is stamped: a player at or past the loop end renders
     // nothing of where it is, so what this callback captures belongs after
     // the wrap.
-    if (m_appliedTransport != static_cast<int>(Transport::Playing) || !m_timeline)
+    // A count-in holds the song where it will start, which may be past the
+    // loop end (a seek during it): it wraps when it starts (finishCountIn).
+    if (m_appliedTransport != static_cast<int>(Transport::Playing) || !m_timeline ||
+        m_countInActive)
         return;
     const uint64_t from = m_player.position();
     const uint32_t wraps = m_player.wrapCount();
@@ -1326,6 +1453,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     m_callbackFrames = frameCount;
     applyTransportTransition();
     applyPendingSeek();
+    applyCountInRequest();
     applyMuteTransition();
     applyPreviewNote();
     applyTimedPreviews(frameCount);
@@ -1347,17 +1475,30 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     const float gain = m_outputGain.load();
     const float clickGain = gain * m_metronomeVolume.load();
     const bool metronomeOn = m_metronomeOn.load() && clickGain > 0.0f;
+    // The count-in clicks whether or not the metronome is on (M5).
+    const bool countInClicks = clickGain > 0.0f;
     m_clickQueueCount = 0;
     uint32_t done = 0;
-    const uint32_t wrapsBefore = m_player.wrapCount();
+    uint32_t wrapsBefore = m_player.wrapCount();
 
     while (done < frameCount) {
-        const uint32_t n = std::min(frameCount - done, m_bufCapacity);
+        uint32_t n = std::min(frameCount - done, m_bufCapacity);
         const MidiTimeline *tl = m_timeline;
         const bool playing =
             m_appliedTransport == static_cast<int>(Transport::Playing) && tl != nullptr;
+        if (playing && m_countInActive && m_countInPos >= m_countIn.lengthSamples) {
+            finishCountIn(); // defensive: a count-in ends as its last frame renders
+            wrapsBefore = m_player.wrapCount();
+        }
 
-        if (playing) {
+        if (playing && m_countInActive) {
+            // The song holds at its start; the engine runs on for live play.
+            n = uint32_t(std::min<uint64_t>(n, m_countIn.lengthSamples - m_countInPos));
+            m4a_engine_process(engine, m_bufL.get(), m_bufR.get(), int(n));
+            if (countInClicks)
+                queueCountInClicks(m_countInPos, m_countInPos + n, done, frameCount);
+            m_countInPos += n;
+        } else if (playing) {
             const bool looping = m_loopEnabled.load();
             const uint64_t p0 = m_player.position();
             const uint32_t w0 = m_player.wrapCount();
@@ -1388,6 +1529,12 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             interleavedOut[(done + i) * 2 + 1] = (m_bufR[i] + m_pvR[i]) * gain;
         }
         done += n;
+        // The song starts on the frame after the count-in's last. A wrap it
+        // settles there comes before the take's Begin: no Boundary for it.
+        if (m_countInActive && m_countInPos >= m_countIn.lengthSamples) {
+            finishCountIn();
+            wrapsBefore = m_player.wrapCount();
+        }
     }
     m_tap.write(interleavedOut, frameCount);
     // The metronome goes in after the tap (M8): meters and plugins hear only

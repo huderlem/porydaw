@@ -65,6 +65,7 @@ class RecordingTake
         uint8_t velocity = 0;
         bool open = true;
         bool playedEnd = false; // closed by a played note-off (shifted by the offset)
+        bool carried = false;   // down before the take began (CaptureEvent::Carried)
     };
 
     // A played pitch-bend or routed lane move.

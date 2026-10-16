@@ -426,6 +426,11 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
 
 uint64_t MidiTimeline::sampleForTick(uint64_t tick) const
 {
+    // Where build() put the events (the click grid matches it bit for bit):
+    // a playback start on a note's tick lands on the note, and on a beat's
+    // tick on its click.
+    if (!clickGrid.empty())
+        return clickGrid.sampleAt(tick);
     // tempoMap always has an entry at tick 0.
     const TempoPoint *tp = &tempoMap.front();
     for (const TempoPoint &p : tempoMap) {

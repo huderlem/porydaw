@@ -9,6 +9,8 @@
 #include <vector>
 
 #include "audio/audioengine.h"
+#include "audio/midiinput.h"
+#include "core/captureevent.h"
 #include "core/clickgrid.h"
 #include "core/miditimeline.h"
 #include "core/smf.h"
@@ -31,6 +33,11 @@
 //    callback (several wraps per render) clicks once per pass. The
 //    auto-stop after the song's tail keeps the clicks its callback rendered
 //    before the stop.
+//  - Record's count-in (step 2): its length and beat lines for cursors on
+//    and off bar lines and near tick 0; through the engine, its clicks with
+//    the metronome off, the song starting sample-exactly after it, the
+//    take's carried keys, Stop and rapid Stop/Record/Play; a tempo change
+//    on the cursor's tick, a seek during it, a start past the loop end.
 
 namespace {
 
@@ -154,6 +161,12 @@ void checkGrid(uint32_t tpb, double sampleRate)
         if (clicks[i].sample != noteSamples[i])
             fail("tpb %u @%.0f: beat %zu (tick %llu) clicks at %llu, its note at %llu", tpb,
                  sampleRate, i, (unsigned long long)beats[i], (unsigned long long)clicks[i].sample,
+                 (unsigned long long)noteSamples[i]);
+        // Playback starts (sampleForTick) land on the same sample.
+        if (tl->sampleForTick(noteTicks[i]) != noteSamples[i])
+            fail("tpb %u @%.0f: sampleForTick(%llu) = %llu, its note at %llu", tpb, sampleRate,
+                 (unsigned long long)noteTicks[i],
+                 (unsigned long long)tl->sampleForTick(noteTicks[i]),
                  (unsigned long long)noteSamples[i]);
         const double bar = tl->barPositionForTick(double(beats[i])).bar;
         const bool barLine = bar == std::floor(bar);
@@ -582,6 +595,456 @@ void checkEngine()
     }
 }
 
+// The count-in's beat lines against a brute-force walk of the cursor
+// meter's grid extended backward (docs/metronome/PLAN.md stance 6).
+void checkCountInGrid(double sampleRate)
+{
+    const uint32_t tpb = 24;
+    std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(gridSong(tpb), sampleRate);
+    const std::vector<MidiTimeline::TimeSigSegment> segs = tl->timeSigSegments();
+    struct Case {
+        uint64_t cursor;
+        int bars;
+    };
+    // On tick 0 (the count-in reaches back before the song), mid-bar in
+    // 4/4 after the 97 BPM change, mid-bar in 6/8, on the 3/4 change.
+    const Case cases[] = {{0, 1}, {0, 2}, {132, 1}, {132, 2}, {240, 1}, {300, 2}, {12, 2}};
+    for (const Case &c : cases) {
+        const ClickGrid::CountIn ci = tl->clickGrid.countIn(c.cursor, c.bars);
+        const MidiTimeline::TimeSigSegment *seg = &segs.front();
+        for (const MidiTimeline::TimeSigSegment &s : segs) {
+            if (s.tick <= c.cursor)
+                seg = &s;
+        }
+        const TempoPoint *tp = &tl->tempoMap.front();
+        for (const TempoPoint &p : tl->tempoMap) {
+            if (p.tick <= c.cursor)
+                tp = &p;
+        }
+        const double spt = 60.0 / tp->bpm * sampleRate / double(tpb);
+        const int64_t bt = int64_t(seg->beatTicks), bar = bt * seg->beatsPerBar;
+        const int64_t length = bar * c.bars;
+        if (ci.lengthTicks != uint64_t(length) ||
+            std::fabs(double(ci.lengthSamples) - double(length) * spt) > 1.0) {
+            fail("count-in at %llu x%d: %llu ticks / %llu samples, expected %lld / ~%.0f",
+                 (unsigned long long)c.cursor, c.bars, (unsigned long long)ci.lengthTicks,
+                 (unsigned long long)ci.lengthSamples, (long long)length, double(length) * spt);
+            continue;
+        }
+        // Brute force: every count-in tick on the extended grid.
+        std::vector<std::pair<int64_t, bool>> want; // count-in tick, accent
+        const auto mod = [](int64_t a, int64_t m) { return ((a % m) + m) % m; };
+        for (int64_t u = 0; u < length; u++) {
+            const int64_t r = int64_t(c.cursor) - length + u - int64_t(seg->tick);
+            if (mod(r, bt) == 0)
+                want.push_back({u, mod(r, bar) == 0});
+        }
+        ClickGrid::Click got[256];
+        const size_t n = ClickGrid::countInClicksIn(ci, 0, ci.lengthSamples, got, 256);
+        if (n != want.size()) {
+            fail("count-in at %llu x%d: %zu clicks, expected %zu", (unsigned long long)c.cursor,
+                 c.bars, n, want.size());
+            continue;
+        }
+        for (size_t i = 0; i < n; i++) {
+            const double at = double(want[i].first) * spt;
+            if (std::fabs(double(got[i].sample) - at) > 1.0 || got[i].accent != want[i].second) {
+                fail("count-in at %llu x%d: click %zu at %llu accent %d, expected ~%.0f accent %d",
+                     (unsigned long long)c.cursor, c.bars, i, (unsigned long long)got[i].sample,
+                     int(got[i].accent), at, int(want[i].second));
+                break;
+            }
+        }
+        // Chunked queries agree with one.
+        std::vector<ClickGrid::Click> chunked;
+        for (uint64_t from = 0; from < ci.lengthSamples;) {
+            const uint64_t to = std::min<uint64_t>(ci.lengthSamples, from + 777);
+            ClickGrid::Click buf[64];
+            const size_t m = ClickGrid::countInClicksIn(ci, from, to, buf, 64);
+            chunked.insert(chunked.end(), buf, buf + m);
+            from = to;
+        }
+        if (chunked.size() != n)
+            fail("count-in at %llu x%d: chunked queries found %zu clicks, one query %zu",
+                 (unsigned long long)c.cursor, c.bars, chunked.size(), n);
+    }
+    // No count-in: nothing.
+    if (tl->clickGrid.countIn(96, 0).lengthSamples != 0)
+        fail("a 0-bar count-in has a length");
+}
+
+// Record's count-in through the engine: clicks at the count-in's offsets
+// with the metronome off, the song held at the cursor until then and
+// starting sample-exactly after, the song's clicks carrying on from the
+// count-in's with the metronome on, the capture beginning at the song's
+// start with only the keys still sounding then, and Stop cancelling.
+void checkCountInEngine()
+{
+    AudioEngine engine;
+    QString error;
+    if (!engine.init(&error)) {
+        std::printf("metrocheck: count-in part SKIPPED (no audio device: %s)\n",
+                    qUtf8Printable(error));
+        return;
+    }
+    const double rate = engine.sampleRate();
+    TestVoicegroup tvg;
+    std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(silentLoopSong(24, 960, 1920), rate);
+    const ClickGrid &grid = tl->clickGrid;
+    // Mid-bar, between beats 120 and 144.
+    const uint64_t cursorTick = 132;
+    const uint64_t target = tl->sampleForTick(cursorTick);
+    if (target != grid.sampleAt(cursorTick))
+        fail("sampleForTick(%llu) = %llu, not the click grid's %llu",
+             (unsigned long long)cursorTick, (unsigned long long)target,
+             (unsigned long long)grid.sampleAt(cursorTick));
+    const ClickGrid::CountIn ci = grid.countIn(cursorTick, 1);
+    const uint64_t length = ci.lengthSamples;
+
+    engine.holdDeviceForTest(true);
+    engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+    engine.setOutputGain(1.0f);
+    engine.setMetronomeVolume(1.0f);
+
+    // Metronome off: only the count-in clicks.
+    {
+        engine.setMetronomeEnabled(false);
+        engine.playWithCountIn(target, ci);
+        if (!engine.countingIn())
+            fail("playWithCountIn: not counting in");
+        std::vector<float> out;
+        engine.pumpForTest(uint32_t(length - 1), &out);
+        if (!engine.countingIn())
+            fail("the count-in ended a frame early");
+        if (engine.playheadSamples() != target)
+            fail("during the count-in the playhead is at %llu, not the cursor %llu",
+                 (unsigned long long)engine.playheadSamples(), (unsigned long long)target);
+        const uint32_t after = 3000;
+        engine.pumpForTest(uint32_t(after + 1), &out);
+        if (engine.countingIn())
+            fail("the count-in did not end");
+        if (engine.playheadSamples() != target + after)
+            fail("the song is at %llu after the count-in plus %u frames, expected %llu",
+                 (unsigned long long)engine.playheadSamples(), after,
+                 (unsigned long long)(target + after));
+        ClickGrid::Click want[64];
+        const size_t n = ClickGrid::countInClicksIn(ci, 0, length, want, 64);
+        const std::vector<Onset> onsets = findOnsets(out, 64, 400);
+        if (onsets.size() != n) {
+            fail("count-in: %zu clicks heard, %zu expected", onsets.size(), n);
+        } else {
+            for (size_t i = 0; i < n; i++) {
+                const bool accent =
+                    onsets[i].peak > (ClickVoice::kAccentPeak + ClickVoice::kBeatPeak) / 2;
+                if (onsets[i].frame != want[i].sample || accent != want[i].accent)
+                    fail("count-in click %zu at frame %llu accent %d, expected %llu accent %d", i,
+                         (unsigned long long)onsets[i].frame, int(accent),
+                         (unsigned long long)want[i].sample, int(want[i].accent));
+            }
+        }
+        std::vector<float> tap(size_t(engine.tap().capacity()) * 2);
+        engine.tap().readLatest(tap.data(), engine.tap().capacity());
+        if (!allSilent(tap.data(), tap.size()))
+            fail("the audio tap heard the count-in");
+        engine.stop();
+        engine.pumpForTest(512);
+    }
+
+    // Metronome on: the song's first click (beat 144) follows the count-in's
+    // last (beat 120) one beat later.
+    {
+        engine.setMetronomeEnabled(true);
+        engine.playWithCountIn(target, ci);
+        std::vector<float> out;
+        engine.pumpForTest(uint32_t(length + (grid.sampleAt(168) - target)), &out);
+        const std::vector<Onset> onsets = findOnsets(out, 64, 400);
+        const uint64_t firstSong = length + (grid.sampleAt(144) - target);
+        if (onsets.size() < 2 || onsets.back().frame != firstSong) {
+            fail("the song's first click is at frame %llu, expected %llu",
+                 onsets.empty() ? 0ull : (unsigned long long)onsets.back().frame,
+                 (unsigned long long)firstSong);
+        } else {
+            const uint64_t gap = onsets.back().frame - onsets[onsets.size() - 2].frame;
+            const double beat = 24 * ci.samplesPerTick;
+            if (std::fabs(double(gap) - beat) > 2.0)
+                fail("count-in to song: %llu frames between clicks, a beat is %.1f",
+                     (unsigned long long)gap, beat);
+        }
+        engine.stop();
+        engine.pumpForTest(512);
+    }
+
+    // Capture: key 60 pressed during the count-in and held, key 62 pressed
+    // and released during it, key 64 pressed after the song starts.
+    {
+        engine.setMetronomeEnabled(false);
+        MidiInputRing ring;
+        engine.setMidiInputRing(&ring);
+        engine.setLiveTarget(-1);
+        engine.armCapture(41);
+        engine.playWithCountIn(target, ci);
+        engine.pumpForTest(512);
+        ring.push({0x90, 62, 70, 0});
+        engine.pumpForTest(uint32_t(length / 3));
+        ring.push({0x90, 60, 90, 0});
+        engine.pumpForTest(uint32_t(length / 3));
+        ring.push({0x80, 62, 0, 0});
+        engine.pumpForTest(uint32_t(length - 512 - 2 * (length / 3) + 1000));
+        ring.push({0x90, 64, 50, 0});
+        engine.pumpForTest(1024);
+        ring.push({0x80, 60, 0, 0});
+        ring.push({0x80, 64, 0, 0});
+        engine.pumpForTest(1024);
+        engine.armCapture(0);
+        std::vector<CaptureEvent> evs;
+        CaptureEvent ev;
+        while (engine.popCapture(&ev))
+            evs.push_back(ev);
+        const auto find = [&](uint8_t kind, uint8_t key) -> const CaptureEvent * {
+            for (const CaptureEvent &e : evs) {
+                if (e.generation == 41 && e.kind == kind &&
+                    (kind == CaptureEvent::Begin || e.key == key))
+                    return &e;
+            }
+            return nullptr;
+        };
+        const CaptureEvent *begin = find(CaptureEvent::Begin, 0);
+        if (!begin || begin->samplePos != target)
+            fail("the take begins at %lld, expected the cursor %llu",
+                 begin ? (long long)begin->samplePos : -1LL, (unsigned long long)target);
+        if (!evs.empty() && evs.front().kind != CaptureEvent::Begin)
+            fail("the take's first event is kind %d, not its Begin", int(evs.front().kind));
+        const CaptureEvent *held = find(CaptureEvent::NoteOn, 60);
+        if (!held || held->samplePos != target || held->velocity != 90 || held->lateSamples != 0)
+            fail("the key held through the count-in records at %lld vel %d, expected %llu vel 90",
+                 held ? (long long)held->samplePos : -1LL, held ? int(held->velocity) : -1,
+                 (unsigned long long)target);
+        if (find(CaptureEvent::NoteOn, 62) || find(CaptureEvent::NoteOff, 62))
+            fail("a key released during the count-in was recorded");
+        const CaptureEvent *later = find(CaptureEvent::NoteOn, 64);
+        if (!later || later->samplePos <= target)
+            fail("a key pressed after the song started was not recorded after the cursor");
+        if (!find(CaptureEvent::NoteOff, 60))
+            fail("the held key's release was not recorded");
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.setMidiInputRing(nullptr);
+    }
+
+    // Stop during the count-in cancels it and its take; a later Play has none.
+    {
+        engine.armCapture(42);
+        engine.playWithCountIn(target, ci);
+        engine.pumpForTest(uint32_t(length / 2));
+        engine.stop();
+        engine.pumpForTest(512);
+        if (engine.countingIn())
+            fail("Stop left the count-in pending");
+        engine.armCapture(0);
+        CaptureEvent ev;
+        bool begun = false;
+        while (engine.popCapture(&ev))
+            begun |= ev.generation == 42 && ev.kind == CaptureEvent::Begin;
+        if (begun)
+            fail("a take cancelled during its count-in began");
+        engine.seek(target);
+        engine.play();
+        engine.pumpForTest(1024);
+        if (engine.playheadSamples() != target + 1024)
+            fail("Play after a cancelled count-in did not start at once");
+        engine.stop();
+        engine.pumpForTest(512);
+        // Stopped before the audio thread ever saw the request.
+        engine.playWithCountIn(target, ci);
+        engine.stop();
+        engine.seek(target);
+        engine.play();
+        engine.pumpForTest(1024);
+        if (engine.countingIn() || engine.playheadSamples() != target + 1024)
+            fail("a count-in stopped before it began came back on the next Play");
+        engine.stop();
+        engine.pumpForTest(512);
+    }
+
+    // Stop then Record inside one period, from a playing song: the audio
+    // thread never sees Stopped, and still counts in.
+    {
+        engine.seek(target);
+        engine.play();
+        engine.pumpForTest(1024);
+        engine.stop();
+        engine.playWithCountIn(target, ci);
+        engine.pumpForTest(1024);
+        if (!engine.countingIn() || engine.playheadSamples() != target)
+            fail("Stop then Record inside one period did not count in (playhead %llu)",
+                 (unsigned long long)engine.playheadSamples());
+        // And Stop then Play inside one period during a count-in ends it.
+        engine.stop();
+        engine.seek(target);
+        engine.play();
+        engine.pumpForTest(1024);
+        if (engine.countingIn() || engine.playheadSamples() != target + 1024)
+            fail("Stop then Play inside one period kept the count-in (playhead %llu)",
+                 (unsigned long long)engine.playheadSamples());
+        engine.stop();
+        engine.pumpForTest(512);
+    }
+
+    engine.unloadSong();
+    engine.holdDeviceForTest(false);
+}
+
+// A song with no loop: 120 BPM, then 90 BPM from tick `changeTick`.
+SmfFile tempoChangeSong(uint32_t tpb, uint64_t changeTick)
+{
+    SmfFile smf;
+    smf.format = 1;
+    smf.division = uint16_t(tpb);
+    smf.tracks.resize(2);
+    SmfTrack &c = smf.tracks[0];
+    c.events.push_back(tempoEvent(0, 120.0));
+    c.events.push_back(tempoEvent(changeTick, 90.0));
+    c.endTick = tpb * 40;
+    smf.tracks[1].events.push_back(channelEvent(0, 0xC0, 0, 0));
+    smf.tracks[1].endTick = tpb * 40;
+    return smf;
+}
+
+// The count-in's edges through the engine: a tempo change on the cursor's
+// own tick, a seek during the count-in, and a start past the loop end.
+void checkCountInEdges()
+{
+    AudioEngine engine;
+    QString error;
+    if (!engine.init(&error)) {
+        std::printf("metrocheck: count-in edges SKIPPED (no audio device: %s)\n",
+                    qUtf8Printable(error));
+        return;
+    }
+    const double rate = engine.sampleRate();
+    TestVoicegroup tvg;
+    engine.holdDeviceForTest(true);
+    engine.setOutputGain(1.0f);
+    engine.setMetronomeVolume(1.0f);
+
+    // A tempo change exactly on the cursor (a bar line): the count-in runs
+    // at the new tempo, and the song's first click (the cursor's beat, M9)
+    // follows its last one beat of the new tempo later.
+    {
+        std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(tempoChangeSong(24, 96), rate);
+        engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+        const uint64_t target = tl->sampleForTick(96);
+        const ClickGrid::CountIn ci = tl->clickGrid.countIn(96, 1);
+        const double beat = 24 * (60.0 / 90.0 * rate / 24.0);
+        if (std::fabs(ci.samplesPerTick * 24 - beat) > 0.05) // the tempo's rounded µs
+            fail("tempo on the cursor: the count-in's beat is %.2f samples, 90 BPM's is %.2f",
+                 ci.samplesPerTick * 24, beat);
+        engine.setMetronomeEnabled(true);
+        engine.playWithCountIn(target, ci);
+        std::vector<float> out;
+        engine.pumpForTest(uint32_t(ci.lengthSamples + uint64_t(beat) + 200), &out);
+        const std::vector<Onset> onsets = findOnsets(out, 64, 400);
+        if (onsets.size() != 6) {
+            fail("tempo on the cursor: %zu clicks heard, expected 4 + 2", onsets.size());
+        } else {
+            if (onsets[4].frame != ci.lengthSamples ||
+                onsets[4].peak < (ClickVoice::kAccentPeak + ClickVoice::kBeatPeak) / 2)
+                fail("tempo on the cursor: the song's first click at frame %llu, expected an "
+                     "accent at %llu",
+                     (unsigned long long)onsets[4].frame, (unsigned long long)ci.lengthSamples);
+            for (size_t i = 1; i < onsets.size(); i++) {
+                const double gap = double(onsets[i].frame - onsets[i - 1].frame);
+                if (std::fabs(gap - beat) > 2.0)
+                    fail("tempo on the cursor: %.0f frames between clicks %zu and %zu, a beat "
+                         "is %.1f",
+                         gap, i - 1, i, beat);
+            }
+        }
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.unloadSong();
+    }
+
+    std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(silentLoopSong(24, 960, 1920), rate);
+    engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
+    engine.setMetronomeEnabled(false);
+    engine.setLoopEnabled(true);
+
+    // A seek during the count-in moves where the song will start; the
+    // count-in runs its length all the same, then the song starts there.
+    {
+        const uint64_t target = tl->sampleForTick(132);
+        const ClickGrid::CountIn ci = tl->clickGrid.countIn(132, 1);
+        const uint64_t moved = tl->sampleForTick(480);
+        engine.playWithCountIn(target, ci);
+        engine.pumpForTest(uint32_t(ci.lengthSamples / 2));
+        engine.seek(moved);
+        engine.pumpForTest(uint32_t(ci.lengthSamples - ci.lengthSamples / 2 - 1));
+        if (!engine.countingIn() || engine.playheadSamples() != moved)
+            fail("seek during the count-in: counting in %d, playhead %llu (expected %llu)",
+                 int(engine.countingIn()), (unsigned long long)engine.playheadSamples(),
+                 (unsigned long long)moved);
+        engine.pumpForTest(1001);
+        if (engine.countingIn() || engine.playheadSamples() != moved + 1000)
+            fail("seek during the count-in: the song is at %llu after the count-in plus 1000 "
+                 "frames, expected %llu",
+                 (unsigned long long)engine.playheadSamples(), (unsigned long long)(moved + 1000));
+        engine.stop();
+        engine.pumpForTest(512);
+    }
+
+    // Held past the loop end (a start the UI didn't move, or a seek during
+    // the count-in): the song holds there, unwrapped, until it starts; then
+    // it wraps, and the take begins at the loop start with the held key and
+    // no Boundary.
+    {
+        const uint64_t target = tl->sampleForTick(1968);
+        const ClickGrid::CountIn ci = tl->clickGrid.countIn(1968, 1);
+        MidiInputRing ring;
+        engine.setMidiInputRing(&ring);
+        engine.setLiveTarget(-1);
+        engine.armCapture(43);
+        engine.playWithCountIn(target, ci);
+        engine.pumpForTest(512);
+        ring.push({0x90, 60, 90, 0});
+        engine.pumpForTest(uint32_t(ci.lengthSamples - 512 - 1));
+        if (!engine.countingIn() || engine.playheadSamples() != target)
+            fail("past the loop end: during the count-in the playhead is at %llu, not held at "
+                 "%llu",
+                 (unsigned long long)engine.playheadSamples(), (unsigned long long)target);
+        engine.pumpForTest(1001);
+        if (engine.countingIn() || engine.playheadSamples() != tl->loopStartSample + 1000)
+            fail("past the loop end: the song is at %llu after the count-in plus 1000 frames, "
+                 "expected the loop start + 1000 (%llu)",
+                 (unsigned long long)engine.playheadSamples(),
+                 (unsigned long long)(tl->loopStartSample + 1000));
+        ring.push({0x80, 60, 0, 0});
+        engine.pumpForTest(1024);
+        engine.armCapture(0);
+        bool begun = false, held = false, boundary = false;
+        CaptureEvent ev;
+        while (engine.popCapture(&ev)) {
+            if (ev.generation != 43)
+                continue;
+            if (ev.kind == CaptureEvent::Begin)
+                begun = ev.samplePos == tl->loopStartSample;
+            if (ev.kind == CaptureEvent::NoteOn && ev.key == 60)
+                held = ev.samplePos == tl->loopStartSample && (ev.flags & CaptureEvent::Carried);
+            boundary |= ev.kind == CaptureEvent::Boundary;
+        }
+        if (!begun || !held || boundary)
+            fail("past the loop end: Begin at the loop start %d, carried key there %d, "
+                 "Boundary %d",
+                 int(begun), int(held), int(boundary));
+        engine.stop();
+        engine.pumpForTest(512);
+        engine.setMidiInputRing(nullptr);
+    }
+
+    engine.unloadSong();
+    engine.holdDeviceForTest(false);
+}
+
 } // namespace
 
 int runMetroCheck()
@@ -591,6 +1054,10 @@ int runMetroCheck()
             checkGrid(tpb, rate);
     }
     checkEngine();
+    for (const double rate : {48000.0, 44100.0})
+        checkCountInGrid(rate);
+    checkCountInEngine();
+    checkCountInEdges();
     if (g_failures) {
         std::fprintf(stderr, "metrocheck: %d failure(s)\n", g_failures);
         return 1;

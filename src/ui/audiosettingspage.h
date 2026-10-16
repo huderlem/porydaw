@@ -26,11 +26,15 @@ class AudioSettingsPage : public QWidget
     static constexpr int kOutputLevelDefault = 100;
     // Metronome volume in percent (docs/metronome/PLAN.md M7).
     static constexpr int kMetronomeVolumeDefault = 70;
+    // Record's count-in in bars, 0 = off (M5).
+    static constexpr int kCountInBarsMax = 2;
+    static constexpr int kCountInBarsDefault = 1;
 
     AudioSettingsPage(int outputLevel, const EngineSettings &engine, QWidget *parent = nullptr);
 
     int outputLevel() const;
     int metronomeVolume() const;
+    int countInBars() const;
     EngineSettings engineSettings() const;
 
     // Programmatic loads (startup, Restore Defaults) go through these and
@@ -38,11 +42,13 @@ class AudioSettingsPage : public QWidget
     // special-case them.
     void setOutputLevel(int percent);
     void setMetronomeVolume(int percent);
+    void setCountInBars(int bars);
     void setEngineSettings(const EngineSettings &settings);
 
   signals:
     void outputLevelChanged(int percent);
     void metronomeVolumeChanged(int percent);
+    void countInBarsChanged(int bars);
     void engineSettingsChanged(const EngineSettings &settings);
 
   private:
@@ -52,6 +58,7 @@ class AudioSettingsPage : public QWidget
     QLabel *m_outputValue = nullptr;
     QSlider *m_metronomeSlider = nullptr;
     QLabel *m_metronomeValue = nullptr;
+    QComboBox *m_countIn = nullptr;
     QSpinBox *m_polyphony = nullptr;
     QComboBox *m_mixRate = nullptr;
     QCheckBox *m_analogFilter = nullptr;

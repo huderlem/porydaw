@@ -190,6 +190,7 @@ const QString kOutputLevelKey = QStringLiteral("outputLevel");
 // percent, app-wide like Follow Playhead.
 const QString kMetronomeKey = QStringLiteral("metronome");
 const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
+const QString kCountInBarsKey = QStringLiteral("countInBars");
 
 #ifdef Q_OS_WIN
 // These names and values come from the current Windows SDK. The bundled
@@ -3235,6 +3236,18 @@ void MainWindow::openSettings()
     m_settingsDialog->present();
 }
 
+// The settings were read at construction, before a harness turned
+// m_persistSession off. One that runs against the user's own QSettings
+// (--selftest; the rest redirect them to a temp dir) starts from the
+// metronome defaults instead, so the user's click and count-in don't change
+// what it hears. Nothing is written back: m_persistSession is off.
+void MainWindow::useDefaultMetronomeSettings()
+{
+    m_metronomeAction->setChecked(false);
+    m_settingsDialog->audioPage()->setMetronomeVolume(AudioSettingsPage::kMetronomeVolumeDefault);
+    m_settingsDialog->audioPage()->setCountInBars(AudioSettingsPage::kCountInBarsDefault);
+}
+
 // The Settings window is built once and kept; each page applies as it
 // changes, so this is where those changes land and persist.
 void MainWindow::buildSettingsDialog()
@@ -3262,6 +3275,16 @@ void MainWindow::buildSettingsDialog()
         m_audio.setMetronomeVolume(float(volume) / 100.0f);
         m_settingsDialog->audioPage()->setMetronomeVolume(volume);
     }
+    m_countInBars = std::clamp(
+        QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
+        AudioSettingsPage::kCountInBarsMax);
+    m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::countInBarsChanged, this,
+            [this](int bars) {
+                m_countInBars = bars;
+                if (m_persistSession)
+                    QSettings().setValue(kCountInBarsKey, bars);
+            });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
                 m_audio.setMetronomeVolume(float(percent) / 100.0f);
@@ -5613,6 +5636,15 @@ void MainWindow::synchronizePlayhead()
             finishRecording();
         else
             drainCapture();
+        // The count-in is over: the song (and the take) started. Only over
+        // the count-in's own line: another message (a lane Learn's prompt)
+        // stays, and brings the recording status back itself.
+        if (m_countInShown && !m_audio.countingIn()) {
+            if (statusBar()->currentMessage() == m_countInText)
+                showRecordingStatus();
+            else
+                m_countInShown = false;
+        }
     }
     const bool playheadTimerWasActive = m_playheadTimer->isActive();
     const uint64_t playhead = m_audio.playheadSamples();
@@ -5683,17 +5715,33 @@ void MainWindow::syncCompanion(uint64_t playhead, bool playing)
                       m_audio.maxPcmChannels(), m_audio.activeCgbChannels());
 }
 
-void MainWindow::startPlayback(bool fromEditCursor)
+void MainWindow::startPlayback(bool fromEditCursor, int countInBars)
 {
     if (!m_audioOk || !m_active || !m_audio.songLoaded())
         return;
-    const bool seekToCursor = fromEditCursor || m_audio.transport() == Transport::Stopped;
+    const bool stopped = m_audio.transport() == Transport::Stopped;
+    const bool seekToCursor = fromEditCursor || stopped;
     uint64_t target = 0;
     if (seekToCursor) {
-        target = m_audio.timeline()->sampleForTick(m_active->view->editCursorTick());
-        m_audio.seek(target);
+        const MidiTimeline *timeline = m_audio.timeline();
+        uint64_t cursor = m_active->view->editCursorTick();
+        target = timeline->sampleForTick(cursor);
+        if (stopped && countInBars > 0) {
+            // A start at or past the loop end wraps to the loop start at
+            // once (TimelinePlayer::settleWrap), so the song really starts
+            // there: count in to that, at its tempo and meter.
+            if (m_audio.loopEnabled() && timeline->hasLoop() && target >= timeline->loopEndSample) {
+                cursor = timeline->loopStartTick;
+                target = timeline->loopStartSample;
+            }
+            m_audio.playWithCountIn(target, timeline->clickGrid.countIn(cursor, countInBars));
+        } else {
+            m_audio.seek(target);
+            m_audio.play();
+        }
+    } else {
+        m_audio.play();
     }
-    m_audio.play();
     // The companion greets every Play with a Spin on the first downbeat.
     m_companion->cueSpin();
     updateTransportActions();
@@ -5933,7 +5981,11 @@ uint64_t MainWindow::recordingLatencySamples() const
 
 void MainWindow::toggleRecord()
 {
-    if (m_takeSession)
+    // Record again during the count-in cancels it, as Stop does: there is
+    // nothing to punch out of yet.
+    if (m_takeSession && m_audio.countingIn())
+        stopPlayback();
+    else if (m_takeSession)
         finishRecording();
     else
         beginRecording();
@@ -5960,22 +6012,27 @@ void MainWindow::beginRecording()
     // Armed before play(), so the first notes after the start are caught.
     m_audio.armCapture(m_captureGeneration);
     publishLiveTarget();
+    // From the edit cursor when stopped, after the count-in (M5); resumes a
+    // pause at once.
     if (m_audio.transport() != Transport::Playing)
-        startPlayback(); // from the edit cursor when stopped; resumes a pause
+        startPlayback(false, m_countInBars);
     showRecordingStatus();
     syncRecordAction();
 }
 
 void MainWindow::showRecordingStatus()
 {
+    m_countInShown = false;
     if (!m_takeSession)
         return;
     const int track = m_take.track();
     const QString name = m_takeSession->doc.trackName(track);
-    statusBar()->showMessage(tr("Recording into %1…")
-                                 .arg(name.isEmpty()
-                                          ? tr("Track %1").arg(track + 1)
-                                          : QStringLiteral("%1: %2").arg(track + 1).arg(name)));
+    const QString target = name.isEmpty() ? tr("Track %1").arg(track + 1)
+                                          : QStringLiteral("%1: %2").arg(track + 1).arg(name);
+    m_countInShown = m_audio.countingIn();
+    m_countInText =
+        m_countInShown ? tr("Counting in… then recording into %1").arg(target) : QString();
+    statusBar()->showMessage(m_countInShown ? m_countInText : tr("Recording into %1…").arg(target));
 }
 
 void MainWindow::drainCapture()
@@ -6375,6 +6432,7 @@ void MainWindow::syncTempoControl()
 bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabel)
 {
     m_persistSession = false;
+    useDefaultMetronomeSettings();
     if (!m_audioOk) {
         qWarning("selftest: no audio device available");
         return false;

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 #include "audio/audiotap.h"
@@ -324,6 +325,19 @@ class AudioEngine
 
     // Hot transport controls.
     void play();
+    // Record's count-in (docs/metronome/PLAN.md M5, stance 6), from Stopped
+    // only: seeks to startSample, then plays, but for countIn.lengthSamples
+    // the song holds at startSample (the playhead too) and only the count-in
+    // clicks sound (whether or not the metronome is on), and live play
+    // sounds; then the song starts there, sample-exactly. A capture armed
+    // before it begins at the song's start, never during the count-in, and
+    // every key still sounding then is recorded from there (M6).
+    void playWithCountIn(uint64_t startSample, const ClickGrid::CountIn &countIn);
+    // True from playWithCountIn until the song starts (or Stop/Pause).
+    bool countingIn() const
+    {
+        return (m_countInState.load(std::memory_order_acquire) & kCountInPhaseMask) != kCountInIdle;
+    }
     void pause();
     void stop();
     Transport transport() const { return static_cast<Transport>(m_transport.load()); }
@@ -402,11 +416,19 @@ class AudioEngine
     void applyPendingSeek();
     void applyTransportTransition();
     void cutAllSound();
+    // The count-in's end: the song starts at the player's position.
+    void finishCountIn();
+    void applyCountInRequest();
+    // Audio thread: ends the running count-in, leaving any newer request.
+    void cancelCountIn();
+    // UI thread, the device stopped (song load/unload): no count-in at all.
+    void resetCountIn();
     // The metronome's beats in the player's span [p0, p1) of one render
     // chunk that wrapped the loop `wraps` times, queued for the click mix at
     // frame offsets from `frame` (the chunk's start within the callback).
     void scheduleClicks(const MidiTimeline *tl, uint64_t p0, uint64_t p1, uint32_t wraps,
                         uint64_t frame, uint32_t frameCount);
+    void queueCountInClicks(uint64_t from, uint64_t to, uint64_t frame, uint32_t frameCount);
     void queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to, uint64_t frame,
                      uint32_t frameCount);
     void applyMuteTransition();
@@ -515,6 +537,33 @@ class AudioEngine
     std::atomic<float> m_outputGain{1.0f};
     std::atomic<bool> m_metronomeOn{false};
     std::atomic<float> m_metronomeVolume{0.7f};
+    // Count-in handoff. The state is a generation (bumped by kCountInGenStep
+    // for every request, so a state value never comes back) and a phase in
+    // its low bits:
+    //  - UI, playWithCountIn: writes the request's words (relaxed, after a
+    //    release fence), then stores {new gen, Requested} (release), then
+    //    publishes Playing.
+    //  - Audio, once playing: loads {gen, Requested} (acquire), copies the
+    //    words (relaxed), an acquire fence, then CASes it to {gen, Running}.
+    //    A UI write that overlapped the copy came after a Stop that already
+    //    changed the state (Stop must come before another request), so the
+    //    CAS fails and the torn copy is thrown away: a seqlock whose
+    //    sequence is the state itself.
+    //  - The audio thread only ever leaves its own Running phase (CAS
+    //    {gen, Running} -> {gen, Idle}, when the song starts or a transition
+    //    cancels it); it never overwrites a request. Stop and Pause (UI)
+    //    store {gen, Idle} after publishing the transport, so a callback that
+    //    sees its count-in cancelled also sees why.
+    static constexpr uint32_t kCountInIdle = 0;
+    static constexpr uint32_t kCountInRequested = 1;
+    static constexpr uint32_t kCountInRunning = 2;
+    static constexpr uint32_t kCountInPhaseMask = 3;
+    static constexpr uint32_t kCountInGenStep = 4;
+    static_assert(std::is_trivially_copyable_v<ClickGrid::CountIn>);
+    static constexpr size_t kCountInWords = (sizeof(ClickGrid::CountIn) + 7) / 8;
+    std::atomic<uint64_t> m_countInRequest[kCountInWords] = {};
+    std::atomic<uint32_t> m_countInState{kCountInIdle};
+    uint32_t m_countInGen = 0; // UI thread: the latest request's generation
     // Avoid stop/start stalls: publish the latest seek for the audio callback.
     static constexpr uint64_t kNoPendingSeek = UINT64_MAX;
     std::atomic<uint64_t> m_pendingSeek{kNoPendingSeek};
@@ -674,6 +723,17 @@ class AudioEngine
     static constexpr uint32_t kMaxClicksPerCallback = 64;
     ClickVoice::Trigger m_clickQueue[kMaxClicksPerCallback];
     uint32_t m_clickQueueCount = 0;
+    // The running count-in (audio thread): active while m_countInPos is
+    // short of m_countIn.lengthSamples. m_countInTaken is the state it took
+    // ({gen, Running}); any other state means the UI cancelled or replaced
+    // it.
+    ClickGrid::CountIn m_countIn;
+    bool m_countInActive = false;
+    uint32_t m_countInTaken = 0;
+    uint64_t m_countInPos = 0;
+    // Each live key's applied velocity (after Fixed velocity), so a key
+    // sounding when a count-in ends can be recorded as played (M6).
+    uint8_t m_liveVelocity[128] = {};
     uint64_t m_clicksQueued = 0; // clicksQueuedForTest
 
     // Scratch deinterleave buffers (allocated in init)

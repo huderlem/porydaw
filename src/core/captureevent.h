@@ -37,6 +37,10 @@ struct CaptureEvent {
         // rest, not a move the player made. The take keeps it only on a lane
         // it already moved (J5).
         Reset = 0x01,
+        // NoteOn: a key already down when the take began, carried over from
+        // a count-in (docs/metronome/PLAN.md M6). The take drops it if it
+        // was heard released before the start.
+        Carried = 0x02,
     };
     uint64_t samplePos = 0;
     uint64_t resumePos = 0;   // Boundary only
@@ -48,5 +52,5 @@ struct CaptureEvent {
     uint8_t kind = NoteOn;
     uint8_t key = 0; // NoteOn/NoteOff: the key; Control: the lane's CC
     uint8_t velocity = 0;
-    uint8_t flags = 0; // Bend/Control: Flag bits
+    uint8_t flags = 0; // Bend/Control/NoteOn: Flag bits
 };

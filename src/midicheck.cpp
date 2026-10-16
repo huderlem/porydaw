@@ -2934,6 +2934,9 @@ void MainWindow::checkLaneLearn()
         std::printf("midicheck: lane learn during a take SKIP (no audio device)\n");
     } else {
         m_audio.holdDeviceForTest(true);
+        // The take starts at once: the count-in has its own status line.
+        const int countInBars = m_countInBars;
+        m_countInBars = 0;
         QUndoStack *undo = m_active->doc.undoStack();
         const int undoWas = undo->index();
         const auto recordingStatus = [&] {
@@ -2963,6 +2966,7 @@ void MainWindow::checkLaneLearn()
         while (undo->index() > undoWas)
             undo->undo();
         drain(midi.ring());
+        m_countInBars = countInBars;
         m_audio.holdDeviceForTest(false);
     }
     // A learn the Settings page starts doesn't touch the status bar.

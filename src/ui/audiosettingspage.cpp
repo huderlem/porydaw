@@ -135,6 +135,16 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     auto *metronomeForm = new QFormLayout(metronomeGroup);
     metronomeForm->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     metronomeForm->addRow(tr("Volume:"), metronomeRow);
+    m_countIn = new QComboBox(this);
+    m_countIn->setObjectName(QStringLiteral("settingsCountIn"));
+    m_countIn->addItem(tr("Off"), 0);
+    m_countIn->addItem(tr("1 bar"), 1);
+    m_countIn->addItem(tr("2 bars"), 2);
+    m_countIn->setCurrentIndex(m_countIn->findData(kCountInBarsDefault));
+    m_countIn->setToolTip(tr("Before Record starts the song from the edit cursor, click this many "
+                             "bars at the tempo there, even with the metronome off. Not when "
+                             "Record punches in during playback."));
+    metronomeForm->addRow(tr("Count-in when recording:"), m_countIn);
 
     // GBA engine: poryaaaa's global accuracy knobs (SPEC §7).
     auto *engineGroup = new QGroupBox(tr("GBA engine"), this);
@@ -203,6 +213,10 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         if (!m_loading)
             emit metronomeVolumeChanged(percent);
     });
+    connect(m_countIn, &QComboBox::currentIndexChanged, this, [this] {
+        if (!m_loading)
+            emit countInBarsChanged(countInBars());
+    });
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
@@ -210,6 +224,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     connect(defaultsButton, &QPushButton::clicked, this, [this] {
         setOutputLevel(kOutputLevelDefault);
         setMetronomeVolume(kMetronomeVolumeDefault);
+        setCountInBars(kCountInBarsDefault);
         setEngineSettings(EngineSettings());
     });
 
@@ -242,6 +257,16 @@ int AudioSettingsPage::metronomeVolume() const
 void AudioSettingsPage::setMetronomeVolume(int percent)
 {
     m_metronomeSlider->setValue(std::clamp(percent, 0, 100));
+}
+
+int AudioSettingsPage::countInBars() const
+{
+    return m_countIn->currentData().toInt();
+}
+
+void AudioSettingsPage::setCountInBars(int bars)
+{
+    m_countIn->setCurrentIndex(m_countIn->findData(std::clamp(bars, 0, kCountInBarsMax)));
 }
 
 EngineSettings AudioSettingsPage::engineSettings() const

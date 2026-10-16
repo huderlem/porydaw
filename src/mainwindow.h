@@ -241,6 +241,7 @@ class MainWindow : public QMainWindow
   private:
     void buildUi();
     void buildSettingsDialog();
+    void useDefaultMetronomeSettings();
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
     void publishLiveTarget();
@@ -357,6 +358,7 @@ class MainWindow : public QMainWindow
     void checkRecordingLaneDisplay(int track);
     void checkRecordingCcLaneDisplay(int track);
     void checkRecordingFlood();
+    void checkRecordingCountIn(int track);
     void checkRecordingLatch(int a, int b);
     void checkRecordingVoice(int a, int b);
     void updateWindowFrameTheme();
@@ -663,7 +665,9 @@ class MainWindow : public QMainWindow
     // first so playback begins there. fromEditCursor forces that seek even
     // out of Paused — the Space binding (Reaper-style restart), while the
     // Play button resumes from the pause point.
-    void startPlayback(bool fromEditCursor = false);
+    // countInBars > 0 from Stopped: Record's count-in first
+    // (docs/metronome/PLAN.md M5).
+    void startPlayback(bool fromEditCursor = false, int countInBars = 0);
     void pausePlayback();
     void stopPlayback();
     // The session's cfg (volume/reverb) merged with the global engine knobs
@@ -738,6 +742,13 @@ class MainWindow : public QMainWindow
     RecordingTake m_take;
     SongSession *m_takeSession = nullptr;
     uint32_t m_captureGeneration = 0;
+    // Record's count-in length in bars, 0 for none (Settings → Audio,
+    // QSettings countInBars), and whether the status bar says "Counting
+    // in…" (showRecordingStatus), so the UI tick can swap it once the song
+    // starts.
+    int m_countInBars = 1;
+    bool m_countInShown = false;
+    QString m_countInText;           // the "Counting in…" line shown
     uint32_t m_takeDropsAtStart = 0; // AudioEngine::captureDropped at punch-in
     struct TakeLaneBefore {          // takeLaneBefore's cache
         const SongDocument *doc = nullptr;
