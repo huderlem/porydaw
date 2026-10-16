@@ -126,6 +126,7 @@ qt_add_library(porydaw_app STATIC
     src/ui/theme/themepage.cpp
     src/ui/theme/themepage.h
 
+    src/audio/audiodeviceconfig.h
     src/audio/audioengine.cpp
     src/audio/audiotap.cpp
     src/audio/audiotap.h

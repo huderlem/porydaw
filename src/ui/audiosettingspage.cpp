@@ -110,6 +110,40 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     outputCaption->setWordWrap(true);
     outputForm->addRow(QString(), outputCaption);
 
+    // Output device: how far ahead the device buffers, which is the delay
+    // between a key on a MIDI keyboard and its sound.
+    auto *deviceGroup = new QGroupBox(tr("Output device"), this);
+    auto *deviceForm = new QFormLayout(deviceGroup);
+    deviceForm->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_bufferSize = new QComboBox(this);
+    m_bufferSize->setObjectName(QStringLiteral("settingsBufferSize"));
+    for (int ms : kBufferSizesMs)
+        m_bufferSize->addItem(ms == 0 ? tr("Default") : tr("%1 ms").arg(ms), ms);
+    m_bufferSize->setToolTip(tr("How much audio the device buffers ahead. Smaller makes a MIDI "
+                                "keyboard more responsive; too small crackles. Default is "
+                                "about 10 ms, or %1 ms in exclusive mode. Windows may round a "
+                                "shared-mode request up to its own minimum.")
+                                 .arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs));
+    deviceForm->addRow(tr("&Buffer size:"), m_bufferSize);
+#ifdef Q_OS_WIN
+    m_exclusive = new QCheckBox(tr("Exclusive mode (lowest latency)"), this);
+    m_exclusive->setObjectName(QStringLiteral("settingsExclusiveMode"));
+    m_exclusive->setToolTip(tr("Opens the device in WASAPI exclusive mode, bypassing the Windows "
+                               "mixer, for latency close to ASIO's. While porydaw runs, other "
+                               "apps can't play sound on this device."));
+    deviceForm->addRow(QString(), m_exclusive);
+#endif
+    m_deviceStatus = new QLabel(this);
+    m_deviceStatus->setObjectName(QStringLiteral("settingsDeviceStatus"));
+    m_deviceStatus->setForegroundRole(QPalette::PlaceholderText);
+    m_deviceStatus->setWordWrap(true);
+    deviceForm->addRow(QString(), m_deviceStatus);
+    m_deviceWarning = new QLabel(this);
+    m_deviceWarning->setObjectName(QStringLiteral("settingsDeviceWarning"));
+    m_deviceWarning->setWordWrap(true);
+    m_deviceWarning->hide();
+    deviceForm->addRow(QString(), m_deviceWarning);
+
     // Metronome: the click's own level, under the output level like the song.
     auto *metronomeGroup = new QGroupBox(tr("Metronome"), this);
     const QString metronomeTip = tr("How loud the metronome clicks, relative to the song. The "
@@ -198,6 +232,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
 
     auto *pageLayout = new QVBoxLayout(this);
     pageLayout->addWidget(outputGroup);
+    pageLayout->addWidget(deviceGroup);
     pageLayout->addWidget(metronomeGroup);
     pageLayout->addWidget(engineGroup);
     pageLayout->addStretch(1);
@@ -221,11 +256,19 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
     connect(m_analogFilter, &QCheckBox::toggled, this, &AudioSettingsPage::emitEngineSettings);
+    connect(m_bufferSize, &QComboBox::currentIndexChanged, this,
+            &AudioSettingsPage::emitDeviceConfig);
+    if (m_exclusive) {
+        connect(m_exclusive, &QCheckBox::toggled, this, &AudioSettingsPage::emitDeviceConfig);
+        connect(m_exclusive, &QCheckBox::toggled, this, &AudioSettingsPage::updateDefaultLabel);
+    }
+    updateDefaultLabel();
     connect(defaultsButton, &QPushButton::clicked, this, [this] {
         setOutputLevel(kOutputLevelDefault);
         setMetronomeVolume(kMetronomeVolumeDefault);
         setCountInBars(kCountInBarsDefault);
         setEngineSettings(EngineSettings());
+        setDeviceConfig(AudioDeviceConfig());
     });
 
     // Seed without emitting: the owner already holds these values.
@@ -234,6 +277,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     setEngineSettings(engine);
     m_loading = false;
     m_reported = engineSettings();
+    m_reportedDevice = deviceConfig();
     // setValue is a no-op at the default, so seed the readout explicitly.
     m_outputValue->setText(tr("%1%").arg(m_outputSlider->value()));
     m_metronomeValue->setText(tr("%1%").arg(m_metronomeSlider->value()));
@@ -308,4 +352,60 @@ void AudioSettingsPage::emitEngineSettings()
         return;
     m_reported = settings;
     emit engineSettingsChanged(settings);
+}
+
+AudioDeviceConfig AudioSettingsPage::deviceConfig() const
+{
+    AudioDeviceConfig config;
+    config.periodMs = m_bufferSize->currentData().toInt();
+    config.exclusive = m_exclusive && m_exclusive->isChecked();
+    return config;
+}
+
+void AudioSettingsPage::setDeviceConfig(const AudioDeviceConfig &config)
+{
+    const bool wasLoading = m_loading;
+    m_loading = true;
+    int idx = m_bufferSize->findData(config.periodMs);
+    if (idx < 0) { // hand-edited QSettings value: keep it selectable
+        m_bufferSize->addItem(tr("%1 ms (custom)").arg(config.periodMs), config.periodMs);
+        idx = m_bufferSize->count() - 1;
+    }
+    m_bufferSize->setCurrentIndex(idx);
+    if (m_exclusive)
+        m_exclusive->setChecked(config.exclusive);
+    m_loading = wasLoading;
+    emitDeviceConfig();
+}
+
+void AudioSettingsPage::setDeviceStatus(const QString &status, const QString &warning)
+{
+    m_deviceStatus->setText(status);
+    m_deviceWarning->setText(warning);
+    m_deviceWarning->setVisible(!warning.isEmpty());
+}
+
+// Like the engine knobs: each report reopens the device, so only a real
+// change reports.
+void AudioSettingsPage::emitDeviceConfig()
+{
+    if (m_loading)
+        return;
+    const AudioDeviceConfig config = deviceConfig();
+    if (config == m_reportedDevice)
+        return;
+    m_reportedDevice = config;
+    emit deviceConfigChanged(config);
+}
+
+// Default means a different size per mode; the item says which.
+void AudioSettingsPage::updateDefaultLabel()
+{
+    const int idx = m_bufferSize->findData(0);
+    if (idx < 0)
+        return;
+    m_bufferSize->setItemText(idx, m_exclusive && m_exclusive->isChecked()
+                                       ? tr("Default (%1 ms)")
+                                             .arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs)
+                                       : tr("Default (about 10 ms)"));
 }

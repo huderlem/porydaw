@@ -241,6 +241,7 @@ class MainWindow : public QMainWindow
   private:
     void buildUi();
     void buildSettingsDialog();
+    void refreshDeviceStatus();
     void useDefaultMetronomeSettings();
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
@@ -851,6 +852,7 @@ class MainWindow : public QMainWindow
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
     QTimer *m_engineApplyTimer = nullptr; // coalesces Settings → engine restarts
+    QTimer *m_deviceApplyTimer = nullptr; // coalesces Settings → device reopens
     // Last values applied to the status widgets (uiTick runs at 2 Hz idle,
     // 10 Hz during playback; unchanged values skip the label writes).
     struct PolyStatusSnapshot {

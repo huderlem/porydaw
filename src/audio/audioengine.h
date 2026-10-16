@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "audio/audiodeviceconfig.h"
 #include "audio/audiotap.h"
 #include "audio/auditionslots.h"
 #include "audio/metronome.h"
@@ -87,6 +88,22 @@ class AudioEngine
     // the periods really?".
     int periodSizeFrames() const { return m_periodFrames; }
     int periodCount() const { return m_periodCount; }
+    // True when the device actually opened in WASAPI exclusive mode.
+    bool exclusiveMode() const { return m_exclusive; }
+
+    // Before init: the buffering the device first opens with.
+    void setDeviceConfig(const AudioDeviceConfig &config) { m_deviceConfig = config; }
+    AudioDeviceConfig deviceConfig() const { return m_deviceConfig; }
+    // Why the device didn't open as configured (exclusive mode refused, so
+    // it fell back to shared), or empty. Set by init and reopenDevice.
+    QString deviceWarning() const { return m_deviceWarning; }
+    // Cold: closes the output device and opens it again with config, at the
+    // same sample rate, so the engines, the timeline and every sample
+    // position carry over untouched (playback resumes where it was, after a
+    // brief gap). A config the device can't open at all keeps the previous
+    // one (deviceConfig() still reports it) and says so in *error. False
+    // only when no device could be (re)started — playback is then silent.
+    bool reopenDevice(const AudioDeviceConfig &config, QString *error);
 
     // Cold: swaps song data with the device stopped. Borrows both pointers —
     // the caller (the owning song tab) keeps ownership and must detach the
@@ -503,6 +520,10 @@ class AudioEngine
     void applyPreviewVoice();
     void applyPolyDebug();
     void resetPreviewEngine();
+    // Opens (not starts) m_device with config at sampleRate (0 = the
+    // device's native rate) and records what it resolved to. Exclusive
+    // mode the device refuses falls back to shared, noted in *warning.
+    bool openDevice(const AudioDeviceConfig &config, uint32_t sampleRate, QString *warning);
     ToneData *previewVoices() const;
     uint32_t effectiveMuteMask() const;
 
@@ -516,6 +537,9 @@ class AudioEngine
     bool m_isNullBackend = false;
     int m_periodFrames = 0;
     int m_periodCount = 0;
+    bool m_exclusive = false;
+    AudioDeviceConfig m_deviceConfig;
+    QString m_deviceWarning;
     std::unique_ptr<M4AEngine> m_engine;
     const MidiTimeline *m_timeline = nullptr; // not owned (the active song tab's)
     LoadedVoiceGroup *m_voicegroup = nullptr; // not owned (the active song tab's)

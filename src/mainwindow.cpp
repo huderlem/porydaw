@@ -191,6 +191,10 @@ const QString kOutputLevelKey = QStringLiteral("outputLevel");
 const QString kMetronomeKey = QStringLiteral("metronome");
 const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
 const QString kCountInBarsKey = QStringLiteral("countInBars");
+// The output device's buffering (Settings → Audio → Output device):
+// buffer size in ms (0 = the backend's default) and WASAPI exclusive mode.
+const QString kAudioPeriodMsKey = QStringLiteral("audio/periodMs");
+const QString kAudioExclusiveKey = QStringLiteral("audio/exclusive");
 
 #ifdef Q_OS_WIN
 // These names and values come from the current Windows SDK. The bundled
@@ -555,6 +559,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     syncLiveSettings();
     connect(m_midiInput.get(), &MidiInput::settingsChanged, this, &MainWindow::syncLiveSettings);
     m_audioOk = m_audio.init(&audioError);
+    refreshDeviceStatus();
     if (!m_audioOk) {
         QMessageBox::warning(this, tr("Audio Error"),
                              tr("%1\n\nPlayback will be unavailable.").arg(audioError));
@@ -573,6 +578,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     }
     statusBar()->showMessage(
         !m_audioOk ? tr("No audio device.")
+        : !m_audio.deviceWarning().isEmpty() ? m_audio.deviceWarning()
         : m_audio.usingNullBackend()
             ? tr("No audio output: silent null device.")
             : tr("Audio ready (%1 Hz, %2). Open a decomp project to get started.")
@@ -3227,13 +3233,39 @@ void MainWindow::openSongSettings()
 
 void MainWindow::openSettings()
 {
-    // What Auto stands for on this device, so a manual offset can be
-    // judged against it.
-    m_settingsDialog->midiPage()->setAutoLatencyMs(
-        m_audioOk ? int(std::llround(double(m_audio.outputLatencySamples()) * 1000.0 /
-                                     m_audio.sampleRate()))
-                  : -1);
+    refreshDeviceStatus();
     m_settingsDialog->present();
+}
+
+// What the output device actually opened with, on the Audio page, and what
+// MIDI's Auto recording offset stands for on it, so a manual offset can be
+// judged against it.
+void MainWindow::refreshDeviceStatus()
+{
+    if (!m_settingsDialog)
+        return;
+    const double rate = m_audio.sampleRate();
+    QString status;
+    if (!m_audioOk) {
+        status = tr("No audio device.");
+    } else {
+        const double bufferedMs =
+            rate > 0 ? double(m_audio.outputLatencySamples()) * 1000.0 / rate : 0.0;
+        status = tr("Now: %1%2, %3 Hz, %4 × %5 frames (about %6 ms buffered).")
+                     .arg(m_audio.backendName())
+                     .arg(m_audio.exclusiveMode() ? tr(" exclusive") : QString())
+                     .arg(int(rate))
+                     .arg(m_audio.periodCount())
+                     .arg(m_audio.periodSizeFrames())
+                     .arg(bufferedMs, 0, 'f', bufferedMs < 10.0 ? 1 : 0);
+        if (qEnvironmentVariableIsSet("PORYDAW_AUDIO_PERIOD_MS"))
+            status += QLatin1Char(' ') +
+                      tr("PORYDAW_AUDIO_PERIOD_MS is set and overrides the buffer size.");
+    }
+    m_settingsDialog->audioPage()->setDeviceStatus(status,
+                                                   m_audioOk ? m_audio.deviceWarning() : QString());
+    m_settingsDialog->midiPage()->setAutoLatencyMs(
+        m_audioOk ? int(std::llround(double(m_audio.outputLatencySamples()) * 1000.0 / rate)) : -1);
 }
 
 // The settings were read at construction, before a harness turned
@@ -3279,6 +3311,48 @@ void MainWindow::buildSettingsDialog()
         QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
         AudioSettingsPage::kCountInBarsMax);
     m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
+    {
+        // Before init (the caller opens the device after this): the device
+        // first opens with the user's buffering.
+        QSettings settings;
+        AudioDeviceConfig device;
+        device.periodMs = std::clamp(settings.value(kAudioPeriodMsKey, 0).toInt(), 0, 500);
+        device.exclusive = settings.value(kAudioExclusiveKey, false).toBool();
+        m_audio.setDeviceConfig(device);
+        m_settingsDialog->audioPage()->setDeviceConfig(device);
+    }
+    // Reopening the device is a brief gap in the sound, so a combo scrolled
+    // through by wheel or arrow keys reopens once, where it comes to rest.
+    m_deviceApplyTimer = new QTimer(this);
+    m_deviceApplyTimer->setSingleShot(true);
+    m_deviceApplyTimer->setInterval(200);
+    connect(m_deviceApplyTimer, &QTimer::timeout, this, [this] {
+        const AudioDeviceConfig wanted = m_settingsDialog->audioPage()->deviceConfig();
+        if (!m_audioOk) {
+            m_audio.setDeviceConfig(wanted); // the next launch opens with it
+            return;
+        }
+        QString error;
+        if (!m_audio.reopenDevice(wanted, &error) && error.isEmpty())
+            error = tr("The audio output device could not be restarted.");
+        refreshDeviceStatus();
+        statusBar()->showMessage(!error.isEmpty() ? error
+                                 : !m_audio.deviceWarning().isEmpty()
+                                     ? m_audio.deviceWarning()
+                                     : tr("Audio device reopened (%1).")
+                                           .arg(m_audio.exclusiveMode() ? tr("exclusive mode")
+                                                                        : tr("shared mode")),
+                                 5000);
+    });
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::deviceConfigChanged, this,
+            [this](const AudioDeviceConfig &config) {
+                if (m_persistSession) {
+                    QSettings settings;
+                    settings.setValue(kAudioPeriodMsKey, config.periodMs);
+                    settings.setValue(kAudioExclusiveKey, config.exclusive);
+                }
+                m_deviceApplyTimer->start();
+            });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::countInBarsChanged, this,
             [this](int bars) {
                 m_countInBars = bars;

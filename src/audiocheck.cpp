@@ -37,6 +37,54 @@ int runAudioCheck()
         failures++;
     }
 
+    // Reopening with other buffering (Settings → Audio → Output device)
+    // must keep the sample rate the engines run at. Exclusive mode may be
+    // refused (another app holds the device): that falls back to shared
+    // with a warning, never a failure.
+    if (!engine.usingNullBackend()) {
+        const double rate = engine.sampleRate();
+        AudioDeviceConfig configs[4];
+        configs[0].periodMs = 3;
+        configs[1].periodMs = 3;
+        configs[1].exclusive = true;
+        configs[2].exclusive = true; // Default buffer size in exclusive mode
+        // configs[3]: back to the defaults
+        for (const AudioDeviceConfig &config : configs) {
+            QString reopenError;
+            const bool ok = engine.reopenDevice(config, &reopenError);
+            std::printf("audiocheck: reopen periodMs=%d exclusive=%s -> %s, %s, period=%dx%d "
+                        "frames (~%.1f ms)%s%s%s%s\n",
+                        config.periodMs, config.exclusive ? "yes" : "no", ok ? "ok" : "FAILED",
+                        engine.exclusiveMode() ? "exclusive" : "shared", engine.periodCount(),
+                        engine.periodSizeFrames(),
+                        1000.0 * engine.periodSizeFrames() / engine.sampleRate(),
+                        engine.deviceWarning().isEmpty() ? "" : " warning: ",
+                        qUtf8Printable(engine.deviceWarning()),
+                        reopenError.isEmpty() ? "" : " error: ", qUtf8Printable(reopenError));
+            if (!ok) {
+                std::fprintf(stderr, "audiocheck: FAIL: the device didn't reopen\n");
+                failures++;
+            }
+            if (engine.sampleRate() != rate) {
+                std::fprintf(stderr, "audiocheck: FAIL: reopening changed the sample rate\n");
+                failures++;
+            }
+            // Exclusive's Default is small periods, not shared mode's 10 ms.
+            const double periodMs = 1000.0 * engine.periodSizeFrames() / engine.sampleRate();
+            if (engine.exclusiveMode() && config.periodMs == 0 &&
+                !qEnvironmentVariableIsSet("PORYDAW_AUDIO_PERIOD_MS") &&
+                periodMs > AudioDeviceConfig::kExclusiveDefaultPeriodMs + 1) {
+                std::fprintf(stderr, "audiocheck: FAIL: exclusive Default opened %.1f ms periods\n",
+                             periodMs);
+                failures++;
+            }
+            if (engine.exclusiveMode() && !config.exclusive) {
+                std::fprintf(stderr, "audiocheck: FAIL: exclusive mode without asking\n");
+                failures++;
+            }
+        }
+    }
+
     if (failures == 0)
         std::printf("audiocheck: PASS\n");
     return failures ? 1 : 0;

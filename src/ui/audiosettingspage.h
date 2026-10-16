@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/audiodeviceconfig.h"
 #include "enginesettings.h"
 
 #include <QWidget>
@@ -10,8 +11,8 @@ class QLabel;
 class QSlider;
 class QSpinBox;
 
-// Settings window, Audio page: porydaw's own output level and the global
-// GBA-engine accuracy knobs. Every control applies as it changes — there
+// Settings window, Audio page: porydaw's own output level, the output
+// device's buffering, and the global GBA-engine accuracy knobs. Every control applies as it changes — there
 // is no OK/Cancel staging anywhere in the Settings window — so the page
 // only reports; the main window owns applying and persisting.
 class AudioSettingsPage : public QWidget
@@ -32,7 +33,11 @@ class AudioSettingsPage : public QWidget
 
     AudioSettingsPage(int outputLevel, const EngineSettings &engine, QWidget *parent = nullptr);
 
+    // Buffer sizes offered, in ms (0 = the backend's default).
+    static constexpr int kBufferSizesMs[] = {0, 2, 3, 5, 10, 20, 40};
+
     int outputLevel() const;
+    AudioDeviceConfig deviceConfig() const;
     int metronomeVolume() const;
     int countInBars() const;
     EngineSettings engineSettings() const;
@@ -44,15 +49,22 @@ class AudioSettingsPage : public QWidget
     void setMetronomeVolume(int percent);
     void setCountInBars(int bars);
     void setEngineSettings(const EngineSettings &settings);
+    void setDeviceConfig(const AudioDeviceConfig &config);
+    // What the device actually opened with, and why it differs from the
+    // request if it does (warning, or empty). Display only.
+    void setDeviceStatus(const QString &status, const QString &warning);
 
   signals:
     void outputLevelChanged(int percent);
     void metronomeVolumeChanged(int percent);
     void countInBarsChanged(int bars);
     void engineSettingsChanged(const EngineSettings &settings);
+    void deviceConfigChanged(const AudioDeviceConfig &config);
 
   private:
     void emitEngineSettings();
+    void emitDeviceConfig();
+    void updateDefaultLabel();
 
     QSlider *m_outputSlider = nullptr;
     QLabel *m_outputValue = nullptr;
@@ -62,9 +74,14 @@ class AudioSettingsPage : public QWidget
     QSpinBox *m_polyphony = nullptr;
     QComboBox *m_mixRate = nullptr;
     QCheckBox *m_analogFilter = nullptr;
+    QComboBox *m_bufferSize = nullptr;
+    QCheckBox *m_exclusive = nullptr; // null off Windows
+    QLabel *m_deviceStatus = nullptr;
+    QLabel *m_deviceWarning = nullptr;
     // Set while widgets are being loaded programmatically, so a struct
     // restore reports once at the end instead of per widget.
     bool m_loading = false;
     // Last reported engine settings; unchanged values never re-report.
     EngineSettings m_reported;
+    AudioDeviceConfig m_reportedDevice;
 };

@@ -81,44 +81,13 @@ bool AudioEngine::init(QString *error)
     }
 #endif
 
-    m_device = new ma_device;
-    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
-    cfg.playback.format = ma_format_f32;
-    cfg.playback.channels = 2;
-    cfg.sampleRate = 0; // use the device's native rate
-    cfg.dataCallback = &AudioEngine::dataCallback;
-    cfg.pUserData = this;
-    // Buffering: PORYDAW_AUDIO_PERIOD_MS overrides when set. Under WSL,
-    // default to 30 ms periods — WSLg's PulseAudio rides the RDP transport,
-    // which underruns at miniaudio's 10 ms low-latency default and is heard
-    // as constant crackling.
-    bool havePeriodMs = false;
-    int periodMs = qEnvironmentVariableIntValue("PORYDAW_AUDIO_PERIOD_MS", &havePeriodMs);
-#ifdef __linux__
-    if ((!havePeriodMs || periodMs <= 0) && runningUnderWsl()) {
-        periodMs = 30;
-        havePeriodMs = true;
-    }
-#endif
-    if (havePeriodMs && periodMs > 0)
-        cfg.periodSizeInMilliseconds = uint32_t(std::clamp(periodMs, 1, 500));
-
-    if (ma_device_init(m_hasContext ? m_context : nullptr, &cfg, m_device) != MA_SUCCESS) {
+    if (!openDevice(m_deviceConfig, 0, &m_deviceWarning)) {
         if (error)
             *error = QStringLiteral("Failed to initialize the audio output device.");
-        delete m_device;
-        m_device = nullptr;
         return false;
     }
     m_sampleRate = double(m_device->sampleRate);
     m_click.setSampleRate(m_sampleRate);
-    // When every real backend fails (headless CI, WSL without libpulse),
-    // miniaudio's default context falls back to its null device: playback
-    // runs but is silent. Record which backend won so the UI can warn.
-    m_backendName = QString::fromUtf8(ma_get_backend_name(m_device->pContext->backend));
-    m_isNullBackend = (m_device->pContext->backend == ma_backend_null);
-    m_periodFrames = int(m_device->playback.internalPeriodSizeInFrames);
-    m_periodCount = int(m_device->playback.internalPeriods);
 
     m_bufCapacity = 8192;
     m_bufL = std::make_unique<float[]>(m_bufCapacity);
@@ -169,6 +138,118 @@ void AudioEngine::shutdown()
         m_context = nullptr;
         m_hasContext = false;
     }
+}
+
+bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRate,
+                             QString *warning)
+{
+    if (warning)
+        warning->clear();
+    ma_device_config cfg = ma_device_config_init(ma_device_type_playback);
+    cfg.playback.format = ma_format_f32;
+    cfg.playback.channels = 2;
+    // 0 is the device's native rate. A reopen asks for the rate the engines
+    // already run at; miniaudio resamples if the new stream's differs (an
+    // exclusive stream always runs at the device's own format).
+    cfg.sampleRate = sampleRate;
+    cfg.dataCallback = &AudioEngine::dataCallback;
+    cfg.pUserData = this;
+    // Buffering: PORYDAW_AUDIO_PERIOD_MS overrides when set, then the
+    // user's setting. Under WSL the default is 30 ms periods — WSLg's
+    // PulseAudio rides the RDP transport, which underruns at miniaudio's
+    // 10 ms low-latency default and is heard as constant crackling.
+    bool havePeriodMs = false;
+    int periodMs = qEnvironmentVariableIntValue("PORYDAW_AUDIO_PERIOD_MS", &havePeriodMs);
+    if (!havePeriodMs || periodMs <= 0) {
+        periodMs = config.periodMs;
+        havePeriodMs = periodMs > 0;
+    }
+#ifdef __linux__
+    if ((!havePeriodMs || periodMs <= 0) && runningUnderWsl()) {
+        periodMs = 30;
+        havePeriodMs = true;
+    }
+#endif
+    if (havePeriodMs && periodMs > 0)
+        cfg.periodSizeInMilliseconds = uint32_t(std::clamp(periodMs, 1, 500));
+
+    ma_context *context = m_hasContext ? m_context : nullptr;
+    m_device = new ma_device;
+    ma_result result = MA_ERROR;
+#ifdef _WIN32
+    if (config.exclusive) {
+        cfg.playback.shareMode = ma_share_mode_exclusive;
+        // Exclusive mode is asked for to get low latency, so its Default is
+        // small periods rather than miniaudio's 10 ms. The shared fallback
+        // keeps the backend's own default.
+        const uint32_t sharedPeriodMs = cfg.periodSizeInMilliseconds;
+        if (sharedPeriodMs == 0)
+            cfg.periodSizeInMilliseconds = AudioDeviceConfig::kExclusiveDefaultPeriodMs;
+        result = ma_device_init(context, &cfg, m_device);
+        cfg.periodSizeInMilliseconds = sharedPeriodMs;
+        if (result != MA_SUCCESS) {
+            // miniaudio never falls back by itself: retry shared, and say why.
+            if (warning) {
+                *warning = result == MA_BUSY
+                               ? QStringLiteral("Exclusive mode is unavailable: another app is "
+                                                "using the audio device. Using shared mode.")
+                               : QStringLiteral("The audio device refused exclusive mode (%1). "
+                                                "Using shared mode.")
+                                     .arg(QString::fromUtf8(ma_result_description(result)));
+            }
+            cfg.playback.shareMode = ma_share_mode_shared;
+        }
+    }
+#endif
+    if (result != MA_SUCCESS)
+        result = ma_device_init(context, &cfg, m_device);
+    if (result != MA_SUCCESS) {
+        delete m_device;
+        m_device = nullptr;
+        return false;
+    }
+    // When every real backend fails (headless CI, WSL without libpulse),
+    // miniaudio's default context falls back to its null device: playback
+    // runs but is silent. Record which backend won so the UI can warn.
+    m_backendName = QString::fromUtf8(ma_get_backend_name(m_device->pContext->backend));
+    m_isNullBackend = (m_device->pContext->backend == ma_backend_null);
+    m_periodFrames = int(m_device->playback.internalPeriodSizeInFrames);
+    m_periodCount = int(m_device->playback.internalPeriods);
+    m_exclusive = m_device->playback.shareMode == ma_share_mode_exclusive;
+    return true;
+}
+
+bool AudioEngine::reopenDevice(const AudioDeviceConfig &config, QString *error)
+{
+    // Never initialized (or init failed): the next init picks config up.
+    if (!m_engine) {
+        m_deviceConfig = config;
+        return false;
+    }
+    const AudioDeviceConfig previous = m_deviceConfig;
+    if (m_device) {
+        ma_device_uninit(m_device); // stops the audio thread
+        delete m_device;
+        m_device = nullptr;
+    }
+    m_deviceStarted = false;
+    const uint32_t rate = uint32_t(std::lround(m_sampleRate));
+    bool opened = openDevice(config, rate, &m_deviceWarning);
+    if (opened) {
+        m_deviceConfig = config;
+    } else {
+        opened = openDevice(previous, rate, &m_deviceWarning);
+        if (error)
+            *error = opened ? QStringLiteral("The audio device could not be opened with these "
+                                             "settings, so the previous ones are kept.")
+                            : QStringLiteral("The audio output device could not be reopened.");
+        if (!opened)
+            return false;
+    }
+    // A harness that parked the device keeps it parked.
+    if (!m_deviceHeldForTest)
+        m_deviceStarted = ma_device_start(m_device) == MA_SUCCESS;
+    return m_deviceStarted || m_deviceHeldForTest;
 }
 
 void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voicegroup,
