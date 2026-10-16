@@ -12,9 +12,10 @@ class QSlider;
 class QSpinBox;
 
 // Settings window, Audio page: porydaw's own output level, the output
-// device's buffering, and the global GBA-engine accuracy knobs. Every control applies as it changes — there
-// is no OK/Cancel staging anywhere in the Settings window — so the page
-// only reports; the main window owns applying and persisting.
+// device's buffering, and the global GBA-engine accuracy knobs. Every
+// control applies as it changes — there is no OK/Cancel staging anywhere
+// in the Settings window — so the page only reports; the main window owns
+// applying and persisting.
 class AudioSettingsPage : public QWidget
 {
     Q_OBJECT

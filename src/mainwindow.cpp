@@ -559,6 +559,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     syncLiveSettings();
     connect(m_midiInput.get(), &MidiInput::settingsChanged, this, &MainWindow::syncLiveSettings);
     m_audioOk = m_audio.init(&audioError);
+    if (m_audioOk && m_audio.deviceConfig() != m_settingsDialog->audioPage()->deviceConfig()) {
+        // init fell back to the defaults: the saved settings don't open.
+        saveDeviceConfig(m_audio.deviceConfig());
+        m_settingsDialog->audioPage()->setDeviceConfig(m_audio.deviceConfig());
+    }
     refreshDeviceStatus();
     if (!m_audioOk) {
         QMessageBox::warning(this, tr("Audio Error"),
@@ -3237,6 +3242,45 @@ void MainWindow::openSettings()
     m_settingsDialog->present();
 }
 
+// The Audio page's output device settings, applied: the device reopens
+// with them (or, without an engine, they wait for the next launch).
+void MainWindow::applyDeviceConfig()
+{
+    const AudioDeviceConfig wanted = m_settingsDialog->audioPage()->deviceConfig();
+    if (!m_audioOk) {
+        // No engine to reopen: the next launch tries the new settings.
+        saveDeviceConfig(wanted);
+        return;
+    }
+    // Already in effect (the page was just put back to it).
+    if (wanted == m_audio.deviceConfig() && m_audio.deviceOpen())
+        return;
+    QString error;
+    if (!m_audio.reopenDevice(wanted, &error) && error.isEmpty())
+        error = tr("The audio output device could not be restarted.");
+    // Only what took effect is kept: settings the device rejected put the
+    // page back, so the next launch never opens with them.
+    saveDeviceConfig(m_audio.deviceConfig());
+    m_settingsDialog->audioPage()->setDeviceConfig(m_audio.deviceConfig());
+    refreshDeviceStatus();
+    statusBar()->showMessage(!error.isEmpty() ? error
+                             : !m_audio.deviceWarning().isEmpty()
+                                 ? m_audio.deviceWarning()
+                                 : tr("Audio device reopened (%1).")
+                                       .arg(m_audio.exclusiveMode() ? tr("exclusive mode")
+                                                                    : tr("shared mode")),
+                             5000);
+}
+
+void MainWindow::saveDeviceConfig(const AudioDeviceConfig &config)
+{
+    if (!m_persistSession)
+        return;
+    QSettings settings;
+    settings.setValue(kAudioPeriodMsKey, config.periodMs);
+    settings.setValue(kAudioExclusiveKey, config.exclusive);
+}
+
 // What the output device actually opened with, on the Audio page, and what
 // MIDI's Auto recording offset stands for on it, so a manual offset can be
 // judged against it.
@@ -3248,6 +3292,9 @@ void MainWindow::refreshDeviceStatus()
     QString status;
     if (!m_audioOk) {
         status = tr("No audio device.");
+    } else if (!m_audio.deviceOpen()) {
+        status = tr("No audio device: reopening it failed, so playback is silent. Choose "
+                    "another setting to try again.");
     } else {
         const double bufferedMs =
             rate > 0 ? double(m_audio.outputLatencySamples()) * 1000.0 / rate : 0.0;
@@ -3275,6 +3322,11 @@ void MainWindow::refreshDeviceStatus()
 // what it hears. Nothing is written back: m_persistSession is off.
 void MainWindow::useDefaultMetronomeSettings()
 {
+    // The output device too: the user's exclusive mode or tiny buffer
+    // mustn't decide whether the selftest plays cleanly.
+    m_settingsDialog->audioPage()->setDeviceConfig(AudioDeviceConfig());
+    m_deviceApplyTimer->stop();
+    applyDeviceConfig(); // now, before the selftest plays
     m_metronomeAction->setChecked(false);
     m_settingsDialog->audioPage()->setMetronomeVolume(AudioSettingsPage::kMetronomeVolumeDefault);
     m_settingsDialog->audioPage()->setCountInBars(AudioSettingsPage::kCountInBarsDefault);
@@ -3326,33 +3378,9 @@ void MainWindow::buildSettingsDialog()
     m_deviceApplyTimer = new QTimer(this);
     m_deviceApplyTimer->setSingleShot(true);
     m_deviceApplyTimer->setInterval(200);
-    connect(m_deviceApplyTimer, &QTimer::timeout, this, [this] {
-        const AudioDeviceConfig wanted = m_settingsDialog->audioPage()->deviceConfig();
-        if (!m_audioOk) {
-            m_audio.setDeviceConfig(wanted); // the next launch opens with it
-            return;
-        }
-        QString error;
-        if (!m_audio.reopenDevice(wanted, &error) && error.isEmpty())
-            error = tr("The audio output device could not be restarted.");
-        refreshDeviceStatus();
-        statusBar()->showMessage(!error.isEmpty() ? error
-                                 : !m_audio.deviceWarning().isEmpty()
-                                     ? m_audio.deviceWarning()
-                                     : tr("Audio device reopened (%1).")
-                                           .arg(m_audio.exclusiveMode() ? tr("exclusive mode")
-                                                                        : tr("shared mode")),
-                                 5000);
-    });
-    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::deviceConfigChanged, this,
-            [this](const AudioDeviceConfig &config) {
-                if (m_persistSession) {
-                    QSettings settings;
-                    settings.setValue(kAudioPeriodMsKey, config.periodMs);
-                    settings.setValue(kAudioExclusiveKey, config.exclusive);
-                }
-                m_deviceApplyTimer->start();
-            });
+    connect(m_deviceApplyTimer, &QTimer::timeout, this, &MainWindow::applyDeviceConfig);
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::deviceConfigChanged,
+            m_deviceApplyTimer, qOverload<>(&QTimer::start));
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::countInBarsChanged, this,
             [this](int bars) {
                 m_countInBars = bars;

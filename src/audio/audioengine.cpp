@@ -81,7 +81,18 @@ bool AudioEngine::init(QString *error)
     }
 #endif
 
-    if (!openDevice(m_deviceConfig, 0, &m_deviceWarning)) {
+    bool opened = openDevice(m_deviceConfig, 0, &m_deviceWarning);
+    // A saved config this device can't open (a buffer size it rejects)
+    // mustn't cost the user their audio: fall back to the defaults.
+    if (!opened && m_deviceConfig != AudioDeviceConfig()) {
+        opened = openDevice(AudioDeviceConfig(), 0, &m_deviceWarning);
+        if (opened) {
+            m_deviceConfig = AudioDeviceConfig();
+            m_deviceWarning = QStringLiteral("The audio device could not be opened with the "
+                                             "saved output settings, so the defaults are used.");
+        }
+    }
+    if (!opened) {
         if (error)
             *error = QStringLiteral("Failed to initialize the audio output device.");
         return false;
@@ -119,6 +130,11 @@ void AudioEngine::shutdown()
         delete m_device;
         m_device = nullptr;
         m_deviceStarted = false;
+    }
+    if (m_wasapiContext) {
+        ma_context_uninit(m_wasapiContext);
+        delete m_wasapiContext;
+        m_wasapiContext = nullptr;
     }
     if (m_engine) {
         m4a_engine_destroy(m_engine.get());
@@ -178,15 +194,29 @@ bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRat
     ma_result result = MA_ERROR;
 #ifdef _WIN32
     if (config.exclusive) {
+        // Exclusive mode is WASAPI's alone. Without a context miniaudio
+        // walks every backend, and DirectSound (or the silent Null device)
+        // would quietly accept an exclusive request WASAPI refused.
+        if (!m_wasapiContext) {
+            const ma_backend wasapi[] = {ma_backend_wasapi};
+            m_wasapiContext = new ma_context;
+            if (ma_context_init(wasapi, 1, nullptr, m_wasapiContext) != MA_SUCCESS) {
+                delete m_wasapiContext;
+                m_wasapiContext = nullptr;
+            }
+        }
+        const ma_device_config shared = cfg;
         cfg.playback.shareMode = ma_share_mode_exclusive;
         // Exclusive mode is asked for to get low latency, so its Default is
-        // small periods rather than miniaudio's 10 ms. The shared fallback
-        // keeps the backend's own default.
-        const uint32_t sharedPeriodMs = cfg.periodSizeInMilliseconds;
-        if (sharedPeriodMs == 0)
+        // small periods rather than miniaudio's 10 ms.
+        if (cfg.periodSizeInMilliseconds == 0)
             cfg.periodSizeInMilliseconds = AudioDeviceConfig::kExclusiveDefaultPeriodMs;
-        result = ma_device_init(context, &cfg, m_device);
-        cfg.periodSizeInMilliseconds = sharedPeriodMs;
+        // One period: miniaudio hands WASAPI period × periods as the
+        // exclusive stream's periodicity, so the default 3 would triple it.
+        cfg.periods = 1;
+        result = m_wasapiContext ? ma_device_init(m_wasapiContext, &cfg, m_device)
+                                 : MA_BACKEND_NOT_ENABLED;
+        cfg = shared; // the fallback keeps the backend's own buffering
         if (result != MA_SUCCESS) {
             // miniaudio never falls back by itself: retry shared, and say why.
             if (warning) {
@@ -197,7 +227,6 @@ bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRat
                                                 "Using shared mode.")
                                      .arg(QString::fromUtf8(ma_result_description(result)));
             }
-            cfg.playback.shareMode = ma_share_mode_shared;
         }
     }
 #endif
@@ -213,9 +242,19 @@ bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRat
     // runs but is silent. Record which backend won so the UI can warn.
     m_backendName = QString::fromUtf8(ma_get_backend_name(m_device->pContext->backend));
     m_isNullBackend = (m_device->pContext->backend == ma_backend_null);
-    m_periodFrames = int(m_device->playback.internalPeriodSizeInFrames);
+    // The internal period counts frames at the stream's own rate, which an
+    // exclusive stream (the device's format) may not share with the engines.
+    const uint32_t internalRate = m_device->playback.internalSampleRate;
+    const uint32_t clientRate = m_device->sampleRate;
+    m_periodFrames = int(internalRate > 0 ? uint64_t(m_device->playback.internalPeriodSizeInFrames) *
+                                                clientRate / internalRate
+                                          : m_device->playback.internalPeriodSizeInFrames);
     m_periodCount = int(m_device->playback.internalPeriods);
     m_exclusive = m_device->playback.shareMode == ma_share_mode_exclusive;
+    // An event-driven exclusive stream double-buffers: the device plays one
+    // period while the next is rendered, so two periods are in flight.
+    if (m_exclusive)
+        m_periodCount = std::max(m_periodCount, 2);
     return true;
 }
 
@@ -243,8 +282,15 @@ bool AudioEngine::reopenDevice(const AudioDeviceConfig &config, QString *error)
             *error = opened ? QStringLiteral("The audio device could not be opened with these "
                                              "settings, so the previous ones are kept.")
                             : QStringLiteral("The audio output device could not be reopened.");
-        if (!opened)
+        if (!opened) {
+            // Nothing describes a device that isn't there.
+            m_backendName.clear();
+            m_periodFrames = 0;
+            m_periodCount = 0;
+            m_exclusive = false;
+            m_deviceWarning.clear();
             return false;
+        }
     }
     // A harness that parked the device keeps it parked.
     if (!m_deviceHeldForTest)

@@ -119,11 +119,17 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_bufferSize->setObjectName(QStringLiteral("settingsBufferSize"));
     for (int ms : kBufferSizesMs)
         m_bufferSize->addItem(ms == 0 ? tr("Default") : tr("%1 ms").arg(ms), ms);
+#ifdef Q_OS_WIN
     m_bufferSize->setToolTip(tr("How much audio the device buffers ahead. Smaller makes a MIDI "
                                 "keyboard more responsive; too small crackles. Default is "
                                 "about 10 ms, or %1 ms in exclusive mode. Windows may round a "
                                 "shared-mode request up to its own minimum.")
                                  .arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs));
+#else
+    m_bufferSize->setToolTip(tr("How much audio the device buffers ahead. Smaller makes a MIDI "
+                                "keyboard more responsive; too small crackles. Default lets "
+                                "the system choose."));
+#endif
     deviceForm->addRow(tr("&Buffer size:"), m_bufferSize);
 #ifdef Q_OS_WIN
     m_exclusive = new QCheckBox(tr("Exclusive mode (lowest latency)"), this);
@@ -398,11 +404,12 @@ void AudioSettingsPage::emitDeviceConfig()
     emit deviceConfigChanged(config);
 }
 
-// Default means a different size per mode; the item says which.
+// On Windows Default means a different size per mode; the item says which.
+// Elsewhere it is the backend's own choice (30 ms under WSL), left unsaid.
 void AudioSettingsPage::updateDefaultLabel()
 {
     const int idx = m_bufferSize->findData(0);
-    if (idx < 0)
+    if (idx < 0 || !m_exclusive)
         return;
     m_bufferSize->setItemText(idx, m_exclusive && m_exclusive->isChecked()
                                        ? tr("Default (%1 ms)")

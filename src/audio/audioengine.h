@@ -88,6 +88,9 @@ class AudioEngine
     // the periods really?".
     int periodSizeFrames() const { return m_periodFrames; }
     int periodCount() const { return m_periodCount; }
+    // False after a reopen that couldn't open any device: playback is
+    // silent until a later reopen succeeds.
+    bool deviceOpen() const { return m_device != nullptr; }
     // True when the device actually opened in WASAPI exclusive mode.
     bool exclusiveMode() const { return m_exclusive; }
 
@@ -530,6 +533,7 @@ class AudioEngine
     // Device / engine (audio thread reads; cold ops swap while stopped)
     ma_context *m_context = nullptr;
     bool m_hasContext = false;
+    ma_context *m_wasapiContext = nullptr; // exclusive mode's (Windows), made on first use
     ma_device *m_device = nullptr;
     bool m_deviceStarted = false;
     double m_sampleRate = 0.0;

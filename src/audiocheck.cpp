@@ -38,11 +38,10 @@ int runAudioCheck()
     }
 
     // Reopening with other buffering (Settings → Audio → Output device)
-    // must keep the sample rate the engines run at. Exclusive mode may be
-    // refused (another app holds the device): that falls back to shared
-    // with a warning, never a failure.
+    // must stay on the same backend: exclusive mode WASAPI refuses (another
+    // app holds the device) falls back to shared WASAPI with a warning,
+    // never to DirectSound or the silent Null device.
     if (!engine.usingNullBackend()) {
-        const double rate = engine.sampleRate();
         AudioDeviceConfig configs[4];
         configs[0].periodMs = 3;
         configs[1].periodMs = 3;
@@ -52,10 +51,10 @@ int runAudioCheck()
         for (const AudioDeviceConfig &config : configs) {
             QString reopenError;
             const bool ok = engine.reopenDevice(config, &reopenError);
-            std::printf("audiocheck: reopen periodMs=%d exclusive=%s -> %s, %s, period=%dx%d "
+            std::printf("audiocheck: reopen periodMs=%d exclusive=%s -> %s, %s %s, period=%dx%d "
                         "frames (~%.1f ms)%s%s%s%s\n",
                         config.periodMs, config.exclusive ? "yes" : "no", ok ? "ok" : "FAILED",
-                        engine.exclusiveMode() ? "exclusive" : "shared", engine.periodCount(),
+                        qUtf8Printable(engine.backendName()), engine.exclusiveMode() ? "exclusive" : "shared", engine.periodCount(),
                         engine.periodSizeFrames(),
                         1000.0 * engine.periodSizeFrames() / engine.sampleRate(),
                         engine.deviceWarning().isEmpty() ? "" : " warning: ",
@@ -65,8 +64,9 @@ int runAudioCheck()
                 std::fprintf(stderr, "audiocheck: FAIL: the device didn't reopen\n");
                 failures++;
             }
-            if (engine.sampleRate() != rate) {
-                std::fprintf(stderr, "audiocheck: FAIL: reopening changed the sample rate\n");
+            if (engine.backendName() != backend) {
+                std::fprintf(stderr, "audiocheck: FAIL: reopening moved to the %s backend\n",
+                             qUtf8Printable(engine.backendName()));
                 failures++;
             }
             // Exclusive's Default is small periods, not shared mode's 10 ms.

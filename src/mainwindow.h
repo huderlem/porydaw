@@ -242,6 +242,8 @@ class MainWindow : public QMainWindow
     void buildUi();
     void buildSettingsDialog();
     void refreshDeviceStatus();
+    void saveDeviceConfig(const AudioDeviceConfig &config);
+    void applyDeviceConfig();
     void useDefaultMetronomeSettings();
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
