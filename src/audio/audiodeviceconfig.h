@@ -9,7 +9,6 @@
 struct AudioDeviceConfig {
     static constexpr int kExclusiveDefaultPeriodMs = 3;
 
-
     int periodMs = 0;
     bool exclusive = false;
 

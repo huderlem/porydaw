@@ -582,7 +582,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         box->show();
     }
     statusBar()->showMessage(
-        !m_audioOk ? tr("No audio device.")
+        !m_audioOk                           ? tr("No audio device.")
         : !m_audio.deviceWarning().isEmpty() ? m_audio.deviceWarning()
         : m_audio.usingNullBackend()
             ? tr("No audio output: silent null device.")
@@ -3263,13 +3263,13 @@ void MainWindow::applyDeviceConfig()
     saveDeviceConfig(m_audio.deviceConfig());
     m_settingsDialog->audioPage()->setDeviceConfig(m_audio.deviceConfig());
     refreshDeviceStatus();
-    statusBar()->showMessage(!error.isEmpty() ? error
-                             : !m_audio.deviceWarning().isEmpty()
-                                 ? m_audio.deviceWarning()
-                                 : tr("Audio device reopened (%1).")
-                                       .arg(m_audio.exclusiveMode() ? tr("exclusive mode")
-                                                                    : tr("shared mode")),
-                             5000);
+    statusBar()->showMessage(
+        !error.isEmpty() ? error
+        : !m_audio.deviceWarning().isEmpty()
+            ? m_audio.deviceWarning()
+            : tr("Audio device reopened (%1).")
+                  .arg(m_audio.exclusiveMode() ? tr("exclusive mode") : tr("shared mode")),
+        5000);
 }
 
 void MainWindow::saveDeviceConfig(const AudioDeviceConfig &config)

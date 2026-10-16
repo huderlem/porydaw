@@ -54,7 +54,8 @@ int runAudioCheck()
             std::printf("audiocheck: reopen periodMs=%d exclusive=%s -> %s, %s %s, period=%dx%d "
                         "frames (~%.1f ms)%s%s%s%s\n",
                         config.periodMs, config.exclusive ? "yes" : "no", ok ? "ok" : "FAILED",
-                        qUtf8Printable(engine.backendName()), engine.exclusiveMode() ? "exclusive" : "shared", engine.periodCount(),
+                        qUtf8Printable(engine.backendName()),
+                        engine.exclusiveMode() ? "exclusive" : "shared", engine.periodCount(),
                         engine.periodSizeFrames(),
                         1000.0 * engine.periodSizeFrames() / engine.sampleRate(),
                         engine.deviceWarning().isEmpty() ? "" : " warning: ",

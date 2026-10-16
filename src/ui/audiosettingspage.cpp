@@ -411,8 +411,8 @@ void AudioSettingsPage::updateDefaultLabel()
     const int idx = m_bufferSize->findData(0);
     if (idx < 0 || !m_exclusive)
         return;
-    m_bufferSize->setItemText(idx, m_exclusive && m_exclusive->isChecked()
-                                       ? tr("Default (%1 ms)")
-                                             .arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs)
-                                       : tr("Default (about 10 ms)"));
+    m_bufferSize->setItemText(
+        idx, m_exclusive && m_exclusive->isChecked()
+                 ? tr("Default (%1 ms)").arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs)
+                 : tr("Default (about 10 ms)"));
 }

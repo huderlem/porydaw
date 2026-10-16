@@ -156,8 +156,7 @@ void AudioEngine::shutdown()
     }
 }
 
-bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRate,
-                             QString *warning)
+bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRate, QString *warning)
 {
     if (warning)
         warning->clear();
@@ -246,9 +245,10 @@ bool AudioEngine::openDevice(const AudioDeviceConfig &config, uint32_t sampleRat
     // exclusive stream (the device's format) may not share with the engines.
     const uint32_t internalRate = m_device->playback.internalSampleRate;
     const uint32_t clientRate = m_device->sampleRate;
-    m_periodFrames = int(internalRate > 0 ? uint64_t(m_device->playback.internalPeriodSizeInFrames) *
-                                                clientRate / internalRate
-                                          : m_device->playback.internalPeriodSizeInFrames);
+    m_periodFrames =
+        int(internalRate > 0 ? uint64_t(m_device->playback.internalPeriodSizeInFrames) *
+                                   clientRate / internalRate
+                             : m_device->playback.internalPeriodSizeInFrames);
     m_periodCount = int(m_device->playback.internalPeriods);
     m_exclusive = m_device->playback.shareMode == ma_share_mode_exclusive;
     // An event-driven exclusive stream double-buffers: the device plays one
