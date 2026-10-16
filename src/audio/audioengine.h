@@ -398,6 +398,14 @@ class AudioEngine
 
     // Telemetry.
     uint64_t playheadSamples() const { return m_playhead.load(); }
+    // Where the playhead is headed: a seek's target until the audio thread
+    // applies it, then the playhead. For display, which must not flash back
+    // to (or step from) the pre-seek position in between.
+    uint64_t targetPlayheadSamples() const
+    {
+        const uint64_t pending = m_pendingSeek.load(std::memory_order_acquire);
+        return pending != kNoPendingSeek ? pending : m_playhead.load();
+    }
     int activePcmChannels() const { return m_activePcm.load(); }
     int activeCgbChannels() const { return m_activeCgb.load(); }
     int maxPcmChannels() const { return m_settings.maxPcmChannels; }

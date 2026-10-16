@@ -1945,9 +1945,13 @@ void MainWindow::checkSurfaceTransport()
     check(viewPlayhead() > L(3) && viewPlayhead() < L(4),
           "surface transport: playback never reached the fourth bar");
     press(mcu::kFastForward);
+    // The playhead timer firing before the held engine applies the seek (a
+    // slow machine's processEvents) still shows the target.
+    synchronizePlayhead();
     check(cursor() == L(4) && viewPlayhead() == L(4),
           "surface transport: Fast-forward while playing did not step from the playhead");
     surfaceRepeatTick();
+    synchronizePlayhead();
     check(cursor() == L(5) && viewPlayhead() == L(5),
           "surface transport: a held repeat while playing did not chain from the seek");
     release(mcu::kFastForward);

@@ -5543,7 +5543,7 @@ void MainWindow::updateTimeLabel()
 {
     const bool loaded = m_audioOk && m_active && m_audio.songLoaded();
     const QString text =
-        loaded ? QStringLiteral("%1 / %2").arg(formatTime(m_audio.playheadSamples()),
+        loaded ? QStringLiteral("%1 / %2").arg(formatTime(m_audio.targetPlayheadSamples()),
                                                formatTime(m_audio.timeline()->lengthSamples))
                : QStringLiteral("--:--.- / --:--.-");
     if (text == m_lastTimeText)
@@ -5749,7 +5749,9 @@ void MainWindow::synchronizePlayhead()
         }
     }
     const bool playheadTimerWasActive = m_playheadTimer->isActive();
-    const uint64_t playhead = m_audio.playheadSamples();
+    // A seek still pending (it lands within an audio period) shows its
+    // target: the editCursorMoved connect already put the view there.
+    const uint64_t playhead = m_audio.targetPlayheadSamples();
     m_active->view->setPlayheadSample(playhead, playing);
     syncRecordingPreview();
     syncCompanion(playhead, playing);

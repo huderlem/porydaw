@@ -418,8 +418,18 @@ void AudioEngine::seek(uint64_t samplePos)
 
 void AudioEngine::applyPendingSeek()
 {
-    const uint64_t samplePos = m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
-    if (samplePos == kNoPendingSeek || !m_timeline)
+    const uint64_t samplePos = m_pendingSeek.load(std::memory_order_acquire);
+    if (samplePos == kNoPendingSeek)
+        return;
+    // The playhead moves before the seek is cleared, so
+    // targetPlayheadSamples() never sees the pre-seek position in between
+    // (the display flashing back). A newer seek arriving meanwhile stays
+    // pending for the next callback.
+    if (m_timeline)
+        m_playhead.store(samplePos);
+    uint64_t expected = samplePos;
+    m_pendingSeek.compare_exchange_strong(expected, kNoPendingSeek, std::memory_order_acq_rel);
+    if (!m_timeline)
         return;
 
     for (int track = 0; track < MAX_TRACKS; track++)
@@ -432,7 +442,6 @@ void AudioEngine::applyPendingSeek()
     dropLiveLatch(); // the pass ends; the full chase covers its lanes
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
-    m_playhead.store(samplePos);
 }
 
 void AudioEngine::updateSettings(const SongSettings &settings)
