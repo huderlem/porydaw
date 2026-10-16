@@ -24,6 +24,8 @@ ClickGrid::ClickGrid(const std::vector<Tempo> &tempos, std::vector<Meter> meters
 
 uint64_t ClickGrid::sampleAt(uint64_t tick) const
 {
+    if (m_tempo.empty()) // default-constructed: no grid, no time
+        return 0;
     // The last point with tick < t; the first point for t == 0.
     auto it = std::lower_bound(m_tempo.begin(), m_tempo.end(), tick,
                                [](const TempoPoint &p, uint64_t t) { return p.tick < t; });

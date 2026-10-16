@@ -105,6 +105,34 @@ notes were recorded. Clicking another track mid-take keeps recording (and
 sounding) into the original track. Moving the track keeps it following;
 deleting it stops the recording and drops the take. -->
 
+## Metronome and count-in
+
+<!-- TODO: The Metronome button on the transport toolbar (or C in the piano
+roll) clicks every beat while the song plays, recording or not; the first
+beat of each bar is higher. It follows the song's tempo and time signature
+(6/8 clicks eighth notes, 4/4 quarter notes), including changes partway
+through. On/off is remembered. Volume: Settings → Audio → Metronome (scaled
+by Output level too). The click is only for you: it's never in exported
+WAVs, and plugins don't hear it. With Loop on it keeps the song's beat
+grid: when playback wraps back to the loop start, the loop start only
+clicks if it falls on a beat. -->
+
+<!-- TODO: Count-in: pressing Record while stopped clicks 1 bar (default)
+before the song starts at the edit cursor — even with the metronome off.
+Settings → Audio → Count-in when recording: Off / 1 bar / 2 bars. Not for
+Play or for punching in while playing. It counts at the tempo and time
+signature at the edit cursor, lined up so the beat carries straight into
+the song (the cursor needn't be on a bar line). With Loop on and the edit
+cursor at or past the loop end, the count-in leads into the loop start and
+the song starts there. Notes played during the count-in are heard; a key
+still sounding when the song starts is recorded from where it starts — held
+down, or released while the sustain pedal holds it — and one that has
+stopped sounding by then isn't. Keys already held when you press Record are
+cut when playback starts and aren't carried in. Pitch bend, knob and voice
+(program change) moves during the count-in are heard but not recorded.
+Record, Stop or Pause (and the control surface's Play/Pause) during the
+count-in cancels it and records nothing. -->
+
 ## Recording offset (if notes land late)
 
 <!-- TODO: Why: you hear the song a moment after porydaw plays it (audio
@@ -129,7 +157,7 @@ drives Learn. -->
 <!-- TODO: What each button does: Play/Pause plays from the edit cursor,
 pauses, resumes. Stop stops; Stop again goes to the start of the song.
 Record = the Record button (needs a Keyboard port enabled). Loop toggles
-Loop. Rewind/Fast-forward move one bar line per press (from mid-bar,
+Loop. Click toggles the metronome (see Metronome and count-in above). Rewind/Fast-forward move one bar line per press (from mid-bar,
 Rewind goes to that bar's start); hold to repeat, speeding up to two bars
 a step; they stop at the song's start/end. While playing, playback jumps
 from where it is; during a take, the take carries on from the new bar.
@@ -138,7 +166,7 @@ undo (Undo does nothing while you're typing in a text box). -->
 
 <!-- TODO: The buttons work while porydaw is in the background, but not
 while a dialog (e.g. Song Settings) is open. The button lights on the
-keyboard don't light up. Mixer controls (faders, pan knobs, track buttons)
+keyboard don't light up (Click's included). Mixer controls (faders, pan knobs, track buttons)
 aren't supported. Plugins see a control surface's messages too
 (`porydaw.midi.ports()` reports each port's role). -->
 

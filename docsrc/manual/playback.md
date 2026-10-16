@@ -21,6 +21,12 @@ how GBA songs loop forever in-game; seamless loop audition. -->
 <!-- TODO: The transport toggle (also View menu): on = the view scrolls with
 playback; off = the camera stays put. Persisted. -->
 
+## Metronome
+
+<!-- TODO: One line: the transport toolbar's Metronome button (C) clicks
+every beat during playback; details, volume and the count-in before
+recording in [MIDI Keyboard](midi-keyboard.md#metronome-and-count-in). -->
+
 ## Output level
 
 <!-- TODO: Edit → Settings → Audio → Output level (0–200%, double-click

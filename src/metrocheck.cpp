@@ -993,6 +993,57 @@ void checkCountInEdges()
         engine.pumpForTest(512);
     }
 
+    // A seek or a timeline rebuild during the count-in silences the keys
+    // held then: the take doesn't carry them. A key pressed after it is.
+    {
+        const uint64_t target = tl->sampleForTick(132);
+        const ClickGrid::CountIn ci = tl->clickGrid.countIn(132, 1);
+        const uint64_t moved = tl->sampleForTick(480);
+        std::unique_ptr<MidiTimeline> rebuilt =
+            MidiTimeline::build(silentLoopSong(24, 960, 1920), rate);
+        MidiInputRing ring;
+        engine.setMidiInputRing(&ring);
+        engine.setLiveTarget(-1);
+        for (const bool rebuild : {false, true}) {
+            const uint32_t generation = rebuild ? 45 : 44;
+            const char *what = rebuild ? "a timeline update" : "a seek";
+            engine.armCapture(generation);
+            engine.playWithCountIn(target, ci);
+            engine.pumpForTest(512);
+            ring.push({0x90, 60, 90, 0});
+            engine.pumpForTest(uint32_t(ci.lengthSamples / 2));
+            if (rebuild)
+                engine.updateTimeline(rebuilt.get());
+            else
+                engine.seek(moved);
+            engine.pumpForTest(512);
+            ring.push({0x90, 62, 80, 0});
+            engine.pumpForTest(uint32_t(ci.lengthSamples - ci.lengthSamples / 2 - 1024 + 1000));
+            ring.push({0x80, 60, 0, 0});
+            ring.push({0x80, 62, 0, 0});
+            engine.pumpForTest(1024);
+            engine.armCapture(0);
+            bool begun = false, silenced = false, pressed = false;
+            CaptureEvent ev;
+            while (engine.popCapture(&ev)) {
+                if (ev.generation != generation)
+                    continue;
+                begun |= ev.kind == CaptureEvent::Begin;
+                if (ev.kind == CaptureEvent::NoteOn)
+                    (ev.key == 60 ? silenced : pressed) |= (ev.flags & CaptureEvent::Carried) != 0;
+            }
+            if (!begun || silenced || !pressed)
+                fail("%s during the count-in: Begin %d, silenced key carried %d, key pressed "
+                     "after it carried %d",
+                     what, int(begun), int(silenced), int(pressed));
+            engine.stop();
+            engine.pumpForTest(512);
+            if (rebuild)
+                engine.updateTimeline(tl.get());
+        }
+        engine.setMidiInputRing(nullptr);
+    }
+
     // Held past the loop end (a start the UI didn't move, or a seek during
     // the count-in): the song holds there, unwrapped, until it starts; then
     // it wraps, and the take begins at the loop start with the held key and

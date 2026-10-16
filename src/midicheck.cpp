@@ -404,8 +404,9 @@ void checkMcuDecoder()
         return !mcu::decode(MidiTapMsg{status, d1, d2, 3}).has_value();
     };
     const std::pair<uint8_t, K> map[] = {
-        {0x5B, K::Rewind}, {0x5C, K::FastForward}, {0x5D, K::Stop}, {0x5E, K::Play},
-        {0x5F, K::Record}, {0x56, K::Cycle},       {0x50, K::Save}, {0x51, K::Undo},
+        {0x5B, K::Rewind}, {0x5C, K::FastForward}, {0x5D, K::Stop},
+        {0x5E, K::Play},   {0x5F, K::Record},      {0x56, K::Cycle},
+        {0x59, K::Click},  {0x50, K::Save},        {0x51, K::Undo},
     };
     for (const auto &[note, kind] : map) {
         check(decoded(0x90, note, 127, kind, true) && decoded(0x90, note, 1, kind, true),
@@ -418,7 +419,7 @@ void checkMcuDecoder()
         check(ignored(0xA0, note, 127) && ignored(0xB0, note, 127) && ignored(0xD0, note, 0),
               "mcu: a mapped note number in another message type was decoded");
     }
-    for (const uint8_t note : {0, 60, 0x52, 0x55, 0x57, 0x5A, 0x60, 0x65, 94 + 12, 127})
+    for (const uint8_t note : {0, 60, 0x52, 0x55, 0x57, 0x58, 0x5A, 0x60, 0x65, 94 + 12, 127})
         check(ignored(0x90, uint8_t(note), 127) && ignored(0x80, uint8_t(note), 0),
               "mcu: an unmapped note was decoded");
     // The jog wheel: CC 60, bit 6 = backward, the low 6 bits count detents.
@@ -1014,7 +1015,8 @@ void checkSettingsPage()
                   buttons->geometry().top() >= rolesNote->geometry().bottom() &&
                   buttons->text() ==
                       QStringLiteral("Control surface buttons: Play/Pause, Stop, Record, Loop, "
-                                     "Rewind, Fast-forward, the jog wheel, Save and Undo."),
+                                     "Click (metronome), Rewind, Fast-forward, the jog wheel, "
+                                     "Save and Undo."),
               "roles page: the control surface buttons line is missing or misplaced");
         if (check(ports->count() == 2 && roleBox(0) && roleBox(1),
                   "roles page: a port row has no role box")) {
@@ -1729,6 +1731,17 @@ void MainWindow::checkSurfaceTransport()
     tap(mcu::kCycle);
     check(m_loopAction->isChecked() == loopOn, "surface transport: Loop did not toggle back");
 
+    // Click toggles the metronome, on press only, as Loop does.
+    const bool clickOn = m_metronomeAction->isChecked();
+    press(mcu::kClick);
+    check(m_metronomeAction->isChecked() == !clickOn && m_audio.metronomeEnabled() == !clickOn,
+          "surface transport: Click did not toggle the metronome");
+    release(mcu::kClick);
+    check(m_metronomeAction->isChecked() == !clickOn, "surface transport: Click's release toggled");
+    tap(mcu::kClick);
+    check(m_metronomeAction->isChecked() == clickOn && m_audio.metronomeEnabled() == clickOn,
+          "surface transport: Click did not toggle the metronome back");
+
     // Record follows its action: hidden with no keyboard (the surface
     // alone isn't one), a take with one; Stop ends it.
     midi.setOpenPortsForTest({surface});
@@ -1999,11 +2012,14 @@ void MainWindow::checkSurfaceTransport()
                   "surface transport: a release under a modal dialog did not end the hold");
             const bool loop = m_loopAction->isChecked();
             tap(mcu::kPlay);
+            const bool click = m_metronomeAction->isChecked();
             tap(mcu::kCycle);
+            tap(mcu::kClick);
             tap(mcu::kFastForward);
             send(0xB0, mcu::kJogCc, 0x01);
             check(transport() == Transport::Stopped && m_loopAction->isChecked() == loop &&
-                      cursor() == L(3) && !m_surfaceRepeat->isActive(),
+                      m_metronomeAction->isChecked() == click && cursor() == L(3) &&
+                      !m_surfaceRepeat->isActive(),
                   "surface transport: a button acted under a modal dialog");
         }
         modal.hide();

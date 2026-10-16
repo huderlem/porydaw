@@ -431,6 +431,7 @@ uint64_t MidiTimeline::sampleForTick(uint64_t tick) const
     // tick on its click.
     if (!clickGrid.empty())
         return clickGrid.sampleAt(tick);
+    // Only a timeline build() didn't make (its grid empty) gets here.
     // tempoMap always has an entry at tick 0.
     const TempoPoint *tp = &tempoMap.front();
     for (const TempoPoint &p : tempoMap) {

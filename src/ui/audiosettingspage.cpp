@@ -141,9 +141,9 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_countIn->addItem(tr("1 bar"), 1);
     m_countIn->addItem(tr("2 bars"), 2);
     m_countIn->setCurrentIndex(m_countIn->findData(kCountInBarsDefault));
-    m_countIn->setToolTip(tr("Before Record starts the song from the edit cursor, click this many "
-                             "bars at the tempo there, even with the metronome off. Not when "
-                             "Record punches in during playback."));
+    m_countIn->setToolTip(tr("Before Record starts the song, click this many bars at the tempo "
+                             "where it starts, even with the metronome off. Not when Record "
+                             "punches in during playback."));
     metronomeForm->addRow(tr("Count-in when recording:"), m_countIn);
 
     // GBA engine: poryaaaa's global accuracy knobs (SPEC §7).

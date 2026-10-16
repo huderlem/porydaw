@@ -35,6 +35,9 @@ std::optional<SurfaceEvent> decode(const MidiTapMsg &msg)
     case kCycle:
         event.kind = SurfaceEvent::Cycle;
         break;
+    case kClick:
+        event.kind = SurfaceEvent::Click;
+        break;
     case kRewind:
         event.kind = SurfaceEvent::Rewind;
         break;

@@ -11,7 +11,10 @@ puts the window away. The window reopens on the section you used last. -->
 double-click resets to 100%; never saved with the song, never in exported
 WAVs — see [Playing Songs](playback.md)). GBA engine: PCM polyphony, PCM
 mix rate, analog output filter — the global accuracy knobs, contrast with
-the per-song [Song Settings](song-settings.md). Restore Defaults. -->
+the per-song [Song Settings](song-settings.md). Metronome: Volume (0–100%,
+double-click resets to 70%) and Count-in when recording (Off / 1 bar /
+2 bars) — see [MIDI Keyboard](midi-keyboard.md#metronome-and-count-in).
+Restore Defaults. -->
 
 ## MIDI
 

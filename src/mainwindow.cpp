@@ -5840,6 +5840,11 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
     case SurfaceEvent::Cycle:
         press(m_loopAction);
         break;
+    case SurfaceEvent::Click:
+        // The metronome (docs/metronome/PLAN.md M10). Its LED stays dark:
+        // porydaw sends nothing back to a surface.
+        press(m_metronomeAction);
+        break;
     case SurfaceEvent::Save:
         press(m_saveAction);
         break;

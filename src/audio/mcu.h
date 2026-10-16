@@ -7,7 +7,7 @@
 // One Mackie Control (MCU) transport control, as a control surface port
 // sends it (docs/control-surface/PLAN.md §3.2).
 struct SurfaceEvent {
-    enum Kind { Play, Stop, Record, Cycle, Rewind, FastForward, Save, Undo, Jog };
+    enum Kind { Play, Stop, Record, Cycle, Click, Rewind, FastForward, Save, Undo, Jog };
     Kind kind = Play;
     // A button went down (true) or came up (false). A jog turn is always
     // "pressed".
@@ -22,6 +22,7 @@ namespace mcu {
 constexpr uint8_t kSave = 0x50;
 constexpr uint8_t kUndo = 0x51;
 constexpr uint8_t kCycle = 0x56;
+constexpr uint8_t kClick = 0x59;
 constexpr uint8_t kRewind = 0x5B;
 constexpr uint8_t kFastForward = 0x5C;
 constexpr uint8_t kStop = 0x5D;

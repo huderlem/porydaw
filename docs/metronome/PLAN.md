@@ -31,14 +31,14 @@ To change a decision later, update this table and every step it affects
 
 1. **The click grid is precomputed on the UI thread.** `timeSigSegments()`
    returns a fresh `std::vector`, so the audio thread can't call it. When a
-   timeline is built, it also builds an immutable `clickGrid`: one entry per
-   piece of constant tempo *and* meter (a split at every tempo point and
-   every meter change), each holding its start tick, start sample, samples
-   per tick, beat ticks, beats per bar and the beat index (within the bar)
-   of its first beat line. The audio thread reads it like `events`, lock-free
-   because the timeline is immutable once published (`updateTimeline` swaps
-   it with the device stopped). The last piece runs forever, so the click
-   continues past the song end (the 3 s tail, a take past the last note).
+   timeline is built, it also builds an immutable `clickGrid` (`ClickGrid`,
+   src/core/clickgrid.{h,cpp}) holding two sorted lists: tempo points (start
+   tick, start sample, µs per beat) and meters (start tick, beat ticks,
+   beats per bar), the beat grid restarting at every meter. The audio thread
+   reads it like `events`, lock-free because the timeline is immutable once
+   published (`updateTimeline` swaps it with the device stopped). The last
+   tempo and meter run forever, so the click continues past the song end
+   (the 3 s tail, a take past the last note).
 2. **A pure scheduler.** `ClickGrid::clicksIn(fromSample, toSample,
    out[], cap)` lists the beats in `[from, to)` as (sample, accent). It's pure
    so `--metrocheck` can compare it with the `samplePos` of notes placed on
@@ -68,7 +68,7 @@ To change a decision later, update this table and every step it affects
    `countIn(cursorSample, lengthSamples, grid)`: the transport stays out of
    Playing (the song doesn't render, the playhead stays on the cursor), and
    a count-in clock runs from `cursor − length` to the cursor, clicking the
-   cursor's meter grid **extended backward** from the cursor's piece. So the
+   cursor's meter grid **extended backward** at the cursor's tempo. So the
    beat carries straight into the song even when the cursor isn't on a bar
    line, and a cursor near tick 0 still gets full bars. At the end the engine
    switches itself to Playing **at that sample within the callback** and
@@ -91,9 +91,10 @@ To change a decision later, update this table and every step it affects
 
 - `TimelinePlayer` dispatches events by `samplePos` computed by `build()`'s
   file-local `tickToSample` (`miditimeline.cpp:52`). `sampleForTick`
-  (`miditimeline.cpp:427`) rounds from the tempo map's rounded points
-  instead and can be 1 sample off, so the click grid copies `tickToSample`'s arithmetic, not
-  `sampleForTick`'s.
+  (`miditimeline.cpp:427`) used to round from the tempo map's rounded
+  points and could be 1 sample off; the click grid copies `tickToSample`'s
+  arithmetic, and since step 2 `sampleForTick` reads the click grid, so a
+  start on a note's tick lands on the note.
 - `MidiTimeline::timeSigSegments()` (`miditimeline.h:129`) always has the
   4/4 segment at tick 0; `beatTicks = tpb*4 >> denomPow2`. `stepGridLines`
   restarts the grid at every meter change.
@@ -124,7 +125,8 @@ the user for a Windows test** before the next step.
 
 ### Step 1: Metronome click (engine, toggle, volume)
 
-- `MidiTimeline`: `ClickPiece` + `clickGrid` built in `build()` (stance 1).
+- `MidiTimeline`: `clickGrid` (`ClickGrid`: tempo points + meters) built in
+  `build()` (stance 1).
 - `src/audio/metronome.{h,cpp}`: `clicksIn` (stance 2), `ClickVoice`
   (sine blip: ~1.5 kHz accent / ~1 kHz beat, ~1 ms attack, ~30 ms decay,
   sample-rate aware, a fixed peak level so 100% sits about as loud as a
@@ -213,3 +215,28 @@ the user for a Windows test** before the next step.
   knob/bend/voice moves during the count-in are heard but not recorded;
   pedal-held keys count as held (M6).
 - All 5 builds; normal + ASAN sweeps PASS.
+
+### Step 3 — implementation done 2026-10-15
+
+- `mcu::kClick = 0x59` → `SurfaceEvent::Click`; MainWindow presses
+  `m_metronomeAction` (press only, like Cycle → Loop; not under a modal
+  dialog). Settings → MIDI's control surface buttons line lists "Click
+  (metronome)". LED stays dark (M10).
+- `--midicheck`: decoder map + 0x58 as unmapped, Click toggles on press and
+  not on release, ignored under a modal dialog, the Settings line text. All
+  negative-tested.
+- CHANGELOG: metronome + count-in entry; Click in the transport-buttons
+  bullet. Manual TODO outlines: "Metronome and count-in" in
+  midi-keyboard.md after Recording, Click in Transport buttons, a pointer
+  section in playback.md, the transport bar list in main-window.md, the
+  Metronome group in settings.md (shortcuts.md has no defaults table yet).
+  `mkdocs build --strict` PASS.
+- All 5 builds; `--midicheck`, `--keymapcheck` PASS.
+- Final Opus review: no high/medium. Fixed: manual outlines matched to the
+  code (pedal-held keys carried, loop-end count-in leads into the loop
+  start, Pause cancels, keys held before Record are cut, loop-wrap click
+  wording), plan text, `ClickGrid::sampleAt` guard on an empty grid, a
+  `sampleForTick` comment; a seek or timeline update during the count-in
+  already drops the held keys (`forgetLiveNotes`), now asserted by
+  metrocheck. Not taken: click slot steal at <60 ms beats (acceptable),
+  KeyLab Click unverified (user Windows check).
