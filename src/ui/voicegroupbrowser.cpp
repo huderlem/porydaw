@@ -1,13 +1,20 @@
 #include "voicegroupbrowser.h"
 
+#include <QClipboard>
 #include <QComboBox>
 #include <QEvent>
 #include <QFormLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMimeData>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QToolButton>
@@ -15,6 +22,7 @@
 
 #include <algorithm>
 
+#include "ui/keymap.h"
 #include "ui/layout.h"
 
 #include "ui/m4asemantics.h"
@@ -26,6 +34,16 @@
 namespace {
 constexpr int kAuditionKey = 60; // middle C; drumkits play that key's percussion
 constexpr int kAuditionVelocity = 112;
+
+// Rides beside Copy's text/plain macro line, carrying what the line can't: a
+// synth voice's descriptor, so a pending (unsaved) synth symbol — known only
+// to the project that minted it — pastes anywhere. JSON: {"line": ...,
+// "synth": {waveform, baseDuty, dutyStep, modDepth, phase}}.
+const QString kVoiceMimeType = QStringLiteral("application/x-porydaw-voice");
+
+// What Clear writes: the vanilla unused-slot line.
+const VgVoice kPlaceholderVoice{
+    VgMacro::Square1, 60, 0, QString(), QString(), 0, 2, 0, 0, 0, 15, 0};
 
 // The Type dropdown offers every voice family the engine treats as its own,
 // each right after the plain variant it detunes. The one omission among the
@@ -207,7 +225,11 @@ VoicegroupBrowser::VoicegroupBrowser(QWidget *parent) : QWidget(parent)
     m_tree->setAllColumnsShowFocus(true);
     m_tree->header()->setStretchLastSection(false);
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_tree->setToolTip(tr("Click and hold to audition (middle C)."));
+    m_tree->setToolTip(tr("Click and hold to audition (middle C). Right-click for Copy, "
+                          "Paste, and Clear."));
+    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tree, &QTreeWidget::customContextMenuRequested, this,
+            &VoicegroupBrowser::showVoiceMenu);
     layout->addWidget(m_tree, 1);
 
     // Press-and-hold audition, matching the piano keys: press sounds the
@@ -631,7 +653,9 @@ void VoicegroupBrowser::revealSlot(int slot)
 void VoicegroupBrowser::pressedVoice(QTreeWidgetItem *item)
 {
     releaseVoice();
-    if (!item)
+    // itemPressed fires for every button; a right press selects the row for
+    // its context menu and a middle one just selects — neither sounds.
+    if (!item || m_pressButton != Qt::LeftButton)
         return;
     const int voice = item->data(0, Qt::UserRole).toInt();
     m_soundingVoice = voice;
@@ -648,8 +672,36 @@ void VoicegroupBrowser::releaseVoice()
 
 bool VoicegroupBrowser::eventFilter(QObject *watched, QEvent *event)
 {
+    if (watched == m_tree->viewport() && event->type() == QEvent::MouseButtonPress)
+        m_pressButton = static_cast<QMouseEvent *>(event)->button(); // before itemPressed
     if (watched == m_tree->viewport() && event->type() == QEvent::MouseButtonRelease)
         releaseVoice();
+    // Copy/Paste on the focused voice list: claim the chord ahead of any
+    // window-level shortcut, and act on the press before QAbstractItemView
+    // copies the row's text itself.
+    if (watched == m_tree &&
+        (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        const auto &keys = keymap::Registry::instance();
+        const bool copy = keys.matches(keyEvent, QStringLiteral("voicegroup.copy"));
+        if (copy || keys.matches(keyEvent, QStringLiteral("voicegroup.paste"))) {
+            keyEvent->accept();
+            if (event->type() == QEvent::KeyPress) {
+                if (copy)
+                    copyVoice(currentSlot());
+                else
+                    pasteVoice(currentSlot());
+            }
+            return true;
+        }
+        // With voicegroup.copy rebound, QAbstractItemView would still copy
+        // the row's display text on the platform Copy chord: eat the press
+        // (the override stays unclaimed, so a window shortcut still fires).
+        if (event->type() == QEvent::KeyPress && keyEvent->matches(QKeySequence::Copy)) {
+            keyEvent->accept();
+            return true;
+        }
+    }
     // Leave plain Space unaccepted so the window-level play/pause shortcut
     // fires instead of the input inserting a space / toggling.
     if (event->type() == QEvent::ShortcutOverride) {
@@ -900,18 +952,7 @@ void VoicegroupBrowser::commitEdit()
             if (curSynth && desc == curDesc) {
                 symbol = cur->symbol; // unchanged (or a duplicate definition)
             } else {
-                symbol = m_synths.symbolFor(desc); // on-disk definitions
-                if (symbol.isEmpty()) {            // then pending ones
-                    for (auto it = m_synthBySymbol.constBegin(); it != m_synthBySymbol.constEnd();
-                         ++it) {
-                        if (it.value() == desc) {
-                            symbol = it.key();
-                            break;
-                        }
-                    }
-                }
-                if (symbol.isEmpty() && m_mintSynth)
-                    symbol = m_mintSynth(desc);
+                symbol = synthSymbolFor(desc);
             }
         }
         if (symbol.isEmpty()) {
@@ -1085,4 +1126,246 @@ void VoicegroupBrowser::updateRow(int slot)
                          .arg(name.isEmpty() ? type : name));
     item->setText(1, type);
     item->setText(2, adsrText(*voice));
+}
+
+QString VoicegroupBrowser::synthSymbolFor(const VgSynthDesc &desc) const
+{
+    QString symbol = m_synths.symbolFor(desc); // on-disk definitions
+    if (symbol.isEmpty()) {                    // then pending ones
+        for (auto it = m_synthBySymbol.constBegin(); it != m_synthBySymbol.constEnd(); ++it) {
+            if (it.value() == desc) {
+                symbol = it.key();
+                break;
+            }
+        }
+    }
+    if (symbol.isEmpty() && m_mintSynth)
+        symbol = m_mintSynth(desc);
+    return symbol;
+}
+
+void VoicegroupBrowser::showVoiceMenu(const QPoint &pos)
+{
+    QTreeWidgetItem *item = m_tree->itemAt(pos);
+    if (!item)
+        return;
+    releaseVoice();
+    const int slot = item->data(0, Qt::UserRole).toInt();
+    m_tree->setCurrentItem(item); // a keyboard-opened menu acts on the row too
+    const VgVoice *voice = m_source ? m_source->voiceAt(slot) : nullptr;
+    const bool editable = voice != nullptr;
+    VgVoice clip;
+    std::optional<VgSynthDesc> clipSynth;
+    const bool hasClip = clipboardVoice(&clip, &clipSynth, nullptr);
+
+    // The shortcuts are display-only hints here (the real bindings live in
+    // eventFilter); mirroring the keymap keeps a rebind from lying.
+    const auto &keys = keymap::Registry::instance();
+    QMenu menu(this);
+    QAction *copy = menu.addAction(tr("Copy"), this, [this, slot] { copyVoice(slot); });
+    copy->setShortcut(keys.bindings(QStringLiteral("voicegroup.copy")).value(0));
+    copy->setEnabled(editable);
+    QAction *paste = menu.addAction(tr("Paste"), this, [this, slot] { pasteVoice(slot); });
+    paste->setShortcut(keys.bindings(QStringLiteral("voicegroup.paste")).value(0));
+    paste->setEnabled(editable && !m_viewOnly && hasClip);
+    menu.addSeparator();
+    QAction *clear = menu.addAction(tr("Clear"), this, [this, slot] { clearVoice(slot); });
+    clear->setToolTip(tr("Replace this voice with the unused-slot placeholder."));
+    clear->setEnabled(editable && !m_viewOnly && *voice != kPlaceholderVoice);
+    menu.exec(m_tree->viewport()->mapToGlobal(pos));
+}
+
+QString VoicegroupBrowser::notEditableReason(int slot) const
+{
+    if (slot < 0)
+        return tr("no voice is selected");
+    if (!m_source)
+        return tr("this voicegroup's source file couldn't be located");
+    switch (m_source->kindAt(slot)) {
+    case VgLineKind::ReadOnlyVoice:
+        return tr("cry voices are read-only");
+    case VgLineKind::Broken:
+        return tr("this voice line couldn't be parsed");
+    default:
+        return tr("no voice is defined at this slot");
+    }
+}
+
+void VoicegroupBrowser::copyVoice(int slot)
+{
+    const VgVoice *voice = m_source ? m_source->voiceAt(slot) : nullptr;
+    if (!voice) {
+        emit statusMessage(tr("Can't copy: %1.").arg(notEditableReason(slot)));
+        return;
+    }
+    const QString line = QString::fromUtf8(VoicegroupSource::renderVoiceLine(*voice));
+    QJsonObject payload{{QStringLiteral("line"), line}};
+    VgSynthDesc desc;
+    if (synthDescFor(*voice, slot, &desc)) {
+        payload.insert(QStringLiteral("synth"),
+                       QJsonObject{{QStringLiteral("waveform"), desc.waveform},
+                                   {QStringLiteral("baseDuty"), desc.baseDuty},
+                                   {QStringLiteral("dutyStep"), desc.dutyStep},
+                                   {QStringLiteral("modDepth"), desc.modDepth},
+                                   {QStringLiteral("phase"), desc.phase}});
+    }
+    auto *mime = new QMimeData;
+    mime->setText(line);
+    mime->setData(kVoiceMimeType, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    QGuiApplication::clipboard()->setMimeData(mime);
+}
+
+bool VoicegroupBrowser::clipboardVoice(VgVoice *voice, std::optional<VgSynthDesc> *synth,
+                                       bool *overflow) const
+{
+    synth->reset();
+    const QMimeData *mime = QGuiApplication::clipboard()->mimeData();
+    if (!mime)
+        return false;
+    if (mime->hasFormat(kVoiceMimeType)) {
+        const QJsonObject payload = QJsonDocument::fromJson(mime->data(kVoiceMimeType)).object();
+        if (VoicegroupSource::parseVoiceLine(
+                payload.value(QStringLiteral("line")).toString().toUtf8(), voice, overflow)) {
+            const QJsonValue synthValue = payload.value(QStringLiteral("synth"));
+            if (synthValue.isObject()) {
+                const QJsonObject o = synthValue.toObject();
+                VgSynthDesc desc;
+                desc.waveform = std::clamp(o.value(QStringLiteral("waveform")).toInt(), 0, 2);
+                desc.baseDuty = o.value(QStringLiteral("baseDuty")).toInt(desc.baseDuty) & 0xFF;
+                desc.dutyStep = o.value(QStringLiteral("dutyStep")).toInt() & 0xFF;
+                desc.modDepth = o.value(QStringLiteral("modDepth")).toInt() & 0xFF;
+                desc.phase = o.value(QStringLiteral("phase")).toInt() & 0xFF;
+                *synth = desc;
+            }
+            return true;
+        }
+    }
+    return mime->hasText() &&
+           VoicegroupSource::parseVoiceLine(mime->text().toUtf8(), voice, overflow);
+}
+
+bool VoicegroupBrowser::resolvePastedVoice(VgVoice *voice, const std::optional<VgSynthDesc> &synth,
+                                           QString *why)
+{
+    VgFieldRange range;
+    if (vgVoiceOutOfRange(*voice, &range)) {
+        *why = tr("Can't paste: %1 %2 is out of range (0-%3).")
+                   .arg(range.field)
+                   .arg(range.value)
+                   .arg(range.max);
+        return false;
+    }
+    // Sample macros are gated on what asm/macros defines (an empty list
+    // means the scan found nothing to go on, so the line is trusted). The
+    // reverse twins assemble the same type byte, but projects define one
+    // or the other (pret pokeemerald only _reverse, pokeemerald-expansion
+    // only _alt): a reversed voice lands as whichever this project has,
+    // _alt when both.
+    if (vgMacroIsDirectSound(voice->macro) && !m_voiceMacroWords.isEmpty()) {
+        if (voice->macro == VgMacro::DirectSoundAlt ||
+            voice->macro == VgMacro::DirectSoundReverse) {
+            if (m_voiceMacroWords.contains(vgMacroName(VgMacro::DirectSoundAlt)))
+                voice->macro = VgMacro::DirectSoundAlt;
+            else if (m_voiceMacroWords.contains(vgMacroName(VgMacro::DirectSoundReverse)))
+                voice->macro = VgMacro::DirectSoundReverse;
+        }
+        const QString word = vgMacroName(voice->macro);
+        if (!m_voiceMacroWords.contains(word)) {
+            *why = tr("Can't paste: this project doesn't define %1.").arg(word);
+            return false;
+        }
+    }
+    if (!vgMacroHasSymbol(voice->macro))
+        return true;
+
+    const QString &symbol = voice->symbol;
+    const auto refuse = [&](const QString &what) {
+        *why = tr("Can't paste: %1 isn't %2 in this project.").arg(symbol, what);
+        return false;
+    };
+    switch (voice->macro) {
+    case VgMacro::Keysplit:
+        if (!m_keysplitTables.contains(symbol))
+            return refuse(tr("a keysplit instrument"));
+        // A sub-voicegroup only works with its own table: adopt the one
+        // this project pairs it with rather than refusing a mismatch.
+        voice->keysplitTable = m_keysplitTables.value(symbol);
+        return true;
+    case VgMacro::KeysplitAll:
+        return m_drumkitChoices.contains(symbol) || refuse(tr("a drumkit"));
+    case VgMacro::ProgWave:
+    case VgMacro::ProgWaveAlt:
+        return m_waveSymbols.contains(symbol) || refuse(tr("a programmable wave"));
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
+        return m_cries.contains(symbol) || refuse(tr("a compressed (cry) sample"));
+    default:
+        break;
+    }
+    // A plain sample voice: a sample, a known synth definition, or a synth
+    // only the copy's descriptor knows (pending in another project, or a
+    // .bin descriptor with no set_synth entry), resolved the way commitEdit
+    // resolves an edited one. A local synth of the same name but another
+    // descriptor is a different instrument: the descriptor decides.
+    const auto local = m_synthBySymbol.constFind(symbol);
+    if (local != m_synthBySymbol.constEnd() && (!synth || local.value() == *synth))
+        return true;
+    if (local == m_synthBySymbol.constEnd() &&
+        (m_plainSamples.contains(symbol) || m_phonemes.contains(symbol)))
+        return true;
+    if (!synth)
+        return refuse(tr("a sample"));
+    const QString resolved = synthSymbolFor(*synth);
+    if (resolved.isEmpty()) {
+        why->clear(); // the mint reported why itself
+        return false;
+    }
+    m_synthBySymbol.insert(resolved, *synth);
+    voice->symbol = resolved;
+    return true;
+}
+
+void VoicegroupBrowser::pasteVoice(int slot)
+{
+    const VgVoice *cur = m_source ? m_source->voiceAt(slot) : nullptr;
+    if (!cur) {
+        emit statusMessage(tr("Can't paste: %1.").arg(notEditableReason(slot)));
+        return;
+    }
+    if (m_viewOnly) {
+        emit statusMessage(tr("Can't paste: this song is view-only."));
+        return;
+    }
+    VgVoice voice;
+    std::optional<VgSynthDesc> synth;
+    bool overflow = false;
+    if (!clipboardVoice(&voice, &synth, &overflow)) {
+        emit statusMessage(tr("Nothing to paste: the clipboard doesn't hold a voicegroup voice "
+                              "line."));
+        return;
+    }
+    if (overflow) {
+        emit statusMessage(tr("Can't paste: a number in the voice line is out of range."));
+        return;
+    }
+    QString why;
+    if (!resolvePastedVoice(&voice, synth, &why)) {
+        if (!why.isEmpty())
+            emit statusMessage(why);
+        return;
+    }
+    if (voice == *cur)
+        return; // pasting what is already there is a no-op
+    emit voiceEditRequested(slot, voice, vgVoiceStructuralChange(*cur, voice),
+                            tr("paste voice %1").arg(slot));
+}
+
+void VoicegroupBrowser::clearVoice(int slot)
+{
+    const VgVoice *cur = m_source ? m_source->voiceAt(slot) : nullptr;
+    if (!cur || m_viewOnly || *cur == kPlaceholderVoice)
+        return;
+    emit voiceEditRequested(slot, kPlaceholderVoice,
+                            vgVoiceStructuralChange(*cur, kPlaceholderVoice),
+                            tr("clear voice %1").arg(slot));
 }

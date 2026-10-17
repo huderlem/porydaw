@@ -1,4 +1,7 @@
+#include <QApplication>
+#include <QClipboard>
 #include <QComboBox>
+#include <QContextMenuEvent>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
@@ -8,15 +11,20 @@
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPointer>
 #include <QSettings>
 #include <QSpinBox>
+#include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTimer>
 #include <QTreeWidgetItemIterator>
+#include <QUndoStack>
 #include <cstdio>
 
+#include "ui/keymap.h"
 #include "ui/songview.h"
 #include "ui/theme/themeruntime.h"
 
@@ -871,6 +879,545 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             const VgVoice *restored = tab->vgSource->voiceAt(dsSlot);
             check(restored && *restored == before,
                   "undo did not restore the sample voice after the _alt round trip");
+        }
+    }
+
+    // 10c. The voice list's context menu and Copy / Paste shortcuts: one
+    // voice through the system clipboard as its .inc macro line (plus a
+    // private MIME that carries a synth's descriptor). Right-click selects
+    // without auditioning; Paste validates against this project; Paste and
+    // Clear are standalone undo entries that never merge with an editor
+    // run; a view-only tab disables both.
+    {
+        QTreeWidget *tree = m_vgBrowser->findChild<QTreeWidget *>();
+        QClipboard *clipboard = QGuiApplication::clipboard();
+        QUndoStack *stack = tab->doc.undoStack();
+        // The target: another editable voice that differs from the source.
+        int pasteSlot = -1;
+        for (int i = 0; i < VOICEGROUP_SIZE && pasteSlot < 0; i++) {
+            const VgVoice *v = tab->vgSource->voiceAt(i);
+            if (i != dsSlot && v && *v != *tab->vgSource->voiceAt(dsSlot) &&
+                v->macro != VgMacro::Square2)
+                pasteSlot = i;
+        }
+        if (check(tree && clipboard && pasteSlot >= 0, "copy/paste fixtures not found")) {
+            show();
+            const VgVoice source = *tab->vgSource->voiceAt(dsSlot);
+            const VgVoice target = *tab->vgSource->voiceAt(pasteSlot);
+            const int baseIndex = stack->index();
+            const auto rowPos = [&](int slot) {
+                m_vgBrowser->revealSlot(slot);
+                QCoreApplication::processEvents();
+                return tree->visualItemRect(tree->topLevelItem(slot)).center();
+            };
+            // Opens the row's context menu, records each item's enabled
+            // state, and picks `pick` (Escape when it is absent/disabled).
+            const auto runMenu = [&](int slot, const QString &pick, QHash<QString, bool> *enabled) {
+                const QPoint pos = rowPos(slot);
+                bool seen = false;
+                QTimer::singleShot(0, this, [&] {
+                    for (QWidget *w : QApplication::topLevelWidgets()) {
+                        auto *menu = qobject_cast<QMenu *>(w);
+                        if (!menu || !menu->isVisible())
+                            continue;
+                        seen = true;
+                        QAction *chosen = nullptr;
+                        for (QAction *a : menu->actions()) {
+                            if (a->isSeparator())
+                                continue;
+                            enabled->insert(a->text(), a->isEnabled());
+                            if (a->text() == pick && a->isEnabled())
+                                chosen = a;
+                        }
+                        if (chosen)
+                            menu->setActiveAction(chosen);
+                        QKeyEvent key(QEvent::KeyPress, chosen ? Qt::Key_Return : Qt::Key_Escape,
+                                      Qt::NoModifier);
+                        QCoreApplication::sendEvent(menu, &key);
+                        return;
+                    }
+                });
+                QContextMenuEvent event(QContextMenuEvent::Mouse, pos,
+                                        tree->viewport()->mapToGlobal(pos));
+                QCoreApplication::sendEvent(tree->viewport(), &event);
+                QCoreApplication::processEvents(); // the timer, if no menu ran
+                return seen;
+            };
+            const auto sendKeys = [&](int slot, const QKeySequence &seq) {
+                m_vgBrowser->revealSlot(slot);
+                const QKeyCombination combo = seq[0];
+                QKeyEvent override(QEvent::ShortcutOverride, combo.key(),
+                                   combo.keyboardModifiers());
+                QCoreApplication::sendEvent(tree, &override);
+                QKeyEvent press(QEvent::KeyPress, combo.key(), combo.keyboardModifiers());
+                QCoreApplication::sendEvent(tree, &press);
+                return override.isAccepted();
+            };
+            const QKeySequence copyKeys(QKeySequence::Copy), pasteKeys(QKeySequence::Paste);
+            const auto voiceAt = [&](int slot) {
+                const VgVoice *v = tab->vgSource->voiceAt(slot);
+                return v ? *v : VgVoice{};
+            };
+
+            // Line rendering and parsing round-trip on their own.
+            {
+                VgVoice parsed;
+                check(VoicegroupSource::parseVoiceLine(VoicegroupSource::renderVoiceLine(source),
+                                                       &parsed) &&
+                          parsed == source,
+                      "renderVoiceLine/parseVoiceLine did not round-trip a voice");
+                check(!VoicegroupSource::parseVoiceLine("voice_square_2 60, 0, 2, 0, 1, 9, 2\n"
+                                                        "voice_square_2 60, 0, 2, 0, 1, 9, 3\n",
+                                                        &parsed),
+                      "parseVoiceLine accepted two voice lines");
+                check(!VoicegroupSource::parseVoiceLine("cry Cry_Bulbasaur", &parsed),
+                      "parseVoiceLine accepted a read-only cry line");
+            }
+
+            // Only the left button auditions; a right press still selects.
+            int noteOns = 0;
+            const QMetaObject::Connection auditions =
+                connect(m_vgBrowser, &VoicegroupBrowser::auditionVoice, this,
+                        [&noteOns](int, int, int velocity) { noteOns += velocity > 0 ? 1 : 0; });
+            const auto click = [&](int slot, Qt::MouseButton button) {
+                const QPoint pos = rowPos(slot);
+                QMouseEvent press(QEvent::MouseButtonPress, pos, tree->viewport()->mapToGlobal(pos),
+                                  button, button, Qt::NoModifier);
+                QCoreApplication::sendEvent(tree->viewport(), &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, pos,
+                                    tree->viewport()->mapToGlobal(pos), button, Qt::NoButton,
+                                    Qt::NoModifier);
+                QCoreApplication::sendEvent(tree->viewport(), &release);
+            };
+            click(dsSlot, Qt::LeftButton);
+            check(noteOns == 1, "a left press on a voice row did not audition");
+            click(pasteSlot, Qt::RightButton);
+            check(noteOns == 1, "a right press on a voice row auditioned");
+            check(m_vgBrowser->currentSlot() == pasteSlot, "a right press did not select the row");
+            click(dsSlot, Qt::MiddleButton);
+            check(noteOns == 1, "a middle press on a voice row auditioned");
+            disconnect(auditions);
+
+            // Space keeps toggling playback with the tree focused; the
+            // copy/paste chords are claimed by the tree.
+            {
+                QKeyEvent space(QEvent::ShortcutOverride, Qt::Key_Space, Qt::NoModifier);
+                QCoreApplication::sendEvent(tree, &space);
+                check(!space.isAccepted(), "the voice tree claimed Space from the transport");
+            }
+
+            // Copy (menu) -> Paste (shortcut): the clipboard carries the
+            // macro line and the private MIME; one undo entry, labelled.
+            QHash<QString, bool> items;
+            check(runMenu(dsSlot, tr("Copy"), &items), "the voice row's context menu did not open");
+            check(items.value(tr("Copy")) && items.contains(tr("Paste")) &&
+                      items.contains(tr("Clear")),
+                  "the context menu lacks Copy/Paste/Clear");
+            const QString sourceLine = QString::fromUtf8(VoicegroupSource::renderVoiceLine(source));
+            check(clipboard->text() == sourceLine,
+                  "Copy did not put the voice's macro line on the clipboard");
+            check(clipboard->mimeData() && clipboard->mimeData()->hasFormat(
+                                               QStringLiteral("application/x-porydaw-voice")),
+                  "Copy did not write the private voice MIME type");
+            check(sendKeys(pasteSlot, pasteKeys), "the voice tree did not claim the Paste chord");
+            check(voiceAt(pasteSlot) == source, "Paste did not replace the target voice");
+            check(stack->index() == baseIndex + 1 &&
+                      stack->text(stack->index() - 1) == tr("paste voice %1").arg(pasteSlot),
+                  "Paste was not one undo entry labelled \"paste voice N\"");
+            stack->undo();
+            check(voiceAt(pasteSlot) == target && stack->index() == baseIndex,
+                  "one undo did not restore the pasted-over voice");
+
+            // Copy by shortcut writes the same line.
+            clipboard->clear();
+            check(sendKeys(dsSlot, copyKeys) && clipboard->text() == sourceLine,
+                  "the Copy shortcut did not copy the voice");
+
+            // A hand-written .inc line (indent, comment, line ending) pastes
+            // from the menu.
+            clipboard->setText(QStringLiteral("\tvoice_square_2 60, 0, 1, 0, 1, 9, 2 @ by hand\n"));
+            items.clear();
+            runMenu(pasteSlot, tr("Paste"), &items);
+            const VgVoice handWritten = voiceAt(pasteSlot);
+            check(items.value(tr("Paste")) && handWritten.macro == VgMacro::Square2 &&
+                      handWritten.duty == 1 && handWritten.attack == 0 && handWritten.decay == 1 &&
+                      handWritten.sustain == 9 && handWritten.release == 2,
+                  "a hand-written .inc line did not paste");
+            if (stack->index() > baseIndex)
+                stack->undo();
+
+            // Refusals: an unknown sample symbol, an undefined macro, and
+            // text that isn't a voice line push nothing and say why.
+            clipboard->setText(QStringLiteral(
+                "voice_directsound 60, 0, DirectSoundWaveData_NoSuchSample, 255, 0, 255, 0"));
+            statusBar()->clearMessage();
+            sendKeys(pasteSlot, pasteKeys);
+            check(stack->index() == baseIndex && voiceAt(pasteSlot) == target,
+                  "a voice with an unknown sample symbol pasted");
+            check(statusBar()->currentMessage().contains(QStringLiteral("NoSuchSample")),
+                  "the unknown-symbol refusal left no status message");
+            // A project without the expansion's compressed macros (the
+            // browser's macro list stands in for one).
+            m_vgBrowser->setSampleVariants({QStringLiteral("voice_directsound")},
+                                           vgCatalog(tab->root).cries);
+            clipboard->setText(QStringLiteral(
+                "voice_directsound_compressed 60, 0, Cry_Bulbasaur, 255, 0, 255, 0"));
+            statusBar()->clearMessage();
+            sendKeys(pasteSlot, pasteKeys);
+            check(stack->index() == baseIndex &&
+                      statusBar()->currentMessage().contains(
+                          QStringLiteral("voice_directsound_compressed")),
+                  "a macro this project doesn't define pasted");
+            m_vgBrowser->setSampleVariants(vgCatalog(tab->root).voiceMacroWords,
+                                           vgCatalog(tab->root).cries);
+
+            // Pastes text over pasteSlot by shortcut: true when it pushed
+            // one entry (left on the stack for the caller to inspect).
+            const auto pasteText = [&](const QString &text) {
+                clipboard->setText(text);
+                statusBar()->clearMessage();
+                sendKeys(pasteSlot, pasteKeys);
+                return stack->index() == baseIndex + 1;
+            };
+            const auto unwind = [&] {
+                while (stack->index() > baseIndex)
+                    stack->undo();
+            };
+            const QString sample = vgCatalog(tab->root).directSound.value(0);
+            const auto dsLine = [&](const QString &macro, const QString &args) {
+                return QStringLiteral("%1 60, 0, %2, %3").arg(macro, sample, args);
+            };
+
+            // Keysplit and drumkit lines paste; a keysplit adopts the table
+            // this project pairs with its sub-voicegroup.
+            const auto &keysplits = vgCatalog(tab->root).keysplits;
+            const QString drumkit = vgCatalog(tab->root).drumkits.value(0);
+            const QString wave = vgCatalog(tab->root).progWave.value(0);
+            if (check(!keysplits.isEmpty() && !drumkit.isEmpty() && !wave.isEmpty() &&
+                          !sample.isEmpty(),
+                      "no keysplit/drumkit/wave/sample symbols for the paste checks")) {
+                const bool keysplitPasted =
+                    pasteText(QStringLiteral("voice_keysplit %1, keysplit_vgsavecheck_wrong")
+                                  .arg(keysplits.first().first));
+                const VgVoice keysplit = voiceAt(pasteSlot);
+                check(keysplitPasted && keysplit.macro == VgMacro::Keysplit &&
+                          keysplit.symbol == keysplits.first().first &&
+                          keysplit.keysplitTable == keysplits.first().second,
+                      "a keysplit line did not paste with the project's table");
+                unwind();
+                const bool drumkitPasted =
+                    pasteText(QStringLiteral("voice_keysplit_all %1").arg(drumkit));
+                check(drumkitPasted && voiceAt(pasteSlot).macro == VgMacro::KeysplitAll &&
+                          voiceAt(pasteSlot).symbol == drumkit,
+                      "a drumkit line did not paste");
+                unwind();
+                // Unknown wave / drumkit / keysplit / cry symbols are refused.
+                const QString unknownLines[] = {
+                    QStringLiteral("voice_programmable_wave 60, 0, "
+                                   "ProgrammableWaveData_VgSaveCheckNone, 0, 7, 15, 0"),
+                    QStringLiteral("voice_keysplit_all voicegroup_vgsavecheck_none"),
+                    QStringLiteral("voice_keysplit voicegroup_vgsavecheck_none, keysplit_piano"),
+                    QStringLiteral(
+                        "voice_directsound_compressed 60, 0, Cry_VgSaveCheckNone, 255, 0, 255, 0"),
+                };
+                for (const QString &line : unknownLines) {
+                    const bool pasted = pasteText(line);
+                    unwind();
+                    // (Expansion projects lack the compressed macros: that
+                    // refusal names the macro instead.)
+                    const QString why = statusBar()->currentMessage();
+                    check(!pasted && voiceAt(pasteSlot) == target &&
+                              why.startsWith(QStringLiteral("Can't paste")) &&
+                              (why.contains(QStringLiteral("vgsavecheck"), Qt::CaseInsensitive) ||
+                               why.contains(QStringLiteral("doesn't define"))),
+                          qPrintable(QStringLiteral("an unknown symbol pasted (or no status "
+                                                    "message): %1")
+                                         .arg(line)));
+                }
+
+                // The reverse twins land as whichever the project defines,
+                // _alt when both; neither is refused; an empty macro list
+                // (nothing scanned) trusts the line.
+                const QString plain = QStringLiteral("voice_directsound");
+                const QString alt = QStringLiteral("voice_directsound_alt");
+                const QString reverse = QStringLiteral("voice_directsound_reverse");
+                const QString envelope = QStringLiteral("255, 0, 255, 0");
+                const auto reversePastesAs = [&](const QStringList &words, const QString &macro) {
+                    m_vgBrowser->setSampleVariants(words, vgCatalog(tab->root).cries);
+                    const bool pasted = pasteText(dsLine(macro, envelope));
+                    const VgMacro landed = voiceAt(pasteSlot).macro;
+                    unwind();
+                    return pasted ? int(landed) : -1;
+                };
+                check(reversePastesAs({plain, alt}, reverse) == int(VgMacro::DirectSoundAlt),
+                      "a _reverse voice did not paste as _alt into an _alt-only project");
+                check(reversePastesAs({plain, reverse}, alt) == int(VgMacro::DirectSoundReverse),
+                      "an _alt voice did not paste as _reverse into a _reverse-only project");
+                check(reversePastesAs({plain, alt, reverse}, reverse) ==
+                          int(VgMacro::DirectSoundAlt),
+                      "a _reverse voice did not paste as _alt when both are defined");
+                check(reversePastesAs({plain}, alt) == -1,
+                      "a reversed voice pasted into a project with neither reverse macro");
+                check(reversePastesAs({}, reverse) == int(VgMacro::DirectSoundReverse),
+                      "an empty macro scan did not trust the pasted line");
+                check(reversePastesAs({alt}, plain) == -1,
+                      "voice_directsound pasted though the scan didn't find it");
+                m_vgBrowser->setSampleVariants(vgCatalog(tab->root).voiceMacroWords,
+                                               vgCatalog(tab->root).cries);
+
+                // Out-of-range (or int-overflowing) numbers are refused, not
+                // clamped; the boundaries paste.
+                const QString outOfRange[] = {
+                    QStringLiteral("voice_directsound 128, 0, %1, 255, 0, 255, 0").arg(sample),
+                    QStringLiteral("voice_directsound 60, 128, %1, 255, 0, 255, 0").arg(sample),
+                    QStringLiteral("voice_directsound 60, -1, %1, 255, 0, 255, 0").arg(sample),
+                    QStringLiteral("voice_directsound 60, 0, %1, 256, 0, 255, 0").arg(sample),
+                    QStringLiteral("voice_directsound 60, 0, %1, 255, 0, 255, 256").arg(sample),
+                    QStringLiteral("voice_directsound 60, 0, %1, 255, 0, 255, 4294967296")
+                        .arg(sample),
+                    QStringLiteral("voice_square_1 60, 0, 128, 2, 0, 0, 15, 0"),
+                    QStringLiteral("voice_square_1 60, 0, 0, 4, 0, 0, 15, 0"),
+                    QStringLiteral("voice_square_2 60, 0, 2, 8, 0, 15, 0"),
+                    QStringLiteral("voice_square_2 60, 0, 2, 0, 8, 15, 0"),
+                    QStringLiteral("voice_square_2 60, 0, 2, 0, 0, 16, 0"),
+                    QStringLiteral("voice_square_2 60, 0, 2, 0, 0, 15, 8"),
+                    QStringLiteral("voice_noise 60, 0, 2, 0, 0, 15, 0"),
+                    QStringLiteral("voice_programmable_wave 60, 0, %1, 0, 7, 16, 0").arg(wave),
+                };
+                for (const QString &line : outOfRange) {
+                    const bool pasted = pasteText(line);
+                    unwind();
+                    check(
+                        !pasted && voiceAt(pasteSlot) == target &&
+                            statusBar()->currentMessage().contains(QStringLiteral("out of range")),
+                        qPrintable(QStringLiteral("an out-of-range voice pasted (or no "
+                                                  "status message): %1")
+                                       .arg(line)));
+                }
+                const QString boundaries[] = {
+                    QStringLiteral("voice_directsound 127, 127, %1, 255, 255, 255, 255")
+                        .arg(sample),
+                    QStringLiteral("voice_square_1 0, 0, 127, 3, 7, 7, 15, 7"),
+                    QStringLiteral("voice_noise 60, 0, 1, 7, 7, 15, 7"),
+                };
+                for (const QString &line : boundaries) {
+                    const bool pasted = pasteText(line);
+                    unwind();
+                    check(
+                        pasted,
+                        qPrintable(QStringLiteral("an in-range voice was refused: %1").arg(line)));
+                }
+            }
+
+            // Every editable voice line in the project's sound data stays
+            // pasteable: in range, no overflow, parsed the same.
+            {
+                int lines = 0;
+                QStringList bad;
+                QDirIterator it(tab->root + QStringLiteral("/sound"), {QStringLiteral("*.inc")},
+                                QDir::Files, QDirIterator::Subdirectories);
+                while (it.hasNext()) {
+                    const QString path = it.next();
+                    for (const VgSourceLine &line :
+                         VoicegroupSource::parseSource(readFileBytes(path)).lines) {
+                        if (line.kind != VgLineKind::Editable)
+                            continue;
+                        lines++;
+                        VgVoice parsed;
+                        bool overflow = true;
+                        VgFieldRange range;
+                        if (!VoicegroupSource::parseVoiceLine(line.raw, &parsed, &overflow) ||
+                            overflow || parsed != line.voice || vgVoiceOutOfRange(parsed, &range))
+                            bad.append(QString::fromUtf8(line.raw.trimmed()));
+                    }
+                }
+                std::printf("vgsavecheck: note: %d editable voice lines range-checked\n", lines);
+                check(lines > 0 && bad.isEmpty(),
+                      qPrintable(QStringLiteral("project voice lines would not paste: %1")
+                                     .arg(bad.mid(0, 5).join(QStringLiteral(" | ")))));
+            }
+
+            // A row with no editable voice, or no row at all: Copy and Paste
+            // say why instead of doing nothing.
+            int emptySlot = -1;
+            for (int i = VOICEGROUP_SIZE - 1; i >= 0 && emptySlot < 0; i--) {
+                if (!tab->vgSource->voiceAt(i))
+                    emptySlot = i;
+            }
+            if (check(emptySlot >= 0, "no non-editable voice row for the refusal checks")) {
+                clipboard->setText(QStringLiteral("vgsavecheck sentinel"));
+                statusBar()->clearMessage();
+                sendKeys(emptySlot, copyKeys);
+                check(clipboard->text() == QStringLiteral("vgsavecheck sentinel") &&
+                          statusBar()->currentMessage().startsWith(QStringLiteral("Can't copy")),
+                      "Copy on a non-editable row left no status message (or copied)");
+                clipboard->setText(sourceLine);
+                statusBar()->clearMessage();
+                sendKeys(emptySlot, pasteKeys);
+                check(stack->index() == baseIndex &&
+                          statusBar()->currentMessage().startsWith(QStringLiteral("Can't paste")),
+                      "Paste on a non-editable row left no status message (or pasted)");
+            }
+            // voicegroup.copy rebound: the platform Copy chord no longer
+            // copies, and the view doesn't copy the row's text either.
+            {
+                auto &keys = keymap::Registry::instance();
+                keys.setBinding(QStringLiteral("voicegroup.copy"),
+                                QKeySequence(QStringLiteral("Ctrl+Alt+Shift+F8")));
+                clipboard->setText(QStringLiteral("vgsavecheck sentinel"));
+                sendKeys(dsSlot, copyKeys);
+                check(clipboard->text() == QStringLiteral("vgsavecheck sentinel"),
+                      "the Copy chord copied something with voicegroup.copy rebound");
+                keys.resetBinding(QStringLiteral("voicegroup.copy"));
+            }
+
+            clipboard->setText(QStringLiteral("hello"));
+            items.clear();
+            runMenu(pasteSlot, QString(), &items);
+            check(items.contains(tr("Paste")) && !items.value(tr("Paste")),
+                  "Paste is enabled with no voice on the clipboard");
+
+            // Clear writes the placeholder, as one labelled undo entry, and
+            // is disabled on a voice that already is the placeholder.
+            const VgVoice placeholder{
+                VgMacro::Square1, 60, 0, QString(), QString(), 0, 2, 0, 0, 0, 15, 0};
+            items.clear();
+            runMenu(dsSlot, tr("Clear"), &items);
+            check(voiceAt(dsSlot) == placeholder && tab->vgSource->renderPreview().contains(
+                                                        "voice_square_1 60, 0, 0, 2, 0, 0, 15, 0"),
+                  "Clear did not write the placeholder voice");
+            check(stack->index() == baseIndex + 1 &&
+                      stack->text(stack->index() - 1) == tr("clear voice %1").arg(dsSlot),
+                  "Clear was not one undo entry labelled \"clear voice N\"");
+            items.clear();
+            runMenu(dsSlot, QString(), &items);
+            check(items.contains(tr("Clear")) && !items.value(tr("Clear")),
+                  "Clear is enabled on a placeholder voice");
+            stack->undo();
+            check(voiceAt(dsSlot) == source && stack->index() == baseIndex,
+                  "one undo did not restore the cleared voice");
+
+            // A scalar-only paste after a spin edit of the same field stays
+            // its own entry (and a spin edit after it doesn't fold in).
+            QSpinBox *releaseSpin = nullptr;
+            for (QSpinBox *spin : m_vgBrowser->findChildren<QSpinBox *>()) {
+                if (spin->toolTip() == tr("Release"))
+                    releaseSpin = spin;
+            }
+            if (check(releaseSpin != nullptr, "no Release spin box for the merge check")) {
+                m_vgBrowser->selectSlot(dsSlot);
+                const int spun = source.release == 20 ? 21 : 20;
+                releaseSpin->setValue(spun);
+                VgVoice scalar = source;
+                scalar.release = source.release == 30 ? 31 : 30;
+                clipboard->setText(QString::fromUtf8(VoicegroupSource::renderVoiceLine(scalar)));
+                sendKeys(dsSlot, pasteKeys);
+                check(stack->index() == baseIndex + 2 && voiceAt(dsSlot) == scalar,
+                      "a scalar-only paste merged into the preceding spin edit");
+                m_vgBrowser->selectSlot(dsSlot);
+                releaseSpin->setValue(spun);
+                check(stack->index() == baseIndex + 3,
+                      "a spin edit merged into the preceding paste");
+                stack->undo();
+                stack->undo();
+                check(voiceAt(dsSlot).release == spun,
+                      "undoing the paste did not return to the spin-edited voice");
+                stack->undo();
+                check(voiceAt(dsSlot) == source && stack->index() == baseIndex,
+                      "undoing the spin edit did not restore the voice");
+            }
+
+            // A synth only the private MIME's descriptor knows (another
+            // project's pending definition) resolves through the mint path;
+            // the same line as plain text is refused.
+            // (Section 7 gave the scratch project synth support.)
+            if (check(vgCatalog(tab->root).synths.creatable(),
+                      "the scratch project has no synth support for the paste checks")) {
+                const VgSynthDesc foreign{0, 0x33, 0x01, 0x22, 0x00};
+                const QString line = QStringLiteral("voice_directsound 60, 0, "
+                                                    "DirectSoundSynth_Elsewhere, 255, 0, 255, 165");
+                clipboard->setText(line);
+                sendKeys(pasteSlot, pasteKeys);
+                check(stack->index() == baseIndex,
+                      "an unknown synth symbol pasted without its descriptor");
+                auto *mime = new QMimeData;
+                mime->setText(line);
+                mime->setData(QStringLiteral("application/x-porydaw-voice"),
+                              QStringLiteral("{\"line\":\"%1\",\"synth\":{\"waveform\":0,"
+                                             "\"baseDuty\":51,\"dutyStep\":1,\"modDepth\":34,"
+                                             "\"phase\":0}}")
+                                  .arg(line)
+                                  .toUtf8());
+                clipboard->setMimeData(mime);
+                sendKeys(pasteSlot, pasteKeys);
+                const VgVoice pasted = voiceAt(pasteSlot);
+                check(stack->index() == baseIndex + 1 &&
+                          pasted.symbol == vgSynthSymbolName(foreign) &&
+                          m_pendingSynths.value(pasted.symbol) == foreign,
+                      "a synth descriptor on the clipboard did not mint its symbol");
+                // Copying the pasted synth carries its descriptor along.
+                sendKeys(pasteSlot, copyKeys);
+                check(clipboard->mimeData() &&
+                          clipboard->mimeData()
+                              ->data(QStringLiteral("application/x-porydaw-voice"))
+                              .contains("\"baseDuty\":51"),
+                      "copying a synth voice did not carry its descriptor");
+                while (stack->index() > baseIndex)
+                    stack->undo();
+
+                // A local synth of the same name but another descriptor is a
+                // different instrument: the descriptor resolves, not the name.
+                // The same descriptor keeps the name.
+                const auto synthMime = [&](const QString &symbol, const VgSynthDesc &desc) {
+                    const QString synthLine =
+                        QStringLiteral("voice_directsound 60, 0, %1, 255, 0, 255, 165").arg(symbol);
+                    auto *m = new QMimeData;
+                    m->setText(synthLine);
+                    m->setData(QStringLiteral("application/x-porydaw-voice"),
+                               QStringLiteral("{\"line\":\"%1\",\"synth\":{\"waveform\":%2,"
+                                              "\"baseDuty\":%3,\"dutyStep\":%4,"
+                                              "\"modDepth\":%5,\"phase\":%6}}")
+                                   .arg(synthLine)
+                                   .arg(desc.waveform)
+                                   .arg(desc.baseDuty)
+                                   .arg(desc.dutyStep)
+                                   .arg(desc.modDepth)
+                                   .arg(desc.phase)
+                                   .toUtf8());
+                    clipboard->setMimeData(m);
+                    sendKeys(pasteSlot, pasteKeys);
+                    const QString symbolLanded =
+                        stack->index() == baseIndex + 1 ? voiceAt(pasteSlot).symbol : QString();
+                    while (stack->index() > baseIndex)
+                        stack->undo();
+                    return symbolLanded;
+                };
+                const VgSynthDesc saw{1, 0, 0, 0, 0};
+                check(synthMime(QStringLiteral("VgSaveCheckSaw"), foreign) ==
+                          vgSynthSymbolName(foreign),
+                      "a synth pasted onto a same-named local synth with another descriptor "
+                      "kept the local name");
+                check(synthMime(QStringLiteral("VgSaveCheckSaw"), saw) ==
+                          QStringLiteral("VgSaveCheckSaw"),
+                      "a synth with the local definition's descriptor did not keep its name");
+            }
+
+            // View-only: Copy stays, Paste and Clear are disabled, and the
+            // shortcut pushes nothing.
+            m_vgBrowser->setViewOnly(true);
+            clipboard->setText(sourceLine);
+            items.clear();
+            runMenu(pasteSlot, QString(), &items);
+            check(items.value(tr("Copy")) && items.contains(tr("Paste")) &&
+                      !items.value(tr("Paste")) && items.contains(tr("Clear")) &&
+                      !items.value(tr("Clear")),
+                  "view-only did not disable Paste/Clear (or disabled Copy)");
+            sendKeys(pasteSlot, pasteKeys);
+            check(stack->index() == baseIndex && voiceAt(pasteSlot) == target,
+                  "the Paste shortcut edited a view-only voicegroup");
+            m_vgBrowser->setViewOnly(false);
+            check(voiceAt(dsSlot) == source && voiceAt(pasteSlot) == target,
+                  "copy/paste checks left the voices changed");
         }
     }
 

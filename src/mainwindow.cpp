@@ -350,12 +350,15 @@ QIcon punchIcon(QWidget &widget, const QSize &size)
 // voicegroup switch reopened the file from disk (see
 // MainWindow::replayVoiceEdits). The session pointer is safe to hold: the
 // command lives in that session's own undo stack, so they die together.
+// A non-empty text names a whole-voice replacement (the dock's Paste /
+// Clear): a standalone entry that never merges with its neighbours.
 class VoiceEditCommand : public QUndoCommand
 {
   public:
     VoiceEditCommand(MainWindow *window, SongSession *session, const QString &loadName, int slot,
-                     const VgVoice &before, const VgVoice &after, bool structural)
-        : QUndoCommand(QObject::tr("edit voice %1").arg(slot))
+                     const VgVoice &before, const VgVoice &after, bool structural,
+                     const QString &text = QString())
+        : QUndoCommand(text.isEmpty() ? QObject::tr("edit voice %1").arg(slot) : text)
         , m_window(window)
         , m_session(session)
         , m_loadName(loadName)
@@ -363,6 +366,7 @@ class VoiceEditCommand : public QUndoCommand
         , m_before(before)
         , m_after(after)
         , m_structural(structural)
+        , m_standalone(!text.isEmpty())
     {}
 
     const QString &loadName() const { return m_loadName; }
@@ -377,10 +381,13 @@ class VoiceEditCommand : public QUndoCommand
     // Spin boxes commit every step of a click-and-hold gesture; steps that
     // keep changing the same fields of the same voice collapse into one undo
     // entry. A run that lands back on its starting value vanishes entirely.
+    // A standalone replacement takes no part in a run on either side: a
+    // scalar-only paste would otherwise fold into an earlier ADSR drag.
     bool mergeWith(const QUndoCommand *other) override
     {
         auto *o = static_cast<const VoiceEditCommand *>(other);
-        if (o->m_loadName != m_loadName || o->m_slot != m_slot || m_structural || o->m_structural ||
+        if (m_standalone || o->m_standalone || o->m_loadName != m_loadName || o->m_slot != m_slot ||
+            m_structural || o->m_structural ||
             changedFields(o->m_before, o->m_after) != changedFields(m_before, m_after))
             return false;
         m_after = o->m_after;
@@ -424,6 +431,7 @@ class VoiceEditCommand : public QUndoCommand
     VgVoice m_before;
     VgVoice m_after;
     bool m_structural;
+    bool m_standalone;
 };
 
 // The lane menus' MIDI section as midi has it (MainWindow::syncMidiControls).
@@ -1194,6 +1202,8 @@ void MainWindow::buildUi()
             });
     connect(m_vgBrowser, &VoicegroupBrowser::voiceEditRequested, this,
             &MainWindow::onVoiceEditRequested);
+    connect(m_vgBrowser, &VoicegroupBrowser::statusMessage, this,
+            [this](const QString &text) { statusBar()->showMessage(text, 6000); });
     connect(m_vgBrowser, &VoicegroupBrowser::newVoicegroupRequested, this,
             &MainWindow::newVoicegroup);
     connect(m_vgBrowser, &VoicegroupBrowser::newSampleRequested, this,
@@ -5187,7 +5197,8 @@ void MainWindow::openVoicegroupSource(SongSession &session, const SongCfg &cfg)
     session.vgFileTime = QFileInfo(session.vgSource->filePath()).lastModified();
 }
 
-void MainWindow::onVoiceEditRequested(int slot, const VgVoice &voice, bool structural)
+void MainWindow::onVoiceEditRequested(int slot, const VgVoice &voice, bool structural,
+                                      const QString &undoText)
 {
     SongSession *session = m_active;
     if (!session || !session->vgSource || session->bundle)
@@ -5197,7 +5208,7 @@ void MainWindow::onVoiceEditRequested(int slot, const VgVoice &voice, bool struc
         return;
     // pushCommand applies the edit (redo) via applyVoiceEdit.
     session->doc.pushCommand(new VoiceEditCommand(this, session, session->vgSource->loadName(),
-                                                  slot, *before, voice, structural));
+                                                  slot, *before, voice, structural, undoText));
 }
 
 void MainWindow::applyVoiceEdit(SongSession &session, const QString &loadName, int slot,

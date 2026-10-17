@@ -35,6 +35,8 @@ enum class Context {
     // (band or not), so the same overlap rule covers it.
     TimeSelection,
     EventList,
+    // The voicegroup dock's voice list (keyboard focus on its tree).
+    Voicegroup,
     // The mouse-wheel actions. Their conflicts are settled among
     // themselves (wheelConflicts), never against key sequences or the
     // hold-and-drag modifier gestures — a wheel chord and a drag chord can

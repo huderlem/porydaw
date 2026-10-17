@@ -798,6 +798,41 @@ bool vgVoiceStructuralChange(const VgVoice &before, const VgVoice &after)
            before.keysplitTable != after.keysplitTable;
 }
 
+bool vgVoiceOutOfRange(const VgVoice &voice, VgFieldRange *range)
+{
+    if (voice.macro == VgMacro::Keysplit || voice.macro == VgMacro::KeysplitAll)
+        return false; // no numeric fields
+    // The macros pack pan as (0x80 | pan) and mask the CGB fields; a value
+    // past these would assemble to some other (or truncated) byte.
+    const bool cgb = vgMacroIsCgb(voice.macro);
+    const bool square1 = voice.macro == VgMacro::Square1 || voice.macro == VgMacro::Square1Alt;
+    const bool square2 = voice.macro == VgMacro::Square2 || voice.macro == VgMacro::Square2Alt;
+    const bool noise = voice.macro == VgMacro::Noise || voice.macro == VgMacro::NoiseAlt;
+    const struct {
+        const char *field;
+        int value;
+        int max;
+        bool applies;
+    } fields[] = {
+        {"key", voice.key, 127, true},
+        {"pan", voice.pan, 127, true},
+        {"sweep", voice.sweep, 127, square1},
+        {"duty", voice.duty, 3, square1 || square2},
+        {"period", voice.period, 1, noise},
+        {"attack", voice.attack, cgb ? 7 : 255, true},
+        {"decay", voice.decay, cgb ? 7 : 255, true},
+        {"sustain", voice.sustain, cgb ? 15 : 255, true},
+        {"release", voice.release, cgb ? 7 : 255, true},
+    };
+    for (const auto &f : fields) {
+        if (f.applies && (f.value < 0 || f.value > f.max)) {
+            *range = VgFieldRange{QLatin1String(f.field), f.value, f.max};
+            return true;
+        }
+    }
+    return false;
+}
+
 bool VoicegroupSource::open(const QString &projectRoot, const QString &voicegroupArg,
                             QString *error)
 {
@@ -1137,6 +1172,45 @@ VgParsedSource VoicegroupSource::parseSource(const QByteArray &content, const QS
         parsed.lines.append(out);
     }
     return parsed;
+}
+
+QByteArray VoicegroupSource::renderVoiceLine(const VgVoice &voice)
+{
+    // A line with no captured formatting renders in canonical form (its
+    // empty macroText never matches the macro word).
+    Line line;
+    line.voice = voice;
+    VoicegroupSource().renderLine(line);
+    return line.raw;
+}
+
+bool VoicegroupSource::parseVoiceLine(const QByteArray &text, VgVoice *voice, bool *overflow)
+{
+    VoicegroupSource source;
+    if (!source.parse(text, nullptr))
+        return false;
+    const Line *found = nullptr;
+    for (const Line &line : source.m_lines) {
+        if (line.slot < 0)
+            continue;
+        if (found)
+            return false; // more than one voice: ambiguous
+        found = &line;
+    }
+    if (!found || found->kind != VgLineKind::Editable)
+        return false;
+    *voice = found->voice;
+    if (overflow) {
+        // parse() takes any run of digits; toInt reads 0 when it can't fit.
+        *overflow = false;
+        for (int a = 0; a < found->argPieces.size(); a++) {
+            bool ok = true;
+            if (!macroArgIsSymbol(found->voice.macro, a))
+                found->argPieces.at(a).trimmed().toInt(&ok);
+            *overflow = *overflow || !ok;
+        }
+    }
+    return true;
 }
 
 VgLineKind VoicegroupSource::kindAt(int slot) const

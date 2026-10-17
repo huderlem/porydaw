@@ -202,6 +202,13 @@ const Def kDefs[] = {
      QT_TR_NOOP("Move Event Up (Same Tick)"), QKeySequence::UnknownKey, "Alt+Up"},
     {"eventlist.move_down", Context::EventList, QT_TR_NOOP("MIDI Event List"),
      QT_TR_NOOP("Move Event Down (Same Tick)"), QKeySequence::UnknownKey, "Alt+Down"},
+    // Voicegroup dock: one voice at a time through the system clipboard, as
+    // its macro line. Its own context, so the roll's Copy/Paste keep the
+    // same keys.
+    {"voicegroup.copy", Context::Voicegroup, QT_TR_NOOP("Voicegroup"), QT_TR_NOOP("Copy Voice"),
+     QKeySequence::Copy, ""},
+    {"voicegroup.paste", Context::Voicegroup, QT_TR_NOOP("Voicegroup"), QT_TR_NOOP("Paste Voice"),
+     QKeySequence::Paste, ""},
     // Mouse wheel: which held chord makes scrolling zoom or pan the song
     // view. Every DAW picks these differently, so all four are rebindable;
     // the defaults keep porydaw's REAPER-style feel. Each surface maps the

@@ -180,6 +180,17 @@ VgAdsr vgDefaultAdsr(const VgAdsrDefaults &defaults, VgMacro macro, const QStrin
 // the caller must reload the voicegroup from rendered source instead.
 bool vgVoiceStructuralChange(const VgVoice &before, const VgVoice &after);
 
+// The first of a voice's numeric fields outside what its macro packs into
+// ToneData (key and pan 0-127, sample ADSR 0-255, CGB A/D/R 0-7 and S 0-15,
+// sweep 0-127, duty 0-3, period 0-1; every minimum is 0). Every editable
+// line in pret pokeemerald and pokeemerald-expansion is in range.
+struct VgFieldRange {
+    QString field; // "key", "pan", "sweep", "duty", "period", "attack", ...
+    int value = 0;
+    int max = 0;
+};
+bool vgVoiceOutOfRange(const VgVoice &voice, VgFieldRange *range);
+
 enum class VgLineKind {
     None,          // slot has no source line (past the file's last voice)
     Other,         // comment / label / directive — verbatim
@@ -261,6 +272,18 @@ class VoicegroupSource
     // walk the source text, like the song-bundle exporter.
     static VgParsedSource parseSource(const QByteArray &content,
                                       const QString &sectionLabel = QString());
+
+    // One voice as its macro line in canonical spacing, with no indent or
+    // line ending ("voice_square_1 60, 0, 0, 2, 0, 0, 15, 0") — what the
+    // voicegroup dock's Copy puts on the clipboard.
+    static QByteArray renderVoiceLine(const VgVoice &voice);
+    // The inverse, through parseSource: text holding exactly one voice line
+    // (a renderVoiceLine result, or a line copied out of a .inc file —
+    // indentation, comments, and surrounding non-voice lines allowed). False
+    // when text holds no voice line, several, or one that isn't Editable (a
+    // cry, a malformed line). *overflow, when given, reports a numeric
+    // argument too large for an int (its field then reads 0).
+    static bool parseVoiceLine(const QByteArray &text, VgVoice *voice, bool *overflow = nullptr);
 
     // Pushes the slot's scalar fields into a loaded ToneData using the C
     // loader's packing, for live audition without a reload. Returns false

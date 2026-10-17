@@ -92,6 +92,12 @@ fixes → commit → user Windows check.
   - Square 1, Square 2, Programmable Wave: **Normal / Detuned** (`_alt`).
   - Hidden for synth, keysplit, drumkit, noise, cry voices.
   - Variants share an envelope family, so ADSR carries over unchanged.
+- **Reverse macro follows the project** (user decision 2026-10-17): Reversed
+  writes whichever reverse macro the project defines — `_alt` or
+  `_reverse` (current upstream pokeemerald defines `_reverse` but not
+  `_alt`). Applies to the radio group AND the existing Type dropdown, which
+  today always writes `_alt`; fix the stale "_alt, which every project has"
+  comment. When both exist, keep `_alt` (vanilla).
 - CHANGELOG `Added` line (simple, user-facing).
 - `docsrc/manual/voicegroups.md`: a TODO-outline section for the user's
   prose (menu items, clipboard text interop, variants). `mkdocs build

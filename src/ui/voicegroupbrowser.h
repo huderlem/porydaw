@@ -5,6 +5,7 @@
 #include <QTreeWidget>
 #include <QWidget>
 #include <functional>
+#include <optional>
 
 extern "C" {
 #include "voicegroup_loader.h"
@@ -27,6 +28,9 @@ enum class VgAuditionKind { Sample, Wave, Keysplit };
 
 // The voicegroup dock (SPEC §6.1): the current song's 128 voicegroup entries
 // with press-and-hold audition, plus an editor panel for the selected voice.
+// A voice row's context menu (and the voicegroup.copy / voicegroup.paste
+// shortcuts) copies, pastes, and clears one voice through the system
+// clipboard as its .inc macro line.
 // Basic voice types (sample/square/wave/noise) plus keysplit, drumkit, and
 // Golden Sun synth voices are editable when a source file was located; cry
 // voices stay read-only.
@@ -112,7 +116,12 @@ class VoicegroupBrowser : public QWidget
     // reflects it back via voiceChanged / a full setVoicegroup. structural
     // means scalar ToneData pokes aren't enough (type or symbol changed) and
     // the voicegroup needs a reload from rendered source to audition.
-    void voiceEditRequested(int slot, const VgVoice &voice, bool structural);
+    // A non-empty undoText names a whole-voice replacement (Paste / Clear):
+    // its own undo entry that never merges with an adjacent editor edit.
+    void voiceEditRequested(int slot, const VgVoice &voice, bool structural,
+                            const QString &undoText = QString());
+    // Why a Paste was refused, for the window's status bar.
+    void statusMessage(const QString &text);
     void newVoicegroupRequested();
     // "New sample…" beside the DirectSound sample combo: create a sample via
     // Sample Editor and point this slot's voice at it. The browser stays a
@@ -135,6 +144,26 @@ class VoicegroupBrowser : public QWidget
   private:
     void pressedVoice(QTreeWidgetItem *item);
     void releaseVoice();
+    // The voice row's context menu (pos in viewport coordinates).
+    void showVoiceMenu(const QPoint &pos);
+    void copyVoice(int slot);
+    void pasteVoice(int slot);
+    void clearVoice(int slot);
+    // The voice on the clipboard: the private MIME's line and synth
+    // descriptor when present, else the plain text parsed as a .inc line.
+    // *overflow (optional) as VoicegroupSource::parseVoiceLine reports it.
+    bool clipboardVoice(VgVoice *voice, std::optional<VgSynthDesc> *synth, bool *overflow) const;
+    // Why a slot has no voice to copy or paste over, for a status message.
+    QString notEditableReason(int slot) const;
+    // Checks a pasted voice against this project (fields in range, macro
+    // defined, symbol known), adopting the project's reverse-macro spelling
+    // and keysplit table, and resolving an unknown (or differently defined)
+    // synth symbol from its descriptor. On refusal *why says why
+    // (empty when the synth mint already reported its own error).
+    bool resolvePastedVoice(VgVoice *voice, const std::optional<VgSynthDesc> &synth, QString *why);
+    // A synth descriptor's symbol: an on-disk definition, then a pending
+    // one, then a newly minted pending one ("" when minting fails).
+    QString synthSymbolFor(const VgSynthDesc &desc) const;
     void markUsedRow(QTreeWidgetItem *item, bool used);
     void populateEditor();
     void commitEdit();
@@ -150,6 +179,8 @@ class VoicegroupBrowser : public QWidget
     QStringList m_vgChoices; // last list handed to setVoicegroupChoices
     QTreeWidget *m_tree = nullptr;
     int m_soundingVoice = -1;
+    // The button of the tree's latest press: only the left one auditions.
+    Qt::MouseButton m_pressButton = Qt::NoButton;
     QSet<int> m_usedVoices;
 
     const LoadedVoiceGroup *m_vg = nullptr;

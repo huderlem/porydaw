@@ -234,7 +234,10 @@ class MainWindow : public QMainWindow
     // performs the deletion.
     void deleteSongById(int songId);
     void uiTick();
-    void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural);
+    // A non-empty undoText (the dock's Paste / Clear) makes the edit one
+    // standalone undo entry under that text.
+    void onVoiceEditRequested(int slot, const VgVoice &voice, bool structural,
+                              const QString &undoText = QString());
     void tabChanged(int index);
     void closeTab(int index);
 
