@@ -52,6 +52,39 @@ struct LaneLatch {
     }
 };
 
+// A punch take's silenced notes (docs/punch/PLAN.md P9): while a punch
+// take records, the song's notes on its track that start inside the punch
+// range don't play (a playback-only mask; the document is untouched until
+// the take commits), and the track's notes still sounding when playback
+// reaches the range's start are released there, as the commit truncates
+// them. The release happens once per pass (cut), re-armed whenever the
+// player is before inSample again (a loop wrap or a seek back), and takes
+// only notes that started before outTick (what the commit truncates; a TIE
+// from after the range carried across a loop wrap keeps sounding) with
+// their gate-carried releases. A key the keyboard holds on the track
+// (held, filled by the caller before each render) is not released: the
+// engine stops channels by track+key, so its note-off would silence the
+// player's own note too; the song's note on that key is let go instead
+// (no longer keyed on), and ends with the keyboard's release. A song
+// note-off on the track for a key the player hasn't keyed on is dropped
+// too: it belongs to a silenced (or released) note, and would otherwise
+// cut the keyboard's own note on that key. Plain data: the audio thread
+// keeps one; offline paths never pass one.
+struct NoteMask {
+    int track = -1;
+    uint64_t inTick = 0, outTick = 0;     // note-ons in [inTick, outTick) are silent
+    uint64_t inSample = 0, outSample = 0; // the same range on the timeline
+    bool cut = false;                     // this pass released the track at inSample
+    uint64_t held[2] = {0, 0};            // keys the keyboard holds on track
+
+    bool any() const { return track >= 0 && outTick > inTick; }
+    bool silences(const TimelineEvent &ev) const
+    {
+        return ev.type == 0x9 && ev.track == track && ev.tick >= inTick && ev.tick < outTick;
+    }
+    bool holds(int key) const { return (held[(key >> 6) & 1] >> (key & 63)) & 1; }
+};
+
 // Walks a MidiTimeline, dispatching events to an M4AEngine and rendering
 // audio between them. Shared by the real-time audio callback (AudioEngine)
 // and the offline render CLI so both play back identically.
@@ -160,8 +193,13 @@ class TimelinePlayer
     // next) and it is cleared in place, so the loop start's events apply on
     // top and the next pass plays the song's own events until the keyboard
     // latches a lane again (J2).
+    //
+    // `mask` (a punch take only; null everywhere else): the notes it silences
+    // are skipped, and its track is released where the range starts
+    // (NoteMask); a render stops at mask->inSample so that lands exactly.
     void render(M4AEngine *engine, const MidiTimeline *timeline, float *outL, float *outR,
-                uint32_t frames, bool looping, uint32_t muteMask, LaneLatch *latch = nullptr);
+                uint32_t frames, bool looping, uint32_t muteMask, LaneLatch *latch = nullptr,
+                NoteMask *mask = nullptr);
 
     // A position at or past the loop end (a start or seek there, or the
     // last render ending exactly on it) wraps before the next render plays
@@ -169,14 +207,16 @@ class TimelinePlayer
     // caller reading position() sees where the sound will come from. A
     // no-op otherwise.
     void settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
-                    uint32_t muteMask, LaneLatch *latch = nullptr);
+                    uint32_t muteMask, LaneLatch *latch = nullptr, NoteMask *mask = nullptr);
 
   private:
     static void dispatchEvent(M4AEngine *engine, const TimelineEvent &ev, uint32_t muteMask);
     // Dispatches every event (and gate-carried release) due at the
-    // position, wrapping the loop as needed; a latch as in render.
+    // position, wrapping the loop as needed; a latch and a mask as in render.
     void dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop, uint32_t muteMask,
-                     LaneLatch *latch);
+                     LaneLatch *latch, NoteMask *mask);
+    // The mask's range starts here: its track's song notes release.
+    void cutMaskedTrack(M4AEngine *engine, const NoteMask &mask);
 
     void wrapNotes(M4AEngine *engine, const MidiTimeline *timeline);
 

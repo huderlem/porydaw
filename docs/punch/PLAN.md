@@ -75,7 +75,9 @@ normal + ASAN sweeps.
    TODO-outline section (user writes the prose); final Opus review of the
    branch.
 
-## 5. Step 1 — as built (2026-10-17, uncommitted)
+## 5. As built
+
+### 5.1 Step 1 (2026-10-17, committed 1176547)
 
 Where it lives: `RecordingTake::setPunchWindow` / `punchedSpans` and the
 window rules in `toNotes` / `toLaneWrites` (core/recordingtake.*); the Punch
@@ -202,3 +204,228 @@ take armed mid-window (Record while playing inside it, or the edit cursor
 inside it) keeps [in, p) — masking all of [in, out) would wrongly silence
 [in, p) on later loop passes. On a loop pass that will record [in, p) too,
 the mask may cover it only once that pass's span covers it.
+
+### 5.2 Step 2 (2026-10-17, uncommitted)
+
+Where it lives: `MidiTimeline::preRollStartTick` (core/miditimeline.*); the
+pre-roll start in `MainWindow::beginRecording` / `startPlayback(…, startTick)`
+and the setting (`punchPreRollBars`, `AudioSettingsPage::kPunchPreRollBars*`,
+`punchPreRollBarsChanged`, combo `settingsPunchPreRoll` under Count-in); the
+mask as `NoteMask` in `TimelinePlayer::render` / `dispatchDue` (core/
+timelineplayer.*) driven by `AudioEngine::setPunchMask` / `clearPunchMask`
+(audio/audioengine.*); the dimming as `RecordingPreview::silenced`
+(ui/songview.*), filled by `syncRecordingPreview`.
+
+Judgment calls:
+
+- **Pre-roll from Stopped only.** Record while Paused in punch mode resumes
+  where it paused (no pre-roll, no count-in), like any take from a pause; the
+  take arms as P10 says (records only in the window). Record while playing is
+  unchanged. The count-in is never used in punch mode (any start), whatever
+  its setting; the metronome clicks during the pre-roll if it is on.
+- **Bars** = `bars × beatsPerBar × beatTicks` of the meter segment in force
+  at punch-in (a meter change exactly at punch-in counts), subtracted in
+  ticks, clamped at 0; meters between are ignored, as P4 says. A pre-roll
+  start at/after the loop end wraps like any start.
+- **Edit cursor untouched.** The pre-roll start is a one-off seek;
+  `startPlayback` takes a start tick that overrides the cursor only from
+  Stopped. Stop returns to the edit cursor as always (not the pre-roll start).
+- **The mask is player-side, not a rebuilt timeline.** A masked timeline
+  would need a rebuild (`updateTimeline` = all-notes-off) at take start and
+  at the end; instead `TimelinePlayer` skips the target track's note-ons with
+  tick in [in, out) while a `NoteMask` is passed (the live render only;
+  offline renders pass none, one pointer test per event), so nothing restarts.
+  The UI publishes {generation, track, in, out} before `armCapture`; the
+  audio thread loads it **at the take's Begin** (syncCapture), so it only
+  ever applies from where recording started.
+- **Equality with the commit's replaced spans.** `punchedSpans` = the take's
+  recorded segments ∩ [in, out). The player only moves forward within a
+  segment, so masking note-ons in [in, out) from the segment's start on
+  silences exactly [max(in, segment start), out) of each pass — the spans
+  the commit replaces (a later pass starting at the loop start ≤ in covers
+  [in, …) as it plays; a stop inside ends both at the stop). Deviation: the
+  commit rounds span edges to ticks (`tickAt`), the mask works on the
+  playback position, so a take armed inside the window can differ by ≤ 1
+  tick at its Begin (a note on that tick may play and then be deleted, or
+  vice versa).
+- **Cut.** Song notes the target track still sounds when the pass reaches
+  max(in, Begin) are released there (once per pass; re-armed when the
+  player is before in again — a wrap or a seek), with their gate-carried
+  releases dropped: the commit truncates them there. Only notes keyed on
+  before out (a TIE or gate-carried note from after out, carried across a
+  loop wrap, isn't the commit's and keeps sounding), and never a key the
+  keyboard holds on the track (review fixes M1/M2 below). A render stops at
+  in's sample so the cut is sample-exact. A song note-off on the masked
+  track for a key the player hasn't keyed on is dropped too, so a silenced
+  (or cut) note's note-off never kills the keyboard's own note on that key.
+- **Lifetime.** Kept after the disarm until the take's commit lands (as
+  revised by review fix L2 below): narrowed at the take's end to what the
+  commit replaces, kept through other rebuilds while the commit waits,
+  dropped by the commit's own rebuild, or at once when the commit writes
+  nothing; also dropped by a Stop/Pause transition, a seek while not
+  capturing, another arm, followTakeTrack's drop, `loadSong`/`unloadSong`.
+- **Mid-take edit**: `updateTimeline` while capturing keeps the mask and
+  recomputes its samples from its ticks (a tempo edit moves them).
+- **Track move**: `followLiveTrack` moves the mask's track with the live
+  target and the latch in `updateTimeline`; `followTakeTrack` also updates
+  the published track for a Begin that hasn't happened yet.
+- **Dimming** (as revised by review fix L1): `RecordingPreview::silenced`
+  = `RecordingTake::silencedTickSpans`, what the engine is silencing; the
+  roll paints the take track's notes starting there at
+  fill alpha 70 (`kPunchSilencedAlpha`), or half the ghost alpha when the
+  track isn't selected. Notes sounding *into* the range (cut, truncated at
+  commit) aren't dimmed. After the take ends, the frozen ghosts carry the
+  replaced span while the commit waits (L2); cleared when it lands and
+  when the take's track is deleted.
+- Settings: the combo sits under "Count-in when recording:" as "Punch
+  pre-roll:", Restore Defaults resets it to 1 bar; the count-in tooltip now
+  says it isn't used for a punch recording.
+- Step-1 checks: `checkRecordingPunch` pins the pre-roll to 1 bar and its
+  two-loop-pass case now arms while playing (from Stopped it would pre-roll
+  before punch-in instead of starting at beat 12).
+
+Checks: metrocheck `checkPreRoll` (Off, 1 and 2 bars in 4/4, 6/8 and on/
+around the 3/4 change of the grid song, an exact-bar 0 and the clamp at 0).
+reccheck `MainWindow::checkRecordingPunchMask` (device held, two
+DirectSound tracks soloed, count-in set to 2 bars throughout): the Settings
+combo applies and persists; Record from Stopped starts (seek target and the
+take's Begin) at in / in − 1 bar / in − 2 bars with no count-in, clamps at
+0 (punch-in at bar 1.5), measures a 3/4 set at punch-in as 3 beats, never
+moves the edit cursor and Stop goes back to it; from a pause it resumes in
+place. Through a take: the track's note before punch-in sounds and the
+mask is set; inside the range the target track sounds nothing (a note
+starting inside silent, one sounding into it cut) while the other track's
+note plays; `silenced` == [in, out); the roll's pixel at the silenced note
+changes with the dimming; the keyboard's key outlives a silenced note's
+note-off; a mid-take edit keeps the mask (a later note in range still
+silent); the note at punch-out plays; Stop clears mask and dimming and the
+range plays again; Record again and Pause inside the range each clear the
+mask and the rest of the range plays (at once / on resume); a tab switch
+mid-take clears it and the range plays after coming back; deleting the
+track clears it; a track move moves it (the moved track silent in range,
+soloed alone); a take armed inside the range on a [8, 16)-beat loop: the
+note before the Begin plays, the Begin cuts the track, `silenced` ==
+[begin, out), the rest of the pass silent, after the wrap the note before
+punch-in plays and from punch-in the track is silent again, `silenced` ==
+[in, out).
+
+Mutation tests (by hand via a scripted apply, rebuilt, metrocheck +
+reccheck run, restored from backup files): caught — note-on mask off
+(6 reccheck fails), cut at range start removed (3), masked note-off skip
+removed (1), cut not re-armed on a new pass (1), mask not loaded at Begin
+(11), rebuild always drops it (4), mask not following a track move (2), UI
+never sets it (11), every take-end clear removed (7; with the
+loadSong/unloadSong clears too, 9), the rebuild drop and UI clears removed
+together (3), pre-roll ignoring bars (metrocheck 10, reccheck 15), meter at
+tick 0 instead of punch-in (6, 2), no clamp (2, 1), count-in used in punch
+mode (7), start at the edit cursor (7), pre-roll setting not persisted (1),
+combo not emitting (2), dimming not painted (1), `silenced` ignoring the
+Begin (1), `silenced` never set (4). Not caught, by design (redundant
+nets): the audio-side drops alone (the UI clear remains), the UI clears
+alone or with the Stop/Pause transition drops (the commit's rebuild drops
+it), the loadSong clear alone (the UI clear). The render stopping at in's
+sample is now checked and mutation-tested (review checks below). Not tested directly: project switch, quit and song-end auto-stop
+(they end the take through `finishRecording` / the Stopped transition /
+`unloadSong`, all covered above).
+
+Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
+~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan, build-dummy,
+build-nomidi, build-off: clean. clang-format 22 on touched files.
+
+#### Step 2 review fixes (2026-10-17, uncommitted)
+
+- **M1 — held key across punch-in.** The engine stops channels by
+  track+key, so the cut's `m4a_engine_note_off` also silenced the
+  keyboard's own note on that key (held across in, or held at a Begin
+  inside the window). `NoteMask::held` (128 bits) is filled before every
+  render/settleWrap from the held entries of `m_timedActive` on the mask's
+  track (`AudioEngine::fillPunchHeld`); the cut skips the note-off for
+  those keys and just forgets the song's note (no longer keyed on, its
+  gate-carried release dropped). Chosen over re-striking, which would
+  re-attack at in a note the player didn't play. The song's note on that
+  key sounds on under the held one until the keyboard's release
+  (`releaseActive` stops both); its own note-off is dropped as before
+  (not keyed on).
+- **M2 — only what the commit truncates.** The cut releases only keys with
+  `m_keyedOnTick < outTick`, and drops only those keys' gate-carried
+  releases: a TIE or gate-carried note starting after out, carried into
+  the next pass by a loop wrap, keeps sounding (the commit doesn't touch
+  it), and its release still fires.
+- **L1 — dimming = what is silenced and replaced.**
+  `RecordingTake::silencedTickSpans` = `punchedSpans` (what the commit
+  replaces so far) ∪ the current pass's [max(in, segment start), out);
+  `RecordingPreview::silenced` is now a sorted span list. The segment-0
+  special case is gone: a loop start inside the window dims from the loop
+  start on later passes, and a seek forward inside the window leaves the
+  skipped stretch undimmed.
+- **L2 — deferred commit.** `clearPunchMask(generation)` is
+  generation-guarded (compare-exchange gen → 0 inside the seqlock write):
+  a late clear never wipes a newer take's request. Beyond the review's
+  suggestion: keeping the whole [in, out) mask through a deferred commit
+  would silence the rest of the window after a take ended inside it (the
+  commit doesn't replace that), so at the take's end (`finishRecording`)
+  the mask is narrowed (`narrowPunchMask`) to the replaced span and the
+  frozen ghosts carry it as `silenced`. Several replaced spans (rare:
+  armed inside and wrapped, or a seek inside) clear it at once instead
+  (the old part may sound until the commit lands, as before); no spans
+  clear it at once. `commitTake` leaves the mask alone while it defers;
+  landing, it calls `endPunchMaskAtRebuild(take)` before its edits, so
+  the edit's own rebuild drops the mask together with the old notes (no
+  moment of old part, and no moment of the new part masked), and
+  `clearPunchMask(take)` after (which drops it at once when nothing was
+  written: a locked document, a vanished track, a no-op replace).
+  `updateTimeline` while not capturing keeps a mask whose generation is
+  still published and not ending (the open group's own edits rebuild
+  first). Left as is: a Stop/Pause, or a seek, while the commit waits
+  still drops the mask (ordinary playback from there).
+- **L3 — torn reads.** The request is a seqlock: `m_punchSeq` (odd while
+  the UI writes), the fields atomics (generation, track, in, out,
+  ending), written only on the UI thread (`writePunchRequest`); the audio
+  thread reads a snapshot and re-checks the sequence (`readPunchRequest`,
+  16 tries). A Begin whose read keeps tearing loads at the next callback
+  (`m_punchLoadPending`). `applyPunchMask` re-reads only when the
+  sequence moved: a cleared or other generation drops the mask, the same
+  one applies a narrowed range (the track follows the take via
+  `followLiveTrack`, so the request's track is read only at a Begin).
+- **Simplification.** The eight reset pairs are `dropPunchMask()`.
+
+Checks added (reccheck `checkRecordingPunchMask`, after the loop case):
+a key held across punch-in on the key of the old part's note sounding
+into the range (41) keeps sounding past in and past the song note's
+note-off, and stops with the release — from Stopped and armed inside the
+range (M1); on an [8, 16)-beat loop a TIE (50) and a gate-carried note
+(52) from after punch-out survive punch-in on the next pass, and 52's
+carried release still fires (M2); a take armed inside the range on an
+[11, 20)-beat loop dims [begin, out), then [11, out) after the wrap; a
+seek forward inside the range dims [in, left) and [landing, out) (L1);
+with an edit group open (and an edit in it, a rebuild), a take ended past
+punch-out on a loop keeps the next pass's range silent and dimmed until
+the commit lands, then the mask is gone; a take ended inside the range
+keeps a narrowed mask and the rest of the range plays; a locked
+document's failed commit drops the mask at once (the next pass plays the
+old part); a newer take armed while the older commit waits keeps its mask
+when that commit lands (L2); Record from a pause inside the range masks
+and dims from the Begin and replaces from it; the release at punch-in is
+sample-exact (punch-in a few ticks off any event, the player pumped to
+three frames before inSample with 41 sounding, then one 4-frame period
+releases it). metrocheck `checkPreRoll`: mid-bar punch-ins in 4/4, in 6/8
+two bars back into 4/4, and in 3/4 two bars back across 6/8 into 4/4.
+
+Mutation tests (scripted apply, rebuilt, reccheck and/or metrocheck run,
+restored from backup files): caught — held keys not skipped (4 fails),
+held mask never filled (4), no keyed-on-tick test (2), all of the track's
+pending offs dropped (1), dimming from in (5), dimming without the
+replaced spans (1), no narrowing (2), narrowing skipped with the mask kept
+(1), rebuild always drops (1), no `endPunchMaskAtRebuild` (2), no landing
+clear (1, the locked case), unguarded clear (1), render not stopping at
+inSample (1), pre-roll meter from tick 0 (metrocheck 8 incl. both new
+cross-meter cases, reccheck 2). Not mutation-tested: the seqlock retry
+and the pending load (a torn read needs a UI write racing the audio
+read; not reproducible deterministically in the harness); Record from a
+pause has no pause-specific code (its check fails under the dimming
+mutation).
+
+Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
+~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan,
+build-dummy, build-nomidi, build-off: clean. clang-format 22 on touched
+files.

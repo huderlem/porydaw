@@ -2741,6 +2741,7 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
     }
 
     checkRecordingPunch(a, b);
+    checkRecordingPunchMask(scratchDir);
     checkRecordingDisplay();
     checkRecordingFlood();
     m_countInBars = countInBars;
@@ -2837,6 +2838,9 @@ void MainWindow::checkRecordingPunch(int a, int b)
     midi.setLivePlay(true);
     const bool loopWas = m_loopAction->isChecked();
     m_loopAction->setChecked(false);
+    // These takes start a bar before punch-in (checkRecordingPunchMask
+    // covers the pre-roll).
+    const int preRollWas = std::exchange(m_punchPreRollBars, 1);
 
     // The toggle.
     check(m_punchAction && m_punchAction->isCheckable() &&
@@ -3095,6 +3099,9 @@ void MainWindow::checkRecordingPunch(int a, int b)
             const int undoBefore = undo->index();
             selectTicks(in, out);
             view->setEditCursorTick(tpb * 12);
+            // Armed while playing (P10): from Stopped a punch take would
+            // start its pre-roll before punch-in instead.
+            startPlayback();
             m_recordAction->trigger();
             pumpMs(20);
             const uint64_t p70 = playhead();
@@ -3498,6 +3505,794 @@ void MainWindow::checkRecordingPunch(int a, int b)
     }
     view->clearTimeSelection();
     m_loopAction->setChecked(loopWas);
+    m_punchPreRollBars = preRollWas;
+}
+
+// Punch pre-roll and the old part's silencing (docs/punch/PLAN.md step 2),
+// the device held: Record from Stopped in punch mode starts Off / 1 / 2 bars
+// of punch-in's meter before it (clamped at 0, a meter change at punch-in
+// measuring), with no count-in, the edit cursor left where it was (Stop
+// goes back to it); from a pause it resumes in place. During the take the
+// target track's notes starting in the range are silent (other tracks, and
+// the track outside the range, play), a note sounding into it is cut at
+// punch-in (or where a take armed inside it began), the roll dims them,
+// and the mask holds through a mid-take edit, follows a track move, covers
+// [begin, out) on the first pass and [in, out) on a later loop pass, and
+// goes on every take-ending path (Stop, Record again, Pause, a tab switch,
+// the track deleted), the old part playing again after.
+void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
+{
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const M4AEngine *engine = m_audio.engineForTest();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto playhead = [&] { return m_audio.playheadSamples(); };
+    const auto sampleOf = [&](uint64_t tick) { return session->timeline->sampleForTick(tick); };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    // At least once: a start's seek lands in the first callback.
+    const auto pumpTo = [&](uint64_t tick) {
+        pumpMs(5);
+        for (int i = 0; i < 4000 && playhead() < sampleOf(tick); i++)
+            pumpMs(5);
+    };
+    const auto recording = [&] { return m_takeSession != nullptr; };
+    const auto message = [&] { return statusBar()->currentMessage(); };
+    const auto mask = [&] { return m_audio.punchMaskForTest(); };
+    // Keys of the channels keyed on (sounding, not yet released) on a track.
+    const auto keyed = [&](int track) {
+        std::vector<int> keys;
+        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+            const M4APCMChannel &ch = engine->pcmChannels[i];
+            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                ch.trackIndex == track)
+                keys.push_back(ch.midiKey);
+        }
+        for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+            const M4ACGBChannel &ch = engine->cgbChannels[i];
+            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                ch.trackIndex == track)
+                keys.push_back(ch.midiKey);
+        }
+        std::sort(keys.begin(), keys.end());
+        return keys;
+    };
+    const auto has = [](const std::vector<int> &keys, int key) {
+        return std::find(keys.begin(), keys.end(), key) != keys.end();
+    };
+    const auto printKeys = [](const char *what, const std::vector<int> &keys) {
+        std::string list;
+        for (const int k : keys)
+            list += " " + std::to_string(k);
+        std::fprintf(stderr, "reccheck:   %s:%s\n", what, list.c_str());
+    };
+    const uint64_t tpb = session->timeline->ticksPerBeat;
+    const auto selectTicks = [&](uint64_t start, uint64_t end) {
+        SongView::TimeSelection sel;
+        sel.startTick = start;
+        sel.endTick = end;
+        view->setTimeSelection(sel);
+    };
+    const uint64_t in = tpb * 10, out = tpb * 14;
+    using Spans = std::vector<std::pair<uint64_t, uint64_t>>;
+
+    // Two tracks playing a DirectSound voice at punch-in (one channel per
+    // note, so a chord is visible), the first preferably a looping one, so
+    // a note sounding into the range is still sounding when it is cut.
+    m_audio.seek(sampleOf(in));
+    pumpMs(10);
+    int pa = -1, pb = -1;
+    bool paLoops = false;
+    for (int t = 0; t < MAX_TRACKS; t++) {
+        const ToneData &voice = engine->tracks[t].currentVoice;
+        if (!session->timeline->tracks[t].used || doc.smfTrackFor(t) < 0 ||
+            (voice.type & 0xC7) != 0 || !voice.wav)
+            continue;
+        const bool loops = (voice.wav->status & 0x4000) != 0 && voice.sustain > 0;
+        if (pa < 0 || (loops && !paLoops)) {
+            if (pa >= 0 && pb < 0)
+                pb = pa;
+            pa = t;
+            paLoops = loops;
+        } else if (pb < 0) {
+            pb = t;
+        }
+    }
+    if (!check(pa >= 0 && pb >= 0, "punch mask: the song has no two DirectSound tracks"))
+        return;
+    std::printf("reccheck: punch mask on track %d%s, other track %d\n", pa,
+                paLoops ? " (looping)" : "", pb);
+    MidiInput &midi = midiInput();
+    midi.setLatencyMs(0);
+    midi.setFixedVelocity(0);
+    midi.setLivePlay(true);
+    const bool loopWas = m_loopAction->isChecked();
+    m_loopAction->setChecked(false);
+    const bool punchWas = m_punchAction->isChecked();
+    m_punchAction->setChecked(true);
+    const int countInWas = std::exchange(m_countInBars, 2); // never used in punch mode
+    const int preRollWas = m_punchPreRollBars;
+    const bool followWas = m_followPlayheadAction->isChecked();
+    m_followPlayheadAction->setChecked(false);
+    view->selectTrack(pa);
+    // Only the two tracks sound, so the song's other notes can't steal
+    // the probes' channels.
+    const auto soloBoth = [&] { m_audio.setSoloMask((1u << pa) | (1u << pb)); };
+    soloBoth();
+
+    // Settings → Audio drives the pre-roll.
+    if (m_settingsDialog) {
+        m_settingsDialog->audioPage()->setPunchPreRollBars(2);
+        check(m_punchPreRollBars == 2, "pre-roll: the Settings page did not set 2 bars");
+        const bool persist = std::exchange(m_persistSession, true);
+        m_settingsDialog->audioPage()->setPunchPreRollBars(0);
+        check(m_punchPreRollBars == 0 &&
+                  QSettings().value(QStringLiteral("punchPreRollBars"), -1).toInt() == 0,
+              "pre-roll: Off from the Settings page was not applied and persisted");
+        m_persistSession = persist;
+        m_settingsDialog->audioPage()->setPunchPreRollBars(1);
+    }
+
+    // P4: where Record from Stopped starts. bar: punch-in's meter.
+    const auto barAt = [&](uint64_t tick) {
+        uint64_t bar = tpb * 4;
+        for (const MidiTimeline::TimeSigSegment &s : session->timeline->timeSigSegments())
+            if (s.tick <= tick)
+                bar = s.beatTicks * uint64_t(s.beatsPerBar);
+        return bar;
+    };
+    const auto startsAt = [&](uint64_t from, uint64_t to, int bars, uint64_t want,
+                              const char *what) {
+        const int undoBefore = undo->index();
+        m_punchPreRollBars = bars;
+        selectTicks(from, to);
+        const uint64_t cursor = to + tpb; // the edit cursor plays no part
+        view->setEditCursorTick(cursor);
+        m_recordAction->trigger();
+        const bool seeked = m_audio.targetPlayheadSamples() == sampleOf(want);
+        const bool counting = m_audio.countingIn();
+        pumpMs(20);
+        drainCapture();
+        const bool begun = m_take.started() && m_take.punchInSample() == sampleOf(want);
+        const bool said = message().startsWith(QStringLiteral("Punch recording into "));
+        if (!check(recording() && seeked && begun && !counting && said, what))
+            std::fprintf(stderr, "reccheck:   want tick %llu (sample %llu), began at %llu%s\n",
+                         (unsigned long long)want, (unsigned long long)sampleOf(want),
+                         (unsigned long long)m_take.punchInSample(),
+                         counting ? ", counting in" : "");
+        check(view->editCursorTick() == cursor, "pre-roll: Record moved the edit cursor");
+        m_stopAction->trigger();
+        check(m_audio.targetPlayheadSamples() == sampleOf(cursor),
+              "pre-roll: Stop did not go back to the edit cursor");
+        while (undo->index() > undoBefore)
+            undo->undo();
+    };
+    {
+        const uint64_t bar = barAt(in);
+        startsAt(in, out, 0, in, "pre-roll: Off did not start at punch-in (without a count-in)");
+        startsAt(in, out, 1, in - bar, "pre-roll: 1 bar did not start a bar before punch-in");
+        startsAt(in, out, 2, in >= 2 * bar ? in - 2 * bar : 0,
+                 "pre-roll: 2 bars did not start two bars before punch-in");
+        // Clamped at 0: punch-in one and a half bars in.
+        const uint64_t early = barAt(0) + barAt(0) / 2;
+        startsAt(early, early + tpb * 2, 1, early - barAt(0),
+                 "pre-roll: 1 bar at bar 1.5 did not start half a bar in");
+        startsAt(early, early + tpb * 2, 2, 0, "pre-roll: 2 bars at bar 1.5 were not clamped at 0");
+        // Punch-in's own meter: 3/4 from punch-in, whatever came before.
+        const int undoBefore = undo->index();
+        doc.setTimeSig(in, 3, 2);
+        if (check(barAt(in) == tpb * 3, "pre-roll: the 3/4 at punch-in could not be set")) {
+            startsAt(in, out, 1, in - tpb * 3,
+                     "pre-roll: 1 bar of a 3/4 at punch-in was not 3 beats");
+            startsAt(in, out, 2, in - tpb * 6,
+                     "pre-roll: 2 bars of a 3/4 at punch-in were not 6 beats");
+        }
+        while (undo->index() > undoBefore)
+            undo->undo();
+        // From a pause it resumes where it paused, no pre-roll, no count-in.
+        m_punchPreRollBars = 1;
+        view->setEditCursorTick(in - 2 * tpb);
+        startPlayback();
+        pumpMs(100);
+        pausePlayback();
+        const uint64_t paused = m_audio.targetPlayheadSamples();
+        selectTicks(in, out);
+        m_recordAction->trigger();
+        pumpMs(20);
+        drainCapture();
+        check(recording() && m_audio.transport() == Transport::Playing && !m_audio.countingIn() &&
+                  m_take.started() && m_take.punchInSample() == paused,
+              "pre-roll: Record from a pause did not resume the punch take where it paused");
+        const int undoAt = undo->index();
+        m_stopAction->trigger();
+        while (undo->index() > undoAt)
+            undo->undo();
+    }
+
+    // The fixture. On the target track: one sounding into punch-in (41),
+    // two inside (40, 45), one at punch-out (44); on the other, one
+    // inside (43).
+    const int undoBase = undo->index();
+    doc.beginEditGroup(QStringLiteral("punch mask setup"));
+    doc.addNote(pa, in - tpb, 41, uint32_t(3 * tpb), 100);
+    doc.addNote(pa, in + tpb, 40, uint32_t(tpb), 100);
+    doc.addNote(pa, in + 3 * tpb, 45, uint32_t(tpb / 2), 100);
+    doc.addNote(pa, out, 44, uint32_t(tpb), 100);
+    doc.addNote(pb, in + tpb, 43, uint32_t(tpb), 100);
+    doc.endEditGroup();
+    const int undoSetup = undo->index();
+    soloBoth();
+    m_punchPreRollBars = 1;
+
+    // Through a take: the old part silent, the rest playing; dimmed in the
+    // roll; a mid-take edit keeps it.
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in - tpb / 4);
+        check(has(keyed(pa), 41) && mask().any() && mask().track == pa && mask().inTick == in &&
+                  mask().outTick == out,
+              "punch mask: before punch-in the track's note does not sound, or no mask is set");
+        pumpTo(in + tpb + tpb / 4);
+        if (!check(keyed(pa).empty(), "punch mask: the target track sounds inside the punch "
+                                      "range (a note starting there, or one sounding into it)"))
+            printKeys("track keys", keyed(pa));
+        check(has(keyed(pb), 43), "punch mask: another track's note in the range is silent");
+        synchronizePlayhead();
+        check(view->recordingPreview().silenced == Spans{{in, out}},
+              "punch mask: the roll's silenced range is not the punch range");
+        // Dimmed: the silenced note's fill changes with the range.
+        if (auto *roll = view->findChild<QWidget *>(QStringLiteral("pianoRoll"))) {
+            resize(1400, 900);
+            show();
+            QApplication::processEvents();
+            SongView::ViewState state = view->viewState();
+            state.pxPerBeat = 96.0;
+            state.keyHeight = 16.0;
+            view->applyViewState(state);
+            view->ensureKeyVisible(40);
+            view->ensureTickVisible(in + tpb + tpb / 2);
+            QApplication::processEvents();
+            SongDocument::NewNote n{in + tpb, 40, uint32_t(tpb), 100};
+            const QRectF r = view->recordingPreviewNoteRect(n);
+            const QPointF at(r.left() + r.width() * 0.75, r.center().y());
+            const qreal dpr = roll->devicePixelRatioF();
+            const auto pixel = [&] {
+                return roll->grab().toImage().pixelColor(int(at.x() * dpr), int(at.y() * dpr));
+            };
+            const QColor dimmed = pixel();
+            RecordingPreview plain = view->recordingPreview();
+            plain.silenced.clear();
+            view->setRecordingPreview(plain);
+            const QColor full = pixel();
+            if (!check(r.width() > 4 && at.x() > songview::kKeyboardW && at.x() < roll->width() &&
+                           dimmed != full,
+                       "punch mask: the roll does not dim the silenced note"))
+                std::fprintf(stderr, "reccheck:   at %.0f,%.0f: %s vs %s\n", at.x(), at.y(),
+                             qPrintable(dimmed.name()), qPrintable(full.name()));
+            synchronizePlayhead();
+        }
+        // The keyboard's own 40 outlives the silenced 40's note-off.
+        const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+            midi.injectForTest({status, d1, d2});
+        };
+        send(0x90, 40, 100);
+        pumpTo(in + 2 * tpb + tpb / 8);
+        check(has(keyed(pa), 40),
+              "punch mask: a silenced note's note-off cut the keyboard's note on its key");
+        send(0x80, 40, 0);
+        pumpMs(5);
+        // A document edit mid-take (a rebuild) keeps the mask.
+        doc.addNote(pb, out + 8 * tpb, 70, uint32_t(tpb), 80);
+        pumpMs(5);
+        check(recording() && mask().any() && mask().track == pa,
+              "punch mask: a mid-take edit dropped the mask");
+        pumpTo(in + 3 * tpb + tpb / 8);
+        if (!check(!has(keyed(pa), 45), "punch mask: after a mid-take edit a note in the "
+                                        "range sounds"))
+            printKeys("track keys", keyed(pa));
+        pumpTo(out + tpb / 4);
+        check(has(keyed(pa), 44), "punch mask: the track's note at punch-out is silent");
+        m_stopAction->trigger();
+        pumpMs(5);
+        check(!mask().any() && view->recordingPreview().silenced.empty(),
+              "punch mask: Stop left the mask (or the dimming)");
+        while (undo->index() > undoSetup)
+            undo->undo();
+        // The old part plays again.
+        view->setEditCursorTick(in + tpb / 2);
+        startPlayback();
+        pumpTo(in + tpb + tpb / 4);
+        check(has(keyed(pa), 40), "punch mask: after Stop the range's note stays silent");
+        m_stopAction->trigger();
+    }
+
+    // Record again and Pause inside the range end the take there: the rest
+    // of the range plays (45, after the replaced part) at once / on resume.
+    for (const bool pause : {false, true}) {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in + 2 * tpb);
+        (pause ? m_pauseAction : m_recordAction)->trigger();
+        pumpMs(5);
+        check(!recording() && !mask().any(),
+              pause ? "punch mask: Pause left the mask" : "punch mask: Record again left the mask");
+        if (pause)
+            startPlayback();
+        pumpTo(in + 3 * tpb + tpb / 8);
+        check(has(keyed(pa), 45),
+              pause ? "punch mask: after Pause and Play the rest of the range is silent"
+                    : "punch mask: after Record again the rest of the range is silent");
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // A tab switch mid-take ends it; coming back, the range plays.
+    {
+        const QString bundle = QDir(scratchDir).filePath(QStringLiteral("reccheck.porysong"));
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in + tpb / 2);
+        QString error;
+        if (check(QFileInfo::exists(bundle) && openBundle(bundle, &error) && m_active &&
+                      m_active->bundle,
+                  "punch mask: the bundle tab did not open")) {
+            pumpMs(5);
+            check(!recording() && !mask().any(), "punch mask: a tab switch left the mask");
+            closeTab(m_tabs->indexOf(m_active->view));
+        }
+        check(m_active == session, "punch mask: closing the bundle tab did not return");
+        soloBoth();
+        while (undo->index() > undoSetup)
+            undo->undo();
+        view->setEditCursorTick(in + tpb / 2);
+        startPlayback();
+        pumpTo(in + tpb + tpb / 4);
+        check(!mask().any() && has(keyed(pa), 40),
+              "punch mask: after a tab switch the range's note stays silent");
+        m_stopAction->trigger();
+    }
+
+    // Deleting the take's track ends the take and its mask.
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in - tpb / 2);
+        check(mask().any(), "punch mask: no mask before the track was deleted");
+        doc.deleteTrack(pa);
+        pumpMs(5);
+        check(!recording() && !mask().any(), "punch mask: deleting the take's track left the mask");
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+        view->selectTrack(pa);
+        soloBoth();
+    }
+
+    // A track move mid-take: the mask goes with the track.
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in - tpb / 2);
+        check(doc.moveTrack(pa, pb), "punch mask: the track move mid-take failed");
+        const int moved = m_take.track();
+        pumpMs(5);
+        // Only the moved track sounds: its own note in the range would.
+        m_audio.setSoloMask(1u << moved);
+        check(moved != pa && mask().track == moved,
+              "punch mask: the mask did not follow the take's track move");
+        pumpTo(in + tpb + tpb / 4);
+        if (!check(keyed(moved).empty(), "punch mask: after a track move the moved track sounds "
+                                         "in the range"))
+            printKeys("moved track keys", keyed(moved));
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+        view->selectTrack(pa);
+        soloBoth();
+    }
+
+    // Loop passes, a take armed inside the range (P10): before the Begin
+    // the range plays; from it the track is cut and silent to punch-out;
+    // the next pass is silent from punch-in, a note sounding into it cut.
+    {
+        doc.setLoopTick(false, int64_t(tpb * 8));
+        doc.setLoopTick(true, int64_t(tpb * 16));
+        doc.setLoopTick(false, int64_t(tpb * 8));
+        soloBoth();
+        if (check(session->timeline->hasLoop() && session->timeline->loopStartTick == tpb * 8 &&
+                      session->timeline->loopEndTick == tpb * 16,
+                  "punch mask: the loop could not be set")) {
+            m_loopAction->setChecked(true);
+            selectTicks(in, out);
+            view->setEditCursorTick(in + tpb / 2);
+            startPlayback();
+            pumpTo(in + tpb + tpb / 4);
+            check(has(keyed(pa), 40), "punch mask: before Record the range's note is silent");
+            m_recordAction->trigger();
+            pumpMs(10);
+            if (!check(recording() && keyed(pa).empty(),
+                       "punch mask: a take armed inside the range did not cut the track there"))
+                printKeys("track keys", keyed(pa));
+            synchronizePlayhead();
+            const uint64_t begin = tickOf(m_take.punchInSample());
+            check(view->recordingPreview().silenced == Spans{{begin, out}} && begin > in,
+                  "punch mask: the first pass's silenced range is not [begin, out)");
+            pumpTo(in + 3 * tpb + tpb / 8);
+            check(!has(keyed(pa), 45), "punch mask: the first pass plays a note in the range");
+            const uint64_t pA = playhead();
+            for (int i = 0; i < 4000 && playhead() >= pA; i++)
+                pumpMs(5);
+            check(playhead() < pA, "punch mask: the loop never wrapped");
+            pumpTo(in - tpb / 2);
+            check(has(keyed(pa), 41),
+                  "punch mask: the second pass's note before punch-in is silent");
+            pumpTo(in + tpb + tpb / 4);
+            if (!check(keyed(pa).empty(), "punch mask: the second pass sounds the track in the "
+                                          "range (from punch-in)"))
+                printKeys("track keys", keyed(pa));
+            synchronizePlayhead();
+            check(view->recordingPreview().silenced == Spans{{in, out}},
+                  "punch mask: the second pass's silenced range is not the punch range");
+            m_stopAction->trigger();
+            m_loopAction->setChecked(false);
+        }
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // Review checks (docs/punch/PLAN.md §5.2 review fixes).
+    const auto sendKey = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto setLoop = [&](uint64_t start, uint64_t end) {
+        doc.setLoopTick(true, int64_t(end));
+        doc.setLoopTick(false, int64_t(start));
+        doc.setLoopTick(true, int64_t(end));
+        doc.setLoopTick(false, int64_t(start));
+        soloBoth();
+        return check(session->timeline->hasLoop() && session->timeline->loopStartTick == start &&
+                         session->timeline->loopEndTick == end,
+                     "punch mask: the loop could not be set");
+    };
+    const auto hasNote = [&](int track, uint64_t tick, int key) {
+        for (const DocNote &n : doc.notesForTrack(track))
+            if (n.key == key && n.tick == tick)
+                return true;
+        return false;
+    };
+    const auto waitForUndo = [&](int index) {
+        QElapsedTimer waited;
+        waited.start();
+        while (undo->index() < index && waited.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 10);
+        return undo->index() >= index;
+    };
+
+    // M1: a key the keyboard holds across punch-in, the same key as the old
+    // part's note sounding into the range (41), keeps sounding: the range's
+    // start releases the song's note without stopping the keyboard's. From
+    // Stopped (the cut as playback reaches punch-in) and armed inside the
+    // range (the cut at the take's Begin).
+    for (const bool armedInside : {false, true}) {
+        selectTicks(in, out);
+        if (armedInside) {
+            view->setEditCursorTick(in - 2 * tpb);
+            startPlayback();
+            pumpTo(in - tpb / 4);
+            sendKey(0x90, 41, 100);
+            pumpTo(in + tpb / 2);
+            m_recordAction->trigger();
+            pumpMs(10);
+        } else {
+            view->setEditCursorTick(in - 2 * tpb);
+            m_recordAction->trigger();
+            pumpTo(in - tpb / 2);
+            sendKey(0x90, 41, 100);
+            pumpTo(in + tpb / 4);
+        }
+        if (!check(recording() && mask().any() && has(keyed(pa), 41),
+                   armedInside ? "punch mask: a take armed inside the range cut the key the "
+                                 "keyboard holds on the old part's key"
+                               : "punch mask: punch-in cut the key the keyboard holds on the "
+                                 "old part's key"))
+            printKeys("track keys", keyed(pa));
+        // Past the song's 41's own note-off (dropped: it isn't keyed on).
+        pumpTo(in + 2 * tpb + tpb / 8);
+        check(has(keyed(pa), 41),
+              "punch mask: the old part's note-off cut the key the keyboard holds");
+        sendKey(0x80, 41, 0);
+        pumpMs(5);
+        if (!check(!has(keyed(pa), 41),
+                   "punch mask: the old part's note on the held key outlived the release"))
+            printKeys("track keys", keyed(pa));
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // M2: notes from after punch-out carried into the next pass by a loop
+    // wrap are not the commit's to truncate, so punch-in doesn't release
+    // them: a TIE (held forever, 50) and a gate-carried note (52, released
+    // at its written length after the wrap, 3/4 beat past punch-in).
+    if (setLoop(tpb * 8, tpb * 16)) {
+        doc.beginEditGroup(QStringLiteral("punch carry setup"));
+        doc.addNote(pa, tpb * 15, 50, uint32_t(6 * tpb), 100);
+        doc.addNote(pa, tpb * 15, 52, uint32_t(tpb * 15 / 4), 100);
+        doc.endEditGroup();
+        soloBoth();
+        m_loopAction->setChecked(true);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(tpb * 15 + tpb / 2);
+        check(has(keyed(pa), 50) && has(keyed(pa), 52),
+              "punch mask: the notes after punch-out don't sound");
+        const uint64_t pA = playhead();
+        for (int i = 0; i < 4000 && playhead() >= pA; i++)
+            pumpMs(5);
+        pumpTo(in + tpb / 4);
+        if (!check(recording() && has(keyed(pa), 50) && has(keyed(pa), 52) && !has(keyed(pa), 41),
+                   "punch mask: punch-in released a note carried from after punch-out by the "
+                   "loop wrap (or kept the old part's)"))
+            printKeys("track keys", keyed(pa));
+        pumpTo(in + tpb);
+        if (!check(has(keyed(pa), 50) && !has(keyed(pa), 52),
+                   "punch mask: the carried note's gate-carried release did not fire"))
+            printKeys("track keys", keyed(pa));
+        m_stopAction->trigger();
+        m_loopAction->setChecked(false);
+    }
+    while (undo->index() > undoSetup)
+        undo->undo();
+
+    // L1: the dimming is what the engine silences and the commit replaces.
+    // A take armed inside the range on a loop starting inside it: the first
+    // pass from the Begin, the next from the loop start (never [in, start)).
+    if (setLoop(tpb * 11, tpb * 20)) {
+        m_loopAction->setChecked(true);
+        selectTicks(in, out);
+        view->setEditCursorTick(tpb * 12);
+        startPlayback();
+        pumpTo(tpb * 12 + tpb / 4);
+        m_recordAction->trigger();
+        pumpMs(10);
+        synchronizePlayhead();
+        const uint64_t begin = tickOf(m_take.punchInSample());
+        check(recording() && view->recordingPreview().silenced == Spans{{begin, out}},
+              "punch mask: a take armed inside the range does not dim [begin, out)");
+        const uint64_t pA = playhead();
+        for (int i = 0; i < 4000 && playhead() >= pA; i++)
+            pumpMs(5);
+        pumpTo(tpb * 11 + tpb / 2);
+        synchronizePlayhead();
+        const Spans got = view->recordingPreview().silenced;
+        if (!check(got == Spans{{tpb * 11, out}},
+                   "punch mask: after a wrap to a loop start inside the range the dimming is "
+                   "not [loop start, out)"))
+            for (const auto &[a, b] : got)
+                std::fprintf(stderr, "reccheck:   dimmed [%llu, %llu)\n", (unsigned long long)a,
+                             (unsigned long long)b);
+        m_stopAction->trigger();
+        m_loopAction->setChecked(false);
+    }
+    while (undo->index() > undoSetup)
+        undo->undo();
+    // A seek forward inside the range mid-take: the stretch skipped is
+    // neither silenced nor replaced.
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in + tpb / 2);
+        const uint64_t left = tickOf(playhead());
+        m_audio.seek(sampleOf(in + 3 * tpb));
+        pumpMs(10);
+        synchronizePlayhead();
+        const Spans got = view->recordingPreview().silenced;
+        if (!check(recording() && got.size() == 2 && got[0].first == in && got[0].second >= left &&
+                       got[0].second < in + tpb && got[1] == std::make_pair(in + 3 * tpb, out),
+                   "punch mask: after a seek inside the range the dimming is not [in, left) and "
+                   "[landing, out)"))
+            for (const auto &[a, b] : got)
+                std::fprintf(stderr, "reccheck:   dimmed [%llu, %llu)\n", (unsigned long long)a,
+                             (unsigned long long)b);
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // L2: a commit put off by an open edit group keeps the old part silent
+    // where it replaces it until it lands, through the group's own edits'
+    // rebuilds: a take ended past punch-out on a loop, the next pass silent
+    // from punch-in. Ended inside the range, the rest of the range plays.
+    if (setLoop(tpb * 8, tpb * 16)) {
+        m_loopAction->setChecked(true);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(tpb * 15);
+        doc.beginEditGroup(QStringLiteral("Script"));
+        const int undoAt = undo->index();
+        m_recordAction->trigger();
+        doc.addNote(pb, out + 8 * tpb, 71, uint32_t(tpb), 80); // a rebuild meanwhile
+        const uint64_t pA = playhead();
+        for (int i = 0; i < 4000 && playhead() >= pA; i++)
+            pumpMs(5);
+        pumpTo(in + tpb + tpb / 4);
+        if (!check(!recording() && mask().any() && keyed(pa).empty() &&
+                       view->recordingPreview().silenced == Spans{{in, out}},
+                   "punch mask: a deferred commit let the old part sound (or undimmed it) "
+                   "before it landed"))
+            printKeys("track keys", keyed(pa));
+        doc.endEditGroup();
+        check(waitForUndo(undoAt + 2) && !mask().any(),
+              "punch mask: the deferred commit did not land, or left the mask");
+        m_stopAction->trigger();
+        m_loopAction->setChecked(false);
+    }
+    while (undo->index() > undoSetup)
+        undo->undo();
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in + 2 * tpb);
+        doc.beginEditGroup(QStringLiteral("Script"));
+        const int undoAt = undo->index();
+        m_recordAction->trigger();
+        pumpTo(in + 3 * tpb + tpb / 8);
+        if (!check(!recording() && mask().any() && mask().outTick < in + 3 * tpb &&
+                       has(keyed(pa), 45),
+                   "punch mask: a deferred commit of a take ended inside the range silenced the "
+                   "rest of the range"))
+            printKeys("track keys", keyed(pa));
+        doc.endEditGroup();
+        check(waitForUndo(undoAt + 1) && !mask().any(),
+              "punch mask: the deferred commit (ended inside) did not land, or left the mask");
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // A commit that can't write (a locked document) drops the mask at once:
+    // nothing was replaced, so the next pass plays the old part.
+    if (setLoop(tpb * 8, tpb * 16)) {
+        m_loopAction->setChecked(true);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(tpb * 15);
+        doc.setLocked(true);
+        m_recordAction->trigger();
+        doc.setLocked(false);
+        syncRecordAction(); // setLocked tells nobody
+        const uint64_t pA = playhead();
+        for (int i = 0; i < 4000 && playhead() >= pA; i++)
+            pumpMs(5);
+        pumpTo(in + tpb + tpb / 4);
+        if (!check(!recording() && !mask().any() && has(keyed(pa), 40),
+                   "punch mask: a commit that could not write left the old part silent"))
+            printKeys("track keys", keyed(pa));
+        m_stopAction->trigger();
+        m_loopAction->setChecked(false);
+    }
+    while (undo->index() > undoSetup)
+        undo->undo();
+
+    // A newer take armed while the last one's commit waits keeps its own
+    // mask when that commit lands (the landing clears only its own).
+    {
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in + tpb / 2);
+        doc.beginEditGroup(QStringLiteral("Script"));
+        const int undoAt = undo->index();
+        m_recordAction->trigger(); // ends the take; its commit waits
+        m_recordAction->trigger(); // a new take, armed inside the range
+        pumpMs(10);
+        const uint32_t second = m_take.generation();
+        check(recording() && mask().any(), "punch mask: the second take has no mask");
+        doc.endEditGroup();
+        check(waitForUndo(undoAt + 1), "punch mask: the first take's deferred commit did not land");
+        pumpMs(5);
+        pumpTo(in + 3 * tpb + tpb / 8);
+        if (!check(recording() && m_take.generation() == second && mask().any() &&
+                       !has(keyed(pa), 45),
+                   "punch mask: the first take's landing cleared the second take's mask"))
+            printKeys("track keys", keyed(pa));
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // Record from a pause inside the range: the take begins there, the
+    // track cut and silent from it; the dimming and the replaced span start
+    // at the Begin.
+    {
+        view->setEditCursorTick(in - tpb / 2);
+        startPlayback();
+        pumpTo(in + tpb / 2);
+        pausePlayback();
+        pumpMs(5);
+        selectTicks(in, out);
+        m_recordAction->trigger();
+        pumpMs(10);
+        drainCapture();
+        synchronizePlayhead();
+        const uint64_t begin = tickOf(m_take.punchInSample());
+        check(recording() && begin > in && begin < in + tpb && mask().any() &&
+                  view->recordingPreview().silenced == Spans{{begin, out}},
+              "punch mask: Record from a pause inside the range did not mask from the Begin");
+        pumpTo(in + tpb + tpb / 4);
+        if (!check(keyed(pa).empty() && has(keyed(pb), 43),
+                   "punch mask: from a pause inside the range the track sounds"))
+            printKeys("track keys", keyed(pa));
+        const int undoAt = undo->index();
+        m_stopAction->trigger();
+        check(undo->index() == undoAt + 1 && !hasNote(pa, in + tpb, 40),
+              "punch mask: the take from a pause did not replace from its Begin");
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    // The range's start releases the track sample-exactly: a render that
+    // spans inSample stops there. 41 sounds three frames before it and is
+    // released by a 4-frame period. Punch-in a few ticks in, where no event
+    // lies near (a render stops at an event anyway).
+    {
+        uint64_t at = in + 1;
+        const auto eventNear = [&](uint64_t tick) {
+            const uint64_t s0 = sampleOf(tick);
+            for (const TimelineEvent &ev : session->timeline->events)
+                if (ev.samplePos + 8 >= s0 && ev.samplePos <= s0 + 8)
+                    return true;
+            return false;
+        };
+        while (at < in + tpb / 4 && eventNear(at))
+            at++;
+        check(!eventNear(at), "punch mask: no punch-in clear of events for the sample check");
+        selectTicks(at, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpTo(in - tpb / 2);
+        const uint64_t inSample = sampleOf(at);
+        for (int i = 0; i < 64 && playhead() + 600 < inSample; i++)
+            m_audio.pumpForTest(uint32_t(std::min<uint64_t>(512, inSample - 600 - playhead())));
+        m_audio.pumpForTest(uint32_t(inSample - 3 - playhead()), nullptr, 1024);
+        const bool before = playhead() == inSample - 3 && has(keyed(pa), 41);
+        m_audio.pumpForTest(4, nullptr, 4);
+        if (!check(before && !has(keyed(pa), 41) && mask().cut,
+                   "punch mask: the release at punch-in is not sample-exact"))
+            std::fprintf(stderr, "reccheck:   playhead %llu, inSample %llu, sounding before %d\n",
+                         (unsigned long long)playhead(), (unsigned long long)inSample, int(before));
+        m_stopAction->trigger();
+        while (undo->index() > undoSetup)
+            undo->undo();
+    }
+
+    while (undo->index() > undoBase)
+        undo->undo();
+    view->clearTimeSelection();
+    m_audio.setSoloMask(view->soloMask());
+    m_followPlayheadAction->setChecked(followWas);
+    m_loopAction->setChecked(loopWas);
+    m_punchAction->setChecked(punchWas);
+    m_countInBars = countInWas;
+    m_punchPreRollBars = preRollWas;
+    if (m_settingsDialog)
+        m_settingsDialog->audioPage()->setPunchPreRollBars(preRollWas);
 }
 
 // Record's count-in (docs/metronome/PLAN.md step 2), the device held: from

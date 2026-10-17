@@ -226,18 +226,46 @@ void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
 }
 
 void TimelinePlayer::settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
-                                uint32_t muteMask, LaneLatch *latch)
+                                uint32_t muteMask, LaneLatch *latch, NoteMask *mask)
 {
     const bool loop = looping && timeline->hasLoop();
     if (loop && m_pos >= timeline->loopEndSample)
-        dispatchDue(engine, timeline, loop, muteMask, latch);
+        dispatchDue(engine, timeline, loop, muteMask, latch, mask);
+}
+
+void TimelinePlayer::cutMaskedTrack(M4AEngine *engine, const NoteMask &mask)
+{
+    const int track = mask.track;
+    if (track < 0 || track >= 16)
+        return;
+    for (int key = 0; key < 128; key++) {
+        // Only what the commit truncates: a note from after the range
+        // (carried here by a loop wrap) keeps sounding, its release too.
+        if (!m_keyedOn[track][key] || m_keyedOnTick[track][key] >= mask.outTick)
+            continue;
+        // A key the keyboard holds: its note-off would stop the keyboard's
+        // note too. The song's ends with the keyboard's release.
+        if (!mask.holds(key))
+            m4a_engine_note_off(engine, uint8_t(track), uint8_t(key));
+        m_keyedOn[track][key] = false;
+        // Its gate-carried release has nothing left to release (and would
+        // cut a held key).
+        for (int i = 0; i < m_pendingOffCount;) {
+            if (m_pendingOffs[i].track == track && m_pendingOffs[i].key == key)
+                m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
+            else
+                i++;
+        }
+    }
 }
 
 void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline, bool loop,
-                                 uint32_t muteMask, LaneLatch *latch)
+                                 uint32_t muteMask, LaneLatch *latch, NoteMask *mask)
 {
     if (latch && !latch->any())
         latch = nullptr;
+    if (mask && !mask->any())
+        mask = nullptr;
     for (;;) {
         // Gate-carried releases fire before regular events at the same
         // position: on hardware the channel gate hits zero as the clock
@@ -249,6 +277,16 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                 m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
             } else {
                 i++;
+            }
+        }
+        // A punch take's range starts: what the track still sounds from
+        // before it stops here, once a pass (P9, as the commit truncates).
+        if (mask) {
+            if (m_pos < mask->inSample) {
+                mask->cut = false;
+            } else if (!mask->cut && m_pos < mask->outSample) {
+                cutMaskedTrack(engine, *mask);
+                mask->cut = true;
             }
         }
         while (m_cursor < timeline->events.size() &&
@@ -264,6 +302,11 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                 continue;
             // A lane a live take holds (never a note).
             if (latch && latch->holds(ev))
+                continue;
+            // A punch take's silenced note, and the note-off of one (or of a
+            // note its range start released): never the keyboard's note.
+            if (mask && (mask->silences(ev) || (ev.type == 0x8 && ev.track == mask->track &&
+                                                !m_keyedOn[ev.track][ev.data0 & 0x7F])))
                 continue;
             if (ev.type == 0x9 && !((muteMask >> ev.track) & 1)) {
                 m_keyedOn[ev.track][ev.data0 & 0x7F] = true;
@@ -301,7 +344,7 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
 
 void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, float *outL,
                             float *outR, uint32_t frames, bool looping, uint32_t muteMask,
-                            LaneLatch *latch)
+                            LaneLatch *latch, NoteMask *mask)
 {
     const bool loop = looping && timeline->hasLoop();
     uint32_t done = 0;
@@ -309,9 +352,10 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
     while (done < frames) {
         // Dispatch every event due at the current position, wrapping the loop
         // as needed.
-        dispatchDue(engine, timeline, loop, muteMask, latch);
+        dispatchDue(engine, timeline, loop, muteMask, latch, mask);
 
-        // Render up to the next event, pending release, or the loop end.
+        // Render up to the next event, pending release, the loop end, or a
+        // punch mask's range start.
         uint64_t next = UINT64_MAX;
         if (m_cursor < timeline->events.size())
             next = timeline->events[m_cursor].samplePos;
@@ -319,6 +363,8 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
             next = std::min(next, m_pendingOffs[i].samplePos);
         if (loop)
             next = std::min(next, timeline->loopEndSample);
+        if (mask && mask->any() && m_pos < mask->inSample)
+            next = std::min(next, mask->inSample);
 
         uint32_t n = frames - done;
         if (next != UINT64_MAX)

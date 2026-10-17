@@ -375,6 +375,7 @@ class MainWindow : public QMainWindow
     void checkRecordingLatch(int a, int b);
     void checkRecordingVoice(int a, int b);
     void checkRecordingPunch(int a, int b);
+    void checkRecordingPunchMask(const QString &scratchDir);
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -680,8 +681,10 @@ class MainWindow : public QMainWindow
     // out of Paused — the Space binding (Reaper-style restart), while the
     // Play button resumes from the pause point.
     // countInBars > 0 from Stopped: Record's count-in first
-    // (docs/metronome/PLAN.md M5).
-    void startPlayback(bool fromEditCursor = false, int countInBars = 0);
+    // (docs/metronome/PLAN.md M5). startTick >= 0 from Stopped: playback
+    // starts there instead of at the edit cursor, which stays where it is
+    // (a punch take's pre-roll, docs/punch/PLAN.md P4).
+    void startPlayback(bool fromEditCursor = false, int countInBars = 0, int64_t startTick = -1);
     void pausePlayback();
     void stopPlayback();
     // The session's cfg (volume/reverb) merged with the global engine knobs
@@ -763,6 +766,9 @@ class MainWindow : public QMainWindow
     // in…" (showRecordingStatus), so the UI tick can swap it once the song
     // starts.
     int m_countInBars = 1;
+    // A punch take's pre-roll from Stopped in bars, 0 for none (Settings →
+    // Audio, QSettings punchPreRollBars; docs/punch/PLAN.md P4).
+    int m_punchPreRollBars = 1;
     bool m_countInShown = false;
     QString m_countInText;           // the "Counting in…" line shown
     uint32_t m_takeDropsAtStart = 0; // AudioEngine::captureDropped at punch-in

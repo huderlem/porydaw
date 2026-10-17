@@ -195,6 +195,8 @@ const QString kCountInBarsKey = QStringLiteral("countInBars");
 // Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
 // metronome.
 const QString kPunchKey = QStringLiteral("punch");
+// A punch take's pre-roll in bars (P4), app-wide like the count-in.
+const QString kPunchPreRollBarsKey = QStringLiteral("punchPreRollBars");
 // The output device's buffering (Settings → Audio → Output device):
 // buffer size in ms (0 = the backend's default) and WASAPI exclusive mode.
 const QString kAudioPeriodMsKey = QStringLiteral("audio/periodMs");
@@ -3434,6 +3436,12 @@ void MainWindow::buildSettingsDialog()
         QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
         AudioSettingsPage::kCountInBarsMax);
     m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
+    m_punchPreRollBars =
+        std::clamp(QSettings()
+                       .value(kPunchPreRollBarsKey, AudioSettingsPage::kPunchPreRollBarsDefault)
+                       .toInt(),
+                   0, AudioSettingsPage::kPunchPreRollBarsMax);
+    m_settingsDialog->audioPage()->setPunchPreRollBars(m_punchPreRollBars);
     {
         // Before init (the caller opens the device after this): the device
         // first opens with the user's buffering.
@@ -3457,6 +3465,12 @@ void MainWindow::buildSettingsDialog()
                 m_countInBars = bars;
                 if (m_persistSession)
                     QSettings().setValue(kCountInBarsKey, bars);
+            });
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::punchPreRollBarsChanged, this,
+            [this](int bars) {
+                m_punchPreRollBars = bars;
+                if (m_persistSession)
+                    QSettings().setValue(kPunchPreRollBarsKey, bars);
             });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
@@ -5890,7 +5904,7 @@ void MainWindow::syncCompanion(uint64_t playhead, bool playing)
                       m_audio.maxPcmChannels(), m_audio.activeCgbChannels());
 }
 
-void MainWindow::startPlayback(bool fromEditCursor, int countInBars)
+void MainWindow::startPlayback(bool fromEditCursor, int countInBars, int64_t startTick)
 {
     if (!m_audioOk || !m_active || !m_audio.songLoaded())
         return;
@@ -5899,7 +5913,8 @@ void MainWindow::startPlayback(bool fromEditCursor, int countInBars)
     uint64_t target = 0;
     if (seekToCursor) {
         const MidiTimeline *timeline = m_audio.timeline();
-        uint64_t cursor = m_active->view->editCursorTick();
+        uint64_t cursor =
+            stopped && startTick >= 0 ? uint64_t(startTick) : m_active->view->editCursorTick();
         target = timeline->sampleForTick(cursor);
         if (stopped && countInBars > 0) {
             // A start at or past the loop end wraps to the loop start at
@@ -6198,6 +6213,9 @@ void MainWindow::beginRecording()
         const SongView::TimeSelection &sel = m_active->view->timeSelection();
         m_take.setPunchWindow(sel.startTick, sel.endTick);
         m_active->view->setPunchLatch(sel.startTick, sel.endTick);
+        // The track's old part there goes silent while the take records
+        // (P9), from where the take begins: before the arm, which it rides.
+        m_audio.setPunchMask(m_captureGeneration, track, sel.startTick, sel.endTick);
     }
     m_takeSession = m_active;
     m_takeLaneBefore = TakeLaneBefore(); // another document may sit at the same address
@@ -6209,9 +6227,15 @@ void MainWindow::beginRecording()
     // From the edit cursor when stopped, after the count-in (M5); resumes a
     // pause at once. While playing it records at once, or for a punch take
     // arms: only the window is kept (P10), so a take armed past it records
-    // on a later loop pass or not at all.
-    if (m_audio.transport() != Transport::Playing)
-        startPlayback(false, m_countInBars);
+    // on a later loop pass or not at all. A punch take from Stopped starts
+    // its pre-roll before punch-in instead, with no count-in (P4); from a
+    // pause it resumes there, as any take does.
+    if (m_audio.transport() == Transport::Stopped && m_take.punching())
+        startPlayback(false, 0,
+                      int64_t(m_audio.timeline()->preRollStartTick(m_take.punchWindowIn(),
+                                                                   m_punchPreRollBars)));
+    else if (m_audio.transport() != Transport::Playing)
+        startPlayback(false, m_take.punching() ? 0 : m_countInBars);
     showRecordingStatus();
     syncRecordAction();
 }
@@ -6427,6 +6451,10 @@ void MainWindow::syncRecordingPreview()
     // The REC tint: where the take recorded; a punch take's clipped to its
     // window, what it will replace (P7).
     preview.spans = m_take.recordedTickSpans(timeline, pos, segment);
+    // The track's notes the engine is silencing (P9, AudioEngine::
+    // setPunchMask), dimmed: what the commit replaces so far and the rest
+    // of this pass's window.
+    preview.silenced = m_take.silencedTickSpans(timeline, pos, segment);
     m_takeSession->view->setRecordingPreview(std::move(preview));
 }
 
@@ -6468,6 +6496,17 @@ void MainWindow::finishRecording()
     ghosts.take = take;
     ghosts.notes = notes;
     ghosts.lanes = takeLanes(session->doc, track, lanes);
+    // The engine keeps the old part silent until the commit lands (P9), but
+    // only where the commit replaces it: a take ended inside its window
+    // lets the rest play on. One span narrows the mask; none clears it, and
+    // so do several (rare: a take armed inside the window that wrapped, or
+    // a seek inside it), which let the old part sound until the commit.
+    if (punch.spans.size() == 1) {
+        m_audio.narrowPunchMask(take, punch.spans.front().first, punch.spans.front().second);
+        ghosts.silenced = punch.spans;
+    } else {
+        m_audio.clearPunchMask(take);
+    }
     session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.
@@ -6528,6 +6567,9 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
     // A punch take that replaced notes but recorded none and moved no lane.
     bool cleared = false;
     if (writable && !empty) {
+        // The old part's mask (P9) goes with the edit's own rebuild: never
+        // a moment of the old notes before the new ones replace them.
+        m_audio.endPunchMaskAtRebuild(take);
         const uint64_t revision = doc->revision();
         doc->beginEditGroup(
             punch.on && !recorded       ? tr("Punch record (cleared)")
@@ -6586,6 +6628,9 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
     if (inputLost)
         text += QLatin1Char(' ') + tr("Some MIDI input was lost while recording.");
     statusBar()->showMessage(text, 6000);
+    // Landed or given up: the mask goes, if the rebuild hasn't taken it
+    // (nothing written). A newer take's mask is never this one's.
+    m_audio.clearPunchMask(take);
 }
 
 void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
@@ -6602,8 +6647,11 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
         // documentChanged that follows republishes the live target; the
         // engine moves it, and the take's latch, with the rebuilt timeline.
         if (now != old) {
-            if (m_audioOk)
+            if (m_audioOk) {
                 m_audio.followLiveTrack(m_captureGeneration, old, now);
+                // A take whose Begin hasn't read its mask yet reads it here.
+                m_audio.setPunchMaskTrack(now);
+            }
             m_take.setTrack(now);
             showRecordingStatus();
         }
@@ -6613,6 +6661,7 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
     // recording stops (playback goes on) and the take is dropped.
     m_takeSession = nullptr;
     m_audio.armCapture(0);
+    m_audio.clearPunchMask(m_take.generation());
     drainCapture();
     m_take.clear();
     session.view->clearRecordingPreview();

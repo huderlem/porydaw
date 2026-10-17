@@ -259,6 +259,65 @@ class AudioEngine
     // that lane on that track stop playing until the pass ends, so what you
     // hear is what the take commits (m_liveLatch has the rules).
     void armCapture(uint32_t generation) { m_captureGen.store(generation); }
+    // A punch take's playback mask (docs/punch/PLAN.md P9, NoteMask): set
+    // before armCapture(generation), it silences the song's notes on track
+    // that start in [inTick, outTick) from the take's Begin, and releases the
+    // track's notes sounding into the range where playback reaches it. It is
+    // applied from the player's position at the Begin onward, so it covers
+    // exactly what the take's replaced span will (that span starts where the
+    // take began, then grows with each pass). It follows the take's track
+    // (followLiveTrack), survives a document edit's rebuild while the take
+    // records, and goes with clearPunchMask, a Stop or Pause, a seek once the
+    // take has ended, another arm, or the song. After the disarm it stays
+    // until the take's commit lands: narrowPunchMask shrinks it to what the
+    // commit will replace, rebuilds meanwhile (a deferred commit's open edit
+    // group) keep it, and endPunchMaskAtRebuild hands it to the commit's own
+    // rebuild, so the old part never sounds before the new one replaces it.
+    // UI thread only (the single writer of the request, a seqlock).
+    void setPunchMask(uint32_t generation, int track, uint64_t inTick, uint64_t outTick)
+    {
+        writePunchRequest([&] {
+            m_punchGen.store(generation, std::memory_order_relaxed);
+            m_punchTrack.store(track, std::memory_order_relaxed);
+            m_punchIn.store(inTick, std::memory_order_relaxed);
+            m_punchOut.store(outTick, std::memory_order_relaxed);
+            m_punchEnding.store(false, std::memory_order_relaxed);
+        });
+    }
+    // The take moved before its Begin read the mask.
+    void setPunchMaskTrack(int track)
+    {
+        writePunchRequest([&] { m_punchTrack.store(track, std::memory_order_relaxed); });
+    }
+    // The ended take of `generation` will replace only [inTick, outTick)
+    // (within its range): the mask shrinks to that from the next callback.
+    void narrowPunchMask(uint32_t generation, uint64_t inTick, uint64_t outTick)
+    {
+        if (m_punchGen.load(std::memory_order_relaxed) != generation)
+            return;
+        writePunchRequest([&] {
+            m_punchIn.store(inTick, std::memory_order_relaxed);
+            m_punchOut.store(outTick, std::memory_order_relaxed);
+        });
+    }
+    // The commit of `generation` is about to edit the document: the rebuild
+    // that edit makes drops the mask, with the old part, in one step.
+    void endPunchMaskAtRebuild(uint32_t generation)
+    {
+        if (m_punchGen.load(std::memory_order_relaxed) != generation)
+            return;
+        writePunchRequest([&] { m_punchEnding.store(true, std::memory_order_relaxed); });
+    }
+    // The mask of `generation` goes (from the next callback); a late clear
+    // of an older take's never touches a newer take's.
+    void clearPunchMask(uint32_t generation)
+    {
+        uint32_t expected = generation;
+        if (generation == 0 || m_punchGen.load(std::memory_order_relaxed) != generation)
+            return;
+        writePunchRequest(
+            [&] { m_punchGen.compare_exchange_strong(expected, 0, std::memory_order_relaxed); });
+    }
     // UI thread: the single consumer. False when empty.
     bool popCapture(CaptureEvent *out);
     // Events lost to a full ring. The take tolerates the loss (an orphan
@@ -294,6 +353,8 @@ class AudioEngine
     const M4AEngine *engineForTest() const { return m_engine.get(); }
     // With the device held: the recording latch as the callback left it.
     LaneLatch liveLatchForTest() const { return m_liveLatch; }
+    // With the device held: the punch mask as the callback left it.
+    NoteMask punchMaskForTest() const { return m_punchMask; }
 
     // Hot: audition a voicegroup entry by program number (SPEC §6.1 voicegroup
     // browser). Runs on a second engine instance (SPEC §3) so the program
@@ -525,6 +586,37 @@ class AudioEngine
     // The player jumped from `from` to `to`: the take's segment ends.
     void captureBoundary(uint64_t from, uint64_t to);
     void publishCaptureClock();
+    // The UI side of the punch request's seqlock: write runs between the
+    // two sequence bumps.
+    template <typename Write>
+    void writePunchRequest(Write write)
+    {
+        const uint32_t seq = m_punchSeq.load(std::memory_order_relaxed);
+        m_punchSeq.store(seq + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        write();
+        m_punchSeq.store(seq + 2, std::memory_order_release);
+    }
+    struct PunchRequest {
+        uint32_t seq = 0, generation = 0;
+        int track = -1;
+        uint64_t inTick = 0, outTick = 0;
+        bool ending = false;
+    };
+    // A consistent snapshot of the request; false when the UI was writing
+    // it (every try).
+    bool readPunchRequest(PunchRequest *out) const;
+    // Audio thread: the punch mask for the Begin of `generation`, if the UI
+    // set one for it (setPunchMask); none otherwise.
+    void loadPunchMask(uint32_t generation);
+    void loadPunchMask(const PunchRequest &request);
+    // The mask's range on the current timeline, from its ticks.
+    void placePunchMask();
+    // The UI narrowed, cleared or replaced it.
+    void applyPunchMask();
+    // The keys the keyboard holds on the mask's track, before a render.
+    void fillPunchHeld();
+    void dropPunchMask();
     // TimelinePlayer::settleWrap at the callback's top, with the take's
     // Boundary.
     void settleLoopWrap();
@@ -664,7 +756,15 @@ class AudioEngine
     static constexpr int kCaptureClockPosBits = 44;
     static constexpr uint64_t kCaptureClockPosMask = (uint64_t(1) << kCaptureClockPosBits) - 1;
     std::atomic<uint64_t> m_captureClock{0}; // segment << 44 | position
-    bool m_deviceHeldForTest = false;        // UI thread only
+    // The punch mask's request (setPunchMask): a seqlock, odd while the UI
+    // writes the fields; generation 0 for none.
+    std::atomic<uint32_t> m_punchSeq{0};
+    std::atomic<uint32_t> m_punchGen{0};
+    std::atomic<int> m_punchTrack{-1};
+    std::atomic<uint64_t> m_punchIn{0};
+    std::atomic<uint64_t> m_punchOut{0};
+    std::atomic<bool> m_punchEnding{false};
+    bool m_deviceHeldForTest = false; // UI thread only
 
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
@@ -721,6 +821,12 @@ class AudioEngine
     // values back (reapplyLiveLatch), on the take's track's new index when
     // the edit moved it (followLiveTrack).
     LaneLatch m_liveLatch;
+    // The punch take's note mask (setPunchMask; audio thread, or a cold op)
+    // and the generation it was loaded for.
+    NoteMask m_punchMask;
+    uint32_t m_punchMaskGen = 0;
+    uint32_t m_punchSeqSeen = 0;     // the request's sequence applied last
+    uint32_t m_punchLoadPending = 0; // a Begin's load that met a torn read
     // A take's track move waiting for updateTimeline (followLiveTrack); UI
     // thread only, so read by cold operations alone. Generation 0: none.
     struct LiveFollow {

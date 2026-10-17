@@ -132,6 +132,19 @@ std::vector<std::pair<uint64_t, uint64_t>> RecordingTake::punchedSpans(const Mid
     return recordedTickSpans(timeline, endSample, endSegment);
 }
 
+std::vector<std::pair<uint64_t, uint64_t>>
+RecordingTake::silencedTickSpans(const MidiTimeline &timeline, uint64_t endSample,
+                                 uint32_t endSegment) const
+{
+    if (!punching() || !m_started)
+        return {};
+    std::vector<std::pair<uint64_t, uint64_t>> spans =
+        punchedSpans(timeline, endSample, endSegment);
+    // The pass playing now is silenced to punch-out ahead of the playhead.
+    addSpan(spans, std::max(m_windowIn, tickAt(timeline, m_segmentStart)), m_windowOut);
+    return spans;
+}
+
 void RecordingTake::push(const CaptureEvent &ev)
 {
     // Another arm's leftovers (a callback still in flight at the last

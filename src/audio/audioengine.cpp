@@ -334,6 +334,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_liveTouched = TouchedLanes();
     dropLiveLatch();
     m_liveFollow = LiveFollow();
+    dropPunchMask();
 
     // No transition will run cutAllSound for this stop: cut the click too.
     m_click.cut();
@@ -386,8 +387,24 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
             if (m_liveLatch.track == follow.from)
                 m_liveLatch.track = follow.to;
         }
+        // The punch mask silences the take's track wherever it now is.
+        if (capturing() && follow.generation == m_captureBegun &&
+            m_punchMaskGen == follow.generation && m_punchMask.track == follow.from)
+            m_punchMask.track = follow.to;
     }
     m_timeline = timeline;
+    // A take still recording keeps its mask, on the new timeline's samples
+    // (the edit may have moved the tempo); so does an ended one whose commit
+    // hasn't landed (an edit group held open: other edits rebuild first).
+    // The commit's own rebuild (endPunchMaskAtRebuild), or one after the UI
+    // let it go, plays the song as it now is. Read on the writer's thread.
+    if (m_punchMaskGen && !capturing()) {
+        const bool kept = m_punchGen.load(std::memory_order_relaxed) == m_punchMaskGen &&
+                          !m_punchEnding.load(std::memory_order_relaxed);
+        if (!kept)
+            dropPunchMask();
+    }
+    placePunchMask();
     m_player.seek(pos, m_timeline);
     m_playhead.store(pos);
     // Release sounding notes: their note-offs may have moved or vanished in
@@ -439,6 +456,10 @@ void AudioEngine::applyPendingSeek()
     m_click.cut();
     m_player.seek(samplePos, m_timeline);
     captureBoundary(from, samplePos);
+    // A seek inside a punch take is another pass of it, still masked; once
+    // the take has ended it's ordinary playback.
+    if (!capturing())
+        dropPunchMask();
     dropLiveLatch(); // the pass ends; the full chase covers its lanes
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
@@ -571,6 +592,7 @@ void AudioEngine::unloadSong()
     m_liveTouched = TouchedLanes(); // no song to hand anything back to
     dropLiveLatch();
     m_liveFollow = LiveFollow();
+    dropPunchMask();
     resetPreviewEngine();
     clearTimedPreviews();
     m_click.cut(); // the skipped transition would have cut it too
@@ -712,9 +734,11 @@ void AudioEngine::applyTransportTransition()
     case Transport::Stopped:
         cancelCountIn();
         m_player.reset();
+        dropPunchMask(); // the take ended with it
         break;
     case Transport::Paused:
         cancelCountIn();
+        dropPunchMask();
         break;
     case Transport::Playing:
         // No player reset here: the Stopped transition already rewound to 0,
@@ -736,8 +760,9 @@ void AudioEngine::finishCountIn()
     // A start at or past the loop end (a seek during the count-in) wraps
     // now, before the take begins: settleLoopWrap held off while the song
     // was held, and the take's Begin and held keys belong at the loop start.
+    fillPunchHeld();
     m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
-                        &m_liveLatch);
+                        &m_liveLatch, &m_punchMask);
     syncCapture();
     if (!capturing())
         return;
@@ -1421,6 +1446,10 @@ void AudioEngine::syncCapture()
     // the take before it, if any, has ended, and its latch with it.
     releaseLiveLatch(m_player.position());
     m_captureBegun = 0;
+    // Another arm's take has its own mask (or none). A disarm keeps the
+    // ended take's until its commit lands (setPunchMask).
+    if (gen != 0)
+        dropPunchMask();
     // A count-in holds the Begin back until the song starts (finishCountIn).
     if (gen == 0 || !m_timeline || m_appliedTransport != static_cast<int>(Transport::Playing) ||
         m_countInActive)
@@ -1432,6 +1461,123 @@ void AudioEngine::syncCapture()
     // must not see the previous take's position.
     publishCaptureClock();
     pushCapture(CaptureEvent::Begin, m_player.position());
+    loadPunchMask(gen);
+}
+
+bool AudioEngine::readPunchRequest(PunchRequest *out) const
+{
+    // The UI writes a handful of stores between the bumps: a few tries
+    // ride out one in flight; a writer preempted mid-way waits for the next
+    // callback.
+    for (int attempt = 0; attempt < 16; attempt++) {
+        const uint32_t seq = m_punchSeq.load(std::memory_order_acquire);
+        if (seq & 1)
+            continue;
+        PunchRequest r;
+        r.seq = seq;
+        r.generation = m_punchGen.load(std::memory_order_relaxed);
+        r.track = m_punchTrack.load(std::memory_order_relaxed);
+        r.inTick = m_punchIn.load(std::memory_order_relaxed);
+        r.outTick = m_punchOut.load(std::memory_order_relaxed);
+        r.ending = m_punchEnding.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (m_punchSeq.load(std::memory_order_relaxed) == seq) {
+            *out = r;
+            return true;
+        }
+    }
+    return false;
+}
+
+void AudioEngine::dropPunchMask()
+{
+    m_punchMask = NoteMask();
+    m_punchMaskGen = 0;
+    m_punchLoadPending = 0;
+}
+
+void AudioEngine::loadPunchMask(uint32_t generation)
+{
+    dropPunchMask();
+    PunchRequest r;
+    if (!readPunchRequest(&r)) {
+        m_punchLoadPending = generation; // the next callback's applyPunchMask
+        return;
+    }
+    if (r.generation == generation)
+        loadPunchMask(r);
+}
+
+void AudioEngine::loadPunchMask(const PunchRequest &request)
+{
+    m_punchSeqSeen = request.seq;
+    m_punchMask = NoteMask();
+    m_punchMask.track = request.track;
+    m_punchMask.inTick = request.inTick;
+    m_punchMask.outTick = request.outTick;
+    if (request.generation == 0 || m_punchMask.track < 0 || m_punchMask.track >= MAX_TRACKS ||
+        !m_punchMask.any()) {
+        m_punchMask = NoteMask();
+        return;
+    }
+    m_punchMaskGen = request.generation;
+    placePunchMask();
+}
+
+void AudioEngine::placePunchMask()
+{
+    if (!m_punchMask.any() || !m_timeline)
+        return;
+    m_punchMask.inSample = m_timeline->sampleForTick(m_punchMask.inTick);
+    m_punchMask.outSample = m_timeline->sampleForTick(m_punchMask.outTick);
+    // Where the player is now, the range's start hasn't released the track
+    // yet this pass (dispatchDue does, at once if it is inside the range).
+    m_punchMask.cut = false;
+}
+
+void AudioEngine::applyPunchMask()
+{
+    if (!m_punchMaskGen && !m_punchLoadPending)
+        return;
+    if (!m_punchLoadPending && m_punchSeq.load(std::memory_order_acquire) == m_punchSeqSeen)
+        return;
+    PunchRequest r;
+    if (!readPunchRequest(&r))
+        return; // the UI is mid-write: next callback
+    if (const uint32_t pending = std::exchange(m_punchLoadPending, 0)) {
+        // A Begin's load that met a torn read: from here on.
+        if (capturing() && m_captureBegun == pending && r.generation == pending)
+            loadPunchMask(r);
+        return;
+    }
+    m_punchSeqSeen = r.seq;
+    if (r.generation != m_punchMaskGen) {
+        dropPunchMask(); // cleared, or another take's
+        return;
+    }
+    // The same take's range narrowed to what its commit replaces (the
+    // track follows the take on its own, followLiveTrack). Inside the old
+    // range, so a pass that released the track at its start already did.
+    m_punchMask.inTick = r.inTick;
+    m_punchMask.outTick = r.outTick;
+    if (!m_punchMask.any() || !m_timeline) {
+        dropPunchMask();
+        return;
+    }
+    m_punchMask.inSample = m_timeline->sampleForTick(r.inTick);
+    m_punchMask.outSample = m_timeline->sampleForTick(r.outTick);
+}
+
+void AudioEngine::fillPunchHeld()
+{
+    if (!m_punchMask.any())
+        return;
+    m_punchMask.held[0] = m_punchMask.held[1] = 0;
+    for (int i = 0; i < m_timedActiveCount; i++) {
+        const ActiveTimed &a = m_timedActive[i];
+        if (a.held && int(a.track) == m_punchMask.track)
+            m_punchMask.held[a.key >> 6] |= uint64_t(1) << (a.key & 63);
+    }
 }
 
 bool AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
@@ -1489,8 +1635,9 @@ void AudioEngine::settleLoopWrap()
         return;
     const uint64_t from = m_player.position();
     const uint32_t wraps = m_player.wrapCount();
+    fillPunchHeld();
     m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
-                        &m_liveLatch);
+                        &m_liveLatch, &m_punchMask);
     if (m_player.wrapCount() != wraps)
         captureBoundary(from, m_timeline->loopStartSample);
 }
@@ -1590,6 +1737,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     applyTransportTransition();
     applyPendingSeek();
     applyCountInRequest();
+    applyPunchMask();
     applyMuteTransition();
     applyPreviewNote();
     applyTimedPreviews(frameCount);
@@ -1639,8 +1787,9 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             const uint64_t p0 = m_player.position();
             const uint32_t w0 = m_player.wrapCount();
             // The only latched render: every offline path passes none.
+            fillPunchHeld();
             m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
-                            &m_liveLatch);
+                            &m_liveLatch, &m_punchMask);
             if (metronomeOn)
                 scheduleClicks(tl, p0, m_player.position(), m_player.wrapCount() - w0, done,
                                frameCount);

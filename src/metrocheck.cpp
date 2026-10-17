@@ -673,6 +673,42 @@ void checkCountInGrid(double sampleRate)
         fail("a 0-bar count-in has a length");
 }
 
+// A punch take's pre-roll start (docs/punch/PLAN.md P4): bars of the meter
+// in force at punch-in, whatever lies between, clamped at tick 0. gridSong
+// at 24 ticks/beat: 4/4 to tick 192 (96-tick bars), 6/8 from 192 (72-tick
+// bars), 3/4 from 300 (72-tick bars).
+void checkPreRoll(double sampleRate)
+{
+    std::unique_ptr<MidiTimeline> tl = MidiTimeline::build(gridSong(24), sampleRate);
+    struct Case {
+        uint64_t in;
+        int bars;
+        uint64_t want;
+    };
+    const Case cases[] = {
+        {132, 0, 132},                // off: punch-in itself
+        {132, 1, 36},                 // 4/4
+        {132, 2, 0},                  // clamped at 0 (two bars would be -60)
+        {96, 1, 0},                   // exactly one bar: 0, not clamped
+        {0, 2, 0},                    // at the song's start
+        {240, 1, 168},                // 6/8 bars, though the second crosses into 4/4
+        {240, 2, 96},  {300, 1, 228}, // on the 3/4 change: its meter
+        {300, 2, 156}, {299, 1, 227}, // a tick before it: 6/8 (also 72 ticks)
+        {191, 1, 95},                 // a tick before 6/8: 4/4
+        {192, 1, 120},                // on 6/8
+        {250, 2, 106},                // mid-bar in 6/8, two bars back into 4/4
+        {330, 2, 186},                // mid-bar in 3/4, back across 6/8 into 4/4
+        {150, 1, 54},                 // mid-bar in 4/4
+    };
+    for (const Case &c : cases) {
+        const uint64_t got = tl->preRollStartTick(c.in, c.bars);
+        if (got != c.want)
+            fail("pre-roll before %llu x%d: starts at %llu, expected %llu",
+                 (unsigned long long)c.in, c.bars, (unsigned long long)got,
+                 (unsigned long long)c.want);
+    }
+}
+
 // Record's count-in through the engine: clicks at the count-in's offsets
 // with the metronome off, the song held at the cursor until then and
 // starting sample-exactly after, the song's clicks carrying on from the
@@ -1107,6 +1143,7 @@ int runMetroCheck()
     checkEngine();
     for (const double rate : {48000.0, 44100.0})
         checkCountInGrid(rate);
+    checkPreRoll(48000.0);
     checkCountInEngine();
     checkCountInEdges();
     if (g_failures) {

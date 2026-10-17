@@ -520,3 +520,18 @@ MidiTimeline::BarPosition MidiTimeline::barPositionForTick(double tick) const
     return {double(seg->firstBar) + (tick - double(seg->tick)) / barTicks, seg->beatsPerBar,
             seg->beatTicks};
 }
+
+uint64_t MidiTimeline::preRollStartTick(uint64_t tick, int bars) const
+{
+    if (bars <= 0)
+        return tick;
+    const std::vector<TimeSigSegment> segs = timeSigSegments();
+    const TimeSigSegment *seg = &segs.front();
+    for (const TimeSigSegment &s : segs) {
+        if (s.tick <= tick)
+            seg = &s;
+    }
+    const uint64_t length =
+        uint64_t(bars) * seg->beatTicks * uint64_t(std::max(seg->beatsPerBar, 1));
+    return tick > length ? tick - length : 0;
+}

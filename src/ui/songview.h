@@ -60,6 +60,9 @@ constexpr int kGutterW = kHeaderW + kKeyboardW;
 // A recording take's ghost notes (docs/midi-input/PLAN.md step 4): the
 // track's fill at the range-duplicate preview's alpha.
 constexpr int kRecordingGhostAlpha = 110;
+// A punch take's silenced notes (RecordingPreview::silenced): their fill's
+// alpha, so they read as "going" under the take's ghosts.
+constexpr int kPunchSilencedAlpha = 70;
 // Velocity bar handle: with at least this much vertical zoom, or while the
 // roll.velocity_drag modifier chord (Ctrl by default, Ableton-style) is
 // held, each note shows a thin horizontal bar at its velocity level (bottom
@@ -145,6 +148,21 @@ struct RecordingPreview {
     // Punched [start, end) tick spans, sorted and merged: the ruler's REC
     // tint. Empty once the take has ended (a commit still pending).
     std::vector<std::pair<uint64_t, uint64_t>> spans;
+    // A punch take's silenced [start, end) tick spans, sorted and merged
+    // (docs/punch/PLAN.md P9, RecordingTake::silencedTickSpans): the
+    // track's own notes starting there are muted while it records, and the
+    // roll dims them. Empty for an overdub; once the take has ended, the
+    // spans its pending commit replaces (still muted), until it lands.
+    std::vector<std::pair<uint64_t, uint64_t>> silenced;
+    bool silences(int engineTrack, uint64_t tick) const
+    {
+        if (engineTrack != track)
+            return false;
+        for (const auto &[start, end] : silenced)
+            if (tick >= start && tick < end)
+                return true;
+        return false;
+    }
     // The take's bend and lane moves: each lane's whole curve as the commit
     // would leave it, and the tick ranges the take rewrites ([begin, end],
     // inclusive, as SongDocument::writeLanePoints takes them), painted as

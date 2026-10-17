@@ -183,8 +183,19 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_countIn->setCurrentIndex(m_countIn->findData(kCountInBarsDefault));
     m_countIn->setToolTip(tr("Before Record starts the song, click this many bars at the tempo "
                              "where it starts, even with the metronome off. Not when Record "
-                             "punches in during playback."));
+                             "punches in during playback, nor for a punch recording (it "
+                             "pre-rolls instead)."));
     metronomeForm->addRow(tr("Count-in when recording:"), m_countIn);
+    m_punchPreRoll = new QComboBox(this);
+    m_punchPreRoll->setObjectName(QStringLiteral("settingsPunchPreRoll"));
+    m_punchPreRoll->addItem(tr("Off"), 0);
+    m_punchPreRoll->addItem(tr("1 bar"), 1);
+    m_punchPreRoll->addItem(tr("2 bars"), 2);
+    m_punchPreRoll->setCurrentIndex(m_punchPreRoll->findData(kPunchPreRollBarsDefault));
+    m_punchPreRoll->setToolTip(tr("When Record starts a punch recording, play the song from this "
+                                  "many bars before the time selection (instead of the "
+                                  "count-in). Not when Record punches in during playback."));
+    metronomeForm->addRow(tr("Punch pre-roll:"), m_punchPreRoll);
 
     // GBA engine: poryaaaa's global accuracy knobs (SPEC §7).
     auto *engineGroup = new QGroupBox(tr("GBA engine"), this);
@@ -258,6 +269,10 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         if (!m_loading)
             emit countInBarsChanged(countInBars());
     });
+    connect(m_punchPreRoll, &QComboBox::currentIndexChanged, this, [this] {
+        if (!m_loading)
+            emit punchPreRollBarsChanged(punchPreRollBars());
+    });
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
@@ -273,6 +288,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         setOutputLevel(kOutputLevelDefault);
         setMetronomeVolume(kMetronomeVolumeDefault);
         setCountInBars(kCountInBarsDefault);
+        setPunchPreRollBars(kPunchPreRollBarsDefault);
         setEngineSettings(EngineSettings());
         setDeviceConfig(AudioDeviceConfig());
     });
@@ -317,6 +333,17 @@ int AudioSettingsPage::countInBars() const
 void AudioSettingsPage::setCountInBars(int bars)
 {
     m_countIn->setCurrentIndex(m_countIn->findData(std::clamp(bars, 0, kCountInBarsMax)));
+}
+
+int AudioSettingsPage::punchPreRollBars() const
+{
+    return m_punchPreRoll->currentData().toInt();
+}
+
+void AudioSettingsPage::setPunchPreRollBars(int bars)
+{
+    m_punchPreRoll->setCurrentIndex(
+        m_punchPreRoll->findData(std::clamp(bars, 0, kPunchPreRollBarsMax)));
 }
 
 EngineSettings AudioSettingsPage::engineSettings() const

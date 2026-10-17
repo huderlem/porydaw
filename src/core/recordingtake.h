@@ -194,6 +194,13 @@ class RecordingTake
     // Empty for a take that isn't punching.
     std::vector<std::pair<uint64_t, uint64_t>>
     punchedSpans(const MidiTimeline &timeline, uint64_t endSample, uint32_t endSegment) const;
+    // A punch take's notes the engine silences so far (P9, AudioEngine::
+    // setPunchMask), in ticks, sorted and merged: punchedSpans (what the
+    // commit replaces) and the current pass's [max(in, its start), out).
+    // The roll dims the track's notes starting there. Empty for a take that
+    // isn't punching or hasn't started.
+    std::vector<std::pair<uint64_t, uint64_t>>
+    silencedTickSpans(const MidiTimeline &timeline, uint64_t endSample, uint32_t endSegment) const;
 
     // In arrival order.
     const std::vector<Control> &controls() const { return m_controls; }

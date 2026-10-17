@@ -1654,6 +1654,13 @@ class PianoRoll : public TimelineSurface
     // notes repaint their own boxes.
     void recordingPreviewChanged(const RecordingPreview &before, const RecordingPreview &after)
     {
+        // A punch take's silenced range came, went or moved (rare: the
+        // take's start, a pass, its end): the real notes there change.
+        if (before.silenced != after.silenced ||
+            (before.track != after.track && !after.silenced.empty())) {
+            invalidateContent();
+            return;
+        }
         if (before.notes.empty() && after.notes.empty())
             return;
         if (!before.notes.empty() && !after.notes.empty() && before.track != after.track) {
@@ -2846,8 +2853,14 @@ class PianoRoll : public TimelineSurface
                 continue;
 
             const QRectF noteBox = this->noteBox(noteRect);
+            // A punch take is silencing it (P9): dimmed until the commit
+            // replaces it.
+            const bool silenced = m_sv->recordingPreview().silences(note.track, note.startTick);
             if (isGhostNote) {
-                painter.fillRect(noteBox, ghostNoteColor(note.track, isBlackKey(note.key)));
+                QColor ghost = ghostNoteColor(note.track, isBlackKey(note.key));
+                if (silenced)
+                    ghost.setAlpha(ghost.alpha() / 2);
+                painter.fillRect(noteBox, ghost);
                 continue;
             }
 
@@ -2860,7 +2873,9 @@ class PianoRoll : public TimelineSurface
                 // follow the lane as it is dragged.
                 renderedVelocity = *preview;
             }
-            const QColor fill = m_sv->noteFillColor(note.track, renderedVelocity);
+            QColor fill = m_sv->noteFillColor(note.track, renderedVelocity);
+            if (silenced)
+                fill.setAlpha(kPunchSilencedAlpha);
             painter.fillRect(noteBox, fill);
 
             // Mixing one-third toward black in OKLab keeps the bar distinct
@@ -11838,6 +11853,7 @@ void SongView::onTracksRemapped(const TrackRemap &remap)
         m_recordingPreview.notes.clear();
         m_recordingPreview.spans.clear();
         m_recordingPreview.lanes.clear();
+        m_recordingPreview.silenced.clear();
     }
 }
 

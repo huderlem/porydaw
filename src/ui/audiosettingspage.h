@@ -31,6 +31,9 @@ class AudioSettingsPage : public QWidget
     // Record's count-in in bars, 0 = off (M5).
     static constexpr int kCountInBarsMax = 2;
     static constexpr int kCountInBarsDefault = 1;
+    // A punch take's pre-roll in bars, 0 = off (docs/punch/PLAN.md P4).
+    static constexpr int kPunchPreRollBarsMax = 2;
+    static constexpr int kPunchPreRollBarsDefault = 1;
 
     AudioSettingsPage(int outputLevel, const EngineSettings &engine, QWidget *parent = nullptr);
 
@@ -41,6 +44,7 @@ class AudioSettingsPage : public QWidget
     AudioDeviceConfig deviceConfig() const;
     int metronomeVolume() const;
     int countInBars() const;
+    int punchPreRollBars() const;
     EngineSettings engineSettings() const;
 
     // Programmatic loads (startup, Restore Defaults) go through these and
@@ -49,6 +53,7 @@ class AudioSettingsPage : public QWidget
     void setOutputLevel(int percent);
     void setMetronomeVolume(int percent);
     void setCountInBars(int bars);
+    void setPunchPreRollBars(int bars);
     void setEngineSettings(const EngineSettings &settings);
     void setDeviceConfig(const AudioDeviceConfig &config);
     // What the device actually opened with, and why it differs from the
@@ -59,6 +64,7 @@ class AudioSettingsPage : public QWidget
     void outputLevelChanged(int percent);
     void metronomeVolumeChanged(int percent);
     void countInBarsChanged(int bars);
+    void punchPreRollBarsChanged(int bars);
     void engineSettingsChanged(const EngineSettings &settings);
     void deviceConfigChanged(const AudioDeviceConfig &config);
 
@@ -72,6 +78,7 @@ class AudioSettingsPage : public QWidget
     QSlider *m_metronomeSlider = nullptr;
     QLabel *m_metronomeValue = nullptr;
     QComboBox *m_countIn = nullptr;
+    QComboBox *m_punchPreRoll = nullptr;
     QSpinBox *m_polyphony = nullptr;
     QComboBox *m_mixRate = nullptr;
     QCheckBox *m_analogFilter = nullptr;
