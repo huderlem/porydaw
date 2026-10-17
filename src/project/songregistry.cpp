@@ -1385,7 +1385,9 @@ QString deletableVoicegroup(const QString &projectRoot, const QVector<SongInfo> 
     if (name.isEmpty())
         return {};
 
-    // Not a keysplit/drumkit sub-group of another voicegroup.
+    // Not a keysplit/drumkit sub-group of another voicegroup (the drumkit
+    // list also holds drumsets/ voicegroups nothing uses yet; keeping those
+    // errs safe).
     const QString symbol = QStringLiteral("voicegroup") + arg;
     const VgCatalogScan catalog = VoicegroupSource::catalogScan(projectRoot);
     for (const auto &keysplit : catalog.keysplits) {

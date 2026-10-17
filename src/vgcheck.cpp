@@ -282,6 +282,39 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
         std::printf("vgcheck: edited Keysplit slot %d (sub-vg/table from slot %d)\n", ksSlot,
                     ksDonor);
     }
+    // A drumset declared under sound/voicegroups/drumsets/ is a drumkit choice
+    // before any voice uses it; an unused top-level voicegroup is not. Both
+    // probe files are removed again before the swap below.
+    if (QDir(projectRoot + QStringLiteral("/sound/voicegroups/drumsets")).exists()) {
+        const QString unrefDrumset =
+            projectRoot + QStringLiteral("/sound/voicegroups/drumsets/zz_vgcheck_unref.inc");
+        const QString unrefGroup =
+            projectRoot + QStringLiteral("/sound/voicegroups/zz_vgcheck_unref.inc");
+        const QByteArray voice = "\tvoice_square_1 60, 0, 0, 2, 0, 0, 15, 0\n";
+        QFile drumsetFile(unrefDrumset), groupFile(unrefGroup);
+        if (!drumsetFile.open(QIODevice::WriteOnly) || !groupFile.open(QIODevice::WriteOnly)) {
+            std::fprintf(stderr, "vgcheck: cannot write unreferenced-drumset probes\n");
+            return 1;
+        }
+        drumsetFile.write("voice_group zz_vgcheck_unref_drumset, 36\n" + voice);
+        groupFile.write("voice_group zz_vgcheck_unref_group\n" + voice);
+        drumsetFile.close();
+        groupFile.close();
+        const QStringList withProbes = VoicegroupSource::drumkitInstruments(projectRoot);
+        QFile::remove(unrefDrumset);
+        QFile::remove(unrefGroup);
+        if (!withProbes.contains(QStringLiteral("voicegroup_zz_vgcheck_unref_drumset"))) {
+            std::fprintf(stderr, "vgcheck: unreferenced drumsets/ voicegroup missing from "
+                                 "drumkit choices\n");
+            return 1;
+        }
+        if (withProbes.contains(QStringLiteral("voicegroup_zz_vgcheck_unref_group"))) {
+            std::fprintf(stderr, "vgcheck: unreferenced top-level voicegroup listed as a "
+                                 "drumkit\n");
+            return 1;
+        }
+        std::printf("vgcheck: unreferenced drumsets/ voicegroup is a drumkit choice\n");
+    }
     // Drumkit swap: point one keysplit_all voice at a different observed
     // drumkit sub-voicegroup, and convert a spare basic voice into a drumkit.
     const QStringList drumkits = VoicegroupSource::drumkitInstruments(projectRoot);

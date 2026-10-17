@@ -4350,7 +4350,9 @@ bool MainWindow::draftVoicegroupUsedElsewhere(
     }
     // Another voicegroup's keysplit/drumkit sub-group (read from disk, as
     // Delete Song's SongRegistry::deletableVoicegroup does): deleting it
-    // would leave that reference dangling and break the build.
+    // would leave that reference dangling and break the build. The drumkit
+    // list also holds drumsets/ voicegroups nothing uses yet; keeping those
+    // errs safe.
     const QString symbol = QStringLiteral("voicegroup") + arg;
     const VgCatalogScan catalog = VoicegroupSource::catalogScan(session.root);
     for (const auto &keysplit : catalog.keysplits) {

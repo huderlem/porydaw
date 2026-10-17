@@ -1682,13 +1682,21 @@ VgCatalogScan VgScanCounts::finish() const
 VgCatalogScan VoicegroupSource::catalogScan(const QString &projectRoot)
 {
     VgScanCounts counts;
-    const QString drumsetsDir = projectRoot + QStringLiteral("/sound/voicegroups/drumsets/");
+    // Windows and (by default) macOS match folder names without regard to
+    // case, so a "Drumsets" folder is the same folder there.
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseSensitive;
+#endif
+    const QDir root(projectRoot);
     for (const QString &path : voicegroupFiles(projectRoot)) {
         bool ok = false;
         const QByteArray content = readAllBytes(path, &ok);
         if (!ok)
             continue;
-        const bool inDrumsetsDir = path.startsWith(drumsetsDir);
+        const bool inDrumsetsDir = root.relativeFilePath(path).startsWith(
+            QStringLiteral("sound/voicegroups/drumsets/"), pathCase);
         bool endsWithNewline = false;
         for (const QByteArray &raw : splitLines(content, &endsWithNewline))
             counts.scanLine(raw, inDrumsetsDir);
