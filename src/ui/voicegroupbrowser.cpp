@@ -45,6 +45,14 @@ const QString kVoiceMimeType = QStringLiteral("application/x-porydaw-voice");
 const VgVoice kPlaceholderVoice{
     VgMacro::Square1, 60, 0, QString(), QString(), 0, 2, 0, 0, 0, 15, 0};
 
+// Two voices that write the same .inc line are the same voice: VgVoice's
+// operator== also compares fields the macro doesn't use (a Square 1's
+// period, a sample's duty), which an edit can leave behind.
+bool sameVoiceLine(const VgVoice &a, const VgVoice &b)
+{
+    return VoicegroupSource::renderVoiceLine(a) == VoicegroupSource::renderVoiceLine(b);
+}
+
 // The Type dropdown offers every voice family the engine treats as its own,
 // each right after the plain variant it detunes. The one omission among the
 // _alt macros is voice_noise_alt: CgbSound guards the FIX bit with `ch < 4`,
@@ -1171,7 +1179,8 @@ void VoicegroupBrowser::showVoiceMenu(const QPoint &pos)
     menu.addSeparator();
     QAction *clear = menu.addAction(tr("Clear"), this, [this, slot] { clearVoice(slot); });
     clear->setToolTip(tr("Replace this voice with the unused-slot placeholder."));
-    clear->setEnabled(editable && !m_viewOnly && *voice != kPlaceholderVoice);
+    clear->setEnabled(editable && !m_viewOnly && !sameVoiceLine(*voice, kPlaceholderVoice));
+    menu.setToolTipsVisible(true);
     menu.exec(m_tree->viewport()->mapToGlobal(pos));
 }
 
@@ -1259,15 +1268,17 @@ bool VoicegroupBrowser::resolvePastedVoice(VgVoice *voice, const std::optional<V
     // means the scan found nothing to go on, so the line is trusted). The
     // reverse twins assemble the same type byte, but projects define one
     // or the other (pret pokeemerald only _reverse, pokeemerald-expansion
-    // only _alt): a reversed voice lands as whichever this project has,
-    // _alt when both.
+    // only _alt): a reversed voice keeps its spelling when this project
+    // defines it and otherwise lands as the twin this project has.
     if (vgMacroIsDirectSound(voice->macro) && !m_voiceMacroWords.isEmpty()) {
-        if (voice->macro == VgMacro::DirectSoundAlt ||
-            voice->macro == VgMacro::DirectSoundReverse) {
-            if (m_voiceMacroWords.contains(vgMacroName(VgMacro::DirectSoundAlt)))
-                voice->macro = VgMacro::DirectSoundAlt;
-            else if (m_voiceMacroWords.contains(vgMacroName(VgMacro::DirectSoundReverse)))
-                voice->macro = VgMacro::DirectSoundReverse;
+        if ((voice->macro == VgMacro::DirectSoundAlt ||
+             voice->macro == VgMacro::DirectSoundReverse) &&
+            !m_voiceMacroWords.contains(vgMacroName(voice->macro))) {
+            const VgMacro twin = voice->macro == VgMacro::DirectSoundAlt
+                                     ? VgMacro::DirectSoundReverse
+                                     : VgMacro::DirectSoundAlt;
+            if (m_voiceMacroWords.contains(vgMacroName(twin)))
+                voice->macro = twin;
         }
         const QString word = vgMacroName(voice->macro);
         if (!m_voiceMacroWords.contains(word)) {
@@ -1354,7 +1365,7 @@ void VoicegroupBrowser::pasteVoice(int slot)
             emit statusMessage(why);
         return;
     }
-    if (voice == *cur)
+    if (sameVoiceLine(voice, *cur))
         return; // pasting what is already there is a no-op
     emit voiceEditRequested(slot, voice, vgVoiceStructuralChange(*cur, voice),
                             tr("paste voice %1").arg(slot));
@@ -1363,7 +1374,7 @@ void VoicegroupBrowser::pasteVoice(int slot)
 void VoicegroupBrowser::clearVoice(int slot)
 {
     const VgVoice *cur = m_source ? m_source->voiceAt(slot) : nullptr;
-    if (!cur || m_viewOnly || *cur == kPlaceholderVoice)
+    if (!cur || m_viewOnly || sameVoiceLine(*cur, kPlaceholderVoice))
         return;
     emit voiceEditRequested(slot, kPlaceholderVoice,
                             vgVoiceStructuralChange(*cur, kPlaceholderVoice),

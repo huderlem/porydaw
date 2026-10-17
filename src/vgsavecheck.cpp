@@ -1135,9 +1135,10 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                                          .arg(line)));
                 }
 
-                // The reverse twins land as whichever the project defines,
-                // _alt when both; neither is refused; an empty macro list
-                // (nothing scanned) trusts the line.
+                // A reverse twin keeps its spelling when the project defines
+                // it and otherwise lands as the twin the project has; neither
+                // is refused; an empty macro list (nothing scanned) trusts
+                // the line.
                 const QString plain = QStringLiteral("voice_directsound");
                 const QString alt = QStringLiteral("voice_directsound_alt");
                 const QString reverse = QStringLiteral("voice_directsound_reverse");
@@ -1154,8 +1155,10 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 check(reversePastesAs({plain, reverse}, alt) == int(VgMacro::DirectSoundReverse),
                       "an _alt voice did not paste as _reverse into a _reverse-only project");
                 check(reversePastesAs({plain, alt, reverse}, reverse) ==
-                          int(VgMacro::DirectSoundAlt),
-                      "a _reverse voice did not paste as _alt when both are defined");
+                          int(VgMacro::DirectSoundReverse),
+                      "a _reverse voice did not keep its spelling when both are defined");
+                check(reversePastesAs({plain, alt, reverse}, alt) == int(VgMacro::DirectSoundAlt),
+                      "an _alt voice did not keep its spelling when both are defined");
                 check(reversePastesAs({plain}, alt) == -1,
                       "a reversed voice pasted into a project with neither reverse macro");
                 check(reversePastesAs({}, reverse) == int(VgMacro::DirectSoundReverse),
@@ -1296,6 +1299,33 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
             stack->undo();
             check(voiceAt(dsSlot) == source && stack->index() == baseIndex,
                   "one undo did not restore the cleared voice");
+
+            // Equality is the rendered line: a Square 1 that writes the
+            // placeholder line but carries a field the macro doesn't use
+            // (a noise period) is the placeholder for Clear, and pasting
+            // its own line over it is a no-op.
+            {
+                VgVoice hidden = placeholder;
+                hidden.period = 1;
+                emit m_vgBrowser->voiceEditRequested(dsSlot, hidden, true,
+                                                     QStringLiteral("vgsavecheck hidden field"));
+                const int hiddenIndex = stack->index();
+                if (check(hiddenIndex == baseIndex + 1 && voiceAt(dsSlot) == hidden,
+                          "the hidden-field voice fixture did not land")) {
+                    items.clear();
+                    runMenu(dsSlot, QString(), &items);
+                    check(items.contains(tr("Clear")) && !items.value(tr("Clear")),
+                          "Clear is enabled on a voice that renders as the placeholder");
+                    clipboard->setText(
+                        QString::fromUtf8(VoicegroupSource::renderVoiceLine(hidden)));
+                    sendKeys(dsSlot, pasteKeys);
+                    check(stack->index() == hiddenIndex && voiceAt(dsSlot) == hidden,
+                          "pasting a voice's own rendered line over it pushed an undo entry");
+                }
+                while (stack->index() > baseIndex)
+                    stack->undo();
+                check(voiceAt(dsSlot) == source, "undo did not restore the hidden-field fixture");
+            }
 
             // A scalar-only paste after a spin edit of the same field stays
             // its own entry (and a spin edit after it doesn't fold in).
