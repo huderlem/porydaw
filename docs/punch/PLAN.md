@@ -429,3 +429,134 @@ Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
 ~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan,
 build-dummy, build-nomidi, build-off: clean. clang-format 22 on touched
 files.
+
+### 5.3 Step 3 (2026-10-17, uncommitted)
+
+Where it lives: `SurfaceEvent::Punch` and `SurfaceEvent::note` (the
+button's note number, set for every button), `mcu::kPunchDrop` (0x57) /
+`kPunchReplace` (0x58) (audio/mcu.*); the once-per-press dispatch in
+`MainWindow::onSurfaceEvent` with `m_surfacePunchHeld` (bit per note,
+`surfacePunchBit`), reset in the `portsClosed` handler (mainwindow.*); the
+Settings → MIDI buttons line (ui/midisettingspage.cpp); CHANGELOG; manual
+outlines in docsrc/manual (midi-keyboard.md "Punch recording" section +
+Transport buttons, main-window.md transport bar, settings.md Audio).
+
+Judgment calls:
+
+- **Held set, not a count.** The dispatch keeps one bit per Punch note:
+  a press toggles only when no bit was set, a release clears its own bit.
+  A repeated press of an already-held note (a lost release) does nothing
+  until the bits clear — devices without releases are unsupported (§3),
+  and the reset below keeps it from lasting past a reconnect.
+- **Counted under a modal dialog.** A Punch press under a modal dialog
+  doesn't toggle (J5, as every button) but is still marked held, so its
+  partner arriving after the dialog closes doesn't toggle either.
+  Releases always clear, as Rewind/FF's do.
+- **Reset where Rewind/FF's hold is**: the `portsClosed` handler (a port
+  unplugged/disabled/reopened, or an open port's role change), *after*
+  draining what the port queued (a queued press still toggles, then
+  nothing is held). Not on a song switch: Punch is app-wide, unlike a
+  Rewind/FF hold.
+- **Mid-take**: the surface triggers the toolbar action, so a take keeps
+  the mode it latched at Record (no new code).
+- **Scripting docs**: API.md / gen_scripting_docs.py don't list surface
+  button kinds (only port roles), so nothing to change or regenerate.
+- **CHANGELOG**: one "Added punch recording…" entry plus "Punch" in the
+  existing transport-buttons list. Manual: TODO outlines only, no new page
+  (mkdocs nav unchanged); `mkdocs build --strict` PASS.
+
+Checks (midicheck): `checkMcuDecoder` maps 0x57/0x58 to Punch (removed
+from the unmapped list) and checks every mapped button's event carries its
+note number. `checkSurfaceTransport`: both notes in one press toggle once
+(and the view's punch mode); releases don't toggle; a second press (partner
+first, released in the other order) toggles back; a partner re-press while
+the other is held is ignored; single-note devices (only 0x57, only 0x58)
+toggle per press, a velocity-0 note on releases; a port closing mid-press
+lets the next press toggle; a press queued before the port closes is
+handled (toggles) and leaves nothing held; Punch under a modal dialog does
+nothing; Punch mid-take toggles both ways with the take running and its
+mode unchanged. Settings page buttons line text.
+
+Mutation tests (scripted apply, rebuilt with exit-code check, midicheck
+run, restored from backup files): all 9 caught — 0x58 not decoded (8
+fails), note not set (22), no held test (13), releases not tracked (9),
+no reset on portsClosed (2), reset before the drain (1), one bit for both
+notes (11), Punch not dispatched (7), Settings line unchanged (1). Not
+mutation-tested: the held-under-modal marking (a partner arriving after a
+dialog closes mid-press isn't drivable without timing a real press).
+
+Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
+~/teamaqua-pokeemerald: PASS (all harnesses; 36/36 ok on ASAN). build, build-asan, build-dummy,
+build-nomidi, build-off: clean. clang-format 22 on touched files.
+
+**Final review fixes (2026-10-17, uncommitted).** A final Opus review of
+the branch found no high/medium bugs; applied:
+
+- **L1 — say why.** A Record press from the control surface, or the roll's
+  R key, while Record is unavailable now shows `recordUnavailableReason()`
+  in the status bar for 6 s, as `beginRecording` does
+  (`MainWindow::explainRecordUnavailable`); both used to do nothing. The R
+  key still does nothing at all when Record is hidden (no keyboard port:
+  no button, no key, as before); the surface's Record says "Connect a MIDI
+  keyboard to record." then (its button has no tooltip).
+- **L2 — no tint for an overdub.** `SongView::setOverdubLatch` (set by
+  `beginRecording` for a non-punch take; `clearPunchLatch` ends either
+  latch, on every take-ending path and a song swap): while an overdub
+  records into the view, `punchRange()` is empty even if Punch is turned on
+  mid-take; a punch take keeps showing its latch.
+- **L3 — Punch hidden with Record.** `syncRecordAction` shows Punch exactly
+  when Record is shown: a keyboard port open, or a take recording (one
+  whose keyboard went away keeps both). A hidden QAction is disabled (Qt),
+  so its `transport.punch` shortcut is off and — mirroring Record, whose
+  surface press with no keyboard does nothing — the surface's Punch button
+  doesn't toggle it then, and says why (the same "Connect a MIDI keyboard
+  to record."). An explicit `setEnabled` was tried and dropped: a mutation
+  removing it went uncaught because hiding already disables.
+- **L4** — CHANGELOG "Changed": switching tracks no longer clears the time
+  selection (a selection of a track's automation lanes still is).
+- **L5** — midi-keyboard.md outline bullets (TODO only): Record while
+  playing inside the range replaces from where recording started; Record
+  from Pause resumes in place with no pre-roll; a selection on a track's
+  automation lanes is still cleared by a track switch (the outline bullet
+  that said switching keeps the selection is corrected); keys held across
+  punch-in keep sounding, only the old part's note is cut; with Loop on, a
+  pre-roll start or range past the loop end is never reached ("Nothing was
+  recorded."); Punch shows only with a keyboard. `mkdocs build --strict`
+  PASS.
+- **L6 — no code change; verified and pinned.** A note's and a lane
+  move's latency-shifted sample is already clamped to its segment's start
+  (`floorSample`, = the take's Begin for a take armed or resumed inside the
+  window, a loop start or seek landing for later segments) *before* the tick
+  conversion, and `punchedSpans` starts each span at `tickAt` of that same
+  sample; `tickAt` is monotonic, so a note or move can never land in
+  [in, p) for a take that began at p: it is clamped to p (the "clamp to
+  span start" rule), on the same footing as lane moves. A second clamp in
+  tick space would be dead code (nothing could make it fire, so nothing
+  could test it). Pinned instead by a new `checkPunchTakeRules` case.
+
+Checks added: midicheck `checkSurfaceTransport` — surface Record with no
+keyboard port and with Punch on and no selection each start nothing and
+show the reason; surface Punch with no keyboard port doesn't toggle and
+says why (the Punch block now opens a keyboard port, as does the modal
+case, which also checks Punch is enabled there so only the dialog keeps it
+out). reccheck — Punch hidden (and disabled) with no keyboard, shown with
+one, kept mid-take when the keyboard goes away, hidden after (L3); R with
+Record shown but unavailable says why, R with no keyboard stays quiet
+(L1); an overdub with Punch turned on mid-take has no punch range or ruler
+rect, and after it the selection tints again (L2); `checkPunchTakeRules`:
+a take armed inside the window at 55 with a 5-tick offset replaces
+[55, 80), and a note and a MOD move shifted to 52/51 land at 55 (L6).
+
+Mutation tests (scripted apply, rebuilt with exit-code check, harness run,
+restored from backup files): caught — surface Record silent when
+unavailable (midicheck 2 fails), surface Punch silent when disabled (1),
+R key silent (reccheck 1), `punchRange` ignoring the overdub latch (1),
+overdub latch never set (1), `clearPunchLatch` keeping the overdub latch
+(4), Punch visibility not synced (reccheck 2, midicheck 1), the note floor
+skipped for punch takes (1), the lane floor skipped for punch takes (1).
+Not caught, and removed: an explicit `setEnabled` on Punch (redundant with
+hiding).
+
+Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
+~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan, build-dummy,
+build-nomidi, build-off: clean. clang-format 22 on touched files.

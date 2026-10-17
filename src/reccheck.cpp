@@ -522,6 +522,33 @@ void checkPunchTakeRules()
               "punch take: with an offset, a program change shifted across punch-in did not land "
               "on it");
     }
+    // Armed inside the window (Begin at 55), with the same offset: the
+    // replaced span starts at the Begin, and a note and a MOD move the shift
+    // carries before it are clamped to it, never into [in, begin), which
+    // the take doesn't replace (they'd overdub the old part kept there).
+    {
+        take.begin(0, 48);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 48};
+        feed.begin(55000);
+        feed.on(57000, 60);  // shifted to 52: starts at the Begin
+        feed.mod(56000, 90); // shifted to 51: lands on the Begin
+        feed.off(65000, 60);
+        const Spans spans = take.punchedSpans(tl, 100000, 0);
+        if (!check(spans == Spans{{55, 80}},
+                   "punch take: armed inside the window, the replaced span is not [begin, out)"))
+            printSpans("got", spans);
+        const auto notes = take.toNotes(tl, 100000, 0, 5000);
+        if (!check(sameNotes(notes, {{55, 60, 5, 100}}),
+                   "punch take: armed inside the window, a note shifted before the Begin was not "
+                   "clamped to it"))
+            printNotes("got", notes);
+        const auto writes = take.toLaneWrites(tl, 100000, 0, 5000);
+        check(writes.size() == 1 && writes[0].cc == 0x01 && writes[0].tickBegin == 55 &&
+                  writes[0].points.size() == 1 && writes[0].points[0].tick == 55,
+              "punch take: armed inside the window, a MOD move shifted before the Begin was not "
+              "clamped to it");
+    }
 }
 
 void checkTakeRules()
@@ -1406,11 +1433,15 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
         std::printf("reccheck: no-keyboard checks SKIP (a real MIDI keyboard port is open)\n");
     } else {
         check(!m_recordAction->isVisible(), "with no MIDI input the Record button is shown");
+        check(!m_punchAction->isVisible() && !m_punchAction->isEnabled(),
+              "with no MIDI input the Punch button is shown (or enabled)");
         toggleRecord();
         check(m_takeSession == nullptr, "with no MIDI input Record started a take");
     }
     midiInput().setOpenPortsForTest({QStringLiteral("Test Keyboard")});
     check(m_recordAction->isVisible(), "a connected keyboard did not show the Record button");
+    check(m_punchAction->isVisible() && m_punchAction->isEnabled(),
+          "a connected keyboard did not show (and enable) the Punch button");
     if (!m_audioOk) {
         check(m_recordAction && !m_recordAction->isEnabled(),
               "with no audio device Record is enabled");
@@ -1884,6 +1915,28 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
             check(!recording(), "record: R in the focused roll did not end the take");
             m_stopAction->trigger();
             pumpMs(30);
+            // Shown but unavailable (Punch on, no time selection), R says
+            // why in the status bar as the button would; with no keyboard
+            // (no button) it stays quiet.
+            const SongView::TimeSelection selWas = view->timeSelection();
+            const bool punchWas = m_punchAction->isChecked();
+            view->clearTimeSelection();
+            m_punchAction->setChecked(true);
+            statusBar()->clearMessage();
+            pressR();
+            check(!recording() && statusBar()->currentMessage() ==
+                                      QStringLiteral("Punch recording needs a time selection."),
+                  "record: R with Record unavailable did not say why in the status bar");
+            m_punchAction->setChecked(false);
+            midiInput().setOpenPortsForTest({});
+            statusBar()->clearMessage();
+            pressR();
+            check(!recording() && statusBar()->currentMessage().isEmpty(),
+                  "record: R with no keyboard (no Record button) said something");
+            midiInput().setOpenPortsForTest({QStringLiteral("Test Keyboard")});
+            m_punchAction->setChecked(punchWas);
+            if (selWas.active())
+                view->setTimeSelection(selWas);
         }
     }
 
@@ -2189,9 +2242,13 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         midi.setOpenPortsForTest({});
         check(recording() && m_recordAction->isVisible() && m_recordAction->isEnabled(),
               "record: the keyboard going away mid-take took the Record button with it");
+        check(m_punchAction->isVisible() && m_punchAction->isEnabled(),
+              "record: the keyboard going away mid-take took the Punch button with it");
         m_recordAction->trigger();
         check(!recording() && !m_recordAction->isVisible(),
               "record: with no keyboard left, the Record button stayed after the take");
+        check(!m_punchAction->isVisible() && !m_punchAction->isEnabled(),
+              "record: with no keyboard left, the Punch button stayed after the take");
         midi.setOpenPortsForTest({QStringLiteral("Test Keyboard")});
         m_stopAction->trigger();
     }
@@ -3427,10 +3484,16 @@ void MainWindow::checkRecordingPunch(int a, int b)
         m_punchAction->setChecked(true);
         check(recording() && !m_take.punching(),
               "punch: turning Punch on mid-take made an overdub a punch take");
+        // It replaces nothing: no punch tint while it records.
+        check(view->punchRange() == std::make_pair(uint64_t(0), uint64_t(0)) &&
+                  view->punchRangeRect().isEmpty(),
+              "punch: an overdub take shows a punch tint with Punch turned on mid-take");
         pumpTo(out + tpb / 2);
         m_stopAction->trigger();
         check(undo->index() == undoAfter && noteList(a) == before,
               "punch: an overdub with Punch turned on mid-take replaced something");
+        check(view->punchRange() == std::make_pair(in, out),
+              "punch: after an overdub take, Punch on does not tint the selection again");
         while (undo->index() > undoBefore)
             undo->undo();
     }

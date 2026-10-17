@@ -38,6 +38,10 @@ std::optional<SurfaceEvent> decode(const MidiTapMsg &msg)
     case kClick:
         event.kind = SurfaceEvent::Click;
         break;
+    case kPunchDrop:
+    case kPunchReplace:
+        event.kind = SurfaceEvent::Punch;
+        break;
     case kRewind:
         event.kind = SurfaceEvent::Rewind;
         break;
@@ -54,6 +58,7 @@ std::optional<SurfaceEvent> decode(const MidiTapMsg &msg)
         return std::nullopt;
     }
     event.pressed = type == 0x90 && msg.d2 > 0;
+    event.note = msg.d1;
     return event;
 }
 

@@ -318,6 +318,10 @@ class MainWindow : public QMainWindow
     static QString takeLanesText(const std::vector<RecordingTake::LaneWrite> &writes);
     // Why Record can't start right now, empty when it can.
     QString recordUnavailableReason() const;
+    // Record (or Punch) asked for from a key or a control surface while
+    // unavailable: recordUnavailableReason() in the status bar, as
+    // beginRecording shows it.
+    void explainRecordUnavailable();
     void syncRecordAction();
     // The lane menus' MIDI section (SongView::MidiControls) on every tab:
     // the keyboard, the routes and the lane learning.
@@ -362,6 +366,8 @@ class MainWindow : public QMainWindow
     void surfaceRepeatTick();
     // Ends a Rewind/FF hold (release, a port closing, a song switch).
     void stopSurfaceRepeat();
+    // m_surfacePunchHeld's bit for a Punch note (Drop 1, Replace 2).
+    static uint8_t surfacePunchBit(uint8_t note);
     static constexpr int kSurfaceRepeatDelayMs = 400;
     static constexpr int kSurfaceRepeatIntervalMs = 150;
     static constexpr int kSurfaceRepeatFastAfter = 5; // 400 + 4 × 150 ms = 1 s
@@ -836,6 +842,10 @@ class MainWindow : public QMainWindow
     QTimer *m_surfaceRepeat = nullptr;
     int m_surfaceRepeatDir = 0;
     int m_surfaceRepeats = 0;
+    // The Punch notes (mcu::kPunchDrop / kPunchReplace) held on a control
+    // surface (surfacePunchBit): a press toggles Punch only when none was
+    // held. Cleared when surface ports close (their releases never come).
+    uint8_t m_surfacePunchHeld = 0;
     // Where the last Rewind/FF/jog step landed, when, and in which session:
     // a Rewind soon after (a held repeat, a quick second press) steps back
     // from there, not from the playhead that has since moved past it.

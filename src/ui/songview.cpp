@@ -9262,6 +9262,7 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_selection.clear();
     m_timeSel = TimeSelection();
     m_punchLatch = {0, 0}; // another song's take
+    m_overdubLatch = false;
     emit timeSelectionChanged();
     // The clipboard is deliberately NOT cleared: it is app-shared and
     // self-contained, so a copy made in another song (or this one, before
@@ -9850,6 +9851,24 @@ void SongView::setPunchLatch(uint64_t in, uint64_t out)
     m_ruler->update();
 }
 
+void SongView::setOverdubLatch()
+{
+    setPunchLatch(0, 0);
+    if (m_overdubLatch)
+        return;
+    m_overdubLatch = true;
+    m_ruler->update();
+}
+
+void SongView::clearPunchLatch()
+{
+    setPunchLatch(0, 0);
+    if (!m_overdubLatch)
+        return;
+    m_overdubLatch = false;
+    m_ruler->update();
+}
+
 std::pair<uint64_t, uint64_t> SongView::punchRange() const
 {
     if (!m_timeline)
@@ -9858,6 +9877,10 @@ std::pair<uint64_t, uint64_t> SongView::punchRange() const
     // toggle says now (the take keeps the mode it started in).
     if (m_punchLatch.second > m_punchLatch.first)
         return m_punchLatch;
+    // An overdub take recording here: it replaces nothing, so no range is
+    // tinted, even with Punch turned on mid-take.
+    if (m_overdubLatch)
+        return {0, 0};
     if (m_punchMode && m_timeSel.active())
         return {m_timeSel.startTick, m_timeSel.endTick};
     return {0, 0};

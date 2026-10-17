@@ -644,13 +644,16 @@ class SongView : public QWidget
     // Punch recording's ruler tint (docs/punch/PLAN.md P2), in the record
     // colour. While a punch take records into this view it is the take's
     // latched range (setPunchLatch; a later selection change or Punch
-    // toggle moves nothing); otherwise, with punch mode on, the time
-    // selection's span. Fed by the main window. punchRange() is {0, 0} when
-    // nothing is tinted.
+    // toggle moves nothing); while an overdub take records here, nothing
+    // (setOverdubLatch: Punch turned on mid-take doesn't make it one);
+    // otherwise, with punch mode on, the time selection's span. Fed by the
+    // main window; clearPunchLatch ends either latch. punchRange() is
+    // {0, 0} when nothing is tinted.
     void setPunchMode(bool on);
     bool punchMode() const { return m_punchMode; }
     void setPunchLatch(uint64_t in, uint64_t out);
-    void clearPunchLatch() { setPunchLatch(0, 0); }
+    void setOverdubLatch();
+    void clearPunchLatch();
     std::pair<uint64_t, uint64_t> punchRange() const;
     // Where the ruler paints it, in the ruler's coordinates (harness probe).
     QRectF punchRangeRect() const;
@@ -1064,6 +1067,7 @@ class SongView : public QWidget
     TimeSelection m_timeSel;
     bool m_punchMode = false;
     std::pair<uint64_t, uint64_t> m_punchLatch{0, 0};
+    bool m_overdubLatch = false; // an overdub take is recording here
     RangeDrag m_rangeDrag;
     // The notes and lane points the active time selection covers, with the
     // selection's scope resolved (nudge, move and duplicate all act on the

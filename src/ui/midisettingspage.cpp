@@ -356,7 +356,8 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     // The fixed MCU map (D5): what a control surface's buttons can do.
     auto *buttonsNote =
         new QLabel(tr("Control surface buttons: Play/Pause, Stop, Record, Loop, Click "
-                      "(metronome), Rewind, Fast-forward, the jog wheel, Save and Undo."),
+                      "(metronome), Punch, Rewind, Fast-forward, the jog wheel, Save and "
+                      "Undo."),
                    m_controls);
     buttonsNote->setObjectName(QStringLiteral("settingsMidiSurfaceButtons"));
     buttonsNote->setForegroundRole(QPalette::PlaceholderText);

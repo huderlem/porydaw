@@ -987,6 +987,8 @@ void MainWindow::buildUi()
         // press still queued can't start a hold after this ends it.
         drainSurface();
         stopSurfaceRepeat();
+        // Nor Punch's releases: a press after a reconnect toggles again.
+        m_surfacePunchHeld = 0;
     });
     // A control surface's MCU transport buttons (docs/control-surface/
     // PLAN.md §3.3), and Rewind/FF's hold-to-repeat.
@@ -1703,8 +1705,14 @@ SongSession *MainWindow::createSession()
     connect(s->view, &SongView::midiLearnCancelRequested, m_midiInput.get(),
             &MidiInput::cancelLearn);
     connect(s->view, &SongView::recordRequested, this, [this, s] {
-        if (s == m_active && m_recordAction->isVisible() && m_recordAction->isEnabled())
+        // As the button: none (no keyboard), no key. Shown but unavailable,
+        // the key says why, as a click on it would in its tooltip.
+        if (s != m_active || !m_recordAction->isVisible())
+            return;
+        if (m_recordAction->isEnabled())
             m_recordAction->trigger();
+        else
+            explainRecordUnavailable();
     });
     connect(s->view, &SongView::metronomeRequested, this, [this, s] {
         if (s == m_active)
@@ -5999,7 +6007,19 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
         if ((event.kind == SurfaceEvent::Rewind && m_surfaceRepeatDir < 0) ||
             (event.kind == SurfaceEvent::FastForward && m_surfaceRepeatDir > 0))
             stopSurfaceRepeat();
+        if (event.kind == SurfaceEvent::Punch)
+            m_surfacePunchHeld &= ~surfacePunchBit(event.note);
         return;
+    }
+    // One press of the KeyLab's Punch button sends two notes (docs/punch/
+    // PLAN.md §3): only the first of a press toggles, while the other is
+    // still held the second does nothing. Counted even under a modal
+    // dialog, so a partner arriving after it closes doesn't toggle either.
+    if (event.kind == SurfaceEvent::Punch) {
+        const uint8_t wasHeld = m_surfacePunchHeld;
+        m_surfacePunchHeld |= surfacePunchBit(event.note);
+        if (wasHeld)
+            return;
     }
     // As the keyboard's shortcuts are (J5). The window being in the
     // background doesn't matter: that's what a hardware transport is for.
@@ -6024,8 +6044,12 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
         break;
     case SurfaceEvent::Record:
         // Hidden (no keyboard port) it is disabled too (syncRecordAction),
-        // so a surface alone never records.
-        press(m_recordAction);
+        // so a surface alone never records. Unavailable, the press says
+        // why: the button on the keyboard has no tooltip.
+        if (m_recordAction->isEnabled())
+            m_recordAction->trigger();
+        else
+            explainRecordUnavailable();
         break;
     case SurfaceEvent::Cycle:
         press(m_loopAction);
@@ -6034,6 +6058,15 @@ void MainWindow::onSurfaceEvent(const SurfaceEvent &event)
         // The metronome (docs/metronome/PLAN.md M10). Its LED stays dark:
         // porydaw sends nothing back to a surface.
         press(m_metronomeAction);
+        break;
+    case SurfaceEvent::Punch:
+        // As the toolbar's toggle: a take already recording keeps the mode
+        // it started in. Hidden with Record (no keyboard port), it is
+        // disabled too and says why, as Record does.
+        if (m_punchAction->isEnabled())
+            m_punchAction->trigger();
+        else
+            explainRecordUnavailable();
         break;
     case SurfaceEvent::Save:
         press(m_saveAction);
@@ -6118,6 +6151,11 @@ void MainWindow::surfaceRepeatTick()
     surfaceStep(m_surfaceRepeatDir * bars, /*bars=*/true);
 }
 
+uint8_t MainWindow::surfacePunchBit(uint8_t note)
+{
+    return note == mcu::kPunchReplace ? 2 : 1;
+}
+
 void MainWindow::stopSurfaceRepeat()
 {
     m_surfaceRepeatDir = 0;
@@ -6170,6 +6208,20 @@ void MainWindow::syncRecordAction()
         m_recordAction->setToolTip(tip);
         m_recordAction->setStatusTip(why);
     }
+    // Punch only matters to Record: shown with it (a take whose keyboard
+    // went away keeps both). A hidden action is disabled too (Qt), as
+    // Record is, so a control surface's Punch button does nothing without a
+    // keyboard.
+    if (m_punchAction)
+        m_punchAction->setVisible(m_recordAction->isVisible());
+}
+
+void MainWindow::explainRecordUnavailable()
+{
+    syncRecordAction();
+    const QString why = recordUnavailableReason();
+    if (!why.isEmpty())
+        statusBar()->showMessage(why, 6000);
 }
 
 uint64_t MainWindow::recordingLatencySamples() const
@@ -6216,6 +6268,9 @@ void MainWindow::beginRecording()
         // The track's old part there goes silent while the take records
         // (P9), from where the take begins: before the arm, which it rides.
         m_audio.setPunchMask(m_captureGeneration, track, sel.startTick, sel.endTick);
+    } else {
+        // An overdub: no punch tint while it records, whatever the toggle.
+        m_active->view->setOverdubLatch();
     }
     m_takeSession = m_active;
     m_takeLaneBefore = TakeLaneBefore(); // another document may sit at the same address

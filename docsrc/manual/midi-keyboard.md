@@ -133,6 +133,45 @@ cut when playback starts and aren't carried in. Pitch bend, knob and voice
 Record, Stop or Pause (and the control surface's Play/Pause) during the
 count-in cancels it and records nothing. -->
 
+## Punch recording
+
+<!-- TODO: What it's for: re-record just a few bars of a track, replacing
+what's there. -->
+
+<!-- TODO: Outline:
+- The Punch toggle on the transport toolbar (beside Record), the
+  `transport.punch` shortcut (no key by default), or the keyboard's Punch
+  button (see Transport buttons below). Remembered. Shown with Record,
+  only while a keyboard is connected.
+- Sweep a time selection on the ruler, then pick the track (switching
+  tracks keeps a time selection made on the ruler or the roll; one made
+  on a track's automation lanes is still cleared). With Punch on, the
+  ruler tints the selection red: that's the punch range.
+- Record needs a time selection while Punch is on (greyed out, tooltip says
+  why).
+- Record from stopped: plays from the pre-roll (Settings → Audio → Punch
+  pre-roll: Off / 1 bar / 2 bars, default 1 bar) with the song audible;
+  no count-in; the metronome clicks if it's on.
+- Only what you play inside the range is kept (keys held across its edges
+  are clipped to it). Knobs, bend, mod wheel, voice: only moves inside it.
+- During the take the track's old notes in the range are silent and drawn
+  dimmed; a note sounding into the range stops there.
+- Keys you hold on the keyboard across punch-in keep sounding; only the
+  old part's note is cut there.
+- Playback keeps going after the range until Stop; the take lands at Stop
+  (one undo step). It replaces the track's notes in the range (a note
+  sounding into it is shortened); playing nothing clears the range.
+  Stopping inside the range replaces only up to there.
+- Record while playing arms it: recording starts when the playhead reaches
+  the range. Loop: each pass through the range records, later wins.
+- Record while playing inside the range: replaces from where recording
+  started, not from the range's start.
+- Record from Pause: resumes in place, no pre-roll.
+- With Loop on, if the pre-roll start or the range lies past the loop end,
+  playback never reaches the range ("Nothing was recorded.").
+- Changing the selection or the Punch toggle mid-take doesn't change the
+  take in progress. -->
+
 ## Recording offset (if notes land late)
 
 <!-- TODO: Why: you hear the song a moment after porydaw plays it (audio
@@ -157,7 +196,9 @@ drives Learn. -->
 <!-- TODO: What each button does: Play/Pause plays from the edit cursor,
 pauses, resumes. Stop stops; Stop again goes to the start of the song.
 Record = the Record button (needs a Keyboard port enabled). Loop toggles
-Loop. Click toggles the metronome (see Metronome and count-in above). Rewind/Fast-forward move one bar line per press (from mid-bar,
+Loop. Click toggles the metronome (see Metronome and count-in above). Punch
+toggles Punch (see Punch recording above; one press, though the KeyLab
+sends two notes for it). Rewind/Fast-forward move one bar line per press (from mid-bar,
 Rewind goes to that bar's start); hold to repeat, speeding up to two bars
 a step; they stop at the song's start/end. While playing, playback jumps
 from where it is; during a take, the take carries on from the new bar.
@@ -166,7 +207,7 @@ undo (Undo does nothing while you're typing in a text box). -->
 
 <!-- TODO: The buttons work while porydaw is in the background, but not
 while a dialog (e.g. Song Settings) is open. The button lights on the
-keyboard don't light up (Click's included). Mixer controls (faders, pan knobs, track buttons)
+keyboard don't light up (Click's and Punch's included). Mixer controls (faders, pan knobs, track buttons)
 aren't supported. Plugins see a control surface's messages too
 (`porydaw.midi.ports()` reports each port's role). -->
 

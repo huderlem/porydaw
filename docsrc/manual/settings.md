@@ -14,6 +14,8 @@ mix rate, analog output filter — the global accuracy knobs, contrast with
 the per-song [Song Settings](song-settings.md). Metronome: Volume (0–100%,
 double-click resets to 70%) and Count-in when recording (Off / 1 bar /
 2 bars) — see [MIDI Keyboard](midi-keyboard.md#metronome-and-count-in).
+Punch pre-roll (Off / 1 bar / 2 bars, default 1 bar) — see
+[MIDI Keyboard](midi-keyboard.md#punch-recording).
 Restore Defaults. -->
 
 ## MIDI

@@ -404,9 +404,9 @@ void checkMcuDecoder()
         return !mcu::decode(MidiTapMsg{status, d1, d2, 3}).has_value();
     };
     const std::pair<uint8_t, K> map[] = {
-        {0x5B, K::Rewind}, {0x5C, K::FastForward}, {0x5D, K::Stop},
-        {0x5E, K::Play},   {0x5F, K::Record},      {0x56, K::Cycle},
-        {0x59, K::Click},  {0x50, K::Save},        {0x51, K::Undo},
+        {0x5B, K::Rewind}, {0x5C, K::FastForward}, {0x5D, K::Stop},  {0x5E, K::Play},
+        {0x5F, K::Record}, {0x56, K::Cycle},       {0x59, K::Click}, {0x57, K::Punch},
+        {0x58, K::Punch},  {0x50, K::Save},        {0x51, K::Undo},
     };
     for (const auto &[note, kind] : map) {
         check(decoded(0x90, note, 127, kind, true) && decoded(0x90, note, 1, kind, true),
@@ -418,8 +418,12 @@ void checkMcuDecoder()
               "mcu: a mapped note on another channel was decoded");
         check(ignored(0xA0, note, 127) && ignored(0xB0, note, 127) && ignored(0xD0, note, 0),
               "mcu: a mapped note number in another message type was decoded");
+        // The dispatch tells Punch's two notes apart by it.
+        check(mcu::decode(MidiTapMsg{0x90, note, 127, 3})->note == note &&
+                  mcu::decode(MidiTapMsg{0x80, note, 0, 3})->note == note,
+              "mcu: a button's event does not carry its note number");
     }
-    for (const uint8_t note : {0, 60, 0x52, 0x55, 0x57, 0x58, 0x5A, 0x60, 0x65, 94 + 12, 127})
+    for (const uint8_t note : {0, 60, 0x52, 0x55, 0x5A, 0x60, 0x65, 94 + 12, 127})
         check(ignored(0x90, uint8_t(note), 127) && ignored(0x80, uint8_t(note), 0),
               "mcu: an unmapped note was decoded");
     // The jog wheel: CC 60, bit 6 = backward, the low 6 bits count detents.
@@ -1015,8 +1019,8 @@ void checkSettingsPage()
                   buttons->geometry().top() >= rolesNote->geometry().bottom() &&
                   buttons->text() ==
                       QStringLiteral("Control surface buttons: Play/Pause, Stop, Record, Loop, "
-                                     "Click (metronome), Rewind, Fast-forward, the jog wheel, "
-                                     "Save and Undo."),
+                                     "Click (metronome), Punch, Rewind, Fast-forward, the jog "
+                                     "wheel, Save and Undo."),
               "roles page: the control surface buttons line is missing or misplaced");
         if (check(ports->count() == 2 && roleBox(0) && roleBox(1),
                   "roles page: a port row has no role box")) {
@@ -1742,19 +1746,126 @@ void MainWindow::checkSurfaceTransport()
     check(m_metronomeAction->isChecked() == clickOn && m_audio.metronomeEnabled() == clickOn,
           "surface transport: Click did not toggle the metronome back");
 
+    // Punch (docs/punch/PLAN.md §3): one press sends Drop and Replace, and
+    // toggles Punch once; the partner's press while one is held does
+    // nothing; the toggle is the toolbar's (QSettings and all). Hidden with
+    // Record when no keyboard port is open, it is disabled as Record is:
+    // the button does nothing then but say why.
+    {
+        const bool punchOn = m_punchAction->isChecked();
+        midi.setOpenPortsForTest({surface});
+        statusBar()->clearMessage();
+        tap(mcu::kPunchDrop);
+        check(!m_punchAction->isVisible() && m_punchAction->isChecked() == punchOn &&
+                  statusBar()->currentMessage() ==
+                      QStringLiteral("Connect a MIDI keyboard to record."),
+              "surface transport: Punch with no keyboard port toggled, or did not say why");
+        midi.setOpenPortsForTest({keyboard});
+        const auto punch = [&] { return m_punchAction->isChecked(); };
+        press(mcu::kPunchDrop);
+        press(mcu::kPunchReplace);
+        check(punch() == !punchOn && view->punchMode() == !punchOn,
+              "surface transport: one Punch press (both notes) did not toggle Punch once");
+        release(mcu::kPunchDrop);
+        release(mcu::kPunchReplace);
+        check(punch() == !punchOn, "surface transport: Punch's releases toggled");
+        // Released, pressed again: back. Partner first, released in the
+        // other order.
+        press(mcu::kPunchReplace);
+        press(mcu::kPunchDrop);
+        release(mcu::kPunchReplace);
+        check(punch() == punchOn, "surface transport: a second Punch press did not toggle back");
+        // The other note held: a re-press of the released one is the same
+        // physical press's partner, not a new press.
+        press(mcu::kPunchReplace);
+        check(punch() == punchOn, "surface transport: a partner press while one is held toggled");
+        release(mcu::kPunchDrop);
+        release(mcu::kPunchReplace);
+        // A device sending only one of the two toggles per press.
+        for (const uint8_t note : {mcu::kPunchDrop, mcu::kPunchReplace}) {
+            tap(note);
+            check(punch() == !punchOn,
+                  "surface transport: a single-note Punch press did not toggle");
+            tap(note);
+            check(punch() == punchOn,
+                  "surface transport: a single-note Punch press did not toggle back");
+            send(0x90, note, 127);
+            send(0x90, note, 0);
+            send(0x90, note, 127);
+            send(0x90, note, 0);
+            check(punch() == punchOn,
+                  "surface transport: velocity-0 note on is not a Punch release");
+        }
+        // A port closing mid-press (the releases never come): the next
+        // press after the reconnect toggles.
+        press(mcu::kPunchDrop);
+        check(punch() == !punchOn, "surface transport: Punch did not toggle before a port closed");
+        emit midi.portsClosed();
+        press(mcu::kPunchReplace);
+        check(punch() == punchOn,
+              "surface transport: a Punch press after a port closed mid-press did not toggle");
+        release(mcu::kPunchReplace);
+        // A press still queued when the port closes is handled first (it
+        // toggles), then nothing is held: the next press toggles back.
+        midi.injectForTest({0x90, mcu::kPunchDrop, 127}, surface);
+        emit midi.portsClosed();
+        check(punch() == !punchOn,
+              "surface transport: a Punch press queued before a port closed was lost");
+        QApplication::processEvents();
+        tap(mcu::kPunchDrop);
+        check(punch() == punchOn,
+              "surface transport: a Punch press queued before a port closed stayed held");
+        if (punch() != punchOn)
+            m_punchAction->setChecked(punchOn);
+        midi.setOpenPortsForTest({});
+    }
+
     // Record follows its action: hidden with no keyboard (the surface
     // alone isn't one), a take with one; Stop ends it.
+    // Unavailable, it says why in the status bar, as the button's tooltip
+    // would (the keyboard's button has none).
     midi.setOpenPortsForTest({surface});
+    statusBar()->clearMessage();
     tap(mcu::kRecord);
     check(m_takeSession == nullptr && transport() == Transport::Stopped,
           "surface transport: Record started a take with no keyboard port");
+    check(statusBar()->currentMessage() == QStringLiteral("Connect a MIDI keyboard to record."),
+          "surface transport: Record with no keyboard port did not say why");
     midi.setOpenPortsForTest({keyboard});
+    {
+        const bool punchOn = m_punchAction->isChecked();
+        const SongView::TimeSelection selWas = view->timeSelection();
+        view->clearTimeSelection();
+        m_punchAction->setChecked(true);
+        statusBar()->clearMessage();
+        tap(mcu::kRecord);
+        check(m_takeSession == nullptr && transport() == Transport::Stopped &&
+                  statusBar()->currentMessage() ==
+                      QStringLiteral("Punch recording needs a time selection."),
+              "surface transport: Record while unavailable started a take or did not say why");
+        m_punchAction->setChecked(punchOn);
+        if (selWas.active())
+            view->setTimeSelection(selWas);
+    }
     view->commitEditCursor(L(1));
     tap(mcu::kRecord);
     check(m_takeSession != nullptr && transport() == Transport::Playing &&
               m_recordAction->isChecked(),
           "surface transport: Record did not start a take");
     pumpMs(50);
+    // Punch mid-take is the toolbar's toggle: the take keeps its mode.
+    {
+        const bool punchOn = m_punchAction->isChecked();
+        const bool punching = m_take.punching();
+        tap(mcu::kPunchDrop);
+        check(m_punchAction->isChecked() == !punchOn && m_takeSession != nullptr &&
+                  m_take.punching() == punching && transport() == Transport::Playing,
+              "surface transport: Punch mid-take did not toggle, or changed the take");
+        tap(mcu::kPunchReplace);
+        check(m_punchAction->isChecked() == punchOn && m_takeSession != nullptr &&
+                  m_take.punching() == punching,
+              "surface transport: Punch mid-take did not toggle back, or changed the take");
+    }
     tap(mcu::kStop);
     check(m_takeSession == nullptr && transport() == Transport::Stopped,
           "surface transport: Stop did not end the take");
@@ -2019,10 +2130,18 @@ void MainWindow::checkSurfaceTransport()
             const bool click = m_metronomeAction->isChecked();
             tap(mcu::kCycle);
             tap(mcu::kClick);
+            // With a keyboard port, so Punch is enabled and only the
+            // dialog keeps it out.
+            midi.setOpenPortsForTest({keyboard});
+            const bool punch = m_punchAction->isChecked();
+            check(m_punchAction->isEnabled(), "surface transport: Punch disabled with a keyboard");
+            tap(mcu::kPunchDrop);
+            midi.setOpenPortsForTest({});
             tap(mcu::kFastForward);
             send(0xB0, mcu::kJogCc, 0x01);
             check(transport() == Transport::Stopped && m_loopAction->isChecked() == loop &&
-                      m_metronomeAction->isChecked() == click && cursor() == L(3) &&
+                      m_metronomeAction->isChecked() == click &&
+                      m_punchAction->isChecked() == punch && cursor() == L(3) &&
                       !m_surfaceRepeat->isActive(),
                   "surface transport: a button acted under a modal dialog");
         }

@@ -11,11 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.
    - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR` and `LFOS` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
-   - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Click (metronome), Rewind, Fast-forward, Save, Undo) are integrated. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
+   - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Click (metronome), Punch, Rewind, Fast-forward, Save, Undo) are integrated. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
 - Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
 - Added a metronome. Toggle it with the new `Metronome` button on the transport toolbar (keyboard shortcut `C`). It clicks every beat, following the song's tempo and time signature. Set its volume in `Settings -> Audio`.
+- Added punch recording. Turn on the new `Punch` button on the transport toolbar, select a time range, and press `Record`: only what you play inside the range is recorded, and it replaces the track's notes there. Playback starts a bar early (set the pre-roll in `Settings -> Audio`).
 - Added `Settings -> Audio -> Output device` to configure playback latency when playing a MIDI keyboard.
    - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
+
+## Changed
+- Switching tracks no longer clears the time selection. A selection of a track's automation lanes is still cleared.
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.

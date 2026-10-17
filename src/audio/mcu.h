@@ -7,11 +7,15 @@
 // One Mackie Control (MCU) transport control, as a control surface port
 // sends it (docs/control-surface/PLAN.md §3.2).
 struct SurfaceEvent {
-    enum Kind { Play, Stop, Record, Cycle, Click, Rewind, FastForward, Save, Undo, Jog };
+    enum Kind { Play, Stop, Record, Cycle, Click, Punch, Rewind, FastForward, Save, Undo, Jog };
     Kind kind = Play;
     // A button went down (true) or came up (false). A jog turn is always
     // "pressed".
     bool pressed = true;
+    // A button only: the note number it came on. Punch has two (one press
+    // of the KeyLab's Punch button sends both, docs/punch/PLAN.md §3), so
+    // the dispatch tells them apart to toggle once per press.
+    uint8_t note = 0;
     // Jog only: detents turned, positive clockwise (forward), never 0.
     int delta = 0;
 };
@@ -22,6 +26,9 @@ namespace mcu {
 constexpr uint8_t kSave = 0x50;
 constexpr uint8_t kUndo = 0x51;
 constexpr uint8_t kCycle = 0x56;
+// MCU "Drop" and "Replace": the KeyLab's Punch button sends both.
+constexpr uint8_t kPunchDrop = 0x57;
+constexpr uint8_t kPunchReplace = 0x58;
 constexpr uint8_t kClick = 0x59;
 constexpr uint8_t kRewind = 0x5B;
 constexpr uint8_t kFastForward = 0x5C;
