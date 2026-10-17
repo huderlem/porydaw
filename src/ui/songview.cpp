@@ -157,6 +157,9 @@ double cursorAnchoredScroll(double anchor, double oldScale, double oldScroll, do
 // The ruler's REC tint over a recording take's punched spans
 // (docs/midi-input/PLAN.md step 4; the ghost notes' alpha is in the header).
 constexpr int kRecordingTintAlpha = 56;
+// Punch mode's range on the ruler (docs/punch/PLAN.md P2): lighter than a
+// take's REC tint, which paints over it once the take records there.
+constexpr int kPunchTintAlpha = 32;
 constexpr int kVoiceAuditionKey = 60; // middle C, matching the voicegroup browser
 constexpr int kVoiceAuditionVel = 112;
 // Resize hit-zone reach at a note's left/right edges (rollcheck probes
@@ -781,6 +784,7 @@ class TimeRuler : public QWidget
         // scope (like the landing frame): it shows where in time the edit
         // happens, not which rows it touches.
         drawOverlays(p, m_sv, area, kGutterW, true, true);
+        drawPunchRange(p, area);
         drawRecordingSpans(p, area, /*strip=*/true);
 
         const qreal physicalPixel = logicalPhysicalPixel(dpr);
@@ -1192,6 +1196,38 @@ class TimeRuler : public QWidget
         }
     }
 
+    // Punch mode's range (SongView::punchRange, docs/punch/PLAN.md P2): the
+    // selection band again in the record dot's red, so it reads as where a
+    // punch take will record. Over the selection band, under the labels.
+    void drawPunchRange(QPainter &p, const QRect &area)
+    {
+        const std::pair<uint64_t, uint64_t> range = m_sv->punchRange();
+        if (range.second <= range.first)
+            return;
+        const QRectF r = punchRangeRect().intersected(QRectF(area));
+        if (r.isEmpty())
+            return;
+        const QColor rec = themes::color(themes::Role::song_view_playhead);
+        QColor tint = rec;
+        tint.setAlpha(kPunchTintAlpha);
+        p.fillRect(r, tint);
+        const QRectF full = punchRangeRect();
+        p.setPen(QPen(rec, 1));
+        p.drawLine(QLineF(full.left(), 0, full.left(), height()));
+        p.drawLine(QLineF(full.right(), 0, full.right(), height()));
+    }
+
+  public:
+    // The punch range's band, the whole ruler height (empty without one).
+    QRectF punchRangeRect() const
+    {
+        const std::pair<uint64_t, uint64_t> range = m_sv->punchRange();
+        if (range.second <= range.first)
+            return QRectF();
+        return recordingSpanRect(range);
+    }
+
+  private:
     int textBaseline(const QRect &row, const QFontMetrics &metrics) const
     {
         return row.top() + (row.height() - metrics.height()) / 2 + metrics.ascent();
@@ -9210,6 +9246,8 @@ void SongView::setSong(const MidiTimeline *timeline, const LoadedVoiceGroup *voi
     m_emptyLanes.clear();
     m_selection.clear();
     m_timeSel = TimeSelection();
+    m_punchLatch = {0, 0}; // another song's take
+    emit timeSelectionChanged();
     // The clipboard is deliberately NOT cleared: it is app-shared and
     // self-contained, so a copy made in another song (or this one, before
     // the swap) pastes here — clipForPaste rescales its ticks.
@@ -9769,6 +9807,7 @@ void SongView::setTimeSelection(const TimeSelection &sel)
     if (m_timeSel.active() && !m_selection.empty())
         m_selection.clear();
     refreshTimelineViews();
+    emit timeSelectionChanged();
 }
 
 void SongView::clearTimeSelection()
@@ -9776,6 +9815,37 @@ void SongView::clearTimeSelection()
     m_timeSel = TimeSelection();
     m_rangeDrag = RangeDrag(); // a drag of a band that no longer exists commits nothing
     refreshTimelineViews();
+    emit timeSelectionChanged();
+}
+
+void SongView::setPunchMode(bool on)
+{
+    if (on == m_punchMode)
+        return;
+    m_punchMode = on;
+    m_ruler->update();
+}
+
+void SongView::setPunchLatch(uint64_t in, uint64_t out)
+{
+    const std::pair<uint64_t, uint64_t> latch{in, std::max(in, out)};
+    if (latch == m_punchLatch)
+        return;
+    m_punchLatch = latch;
+    m_ruler->update();
+}
+
+std::pair<uint64_t, uint64_t> SongView::punchRange() const
+{
+    if (!m_timeline)
+        return {0, 0};
+    // A punch take recording here: its latched range, whatever the Punch
+    // toggle says now (the take keeps the mode it started in).
+    if (m_punchLatch.second > m_punchLatch.first)
+        return m_punchLatch;
+    if (m_punchMode && m_timeSel.active())
+        return {m_timeSel.startTick, m_timeSel.endTick};
+    return {0, 0};
 }
 
 bool SongView::timeSelectionCoversTrack(int track) const
@@ -11024,6 +11094,11 @@ QRectF SongView::recordingPreviewNoteRect(const RecordingPreview::Note &note) co
     return m_roll->recordingNoteRect(note);
 }
 
+QRectF SongView::punchRangeRect() const
+{
+    return m_ruler->punchRangeRect();
+}
+
 QRectF SongView::recordingPreviewSpanRect(const std::pair<uint64_t, uint64_t> &span) const
 {
     return m_ruler->recordingSpanRect(span);
@@ -11062,9 +11137,19 @@ void SongView::selectTrack(int track)
     // trackHeaderClicked restores it for modifier clicks.
     m_trackSelMask = 1u << track;
     m_selection.clear();
-    // A track-scoped time selection would keep rendering only in the ruler
-    // once the shown track leaves its scope; drop it on any track switch.
-    clearTimeSelection();
+    // A track-scoped time selection survives the switch, re-scoped to the
+    // new track with the mask above (docs/punch/PLAN.md P11). A lane-scoped
+    // one naming a track's rows goes: they leave the lanes area. One on the
+    // tempo row alone (track -1) stays, that row doesn't. Either way every
+    // timeline view repaints for the new track.
+    const bool namesTrackRows =
+        m_timeSel.active() && m_timeSel.scope == TimeSelection::Lanes &&
+        std::any_of(m_timeSel.lanes.begin(), m_timeSel.lanes.end(),
+                    [](const std::pair<int, uint8_t> &lane) { return lane.first >= 0; });
+    if (namesTrackRows)
+        clearTimeSelection();
+    else
+        refreshTimelineViews();
     m_headers->syncSelection();
     m_lanes->rebuildRows();
     // Switching tracks readies the roll for keyboard editing (e.g. copy on
@@ -11119,13 +11204,17 @@ void SongView::trackHeaderClicked(int track, Qt::KeyboardModifiers modifiers)
             // The primary track was toggled out; hand primary to the lowest
             // remaining scoped track. This is a scope adjustment, not a
             // track switch, so the time selection survives (selectTrack
-            // clears it and collapses the mask — restore both after).
+            // clears a lane-scoped one and collapses the mask — restore
+            // both after).
             int next = 0;
             while (!(mask & (1u << next)))
                 next++;
             const TimeSelection keep = m_timeSel;
             selectTrack(next);
-            m_timeSel = keep;
+            if (!m_timeSel.active() && keep.active()) {
+                m_timeSel = keep;
+                emit timeSelectionChanged();
+            }
         }
         m_trackSelMask = mask;
     } else if (modifiers & Qt::ShiftModifier) {

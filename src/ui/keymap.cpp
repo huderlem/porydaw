@@ -110,6 +110,9 @@ const Def kDefs[] = {
     // Bare like Record's, for the same reason.
     {"transport.metronome", Context::PianoRoll, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Toggle Metronome"), QKeySequence::UnknownKey, "C"},
+    // Punch recording (docs/punch/PLAN.md P1): no default key.
+    {"transport.punch", Context::Global, QT_TR_NOOP("Transport"), QT_TR_NOOP("Toggle Punch"),
+     QKeySequence::UnknownKey, ""},
     {"transport.follow_playhead", Context::Global, QT_TR_NOOP("Transport"),
      QT_TR_NOOP("Follow Playhead"), QKeySequence::UnknownKey, ""},
     // Songs dock

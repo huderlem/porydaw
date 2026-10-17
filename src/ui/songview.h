@@ -604,8 +604,12 @@ class SongView : public QWidget
     // trackSelectionMask(), so Ctrl/Shift-clicking headers re-scopes an
     // active selection) or individual automation lanes (right-drag in the
     // lanes area). Mutually exclusive with the note selection; survives
-    // document rebuilds (it is tick-addressed), cleared on song swap and
-    // plain track switches.
+    // document rebuilds (it is tick-addressed) and plain track switches (a
+    // track scope re-scopes to the new track; docs/punch/PLAN.md P11: sweep
+    // the ruler, then pick the track to punch-record into), cleared on song
+    // swap. A lane scope naming a track's rows goes with a track switch:
+    // they are the old track's (one on the tempo row alone stays).
+    // timeSelectionChanged follows it.
     struct TimeSelection {
         enum Scope { Tracks, Lanes };
         uint64_t startTick = 0;
@@ -619,6 +623,19 @@ class SongView : public QWidget
     void setTimeSelection(const TimeSelection &sel);
     void clearTimeSelection();
     bool timeSelectionCoversTrack(int track) const;
+    // Punch recording's ruler tint (docs/punch/PLAN.md P2), in the record
+    // colour. While a punch take records into this view it is the take's
+    // latched range (setPunchLatch; a later selection change or Punch
+    // toggle moves nothing); otherwise, with punch mode on, the time
+    // selection's span. Fed by the main window. punchRange() is {0, 0} when
+    // nothing is tinted.
+    void setPunchMode(bool on);
+    bool punchMode() const { return m_punchMode; }
+    void setPunchLatch(uint64_t in, uint64_t out);
+    void clearPunchLatch() { setPunchLatch(0, 0); }
+    std::pair<uint64_t, uint64_t> punchRange() const;
+    // Where the ruler paints it, in the ruler's coordinates (harness probe).
+    QRectF punchRangeRect() const;
     // Whether a lanes-area row (identified as the lane scope encodes it) is
     // inside the selection; track scopes cover a track's CC/voice rows but
     // never the global tempo row.
@@ -910,6 +927,9 @@ class SongView : public QWidget
     void muteMaskChanged(uint32_t mask);
     void soloMaskChanged(uint32_t mask);
     void selectedTrackChanged(int track);
+    // The time selection was set or cleared (not emitted for a range edit
+    // that only shifts it).
+    void timeSelectionChanged();
     // Audition request (velocity 0 releases); forwarded to the audio engine.
     // rawVolume is the track VOL byte to sound it at, or -1 for the track's
     // current one (AudioEngine::kPreviewVolNone); pan is the track PAN to
@@ -1024,6 +1044,8 @@ class SongView : public QWidget
     uint32_t m_soloMask = 0;
     std::vector<NoteKey> m_selection;
     TimeSelection m_timeSel;
+    bool m_punchMode = false;
+    std::pair<uint64_t, uint64_t> m_punchLatch{0, 0};
     RangeDrag m_rangeDrag;
     // The notes and lane points the active time selection covers, with the
     // selection's scope resolved (nudge, move and duplicate all act on the

@@ -73,6 +73,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <map>
 
 #include "audio/mcu.h"
 #include "audio/midiinput.h"
@@ -191,6 +192,9 @@ const QString kOutputLevelKey = QStringLiteral("outputLevel");
 const QString kMetronomeKey = QStringLiteral("metronome");
 const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
 const QString kCountInBarsKey = QStringLiteral("countInBars");
+// Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
+// metronome.
+const QString kPunchKey = QStringLiteral("punch");
 // The output device's buffering (Settings → Audio → Output device):
 // buffer size in ms (0 = the backend's default) and WASAPI exclusive mode.
 const QString kAudioPeriodMsKey = QStringLiteral("audio/periodMs");
@@ -287,6 +291,45 @@ QIcon metronomeIcon(QWidget &widget, const QSize &size)
         painter.drawPolygon(body, 4);
         painter.drawLine(at(0.24, 0.70), at(0.76, 0.70));
         painter.drawLine(at(0.50, 0.70), at(0.70, 0.26));
+        painter.end();
+        return pixmap;
+    };
+    QIcon result(glyph(themes::Role::transport_text));
+    result.addPixmap(glyph(themes::Role::button_hover_text), QIcon::Active, QIcon::Off);
+    result.addPixmap(glyph(themes::Role::button_pressed_text), QIcon::Normal, QIcon::On);
+    result.addPixmap(glyph(themes::Role::button_pressed_text), QIcon::Active, QIcon::On);
+    result.addPixmap(glyph(themes::Role::disabled_text), QIcon::Disabled, QIcon::Off);
+    result.addPixmap(glyph(themes::Role::disabled_text), QIcon::Disabled, QIcon::On);
+    return result;
+}
+// Punch's glyph, painted (no style has one): a pair of brackets, the punch
+// range, around a small dot, tinted like the other transport glyphs.
+QIcon punchIcon(QWidget &widget, const QSize &size)
+{
+    const qreal dpr = widget.devicePixelRatioF();
+    const auto glyph = [&](themes::Role role) {
+        QPixmap pixmap(size * dpr);
+        pixmap.setDevicePixelRatio(dpr);
+        pixmap.fill(Qt::transparent);
+        QPainter painter(&pixmap);
+        painter.setRenderHint(QPainter::Antialiasing);
+        const QColor color = themes::color(role);
+        const qreal s = std::min(size.width(), size.height());
+        const qreal x0 = (size.width() - s) / 2, y0 = (size.height() - s) / 2;
+        const auto at = [&](qreal fx, qreal fy) { return QPointF(x0 + fx * s, y0 + fy * s); };
+        QPen pen(color, std::max<qreal>(1.0, s * 0.09));
+        pen.setJoinStyle(Qt::MiterJoin);
+        pen.setCapStyle(Qt::FlatCap);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        const QPointF left[] = {at(0.34, 0.18), at(0.16, 0.18), at(0.16, 0.82), at(0.34, 0.82)};
+        const QPointF right[] = {at(0.66, 0.18), at(0.84, 0.18), at(0.84, 0.82), at(0.66, 0.82)};
+        painter.drawPolyline(left, 4);
+        painter.drawPolyline(right, 4);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(color);
+        const qreal d = s * 0.26;
+        painter.drawEllipse(QRectF(at(0.5, 0.5) - QPointF(d / 2, d / 2), QSizeF(d, d)));
         painter.end();
         return pixmap;
     };
@@ -819,6 +862,27 @@ void MainWindow::buildUi()
     m_recordAction->setCheckable(true);
     connect(m_recordAction, &QAction::triggered, this, [this] { toggleRecord(); });
     transport->addAction(m_recordAction);
+
+    // Punch recording (docs/punch/PLAN.md P1): Record then records into the
+    // time selection's span and replaces the track's notes there. App-wide
+    // and persisted like the metronome; a take already recording keeps the
+    // mode it started in.
+    m_punchAction = new QAction(tr("Punch"), this);
+    keys.attach(QStringLiteral("transport.punch"), m_punchAction);
+    m_punchAction->setCheckable(true);
+    m_punchAction->setToolTip(
+        tr("Punch recording: Record replaces the selected track's notes in the time selection"));
+    m_punchAction->setChecked(QSettings().value(kPunchKey, false).toBool());
+    connect(m_punchAction, &QAction::toggled, this, [this](bool on) {
+        if (m_persistSession)
+            QSettings().setValue(kPunchKey, on);
+        for (int i = 0; i < m_tabs->count(); i++) {
+            if (SongSession *s = sessionForWidget(m_tabs->widget(i)))
+                s->view->setPunchMode(on);
+        }
+        syncRecordAction();
+    });
+    transport->addAction(m_punchAction);
 
     m_loopAction = new QAction(tr("Loop"), this);
     keys.attach(QStringLiteral("transport.loop"), m_loopAction);
@@ -1442,6 +1506,7 @@ void MainWindow::refreshTransportIcons()
     m_pauseAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaPause, size));
     m_stopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaStop, size));
     m_recordAction->setIcon(recordIcon(*this, size));
+    m_punchAction->setIcon(punchIcon(*this, size));
     m_loopAction->setIcon(tintedStandardIcon(*this, QStyle::SP_BrowserReload, size));
     m_metronomeAction->setIcon(metronomeIcon(*this, size));
     m_followPlayheadAction->setIcon(tintedStandardIcon(*this, QStyle::SP_MediaSeekForward, size));
@@ -1552,6 +1617,7 @@ SongSession *MainWindow::createSession()
     s->view->setVelocityColorMode(m_velocityColorsAction->isChecked());
     s->view->setNoteNameMode(m_noteNamesAction->isChecked());
     s->view->setFollowPlayhead(m_followPlayheadAction->isChecked());
+    s->view->setPunchMode(m_punchAction->isChecked());
     s->view->setMidiControls(midiControlsOf(*m_midiInput));
     s->view->setVelocityLaneVisible(m_velocityLaneAction->isChecked());
     s->view->setAutomationLanesVisible(m_automationLanesAction->isChecked());
@@ -1579,6 +1645,11 @@ SongSession *MainWindow::createSession()
     connect(s->view, &SongView::selectedTrackChanged, this, [this, s] {
         if (s == m_active)
             publishLiveTarget();
+    });
+    // Punch recording needs a time selection (P3).
+    connect(s->view, &SongView::timeSelectionChanged, this, [this, s] {
+        if (s == m_active)
+            syncRecordAction();
     });
     connect(s->view, &SongView::laneRangesChanged, this, [this, s] {
         if (s == m_active)
@@ -6055,6 +6126,9 @@ QString MainWindow::recordUnavailableReason() const
     const int track = m_active->view->selectedTrack();
     if (track < 0 || m_active->doc.smfTrackFor(track) < 0)
         return tr("Select one of the song's tracks to record into.");
+    // No silent fallback to overdub (P3): the range is the selection.
+    if (m_punchAction->isChecked() && !m_active->view->timeSelection().active())
+        return tr("Punch recording needs a time selection.");
     return QString();
 }
 
@@ -6072,8 +6146,11 @@ void MainWindow::syncRecordAction()
     // keeps it, so the take can still be stopped from it.
     m_recordAction->setVisible(recording || !m_midiInput->openKeyboardPorts().isEmpty());
     // The reason shows on hover, in the tooltip and the status bar.
-    const QString tip = why.isEmpty() ? tr("Record from the MIDI keyboard into the selected track")
-                                      : tr("Record\n%1").arg(why);
+    const QString tip =
+        !why.isEmpty() ? tr("Record\n%1").arg(why)
+        : m_punchAction->isChecked()
+            ? tr("Punch record from the MIDI keyboard into the selected track's time selection")
+            : tr("Record from the MIDI keyboard into the selected track");
     if (m_recordAction->toolTip() != tip) {
         m_recordAction->setToolTip(tip);
         m_recordAction->setStatusTip(why);
@@ -6114,6 +6191,14 @@ void MainWindow::beginRecording()
     if (++m_captureGeneration == 0)
         m_captureGeneration = 1;
     m_take.begin(track, m_captureGeneration);
+    if (m_punchAction->isChecked()) {
+        // The punch range is latched now (P2): moving the selection
+        // mid-take moves nothing. Its scope is ignored; the take goes to
+        // the selected track.
+        const SongView::TimeSelection &sel = m_active->view->timeSelection();
+        m_take.setPunchWindow(sel.startTick, sel.endTick);
+        m_active->view->setPunchLatch(sel.startTick, sel.endTick);
+    }
     m_takeSession = m_active;
     m_takeLaneBefore = TakeLaneBefore(); // another document may sit at the same address
     m_takeDropsAtStart = m_audio.captureDropped();
@@ -6122,7 +6207,9 @@ void MainWindow::beginRecording()
     m_audio.armCapture(m_captureGeneration);
     publishLiveTarget();
     // From the edit cursor when stopped, after the count-in (M5); resumes a
-    // pause at once.
+    // pause at once. While playing it records at once, or for a punch take
+    // arms: only the window is kept (P10), so a take armed past it records
+    // on a later loop pass or not at all.
     if (m_audio.transport() != Transport::Playing)
         startPlayback(false, m_countInBars);
     showRecordingStatus();
@@ -6139,9 +6226,13 @@ void MainWindow::showRecordingStatus()
     const QString target = name.isEmpty() ? tr("Track %1").arg(track + 1)
                                           : QStringLiteral("%1: %2").arg(track + 1).arg(name);
     m_countInShown = m_audio.countingIn();
-    m_countInText =
-        m_countInShown ? tr("Counting in… then recording into %1").arg(target) : QString();
-    statusBar()->showMessage(m_countInShown ? m_countInText : tr("Recording into %1…").arg(target));
+    const bool punch = m_take.punching();
+    m_countInText = !m_countInShown ? QString()
+                    : punch         ? tr("Counting in… then punch recording into %1").arg(target)
+                                    : tr("Counting in… then recording into %1").arg(target);
+    statusBar()->showMessage(m_countInShown ? m_countInText
+                             : punch        ? tr("Punch recording into %1…").arg(target)
+                                            : tr("Recording into %1…").arg(target));
 }
 
 void MainWindow::drainCapture()
@@ -6187,6 +6278,45 @@ std::vector<RecordingPreview::Lane> takeLanes(const SongDocument &doc, int track
                                               const std::vector<RecordingTake::LaneWrite> &writes)
 {
     return takeLanes(writes, [&](uint8_t cc) { return doc.lanePoints(track, cc); });
+}
+
+// A punch take's replace (docs/punch/PLAN.md P7), inside the commit's edit
+// group: on the track, notes starting inside a replaced span go, and a note
+// starting before one and sounding into it ends where the span begins (an
+// unterminated note-on, with no end to move, stays). The removals use the
+// first read (nothing has moved yet); each resize moves the others'
+// indices, so the shortened notes are re-read by id once per resize.
+void replacePunchedNotes(SongDocument &doc, int track,
+                         const std::vector<std::pair<uint64_t, uint64_t>> &spans)
+{
+    std::vector<DocNote> removed;
+    // By how much each shortened note's duration changes (negative): one
+    // resize per distinct change.
+    std::map<int64_t, std::vector<NoteId>> shortened;
+    for (const DocNote &n : doc.notesForTrack(track)) {
+        bool inside = false;
+        uint64_t cut = UINT64_MAX;
+        for (const auto &[start, end] : spans) {
+            if (n.tick >= start && n.tick < end)
+                inside = true;
+            else if (n.tick < start && !n.unterminated() && n.tick + n.duration > start)
+                cut = std::min(cut, start);
+        }
+        if (inside)
+            removed.push_back(n);
+        else if (cut != UINT64_MAX)
+            shortened[int64_t(cut - n.tick) - int64_t(n.duration)].push_back(n.noteId);
+    }
+    if (!removed.empty())
+        doc.deleteNotes(removed);
+    for (const auto &[delta, ids] : shortened) {
+        std::vector<DocNote> notes;
+        for (const DocNote &n : doc.notesForTrack(track)) {
+            if (std::find(ids.begin(), ids.end(), n.noteId) != ids.end())
+                notes.push_back(n);
+        }
+        doc.resizeNotes(notes, delta);
+    }
 }
 
 } // namespace
@@ -6294,16 +6424,9 @@ void MainWindow::syncRecordingPreview()
                   [&](uint8_t cc) -> const std::vector<DocLanePoint> & {
                       return takeLaneBefore(m_takeSession->doc, m_take.track(), cc);
                   });
-    const auto tickAt = [&](uint64_t sample) {
-        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
-    };
-    for (const auto &[start, end] : m_take.recordedSpans(pos, segment)) {
-        const uint64_t from = tickAt(start), to = tickAt(end);
-        if (!preview.spans.empty() && preview.spans.back().second >= from)
-            preview.spans.back().second = std::max(preview.spans.back().second, to);
-        else if (to > from)
-            preview.spans.push_back({from, to});
-    }
+    // The REC tint: where the take recorded; a punch take's clipped to its
+    // window, what it will replace (P7).
+    preview.spans = m_take.recordedTickSpans(timeline, pos, segment);
     m_takeSession->view->setRecordingPreview(std::move(preview));
 }
 
@@ -6324,12 +6447,17 @@ void MainWindow::finishRecording()
     drainCapture();
     std::vector<SongDocument::NewNote> notes;
     std::vector<RecordingTake::LaneWrite> lanes;
+    // A punch take's replaced span (P7); empty for an overdub.
+    TakePunch punch;
+    punch.on = m_take.punching();
     if (m_take.started()) {
         notes =
             m_take.toNotes(*session->timeline, stopSample, stopSegment, recordingLatencySamples());
         lanes = m_take.toLaneWrites(*session->timeline, stopSample, stopSegment,
                                     recordingLatencySamples());
+        punch.spans = m_take.punchedSpans(*session->timeline, stopSample, stopSegment);
     }
+    session->view->clearPunchLatch();
     const int track = m_take.track();
     const uint32_t take = m_take.generation();
     m_take.clear();
@@ -6343,7 +6471,7 @@ void MainWindow::finishRecording()
     session->view->setRecordingPreview(std::move(ghosts));
     // Against the timeline as it is now: an edit made mid-take (an undo,
     // say) moved nothing the take recorded, which is in sample time.
-    commitTake(&session->doc, session->view, take, track, notes, lanes,
+    commitTake(&session->doc, session->view, take, track, notes, lanes, punch,
                m_audio.captureDropped() != m_takeDropsAtStart);
     if (session == m_active)
         publishLiveTarget();
@@ -6353,9 +6481,12 @@ void MainWindow::finishRecording()
 void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
                             uint32_t take, int track,
                             const std::vector<SongDocument::NewNote> &notes,
-                            const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost)
+                            const std::vector<RecordingTake::LaneWrite> &lanes,
+                            const TakePunch &punch, bool inputLost)
 {
-    const bool empty = notes.empty() && lanes.empty();
+    // A punch take that replaced a span writes even with nothing recorded:
+    // it blanks that span (P7).
+    const bool empty = notes.empty() && lanes.empty() && punch.spans.empty();
     // The view keeps a shown take on its track through track adds,
     // deletes, and moves (SongView::onTracksRemapped); the write follows
     // it there. -1: the track is gone, nothing is written.
@@ -6376,8 +6507,8 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
         // that group's step under its name, and go if it is rolled back.
         // It lands as its own step once the group has closed.
         QTimer::singleShot(kTakeCommitRetryMs, this,
-                           [this, doc, view, take, track, notes, lanes, inputLost] {
-                               commitTake(doc, view, take, track, notes, lanes, inputLost);
+                           [this, doc, view, take, track, notes, lanes, punch, inputLost] {
+                               commitTake(doc, view, take, track, notes, lanes, punch, inputLost);
                            });
         return;
     }
@@ -6389,18 +6520,28 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
     // "pitch bend, mod, volume and pan", ...).
     const QString moved = takeLanesText(lanes);
     const int count = int(notes.size());
+    const bool recorded = !notes.empty() || !lanes.empty();
+    // Whether the document could take the write at all (not locked, the
+    // track still there).
+    const bool writable = doc && !doc->isLocked() && track >= 0;
     bool written = false;
-    if (doc && !empty && !doc->isLocked() && track >= 0) {
+    // A punch take that replaced notes but recorded none and moved no lane.
+    bool cleared = false;
+    if (writable && !empty) {
         const uint64_t revision = doc->revision();
-        doc->beginEditGroup(lanes.empty() ? tr("Record %n note(s)", nullptr, count)
-                            : notes.empty()
-                                ? tr("Record %1").arg(moved)
-                                : tr("Record %n note(s) with %1", nullptr, count).arg(moved));
-        if (!notes.empty())
-            doc->addNotes(track, notes);
+        doc->beginEditGroup(
+            punch.on && !recorded       ? tr("Punch record (cleared)")
+            : punch.on && lanes.empty() ? tr("Punch record %n note(s)", nullptr, count)
+            : punch.on && notes.empty() ? tr("Punch record %1").arg(moved)
+            : punch.on      ? tr("Punch record %n note(s) with %1", nullptr, count).arg(moved)
+            : lanes.empty() ? tr("Record %n note(s)", nullptr, count)
+            : notes.empty() ? tr("Record %1").arg(moved)
+                            : tr("Record %n note(s) with %1", nullptr, count).arg(moved));
         // Each write's end goes back to what the song had there, read before
         // any of the take lands: a later pass's write must not restore an
-        // earlier pass's value.
+        // earlier pass's value. Read before a punch take's replace too: its
+        // deletes can seed a keep-alive program change at tick 0
+        // (appendTrackKeepAliveOps), which isn't the song before the take.
         std::vector<RecordingTake::LaneWrite> writes = lanes;
         for (RecordingTake::LaneWrite &w : writes) {
             SongDocument::LanePointValue restore;
@@ -6412,8 +6553,14 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
         // what it did (RecordingTake::voiceLeadPoint).
         std::vector<SongDocument::LanePointValue> lead;
         uint64_t leadEnd = 0;
-        if (RecordingTake::voiceLeadPoint(doc->lanePoints(track, DOC_CC_VOICE), lanes, &lead,
-                                          &leadEnd))
+        const bool leads = RecordingTake::voiceLeadPoint(doc->lanePoints(track, DOC_CC_VOICE),
+                                                         lanes, &lead, &leadEnd);
+        if (!punch.spans.empty())
+            replacePunchedNotes(*doc, track, punch.spans);
+        cleared = !recorded && doc->revision() != revision;
+        if (!notes.empty())
+            doc->addNotes(track, notes);
+        if (leads)
             doc->writeLanePoints(track, DOC_CC_VOICE, 0, leadEnd, lead);
         // In segment order: a later loop pass replaces what an earlier one
         // wrote where they overlap.
@@ -6422,11 +6569,17 @@ void MainWindow::commitTake(const QPointer<SongDocument> &doc, const QPointer<So
         doc->endEditGroup();
         written = doc->revision() != revision;
     }
+    // A punch take with nothing recorded wrote only if it cleared notes; if
+    // it couldn't write at all, its replace was lost too.
     QString text =
-        empty ? tr("Nothing was recorded.")
-        : !written && lanes.empty()
+        cleared                                          ? tr("Punch recording cleared the range.")
+        : !recorded && (punch.spans.empty() || writable) ? tr("Nothing was recorded.")
+        : !written && lanes.empty() && !notes.empty()
             ? tr("The %n recorded note(s) could not be added to the song.", nullptr, count)
-        : !written      ? tr("The recording could not be added to the song.")
+        : !written                  ? tr("The recording could not be added to the song.")
+        : punch.on && lanes.empty() ? tr("Punch recorded %n note(s).", nullptr, count)
+        : punch.on && notes.empty() ? tr("Punch recorded %1.").arg(moved)
+        : punch.on      ? tr("Punch recorded %n note(s) with %1.", nullptr, count).arg(moved)
         : lanes.empty() ? tr("Recorded %n note(s).", nullptr, count)
         : notes.empty() ? tr("Recorded %1.").arg(moved)
                         : tr("Recorded %n note(s) with %1.", nullptr, count).arg(moved);
@@ -6463,6 +6616,7 @@ void MainWindow::followTakeTrack(SongSession &session, const TrackRemap &remap)
     drainCapture();
     m_take.clear();
     session.view->clearRecordingPreview();
+    session.view->clearPunchLatch();
     statusBar()->showMessage(tr("Recording stopped: its track was deleted."), 6000);
     syncRecordAction();
 }

@@ -88,7 +88,8 @@
 // drained and with the UI stalled (checkRecordingFlood); the latch, song
 // events of a moved lane held back during a take and back after each way it
 // ends (checkRecordingLatch); program changes onto the Voice lane
-// (checkRecordingVoice).
+// (checkRecordingVoice); punch recording (checkRecordingPunch, and
+// checkPunchTakeRules for the take's window rules).
 
 namespace {
 
@@ -310,6 +311,217 @@ MidiTimeline makeTimeline(bool tempoChange)
     if (tempoChange)
         tl.tempoMap.push_back({96, 96000, 60.0});
     return tl;
+}
+
+using Spans = std::vector<std::pair<uint64_t, uint64_t>>;
+
+void printSpans(const char *what, const Spans &spans)
+{
+    std::fprintf(stderr, "reccheck:   %s:", what);
+    for (const auto &[start, end] : spans)
+        std::fprintf(stderr, " [%llu, %llu)", (unsigned long long)start, (unsigned long long)end);
+    std::fprintf(stderr, "\n");
+}
+
+// Punch takes (docs/punch/PLAN.md step 1), on the same 1000-samples-a-tick
+// map: only the window [40, 80) is kept (P5), a note held across punch-in
+// starting there and one across punch-out ending there; the replaced span
+// (P7) is [in, out) for a pass through the window, [in, stop) for a stop
+// inside, nothing when playback never reached it (or was armed past it),
+// and the union over loop passes; lane moves outside the window are
+// dropped (a CC121 reset only counting on a lane moved inside) and a write
+// ends at punch-out with the song's value back there. The same events
+// without a window record as ever (Punch off is unchanged).
+void checkPunchTakeRules()
+{
+    const MidiTimeline tl = makeTimeline(false);
+    RecordingTake take;
+    const auto feedWindow = [](RecordingTake &t, uint32_t generation) {
+        Feed feed{t, generation};
+        feed.begin(10000);
+        feed.on(20000, 60); // before the window
+        feed.off(30000, 60);
+        feed.on(35000, 62); // held across punch-in
+        feed.off(50000, 62);
+        feed.on(50000, 64); // inside
+        feed.off(60000, 64);
+        feed.on(70000, 65); // held across punch-out
+        feed.off(95000, 65);
+        feed.on(85000, 67); // after the window
+        feed.off(90000, 67);
+        feed.on(75000, 71); // held at the stop: ends at punch-out
+    };
+    {
+        take.begin(2, 40);
+        take.setPunchWindow(40, 80);
+        feedWindow(take, 40);
+        check(take.punching() && take.punchWindowIn() == 40 && take.punchWindowOut() == 80,
+              "punch take: the window was not kept");
+        const auto notes = take.toNotes(tl, 100000, 0, 0);
+        if (!check(sameNotes(
+                       notes,
+                       {{40, 62, 10, 100}, {50, 64, 10, 100}, {70, 65, 10, 100}, {75, 71, 5, 100}}),
+                   "punch take: notes were not clipped to the window (held across punch-in "
+                   "starting there, across punch-out ending there, outside dropped)"))
+            printNotes("got", notes);
+        const Spans spans = take.punchedSpans(tl, 100000, 0);
+        if (!check(spans == Spans{{40, 80}},
+                   "punch take: a pass through the window did not replace [in, out)"))
+            printSpans("got", spans);
+        // The same events with no window: everything, as an overdub.
+        take.begin(2, 41);
+        check(!take.punching(), "punch take: begin() did not clear the window");
+        feedWindow(take, 41);
+        const auto all = take.toNotes(tl, 100000, 0, 0);
+        if (!check(sameNotes(all, {{20, 60, 10, 100},
+                                   {35, 62, 15, 100},
+                                   {50, 64, 10, 100},
+                                   {70, 65, 25, 100},
+                                   {75, 71, 25, 100},
+                                   {85, 67, 5, 100}}),
+                   "punch take: a take with no window was clipped"))
+            printNotes("got", all);
+        check(take.punchedSpans(tl, 100000, 0).empty(),
+              "punch take: a take with no window has a replaced span");
+    }
+    // Stopped inside the window: [in, stop), and a note held at the stop
+    // ends there.
+    {
+        take.begin(0, 46);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 46};
+        feed.begin(10000);
+        feed.on(45000, 60);
+        const Spans inside = take.punchedSpans(tl, 60000, 0);
+        if (!check(inside == Spans{{40, 60}},
+                   "punch take: a stop inside the window did not replace [in, stop)"))
+            printSpans("got", inside);
+        check(sameNotes(take.toNotes(tl, 60000, 0, 0), {{45, 60, 15, 100}}),
+              "punch take: a note held at a stop inside the window did not end there");
+    }
+    // Playback stopped before punch-in, or armed past punch-out: nothing is
+    // recorded and nothing replaced.
+    {
+        take.begin(0, 42);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 42};
+        feed.begin(10000);
+        feed.on(20000, 60);
+        feed.off(25000, 60);
+        feed.on(32000, 61); // held at the stop, short of punch-in
+        check(take.toNotes(tl, 39000, 0, 0).empty() && take.punchedSpans(tl, 39000, 0).empty(),
+              "punch take: a take stopped before punch-in recorded or replaced something");
+        take.begin(0, 43);
+        take.setPunchWindow(40, 80);
+        Feed late{take, 43};
+        late.begin(85000);
+        late.on(86000, 60);
+        late.off(90000, 60);
+        check(take.toNotes(tl, 95000, 0, 0).empty() && take.punchedSpans(tl, 95000, 0).empty(),
+              "punch take: a take armed past punch-out recorded or replaced something");
+    }
+    // Two loop passes (loop [20, 100)), the take armed inside the window:
+    // pass 1 covers [50, 80), pass 2 stops at 45, so the replaced span is
+    // their union; each pass's notes land.
+    {
+        take.begin(0, 44);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 44};
+        feed.begin(50000);
+        feed.on(60000, 66);
+        feed.off(70000, 66);
+        feed.jump(100000, 20000);
+        feed.on(42000, 66);
+        feed.off(44000, 66);
+        const auto notes = take.toNotes(tl, 45000, 1, 0);
+        if (!check(sameNotes(notes, {{42, 66, 2, 100}, {60, 66, 10, 100}}),
+                   "punch take: two loop passes' notes did not both land"))
+            printNotes("got", notes);
+        const Spans spans = take.punchedSpans(tl, 45000, 1);
+        if (!check(spans == Spans{{40, 45}, {50, 80}},
+                   "punch take: two loop passes did not replace the union of what they covered"))
+            printSpans("got", spans);
+        const Spans merged = take.punchedSpans(tl, 60000, 1);
+        if (!check(merged == Spans{{40, 80}},
+                   "punch take: overlapping loop passes' spans did not merge"))
+            printSpans("got", merged);
+    }
+    // Lane moves: one before the window is dropped, those inside become one
+    // write ending at punch-out (the song's value back there); a CC121
+    // reset counts on MOD (moved inside) but not on the bend, moved only
+    // before the window.
+    {
+        take.begin(0, 45);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 45};
+        feed.begin(10000);
+        feed.bend(15000, 4096);
+        feed.mod(20000, 50);
+        feed.mod(50000, 60);
+        feed.resetAll(60000);
+        feed.mod(70000, 70);
+        const auto writes = take.toLaneWrites(tl, 100000, 0, 0);
+        const bool one = writes.size() == 1 && writes[0].cc == 0x01;
+        if (!check(one, "punch take: a lane moved only outside the window (or by a reset) "
+                        "was written"))
+            std::fprintf(stderr, "reccheck:   %zu write(s)\n", writes.size());
+        if (one) {
+            const RecordingTake::LaneWrite &w = writes[0];
+            const std::vector<SongDocument::LanePointValue> want{{50, 60}, {60, 0}, {70, 70}};
+            bool same = w.points.size() == want.size();
+            for (size_t i = 0; same && i < want.size(); i++)
+                same = w.points[i].tick == want[i].tick && w.points[i].value == want[i].value;
+            check(same && w.tickBegin == 50,
+                  "punch take: the MOD write is not the window's moves (and its reset)");
+            check(w.tickEnd == 80 && w.restoreEnd,
+                  "punch take: a lane write did not end at punch-out with the song's value back");
+        }
+        // Stopped inside the window, the write ends at the stop.
+        const auto atStop = take.toLaneWrites(tl, 75000, 0, 0);
+        check(atStop.size() == 1 && atStop[0].tickEnd == 75,
+              "punch take: a lane write did not end at a stop inside the window");
+    }
+    // With a recording offset (5 ticks): a note played just after punch-in
+    // and shifted before it starts at punch-in, as one held across it does;
+    // a MOD move and a program change the shift carries across punch-in land
+    // on it, not dropped (played on the downbeat, they must not vanish);
+    // a move and a short note played before punch-in are still dropped.
+    {
+        take.begin(0, 47);
+        take.setPunchWindow(40, 80);
+        Feed feed{take, 47};
+        feed.begin(10000);
+        feed.mod(30000, 20);    // before the window, shifted to 25: dropped
+        feed.on(36000, 61);     // before the window, shifted to [31, 34): dropped
+        feed.off(39000, 61);    //
+        feed.mod(38000, 30);    // arrived before in (shifted to 33): dropped
+        feed.on(42000, 60);     // shifted to 37: starts at in
+        feed.mod(43000, 90);    // shifted to 38: lands on in
+        feed.program(44000, 5); // shifted to 39: lands on in
+        feed.off(60000, 60);
+        const auto notes = take.toNotes(tl, 100000, 0, 5000);
+        if (!check(sameNotes(notes, {{40, 60, 15, 100}}),
+                   "punch take: with an offset, a note shifted across punch-in was not clamped "
+                   "to it (or one played before the window was kept)"))
+            printNotes("got", notes);
+        const auto writes = take.toLaneWrites(tl, 100000, 0, 5000);
+        const auto at = [&](uint8_t cc) -> const RecordingTake::LaneWrite * {
+            for (const RecordingTake::LaneWrite &w : writes)
+                if (w.cc == cc)
+                    return &w;
+            return nullptr;
+        };
+        const RecordingTake::LaneWrite *mod = at(0x01);
+        const RecordingTake::LaneWrite *voice = at(DOC_CC_VOICE);
+        check(writes.size() == 2 && mod && mod->tickBegin == 40 && mod->points.size() == 1 &&
+                  mod->points[0].tick == 40 && mod->points[0].value == 90 && mod->tickEnd == 80,
+              "punch take: with an offset, a MOD move shifted across punch-in did not land on it "
+              "(or one played before the window was kept)");
+        check(voice && voice->tickBegin == 40 && voice->points.size() == 1 &&
+                  voice->points[0].tick == 40 && voice->points[0].value == 5,
+              "punch take: with an offset, a program change shifted across punch-in did not land "
+              "on it");
+    }
 }
 
 void checkTakeRules()
@@ -1145,6 +1357,7 @@ void checkTakeRules()
         take.clear();
         check(!take.active(), "take: clear() left the take armed");
     }
+    checkPunchTakeRules();
 }
 
 } // namespace
@@ -2527,11 +2740,764 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         undo->undo();
     }
 
+    checkRecordingPunch(a, b);
     checkRecordingDisplay();
     checkRecordingFlood();
     m_countInBars = countInBars;
     checkRecordingCountIn(a);
     m_audio.holdDeviceForTest(false);
+}
+
+// Punch recording (docs/punch/PLAN.md step 1), the device held, no
+// count-in: the Punch toggle (toolbar beside Record, transport.punch with no
+// default key, persisted); a time selection surviving a plain track switch
+// (P11); Record unavailable in punch mode without a selection (P3); the
+// ruler's punch tint, latched during a take; a take that keeps only the
+// window (a key held across punch-in starting there, across punch-out
+// ending there, one after it dropped, ghosts in the window only), commits at
+// Stop and not at punch-out, and replaces the track's notes in the window
+// (removed inside, truncated into it, kept at and after punch-out) as one
+// undo step; an empty take clearing the range; a stop inside replacing
+// [in, stop); a take that never reached the window changing nothing; Record
+// while playing arming; two loop passes replacing their union; and Punch
+// off recording as an overdub as ever with a selection present.
+void MainWindow::checkRecordingPunch(int a, int b)
+{
+    MidiInput &midi = midiInput();
+    SongSession *session = m_active;
+    SongView *view = session->view;
+    SongDocument &doc = session->doc;
+    QUndoStack *undo = doc.undoStack();
+    const double rate = m_audio.sampleRate();
+    const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
+    const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {
+        midi.injectForTest({status, d1, d2});
+    };
+    const auto playhead = [&] { return m_audio.playheadSamples(); };
+    const auto tickOf = [&](uint64_t sample) {
+        return uint64_t(std::llround(session->timeline->tickForSample(sample)));
+    };
+    const auto sampleOf = [&](uint64_t tick) { return session->timeline->sampleForTick(tick); };
+    // Pumps until the playhead reaches tick (a period or so past it).
+    const auto pumpTo = [&](uint64_t tick) {
+        for (int i = 0; i < 2000 && playhead() < sampleOf(tick); i++)
+            pumpMs(10);
+    };
+    const auto noteList = [&](int track) {
+        std::vector<std::array<uint64_t, 4>> out;
+        for (const DocNote &n : doc.notesForTrack(track))
+            out.push_back({n.tick, n.key, n.duration, n.velocity});
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    const auto lastUndoText = [&] {
+        return undo->index() > 0 ? undo->text(undo->index() - 1) : QString();
+    };
+    const auto recording = [&] { return m_takeSession != nullptr; };
+    const auto message = [&] { return statusBar()->currentMessage(); };
+    const uint64_t tpb = session->timeline->ticksPerBeat;
+    const auto selectTicks = [&](uint64_t start, uint64_t end) {
+        SongView::TimeSelection sel;
+        sel.startTick = start;
+        sel.endTick = end;
+        view->setTimeSelection(sel);
+    };
+    // The track's notes as a punch over spans leaves them before the take's
+    // own land (P7).
+    using Row = std::array<uint64_t, 4>;
+    const auto replaced = [](std::vector<Row> rows,
+                             std::initializer_list<std::pair<uint64_t, uint64_t>> spans) {
+        std::vector<Row> out;
+        for (Row r : rows) {
+            bool inside = false;
+            uint64_t cut = UINT64_MAX;
+            for (const auto &[start, end] : spans) {
+                if (r[0] >= start && r[0] < end)
+                    inside = true;
+                else if (r[0] < start && r[2] > 0 && r[0] + r[2] > start)
+                    cut = std::min(cut, start);
+            }
+            if (inside)
+                continue;
+            if (cut != UINT64_MAX)
+                r[2] = cut - r[0];
+            out.push_back(r);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    const auto withNotes = [](std::vector<Row> rows, std::initializer_list<Row> add) {
+        rows.insert(rows.end(), add.begin(), add.end());
+        std::sort(rows.begin(), rows.end());
+        return rows;
+    };
+    view->selectTrack(a);
+    midi.setLatencyMs(0);
+    midi.setFixedVelocity(0);
+    midi.setLivePlay(true);
+    const bool loopWas = m_loopAction->isChecked();
+    m_loopAction->setChecked(false);
+
+    // The toggle.
+    check(m_punchAction && m_punchAction->isCheckable() &&
+              m_transportToolbar->actions().indexOf(m_punchAction) ==
+                  m_transportToolbar->actions().indexOf(m_recordAction) + 1,
+          "punch: Punch is not a checkable action beside Record on the transport toolbar");
+    check(keymap::Registry::instance().bindings(QStringLiteral("transport.punch")).isEmpty() &&
+              !keymap::Registry::instance().command(QStringLiteral("transport.punch")).id.isEmpty(),
+          "punch: transport.punch is not a command without a default key");
+    m_punchAction->setChecked(false);
+    const bool persist = std::exchange(m_persistSession, true);
+    m_punchAction->setChecked(true);
+    check(QSettings().value(QStringLiteral("punch")).toBool(),
+          "punch: turning Punch on was not persisted");
+    m_punchAction->setChecked(false);
+    check(!QSettings().value(QStringLiteral("punch"), true).toBool(),
+          "punch: turning Punch off was not persisted");
+    m_persistSession = persist;
+
+    // P11: a plain track switch keeps a track-scoped time selection (it
+    // re-scopes) and drops a lane-scoped one.
+    const uint64_t in = tpb * 10, out = tpb * 14;
+    {
+        selectTicks(in, out);
+        view->selectTrack(b);
+        check(view->timeSelection().active() && view->timeSelection().startTick == in &&
+                  view->timeSelection().endTick == out && view->timeSelectionCoversTrack(b) &&
+                  !view->timeSelectionCoversTrack(a),
+              "punch: a track switch did not keep (and re-scope) the time selection");
+        view->selectTrack(a);
+        SongView::TimeSelection lanes;
+        lanes.startTick = in;
+        lanes.endTick = out;
+        lanes.scope = SongView::TimeSelection::Lanes;
+        lanes.lanes = {{a, uint8_t(0x07)}};
+        view->setTimeSelection(lanes);
+        view->selectTrack(b);
+        check(!view->timeSelection().active(),
+              "punch: a track switch kept a lane-scoped time selection of the old track");
+        view->selectTrack(a);
+        // The tempo row isn't the old track's: a selection on it alone stays.
+        SongView::TimeSelection tempo = lanes;
+        tempo.lanes = {{-1, DOC_CC_TEMPO}};
+        view->setTimeSelection(tempo);
+        view->selectTrack(b);
+        check(view->timeSelection().active() &&
+                  view->timeSelection().scope == SongView::TimeSelection::Lanes &&
+                  view->timeSelection().lanes == tempo.lanes,
+              "punch: a track switch dropped a time selection on the tempo row alone");
+        view->selectTrack(a);
+        view->clearTimeSelection();
+    }
+
+    // P3 and the ruler tint: Punch on with no selection, Record is
+    // unavailable and says why; a selection brings it back and tints.
+    {
+        view->clearTimeSelection();
+        m_punchAction->setChecked(true);
+        check(!m_recordAction->isEnabled() && m_recordAction->toolTip().contains(QStringLiteral(
+                                                  "Punch recording needs a time selection.")),
+              "punch: Record is available in punch mode with no time selection");
+        beginRecording();
+        check(!recording() &&
+                  message() == QStringLiteral("Punch recording needs a time selection."),
+              "punch: Record with no time selection did not say why in the status bar");
+        check(view->punchRange() == std::make_pair(uint64_t(0), uint64_t(0)),
+              "punch: the ruler tints a punch range with no selection");
+        selectTicks(in, out);
+        check(m_recordAction->isEnabled(), "punch: a time selection did not enable Record");
+        check(view->punchRange() == std::make_pair(in, out) && !view->punchRangeRect().isEmpty(),
+              "punch: the ruler does not tint the time selection in punch mode");
+        m_punchAction->setChecked(false);
+        check(view->punchRange() == std::make_pair(uint64_t(0), uint64_t(0)),
+              "punch: the ruler tints the selection with Punch off");
+        m_punchAction->setChecked(true);
+    }
+
+    // The window, the latch, commit at Stop, the replace. The track gets a
+    // note sounding into punch-in (truncated), one inside (removed), one at
+    // punch-out (kept), one before (kept). From two beats before punch-in:
+    // key 60 held across it, 62 inside, 64 held across punch-out, 65 after
+    // it.
+    {
+        doc.beginEditGroup(QStringLiteral("punch setup"));
+        doc.addNote(a, in - tpb, 50, uint32_t(2 * tpb), 80);
+        doc.addNote(a, in + tpb, 51, uint32_t(tpb / 2), 80);
+        doc.addNote(a, out, 52, uint32_t(tpb), 80);
+        doc.addNote(a, in - 2 * tpb, 53, uint32_t(tpb / 2), 80);
+        doc.endEditGroup();
+        const auto before = noteList(a);
+        const int undoBefore = undo->index();
+        view->setEditCursorTick(in - 2 * tpb);
+        selectTicks(in, out);
+        m_recordAction->trigger();
+        check(recording() && m_take.punching() && m_take.punchWindowIn() == in &&
+                  m_take.punchWindowOut() == out,
+              "punch: Record did not start a punch take over the time selection");
+        check(message().startsWith(QStringLiteral("Punch recording into ")),
+              "punch: the status bar does not say it is punch recording");
+        // Moving the selection mid-take moves nothing (P2).
+        selectTicks(out, out + 4 * tpb);
+        check(view->punchRange() == std::make_pair(in, out),
+              "punch: the ruler's punch range followed a selection change mid-take");
+        pumpMs(30);
+        send(0x90, 60, 100);
+        pumpTo(in + tpb / 2);
+        const uint64_t p62 = playhead();
+        send(0x90, 62, 90);
+        pumpTo(in + tpb);
+        const uint64_t p62off = playhead();
+        send(0x80, 62, 0);
+        pumpTo(in + 3 * tpb / 2);
+        const uint64_t p60off = playhead();
+        send(0x80, 60, 0);
+        pumpTo(in + 2 * tpb);
+        const uint64_t p64 = playhead();
+        send(0x90, 64, 110);
+        pumpTo(out + tpb / 2);
+        send(0x80, 64, 0);
+        send(0x90, 65, 100);
+        pumpTo(out + tpb);
+        send(0x80, 65, 0);
+        pumpMs(20);
+        synchronizePlayhead();
+        const RecordingPreview &ghosts = view->recordingPreview();
+        bool ghostsInside = !ghosts.notes.empty();
+        for (const RecordingPreview::Note &n : ghosts.notes)
+            ghostsInside &= n.tick >= in && n.tick + n.duration <= out;
+        check(ghostsInside, "punch: a ghost note shows outside the punch window");
+        check(ghosts.spans == std::vector<std::pair<uint64_t, uint64_t>>{{in, out}},
+              "punch: the REC tint is not the punch window passed through");
+        // Past punch-out the take still records nothing and isn't committed
+        // (P6).
+        check(recording() && undo->index() == undoBefore,
+              "punch: the take committed at punch-out instead of at Stop");
+        m_stopAction->trigger();
+        check(!recording() && undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Punch record 3 note(s)"),
+              "punch: Stop did not commit one undo step \"Punch record 3 note(s)\"");
+        check(message() == QStringLiteral("Punch recorded 3 note(s)."),
+              "punch: the status bar does not report the punch take");
+        const auto want = withNotes(replaced(before, {{in, out}}),
+                                    {{in, 60, tickOf(p60off) - in, 100},
+                                     {tickOf(p62), 62, tickOf(p62off) - tickOf(p62), 90},
+                                     {tickOf(p64), 64, out - tickOf(p64), 110}});
+        const auto got = noteList(a);
+        if (!check(got == want, "punch: the take did not replace the window's notes (held "
+                                "across punch-in/out clipped, one sounding into it truncated, "
+                                "inside removed, outside kept)")) {
+            for (const Row &r : got)
+                std::fprintf(stderr, "reccheck:   got {%llu k%llu d%llu v%llu}\n",
+                             (unsigned long long)r[0], (unsigned long long)r[1],
+                             (unsigned long long)r[2], (unsigned long long)r[3]);
+            for (const Row &r : want)
+                std::fprintf(stderr, "reccheck:   want {%llu k%llu d%llu v%llu}\n",
+                             (unsigned long long)r[0], (unsigned long long)r[1],
+                             (unsigned long long)r[2], (unsigned long long)r[3]);
+        }
+        check(view->punchRange() == std::make_pair(out, out + 4 * tpb),
+              "punch: the latch outlived the take (the ruler does not follow the selection)");
+        undo->undo();
+        check(noteList(a) == before, "punch: undo did not restore the track");
+
+        // An empty take clears the range, one step.
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        check(undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Punch record (cleared)") &&
+                  message() == QStringLiteral("Punch recording cleared the range.") &&
+                  noteList(a) == replaced(before, {{in, out}}),
+              "punch: an empty take did not clear the range as one step");
+        undo->undo();
+
+        // Stopped inside the window: only [in, stop) is replaced.
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpTo(in + 2 * tpb);
+        const uint64_t stop = tickOf(playhead());
+        m_stopAction->trigger();
+        check(stop < out && noteList(a) == replaced(before, {{in, stop}}),
+              "punch: a stop inside the window did not replace just [in, stop)");
+        undo->undo();
+
+        // Playback that never reached punch-in changes nothing.
+        view->setEditCursorTick(in - 3 * tpb);
+        m_recordAction->trigger();
+        send(0x90, 66, 100);
+        pumpTo(in - tpb);
+        send(0x80, 66, 0);
+        pumpMs(20);
+        m_stopAction->trigger();
+        check(undo->index() == undoBefore && noteList(a) == before &&
+                  message() == QStringLiteral("Nothing was recorded."),
+              "punch: a take that never reached punch-in changed the song");
+
+        // Record while playing arms (P10): before the window nothing is
+        // kept, inside it records.
+        view->setEditCursorTick(in - 2 * tpb);
+        startPlayback();
+        pumpMs(30);
+        m_recordAction->trigger();
+        check(recording() && m_take.punching(), "punch: Record while playing did not arm");
+        send(0x90, 67, 100);
+        pumpTo(in - tpb);
+        send(0x80, 67, 0);
+        pumpTo(in + tpb);
+        const uint64_t p68 = playhead();
+        send(0x90, 68, 100);
+        pumpTo(in + 2 * tpb);
+        const uint64_t p68off = playhead();
+        send(0x80, 68, 0);
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        check(undo->index() == undoBefore + 1 &&
+                  noteList(a) == withNotes(replaced(before, {{in, out}}),
+                                           {{tickOf(p68), 68, tickOf(p68off) - tickOf(p68), 100}}),
+              "punch: Record while playing did not keep just the window's notes");
+        undo->undo();
+        // Armed past the window (no loop): nothing.
+        view->setEditCursorTick(out + tpb);
+        startPlayback();
+        pumpMs(30);
+        m_recordAction->trigger();
+        send(0x90, 69, 100);
+        pumpMs(200);
+        send(0x80, 69, 0);
+        pumpMs(20);
+        m_stopAction->trigger();
+        check(undo->index() == undoBefore && noteList(a) == before,
+              "punch: a take armed past the window changed the song");
+        undo->undo(); // the setup notes
+        check(undo->index() == undoBefore - 1, "punch: the setup did not undo");
+    }
+
+    // Two loop passes (a loop [8, 16) beats, the window [10, 14)): armed
+    // at beat 12, pass 1 covers [12, 14), pass 2 stops near beat 11, so the
+    // take replaces [10, ~11) and [12, 14) and keeps a note between them.
+    {
+        const int undoBase = undo->index();
+        doc.setLoopTick(false, int64_t(tpb * 8));
+        doc.setLoopTick(true, int64_t(tpb * 16));
+        doc.setLoopTick(false, int64_t(tpb * 8)); // an end placed before a far start
+        if (check(session->timeline->hasLoop() && session->timeline->loopStartTick == tpb * 8 &&
+                      session->timeline->loopEndTick == tpb * 16,
+                  "punch: the loop for the two-pass take could not be set")) {
+            m_loopAction->setChecked(true);
+            doc.beginEditGroup(QStringLiteral("punch loop setup"));
+            doc.addNote(a, tpb * 10 + tpb / 4, 54, uint32_t(tpb / 4), 80); // replaced (pass 2)
+            doc.addNote(a, tpb * 11 + tpb / 2, 55, uint32_t(tpb / 4), 80); // between: kept
+            doc.addNote(a, tpb * 13, 56, uint32_t(tpb / 4), 80);           // replaced (pass 1)
+            doc.endEditGroup();
+            const auto before = noteList(a);
+            const int undoBefore = undo->index();
+            selectTicks(in, out);
+            view->setEditCursorTick(tpb * 12);
+            m_recordAction->trigger();
+            pumpMs(20);
+            const uint64_t p70 = playhead();
+            send(0x90, 70, 100);
+            pumpMs(60);
+            const uint64_t p70off = playhead();
+            send(0x80, 70, 0);
+            const uint64_t pA = playhead();
+            for (int i = 0; i < 2000 && playhead() >= pA; i++)
+                pumpMs(10);
+            check(playhead() < pA, "punch: the loop never wrapped");
+            pumpTo(in + tpb / 2);
+            const uint64_t p72 = playhead();
+            send(0x90, 72, 100);
+            pumpMs(60);
+            const uint64_t p72off = playhead();
+            send(0x80, 72, 0);
+            pumpTo(tpb * 11);
+            const uint64_t stop = tickOf(playhead());
+            m_stopAction->trigger();
+            const auto want = withNotes(replaced(before, {{in, stop}, {tpb * 12, out}}),
+                                        {{tickOf(p70), 70, tickOf(p70off) - tickOf(p70), 100},
+                                         {tickOf(p72), 72, tickOf(p72off) - tickOf(p72), 100}});
+            check(stop < tpb * 11 + tpb / 2 && undo->index() == undoBefore + 1 &&
+                      noteList(a) == want,
+                  "punch: two loop passes did not replace the union of what they covered");
+            undo->undo();
+            check(noteList(a) == before, "punch: undo after the two-pass take did not restore");
+            m_loopAction->setChecked(false);
+        }
+        while (undo->index() > undoBase)
+            undo->undo();
+    }
+
+    using Points = std::vector<std::pair<uint64_t, int>>;
+    const auto lanePoints = [&](int track, uint8_t cc) {
+        Points pts;
+        for (const DocLanePoint &p : doc.lanePoints(track, cc))
+            pts.push_back({p.tick, p.value});
+        std::sort(pts.begin(), pts.end());
+        return pts;
+    };
+    // A lane after a take's write of moves over [moves' first, end]: the
+    // song's other points kept, the song's value back at end when it sounds
+    // different (the song's value read before the take).
+    const auto laneAfter = [](uint8_t cc, const Points &before, Points moves, uint64_t end) {
+        Points want;
+        for (const auto &pt : before)
+            if (pt.first < moves.front().first || pt.first > end)
+                want.push_back(pt);
+        int song = RecordingTake::restValue(cc);
+        for (const auto &[t, v] : before)
+            if (t <= end)
+                song = v;
+        if (end > moves.back().first &&
+            RecordingTake::audible(cc, song) != RecordingTake::audible(cc, moves.back().second))
+            moves.push_back({end, song});
+        want.insert(want.end(), moves.begin(), moves.end());
+        std::sort(want.begin(), want.end());
+        return want;
+    };
+    const auto printPoints = [](const char *what, const Points &pts) {
+        for (const auto &[t, v] : pts)
+            std::fprintf(stderr, "reccheck:   %s %llu %d\n", what, (unsigned long long)t, v);
+    };
+    const auto totalNotes = [&] {
+        size_t n = 0;
+        for (int t = 0; t < 16; t++)
+            n += doc.notesForTrack(t).size();
+        return n;
+    };
+
+    // Lane writes through the commit: a bend moved only before the window
+    // isn't written (nor its CC121 reset inside it), MOD moved inside is,
+    // its reset included, ending at punch-out with the song's value back;
+    // VOL and PAN, reset but never moved, stay. One step with the notes
+    // the window replaced.
+    {
+        const int undoBefore = undo->index();
+        const auto before = noteList(a);
+        const Points bendBefore = lanePoints(a, DOC_CC_BEND);
+        const Points modBefore = lanePoints(a, 0x01);
+        const Points volBefore = lanePoints(a, 0x07);
+        const Points panBefore = lanePoints(a, 0x0A);
+        const int modMax = view->laneDisplayMax(a, 0x01);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpMs(20);
+        send(0xE0, 0x00, 0x60); // +4096, before the window
+        pumpMs(20);
+        send(0xE0, 0x00, 0x40);
+        pumpTo(in + tpb);
+        const uint64_t pMod = playhead();
+        send(0xB0, 1, 127);
+        pumpTo(in + 2 * tpb);
+        const uint64_t pReset = playhead();
+        send(0xB0, 121, 0);
+        pumpTo(in + 3 * tpb);
+        const uint64_t pMod2 = playhead();
+        send(0xB0, 1, 127);
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        send(0xB0, 1, 0);
+        check(undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Punch record mod") &&
+                  message() == QStringLiteral("Punch recorded mod."),
+              "punch: a punch take with lane moves did not commit one step naming them");
+        const Points wantMod =
+            laneAfter(0x01, modBefore,
+                      {{tickOf(pMod), modMax}, {tickOf(pReset), 0}, {tickOf(pMod2), modMax}}, out);
+        const Points gotMod = lanePoints(a, 0x01);
+        if (!check(gotMod == wantMod,
+                   "punch: the MOD lane is not the window's moves (and its reset) with the "
+                   "song's value back at punch-out")) {
+            printPoints("got", gotMod);
+            printPoints("want", wantMod);
+        }
+        check(lanePoints(a, DOC_CC_BEND) == bendBefore && lanePoints(a, 0x07) == volBefore &&
+                  lanePoints(a, 0x0A) == panBefore,
+              "punch: a lane moved only before the window (or only reset) was written");
+        check(noteList(a) == replaced(before, {{in, out}}),
+              "punch: a lanes-only punch take did not replace the window's notes");
+        undo->undo();
+        check(lanePoints(a, 0x01) == modBefore && noteList(a) == before,
+              "punch: undo did not restore the lanes-only punch take");
+    }
+
+    // A recording offset: a key and a MOD move played just past punch-in,
+    // shifted before it, land on punch-in; a MOD move played a beat before
+    // the window is dropped.
+    {
+        const int undoBefore = undo->index();
+        const Points modBefore = lanePoints(a, 0x01);
+        const int modMax = view->laneDisplayMax(a, 0x01);
+        midi.setLatencyMs(100);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - 2 * tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        pumpTo(in - tpb);
+        send(0xB0, 1, 64); // before the window by more than the offset
+        pumpTo(in);
+        const uint64_t pIn = playhead();
+        send(0x90, 77, 100);
+        send(0xB0, 1, 127);
+        pumpTo(in + tpb);
+        send(0x80, 77, 0);
+        pumpTo(out + tpb / 2);
+        check(pIn >= sampleOf(in) && pIn - sampleOf(in) < recordingLatencySamples(),
+              "punch: the offset test's key was not played inside the offset (timing)");
+        m_stopAction->trigger();
+        send(0xB0, 1, 0);
+        midi.setLatencyMs(0);
+        bool atIn = false;
+        for (const DocNote &n : doc.notesForTrack(a))
+            atIn |= n.key == 77 && n.tick == in;
+        check(undo->index() == undoBefore + 1 && atIn,
+              "punch: with an offset, a key shifted across punch-in did not start there");
+        const Points wantMod = laneAfter(0x01, modBefore, {{in, modMax}}, out);
+        const Points gotMod = lanePoints(a, 0x01);
+        if (!check(gotMod == wantMod,
+                   "punch: with an offset, a MOD move shifted across punch-in did not land on it "
+                   "(or one before the window was written)")) {
+            printPoints("got", gotMod);
+            printPoints("want", wantMod);
+        }
+        while (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // The take-ending paths besides Stop. Record again past punch-out
+    // commits and keeps playing; Pause commits and stays paused.
+    for (const bool pause : {false, true}) {
+        const int undoBefore = undo->index();
+        const auto before = noteList(a);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        pumpTo(in + tpb);
+        const uint64_t p = playhead();
+        send(0x90, 74, 100);
+        pumpTo(in + 2 * tpb);
+        const uint64_t pOff = playhead();
+        send(0x80, 74, 0);
+        pumpTo(out + tpb / 2);
+        (pause ? m_pauseAction : m_recordAction)->trigger();
+        check(!recording() &&
+                  m_audio.transport() == (pause ? Transport::Paused : Transport::Playing) &&
+                  undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Punch record 1 note(s)") &&
+                  noteList(a) == withNotes(replaced(before, {{in, out}}),
+                                           {{tickOf(p), 74, tickOf(pOff) - tickOf(p), 100}}),
+              pause ? "punch: Pause did not commit the punch take (and stay paused)"
+                    : "punch: Record again did not commit the punch take (and keep playing)");
+        m_stopAction->trigger();
+        while (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // Deleting the take's track drops the take and the ruler's latch: the
+    // tint follows the live selection again.
+    {
+        const int undoBefore = undo->index();
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        selectTicks(out, out + 4 * tpb);
+        pumpTo(in + tpb);
+        check(view->punchRange() == std::make_pair(in, out),
+              "punch: the latch did not hold before the track was deleted");
+        doc.deleteTrack(a);
+        check(!recording() && view->punchRange() == std::make_pair(out, out + 4 * tpb),
+              "punch: deleting the take's track left the ruler's punch latch");
+        m_stopAction->trigger();
+        while (undo->index() > undoBefore)
+            undo->undo();
+        view->selectTrack(a);
+    }
+
+    // A track move mid-take: the replace lands on the track's new slot, and
+    // no other track loses notes.
+    {
+        const int undoBefore = undo->index();
+        doc.addNote(a, in + tpb, 58, uint32_t(tpb / 2), 80);
+        const auto before = noteList(a);
+        const size_t totalBefore = totalNotes();
+        const size_t removedCount = before.size() - replaced(before, {{in, out}}).size();
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        pumpTo(in + tpb / 2);
+        check(doc.moveTrack(a, b), "punch: the track move mid-take failed");
+        const int moved = m_take.track();
+        pumpTo(in + 2 * tpb);
+        const uint64_t p = playhead();
+        send(0x90, 75, 100);
+        pumpTo(in + 3 * tpb);
+        const uint64_t pOff = playhead();
+        send(0x80, 75, 0);
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        check(moved != a && lastUndoText() == QStringLiteral("Punch record 1 note(s)") &&
+                  noteList(moved) == withNotes(replaced(before, {{in, out}}),
+                                               {{tickOf(p), 75, tickOf(pOff) - tickOf(p), 100}}) &&
+                  totalNotes() == totalBefore - removedCount + 1,
+              "punch: after a track move mid-take the replace did not land on the moved track "
+              "alone");
+        while (undo->index() > undoBefore)
+            undo->undo();
+        view->selectTrack(a);
+    }
+
+    // A locked document: the take isn't written and says so, even one that
+    // recorded nothing (its replace is lost too).
+    {
+        const int undoBefore = undo->index();
+        doc.addNote(a, in + tpb, 58, uint32_t(tpb / 2), 80);
+        const int undoSetup = undo->index();
+        const auto before = noteList(a);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        pumpTo(in + tpb);
+        send(0x90, 76, 100);
+        pumpTo(in + 2 * tpb);
+        send(0x80, 76, 0);
+        pumpTo(out + tpb / 2);
+        doc.setLocked(true);
+        m_stopAction->trigger();
+        doc.setLocked(false);
+        syncRecordAction(); // setLocked tells nobody
+        check(undo->index() == undoSetup && noteList(a) == before &&
+                  message() ==
+                      QStringLiteral("The 1 recorded note(s) could not be added to the song."),
+              "punch: a punch take into a locked document was not reported as not added");
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20); // the start seek lands
+        pumpTo(out + tpb / 2);
+        doc.setLocked(true);
+        m_stopAction->trigger();
+        doc.setLocked(false);
+        syncRecordAction();
+        if (!check(undo->index() == undoSetup && noteList(a) == before &&
+                       message() == QStringLiteral("The recording could not be added to the song."),
+                   "punch: an empty punch take into a locked document said nothing was recorded"))
+            std::fprintf(stderr, "reccheck:   undo %d/%d, said \"%s\"\n", undo->index(), undoSetup,
+                         qPrintable(message()));
+        while (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // Toggling Punch mid-take leaves the take's mode alone: a punch take
+    // still replaces (the ruler keeps its latch), an overdub still overdubs.
+    {
+        const int undoBefore = undo->index();
+        doc.addNote(a, in + tpb, 58, uint32_t(tpb / 2), 80);
+        const auto before = noteList(a);
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20);
+        m_punchAction->setChecked(false);
+        check(m_take.punching() && view->punchRange() == std::make_pair(in, out),
+              "punch: turning Punch off mid-take changed the take's mode or dropped its tint");
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        check(lastUndoText() == QStringLiteral("Punch record (cleared)") &&
+                  noteList(a) == replaced(before, {{in, out}}),
+              "punch: a punch take with Punch turned off mid-take did not replace");
+        check(view->punchRange() == std::make_pair(uint64_t(0), uint64_t(0)),
+              "punch: the ruler tints with Punch off after the take");
+        undo->undo();
+        const int undoAfter = undo->index();
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        pumpMs(20);
+        m_punchAction->setChecked(true);
+        check(recording() && !m_take.punching(),
+              "punch: turning Punch on mid-take made an overdub a punch take");
+        pumpTo(out + tpb / 2);
+        m_stopAction->trigger();
+        check(undo->index() == undoAfter && noteList(a) == before,
+              "punch: an overdub with Punch turned on mid-take replaced something");
+        while (undo->index() > undoBefore)
+            undo->undo();
+    }
+
+    // Lane writes' restore points and the voice lead are read before the
+    // replace: a track whose only channel events are the window's notes
+    // gets a keep-alive voice at tick 0 when they go
+    // (appendTrackKeepAliveOps), which isn't the song before the take, so
+    // the take's program change isn't followed by that voice at punch-out.
+    if (doc.canAddTrack()) {
+        const int undoBefore = undo->index();
+        const int added = doc.addTrack(0);
+        std::vector<DocLanePoint> seed =
+            added >= 0 ? doc.lanePoints(added, DOC_CC_VOICE) : std::vector<DocLanePoint>();
+        if (added >= 0) {
+            doc.addNote(added, in + tpb, 60, uint32_t(tpb), 80);
+            doc.deleteLanePoints(added, DOC_CC_VOICE, seed);
+        }
+        if (check(added >= 0 && doc.lanePoints(added, DOC_CC_VOICE).empty() &&
+                      doc.notesForTrack(added).size() == 1 && doc.smfTrackFor(added) >= 0,
+                  "punch: the keep-alive fixture track could not be made")) {
+            view->selectTrack(added);
+            selectTicks(in, out);
+            view->setEditCursorTick(in - tpb);
+            m_recordAction->trigger();
+            pumpMs(20); // the start seek lands
+            pumpTo(in + 2 * tpb);
+            const uint64_t pP = playhead();
+            send(0xC0, 1, 0);
+            pumpTo(out + tpb / 2);
+            m_stopAction->trigger();
+            const Points voices = lanePoints(added, DOC_CC_VOICE);
+            if (!check(doc.notesForTrack(added).empty() &&
+                           voices == Points{{0, 0}, {tickOf(pP), 1}},
+                       "punch: the keep-alive voice seeded by the replace was read as the song "
+                       "before the take (restored at punch-out)"))
+                printPoints("voice", voices);
+        }
+        while (undo->index() > undoBefore)
+            undo->undo();
+        view->selectTrack(a);
+    } else {
+        std::printf("reccheck: punch keep-alive SKIP (the song uses all 16 tracks)\n");
+    }
+
+    // Punch off: Record overdubs from the edit cursor as ever, a selection
+    // or not: a note in the selection stays, notes outside it record.
+    {
+        m_punchAction->setChecked(false);
+        doc.addNote(a, in + tpb, 57, uint32_t(tpb), 80);
+        const auto before = noteList(a);
+        const int undoBefore = undo->index();
+        selectTicks(in, out);
+        view->setEditCursorTick(in - tpb);
+        m_recordAction->trigger();
+        check(recording() && !m_take.punching(), "punch: Punch off started a punch take");
+        pumpMs(20);
+        const uint64_t p1 = playhead();
+        send(0x90, 73, 100);
+        pumpTo(in + tpb / 2);
+        const uint64_t p1off = playhead();
+        send(0x80, 73, 0);
+        pumpMs(20);
+        m_stopAction->trigger();
+        check(undo->index() == undoBefore + 1 &&
+                  lastUndoText() == QStringLiteral("Record 1 note(s)") &&
+                  noteList(a) ==
+                      withNotes(before, {{tickOf(p1), 73, tickOf(p1off) - tickOf(p1), 100}}),
+              "punch: Record with Punch off did not overdub across the selection as ever");
+        undo->undo();
+        undo->undo();
+    }
+    view->clearTimeSelection();
+    m_loopAction->setChecked(loopWas);
 }
 
 // Record's count-in (docs/metronome/PLAN.md step 2), the device held: from

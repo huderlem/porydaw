@@ -15,10 +15,18 @@ void RecordingTake::begin(int track, uint32_t generation)
     m_generation = generation;
 }
 
+void RecordingTake::setPunchWindow(uint64_t in, uint64_t out)
+{
+    m_windowIn = in;
+    m_windowOut = std::max(in, out);
+}
+
 void RecordingTake::clear()
 {
     m_track = -1;
     m_generation = 0;
+    m_windowIn = 0;
+    m_windowOut = 0;
     m_started = false;
     m_punchIn = 0;
     m_segment = 0;
@@ -54,6 +62,12 @@ void RecordingTake::enterSegment(uint32_t segment, uint64_t start)
 }
 
 namespace {
+
+// A sample's tick on the timeline, rounded, never before tick 0.
+uint64_t tickAt(const MidiTimeline &timeline, uint64_t sample)
+{
+    return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
+}
 
 // Adds [start, end) to a sorted, merged span list, merging what it touches.
 void addSpan(std::vector<std::pair<uint64_t, uint64_t>> &spans, uint64_t start, uint64_t end)
@@ -91,6 +105,31 @@ std::vector<std::pair<uint64_t, uint64_t>> RecordingTake::recordedSpans(uint64_t
     const uint64_t end = sameSegment && endSample >= m_segmentStart ? endSample : m_lastSample;
     addSpan(spans, m_segmentStart, std::max(end, m_lastSample));
     return spans;
+}
+
+std::vector<std::pair<uint64_t, uint64_t>>
+RecordingTake::recordedTickSpans(const MidiTimeline &timeline, uint64_t endSample,
+                                 uint32_t endSegment) const
+{
+    std::vector<std::pair<uint64_t, uint64_t>> spans;
+    for (const auto &[start, end] : recordedSpans(endSample, endSegment)) {
+        uint64_t from = tickAt(timeline, start), to = tickAt(timeline, end);
+        if (punching()) {
+            from = std::max(from, m_windowIn);
+            to = std::min(to, m_windowOut);
+        }
+        addSpan(spans, from, to);
+    }
+    return spans;
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> RecordingTake::punchedSpans(const MidiTimeline &timeline,
+                                                                       uint64_t endSample,
+                                                                       uint32_t endSegment) const
+{
+    if (!punching())
+        return {};
+    return recordedTickSpans(timeline, endSample, endSegment);
 }
 
 void RecordingTake::push(const CaptureEvent &ev)
@@ -193,6 +232,7 @@ void RecordingTake::push(const CaptureEvent &ev)
         } else {
             m_moved[control.cc] = true;
         }
+        control.reset = (ev.flags & CaptureEvent::Reset) != 0;
         control.value = ev.kind == CaptureEvent::Bend ? std::clamp<int>(ev.value, -8192, 8191)
                                                       : std::clamp<int>(ev.value, 0, 127);
         m_controls.push_back(control);
@@ -216,9 +256,6 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
                                                           uint64_t endSample, uint32_t endSegment,
                                                           uint64_t latencySamples) const
 {
-    const auto tickAt = [&](uint64_t sample) {
-        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
-    };
     struct Span {
         uint64_t tick;
         uint64_t end; // exclusive
@@ -253,8 +290,16 @@ std::vector<SongDocument::NewNote> RecordingTake::toNotes(const MidiTimeline &ti
                 continue;
             off = std::max(on, off);
         }
-        const uint64_t tick = tickAt(on);
-        const uint64_t end = std::max(tick + 1, tickAt(off));
+        uint64_t tick = tickAt(timeline, on);
+        uint64_t end = std::max(tick + 1, tickAt(timeline, off));
+        if (punching()) {
+            // Only the window is kept (P5): a key held across punch-in starts
+            // there, one held across punch-out ends there.
+            if (end <= m_windowIn || tick >= m_windowOut)
+                continue;
+            tick = std::max(tick, m_windowIn);
+            end = std::min(end, m_windowOut);
+        }
         spans.push_back({tick, end, note.key, note.velocity, true});
     }
 
@@ -332,16 +377,32 @@ std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTime
                                                                   uint32_t endSegment,
                                                                   uint64_t latencySamples) const
 {
-    const auto tickAt = [&](uint64_t sample) {
-        return uint64_t(std::max<long long>(0, std::llround(timeline.tickForSample(sample))));
-    };
     // Segments only grow, so a map by (segment, lane) keeps segment order.
     std::map<std::pair<uint32_t, int>, LaneWrite> writes;
     std::map<std::pair<uint32_t, int>, uint64_t> lastMove; // its sample, unshifted
+    // A punch take's lanes moved inside the window so far: where a CC121
+    // reset counts (push's rule, over the window's moves alone).
+    bool movedInside[256] = {};
     for (const Control &c : m_controls) {
         const uint64_t sample =
             std::max(c.floorSample, samplesEarlier(c.sample, latencySamples + c.late));
-        uint64_t tick = tickAt(sample);
+        uint64_t tick = tickAt(timeline, sample);
+        if (punching()) {
+            // A move the latency shift carried from inside the window to
+            // before punch-in (it arrived at or after in) lands on punch-in,
+            // as a note sounding across in starts there; one that arrived
+            // before in was played before the window.
+            if (tick < m_windowIn && tickAt(timeline, c.sample) >= m_windowIn)
+                tick = m_windowIn;
+            // A move outside the window isn't recorded (P5): the lane keeps
+            // the song's value there.
+            if (tick < m_windowIn || tick >= m_windowOut)
+                continue;
+            if (c.reset && !movedInside[c.cc])
+                continue;
+            if (!c.reset)
+                movedInside[c.cc] = true;
+        }
         // Within a segment the lanes go in ascending CC, then BEND (0xFF),
         // then the voice.
         auto [it, fresh] =
@@ -378,7 +439,11 @@ std::vector<RecordingTake::LaneWrite> RecordingTake::toLaneWrites(const MidiTime
         } else if (const auto seg = m_segmentEnds.find(key.first); seg != m_segmentEnds.end()) {
             end = seg->second;
         }
-        const uint64_t endTick = tickAt(end);
+        uint64_t endTick = tickAt(timeline, end);
+        // A punch take's write ends at punch-out at the latest: the song's
+        // value comes back there.
+        if (punching())
+            endTick = std::min(endTick, m_windowOut);
         if (endTick > w.tickEnd) {
             w.tickEnd = endTick;
             w.restoreEnd = true;

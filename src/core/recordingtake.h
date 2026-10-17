@@ -51,6 +51,15 @@ class MidiTimeline;
 //    one (what TimelinePlayer::primeVoices plays), so that is what a
 //    write's end restores and, when the take's voice would become the
 //    track's first, what moves to tick 0 (voiceLeadPoint).
+//  - A punch take (docs/punch/PLAN.md P5) keeps only what lands inside its
+//    window [in, out), in ticks after the shifts above: a note sounding
+//    across in starts there, one sounding across out ends there, and one
+//    wholly outside goes; a lane move the shifts carried across in (it
+//    reached the take at or after in) lands on in, one outside goes (a
+//    CC121 reset counts only on a lane moved inside), and a write ends at
+//    out at the latest,
+//    where the song's value comes back. Its replaced span is where it
+//    recorded inside the window (punchedSpans).
 class RecordingTake
 {
   public:
@@ -74,9 +83,10 @@ class RecordingTake
         uint64_t floorSample = 0; // the start of its segment
         uint32_t late = 0;        // how long its message waited for its callback
         uint32_t segment = 0;
-        uint8_t cc = 0; // DOC_CC_BEND, DOC_CC_VOICE, or the lane's CC (0x01 MOD, ...)
-        int value = 0;  // bend -8192..8191; a CC lane 0-127, as the lane stores
-                        // it; the voice its slot
+        uint8_t cc = 0;     // DOC_CC_BEND, DOC_CC_VOICE, or the lane's CC (0x01 MOD, ...)
+        int value = 0;      // bend -8192..8191; a CC lane 0-127, as the lane stores
+                            // it; the voice its slot
+        bool reset = false; // part of a Reset All Controllers (CaptureEvent::Reset)
     };
     // One lane's moves from one segment (a loop pass, a seek's landing):
     // they replace the lane's points in [tickBegin, tickEnd]
@@ -134,6 +144,12 @@ class RecordingTake
 
     void begin(int track, uint32_t generation);
     void clear();
+    // Makes the take a punch take over [in, out) in ticks (latched at
+    // Record: P2). Right after begin(), which clears it.
+    void setPunchWindow(uint64_t in, uint64_t out);
+    bool punching() const { return m_windowOut > m_windowIn; }
+    uint64_t punchWindowIn() const { return m_windowIn; }
+    uint64_t punchWindowOut() const { return m_windowOut; }
     // Armed: begin() ran and nothing has cleared it.
     bool active() const { return m_track >= 0; }
     // The audio thread's Begin arrived: the take has a punch-in position.
@@ -167,6 +183,17 @@ class RecordingTake
     // end). Empty until started(). The roll's "REC" ruler tint (step 4).
     std::vector<std::pair<uint64_t, uint64_t>> recordedSpans(uint64_t endSample,
                                                              uint32_t endSegment) const;
+    // recordedSpans through the tempo map, in ticks, sorted and merged; a
+    // punch take's clipped to its window. The roll's REC tint.
+    std::vector<std::pair<uint64_t, uint64_t>>
+    recordedTickSpans(const MidiTimeline &timeline, uint64_t endSample, uint32_t endSegment) const;
+    // A punch take's replaced span (P7), in ticks: recordedSpans through the
+    // tempo map, clipped to the window, sorted and merged. [in, out) once a
+    // pass ran through the whole window, [in, stop) when it stopped inside,
+    // empty when playback never reached it; the union over loop passes.
+    // Empty for a take that isn't punching.
+    std::vector<std::pair<uint64_t, uint64_t>>
+    punchedSpans(const MidiTimeline &timeline, uint64_t endSample, uint32_t endSegment) const;
 
     // In arrival order.
     const std::vector<Control> &controls() const { return m_controls; }
@@ -205,6 +232,8 @@ class RecordingTake
 
     int m_track = -1;
     uint32_t m_generation = 0;
+    uint64_t m_windowIn = 0; // the punch window, in ticks; none when empty
+    uint64_t m_windowOut = 0;
     bool m_started = false;
     uint64_t m_punchIn = 0;
     uint32_t m_segment = 0;

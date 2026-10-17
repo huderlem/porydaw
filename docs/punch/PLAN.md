@@ -74,3 +74,131 @@ normal + ASAN sweeps.
    midicheck; Settings → MIDI supported-buttons list; CHANGELOG; manual
    TODO-outline section (user writes the prose); final Opus review of the
    branch.
+
+## 5. Step 1 — as built (2026-10-17, uncommitted)
+
+Where it lives: `RecordingTake::setPunchWindow` / `punchedSpans` and the
+window rules in `toNotes` / `toLaneWrites` (core/recordingtake.*); the Punch
+action, P3 gating, latching, preview and the replace in `commitTake` /
+`replacePunchedNotes` (mainwindow.cpp); P11, `timeSelectionChanged`,
+`setPunchMode` / `setPunchLatch` / `punchRange` and the ruler tint
+(ui/songview.*); `transport.punch` (ui/keymap.cpp, Global, no default,
+attached to the action).
+
+Judgment calls (things the plan left open):
+
+- **P11 scope.** A *track*-scoped selection survives a plain track switch
+  and re-scopes; a *lane*-scoped one naming a track's rows is still cleared
+  (its rows are the old track's and leave the lanes area); one on the tempo
+  row alone (track -1) survives. `selectTrack` now repaints the timeline
+  views itself: it used to get that from `clearTimeSelection` (velcheck
+  caught the missing repaint).
+- **Window in ticks, after the shifts.** P5 is applied to each note's ticks
+  after the latency/wait shift and rounding, before the later-wins pass. A
+  lane move counts by its shifted tick, except that one the shift carried
+  across punch-in (it reached the take at or after in: its unshifted tick
+  is >= in) lands on in, as a note sounding across in starts there; one
+  that reached the take before in is pre-window input and goes; a CC121 reset counts only on a lane
+  moved *inside* the window; a lane write ends at min(segment end, out),
+  where the song's value is restored as at any write end.
+- **Replaced span starts where recording started.** `punchedSpans` =
+  the take's recorded spans (Begin / loop start / seek landing to the
+  segment's end or stop) in ticks ∩ [in, out), merged. So a take armed or
+  started *inside* the window (Record while playing there, or the edit
+  cursor inside it) replaces from where it started, not from punch-in.
+- **Truncation.** A note starting before a replaced span and sounding into
+  it ends at the earliest span start it reaches (its tail past the span is
+  lost, per P7). An unterminated note-on is left alone. Done with
+  `deleteNotes` (from the first read) then `resizeNotes` (one per distinct
+  duration change, re-read by NoteId) inside the commit's edit group, then
+  the take's `addNotes` and lane writes: one undo step. The lane writes'
+  restore points and the voice lead are read *before* the replace: its
+  deletes can seed a keep-alive tick-0 program change
+  (`appendTrackKeepAliveOps`), which isn't the song before the take.
+- **Texts.** Undo: "Punch record %n note(s)", "… with %1", "Punch record
+  %1" (lanes only), "Punch record (cleared)". Status: "Punch recorded %n
+  note(s).", "Punch recording cleared the range.", "Nothing was
+  recorded." when nothing changed (never reached, or an empty range), or
+  "The recording could not be added to the song." for an empty take with a
+  replaced span that couldn't be written (locked document, track gone).
+  During the take: "Punch recording into N: Name…" (count-in: "Counting in…
+  then punch recording into …"). Record's tooltip names punch mode.
+- **REC tint of a punch take** shows the replaced span (clipped to the
+  window), not everything the playhead passed.
+- **Ruler punch tint**: the record red at alpha 32 over the selection band
+  plus red edge lines, ruler only. While a punch take records it shows the
+  latched range (`setPunchLatch`, cleared at commit, on a dropped take and on
+  a song swap) whatever the Punch toggle says; otherwise the live selection,
+  only with Punch on.
+- **Mode latched at Record**: toggling Punch mid-take doesn't change the
+  running take (only the button/tint).
+- Punch glyph: painted brackets around a dot, tinted like the transport.
+- P6 needed no new code: nothing ends a take at punch-out; Stop/Space/Pause/
+  Record commit as before.
+
+Checks (reccheck): `checkPunchTakeRules` (pure take: window clipping, held
+across in and out, held at a stop inside, stop inside → [in, stop), never
+reached, armed past out, two loop passes → union and merge, lanes windowed +
+reset rule + end at out/stop, the same events without a window unchanged) and
+`MainWindow::checkRecordingPunch` (toolbar placement beside Record, command
+without default key, QSettings persistence, P11 both scopes, P3 disable +
+tooltip + status, ruler tint on/off, latch mid-take and released after,
+held-across-in/out + after-out dropped + ghosts in-window only + REC tint =
+window, no commit at punch-out, replace/truncate/keep as one step + undo,
+empty take clears, stop inside, never reached, Record-while-playing arming
+before the window and armed past it, two loop passes on a [8, 16)-beat loop
+replacing the union and keeping a note between, Punch off = overdub with a
+selection present).
+
+Mutation tests (each applied by hand, rebuilt, reccheck run, restored): all
+20 caught — note clip removed (12 fails), truncation skipped (5), span hull
+instead of union (2), empty take not written (5), track switch clears again
+(1), P3 gate removed (17), ruler latch not set (1), lane moves outside kept
+(2), lane end not clipped (1), REC tint unclipped (1), reset always counts
+(2), window not latched at Record (15), removal skipped (5), tint ignores
+punch mode (1), latch ignored (1), toggle not persisted (2), `punching()`
+true for an empty window (127, regular Record), commit at punch-out (5),
+Punch off still punching with a selection (2), latch kept after the take (1).
+
+Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
+~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan, build-dummy,
+build-nomidi, build-off: clean. clang-format 22 on touched files.
+
+**Review fixes (2026-10-17, uncommitted).** An Opus review found no
+high/medium bugs; applied: (1) `selectTrack` keeps a tempo-row-only lane
+selection (P11), stale `trackHeaderClicked` comment fixed; (2) `commitTake`
+reads lane restore points and the voice lead before `replacePunchedNotes`
+(keep-alive seed); (3) a lane move shifted across punch-in is clamped to it,
+not dropped; (4) an unwritable empty punch take with spans says it could not
+be added; (5) the ruler tint follows the take's latch regardless of the
+toggle, the live selection only with Punch on; (6) simplifications:
+`replacePunchedNotes` deletes first and resizes by id per distinct change,
+`RecordingTake::recordedTickSpans` (clipped only when punching) feeds both
+`punchedSpans` and the preview's REC tint, a file-static `tickAt` replaces
+the duplicated lambdas. New checks: `checkPunchTakeRules` offset case (note,
+MOD and program change shifted across in, pre-window move and note
+dropped); `checkRecordingPunch`: tempo-row selection survives a switch, a
+lanes-only punch take through `commitTake` (bend moved only before the
+window and its CC121 reset not written, MOD + reset inside written with the
+song's value restored at out, VOL/PAN untouched, notes replaced, one step,
+undo), a 100 ms offset end to end (key and MOD at in), Record again and
+Pause ending a punch take, track deleted mid-take clears the latch, track
+moved mid-take replaces on the moved track alone, locked document (notes,
+and an empty take), Punch toggled mid-take both ways, the keep-alive case.
+Mutation tests (by hand, restored from backup files): all caught —
+lane-scope clear incl. tempo row (1), restore read after replace (1), lane
+clamp removed (3), old status text (1), tint gated on the toggle (1),
+resize skipped (2), tick spans unclipped (9), latch kept on track delete
+(1), reset rule dropped (5), lane end unclipped (4), take not following a
+track move (5). Not mutation-targeted: Pause/Record-again (shared
+`finishRecording` path, no punch-specific code to break). Sweeps:
+`tools/run_checks.sh` normal and ASAN PASS; build, build-asan, build-dummy,
+build-nomidi, build-off clean; clang-format 22.
+
+**Note for step 2 (P9 mask).** The mask must silence the same spans the
+commit replaces (`punchedSpans`, growing as the take records), not the whole
+latched [in, out): the replaced span starts where recording started, so a
+take armed mid-window (Record while playing inside it, or the edit cursor
+inside it) keeps [in, p) — masking all of [in, out) would wrongly silence
+[in, p) on later loop passes. On a loop pass that will record [in, p) too,
+the mask may cover it only once that pass's span covers it.

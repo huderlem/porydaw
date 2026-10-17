@@ -268,7 +268,8 @@ class MainWindow : public QMainWindow
     void beginRecording();
     // Commits the take, if one is recording, to its own session as one
     // undo step "Record %n note(s)" (none for an empty take). Playback is
-    // left as it is.
+    // left as it is. A punch take commits here too, at Stop or Record, never
+    // at punch-out (P6): an edit while listening would chop the audio.
     void finishRecording();
     // finishRecording's write, and the status bar's account of it. While
     // the document has an edit group open, it retries until the group has
@@ -280,9 +281,18 @@ class MainWindow : public QMainWindow
     // is cleared, not a newer take's. While the view shows it, the write
     // goes where the view keeps it through track adds, deletes, and moves,
     // and each retry re-reads its lane ghosts against the song as it is.
+    // A punch take (docs/punch/PLAN.md) replaces the track's notes in the
+    // spans it recorded inside its window before its own land, in the same
+    // step ("Punch record %n note(s)"; "Punch record (cleared)" when it only
+    // took notes out).
+    struct TakePunch {
+        bool on = false;
+        std::vector<std::pair<uint64_t, uint64_t>> spans; // RecordingTake::punchedSpans
+    };
     void commitTake(const QPointer<SongDocument> &doc, const QPointer<SongView> &view,
                     uint32_t take, int track, const std::vector<SongDocument::NewNote> &notes,
-                    const std::vector<RecordingTake::LaneWrite> &lanes, bool inputLost);
+                    const std::vector<RecordingTake::LaneWrite> &lanes, const TakePunch &punch,
+                    bool inputLost);
     static constexpr int kTakeCommitRetryMs = 20;
     // "Recording into N: Name…", for the take's current track.
     void showRecordingStatus();
@@ -364,6 +374,7 @@ class MainWindow : public QMainWindow
     void checkRecordingCountIn(int track);
     void checkRecordingLatch(int a, int b);
     void checkRecordingVoice(int a, int b);
+    void checkRecordingPunch(int a, int b);
     void updateWindowFrameTheme();
     void updateDockTabFonts();
     // The dialog-less half of openProject; also the session-restore entry.
@@ -739,6 +750,8 @@ class MainWindow : public QMainWindow
     std::unique_ptr<MidiInput> m_midiInput;
     QAction *m_midiPanicAction = nullptr;
     QAction *m_recordAction = nullptr;
+    // Punch recording on (docs/punch/PLAN.md P1; QSettings punch).
+    QAction *m_punchAction = nullptr;
     // The take being recorded and the session it records into (null when
     // not recording). The take always belongs to the active session: every
     // path that leaves or replaces it commits first.
