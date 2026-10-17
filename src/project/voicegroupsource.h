@@ -321,8 +321,9 @@ class VoicegroupSource
     // Keysplit instruments observed across the project's voicegroups:
     // sub-voicegroup symbol -> its paired keysplit table symbol.
     static QList<QPair<QString, QString>> keysplitInstruments(const QString &projectRoot);
-    // Drumkit sub-voicegroups observed across the project's voicegroups
-    // (voice_keysplit_all targets), sorted.
+    // Drumkit sub-voicegroups: voice_keysplit_all targets across the
+    // project's voicegroups, plus every voicegroup declared under
+    // sound/voicegroups/drumsets/ (a new drumset nothing uses yet), sorted.
     static QStringList drumkitInstruments(const QString &projectRoot);
     // Scans every voicegroup for the most common ADSR per symbol and per
     // family, skipping envelopes that click (release 0) or never sound

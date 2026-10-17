@@ -1581,11 +1581,13 @@ struct VgScanCounts {
     QHash<int, QHash<quint32, int>> familyCounts;
     QHash<QString, QHash<quint32, int>> symbolCounts;
 
-    void scanLine(const QByteArray &raw);
+    // inDrumsetsDir: the line is from a file under sound/voicegroups/drumsets/,
+    // whose declared voicegroups are drumkits even before any voice uses them.
+    void scanLine(const QByteArray &raw, bool inDrumsetsDir);
     VgCatalogScan finish() const;
 };
 
-void VgScanCounts::scanLine(const QByteArray &raw)
+void VgScanCounts::scanLine(const QByteArray &raw, bool inDrumsetsDir)
 {
     static const QRegularExpression keysplitRe(
         QStringLiteral(R"(^\s*voice_keysplit\s+(\w+)\s*,\s*(\w+))"));
@@ -1593,8 +1595,11 @@ void VgScanCounts::scanLine(const QByteArray &raw)
 
     const QString line = QString::fromUtf8(raw.endsWith('\r') ? raw.chopped(1) : raw);
     DeclaredSymbol declared;
-    if (declaredVoicegroupLine(line, &declared))
+    if (declaredVoicegroupLine(line, &declared)) {
         groupSymbols.append(declared.symbol);
+        if (inDrumsetsDir)
+            drumkits.append(declared.symbol);
+    }
     QRegularExpressionMatch m = keysplitRe.match(line);
     if (m.hasMatch() && !keysplitPairs.contains(m.captured(1)))
         keysplitPairs.insert(m.captured(1), m.captured(2));
@@ -1677,14 +1682,16 @@ VgCatalogScan VgScanCounts::finish() const
 VgCatalogScan VoicegroupSource::catalogScan(const QString &projectRoot)
 {
     VgScanCounts counts;
+    const QString drumsetsDir = projectRoot + QStringLiteral("/sound/voicegroups/drumsets/");
     for (const QString &path : voicegroupFiles(projectRoot)) {
         bool ok = false;
         const QByteArray content = readAllBytes(path, &ok);
         if (!ok)
             continue;
+        const bool inDrumsetsDir = path.startsWith(drumsetsDir);
         bool endsWithNewline = false;
         for (const QByteArray &raw : splitLines(content, &endsWithNewline))
-            counts.scanLine(raw);
+            counts.scanLine(raw, inDrumsetsDir);
     }
     return counts.finish();
 }
