@@ -768,13 +768,11 @@ class MainWindow : public QMainWindow
     SongSession *m_takeSession = nullptr;
     uint32_t m_captureGeneration = 0;
     // Record's count-in length in bars, 0 for none (Settings → Audio,
-    // QSettings countInBars), and whether the status bar says "Counting
+    // QSettings countInBars) — also a punch take's pre-roll from Stopped
+    // (docs/punch/PLAN.md P4) — and whether the status bar says "Counting
     // in…" (showRecordingStatus), so the UI tick can swap it once the song
     // starts.
     int m_countInBars = 1;
-    // A punch take's pre-roll from Stopped in bars, 0 for none (Settings →
-    // Audio, QSettings punchPreRollBars; docs/punch/PLAN.md P4).
-    int m_punchPreRollBars = 1;
     bool m_countInShown = false;
     QString m_countInText;           // the "Counting in…" line shown
     uint32_t m_takeDropsAtStart = 0; // AudioEngine::captureDropped at punch-in

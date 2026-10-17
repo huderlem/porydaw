@@ -195,8 +195,6 @@ const QString kCountInBarsKey = QStringLiteral("countInBars");
 // Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
 // metronome.
 const QString kPunchKey = QStringLiteral("punch");
-// A punch take's pre-roll in bars (P4), app-wide like the count-in.
-const QString kPunchPreRollBarsKey = QStringLiteral("punchPreRollBars");
 // The output device's buffering (Settings → Audio → Output device):
 // buffer size in ms (0 = the backend's default) and WASAPI exclusive mode.
 const QString kAudioPeriodMsKey = QStringLiteral("audio/periodMs");
@@ -3444,12 +3442,6 @@ void MainWindow::buildSettingsDialog()
         QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
         AudioSettingsPage::kCountInBarsMax);
     m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
-    m_punchPreRollBars =
-        std::clamp(QSettings()
-                       .value(kPunchPreRollBarsKey, AudioSettingsPage::kPunchPreRollBarsDefault)
-                       .toInt(),
-                   0, AudioSettingsPage::kPunchPreRollBarsMax);
-    m_settingsDialog->audioPage()->setPunchPreRollBars(m_punchPreRollBars);
     {
         // Before init (the caller opens the device after this): the device
         // first opens with the user's buffering.
@@ -3473,12 +3465,6 @@ void MainWindow::buildSettingsDialog()
                 m_countInBars = bars;
                 if (m_persistSession)
                     QSettings().setValue(kCountInBarsKey, bars);
-            });
-    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::punchPreRollBarsChanged, this,
-            [this](int bars) {
-                m_punchPreRollBars = bars;
-                if (m_persistSession)
-                    QSettings().setValue(kPunchPreRollBarsKey, bars);
             });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
@@ -6283,12 +6269,13 @@ void MainWindow::beginRecording()
     // pause at once. While playing it records at once, or for a punch take
     // arms: only the window is kept (P10), so a take armed past it records
     // on a later loop pass or not at all. A punch take from Stopped starts
-    // its pre-roll before punch-in instead, with no count-in (P4); from a
-    // pause it resumes there, as any take does.
+    // the count-in's bars before punch-in instead, as its pre-roll with the
+    // song audible and no clicks (P4); from a pause it resumes there, as any
+    // take does.
     if (m_audio.transport() == Transport::Stopped && m_take.punching())
-        startPlayback(false, 0,
-                      int64_t(m_audio.timeline()->preRollStartTick(m_take.punchWindowIn(),
-                                                                   m_punchPreRollBars)));
+        startPlayback(
+            false, 0,
+            int64_t(m_audio.timeline()->preRollStartTick(m_take.punchWindowIn(), m_countInBars)));
     else if (m_audio.transport() != Transport::Playing)
         startPlayback(false, m_take.punching() ? 0 : m_countInBars);
     showRecordingStatus();
@@ -6306,9 +6293,9 @@ void MainWindow::showRecordingStatus()
                                           : QStringLiteral("%1: %2").arg(track + 1).arg(name);
     m_countInShown = m_audio.countingIn();
     const bool punch = m_take.punching();
-    m_countInText = !m_countInShown ? QString()
-                    : punch         ? tr("Counting in… then punch recording into %1").arg(target)
-                                    : tr("Counting in… then recording into %1").arg(target);
+    // A punch take never counts in: its count-in bars are the pre-roll.
+    m_countInText =
+        m_countInShown ? tr("Counting in… then recording into %1").arg(target) : QString();
     statusBar()->showMessage(m_countInShown ? m_countInText
                              : punch        ? tr("Punch recording into %1…").arg(target)
                                             : tr("Recording into %1…").arg(target));

@@ -156,7 +156,8 @@ class MidiTimeline
     // nearer line in that direction. Never below 0; steps == 0 returns tick.
     uint64_t stepGridLines(uint64_t tick, int steps, bool bars) const;
 
-    // A punch take's pre-roll start (docs/punch/PLAN.md P4): `bars` bars of
+    // A punch take's pre-roll start (docs/punch/PLAN.md P4; `bars` is the
+    // Count-in setting, 5.4): `bars` bars of
     // the meter in force at tick before it, whatever meters lie between,
     // clamped at 0. bars <= 0 returns tick.
     uint64_t preRollStartTick(uint64_t tick, int bars) const;

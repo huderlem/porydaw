@@ -673,8 +673,8 @@ void checkCountInGrid(double sampleRate)
         fail("a 0-bar count-in has a length");
 }
 
-// A punch take's pre-roll start (docs/punch/PLAN.md P4): bars of the meter
-// in force at punch-in, whatever lies between, clamped at tick 0. gridSong
+// A punch take's pre-roll start (docs/punch/PLAN.md P4; the bars are the
+// Count-in setting's, 5.4): bars of the meter in force at punch-in, whatever lies between, clamped at tick 0. gridSong
 // at 24 ticks/beat: 4/4 to tick 192 (96-tick bars), 6/8 from 192 (72-tick
 // bars), 3/4 from 300 (72-tick bars).
 void checkPreRoll(double sampleRate)

@@ -1,6 +1,7 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QComboBox>
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
@@ -2895,9 +2896,9 @@ void MainWindow::checkRecordingPunch(int a, int b)
     midi.setLivePlay(true);
     const bool loopWas = m_loopAction->isChecked();
     m_loopAction->setChecked(false);
-    // These takes start a bar before punch-in (checkRecordingPunchMask
-    // covers the pre-roll).
-    const int preRollWas = std::exchange(m_punchPreRollBars, 1);
+    // These takes start a bar before punch-in: a 1-bar count-in is a punch
+    // take's pre-roll (checkRecordingPunchMask covers it).
+    const int countInWas = std::exchange(m_countInBars, 1);
 
     // The toggle.
     check(m_punchAction && m_punchAction->isCheckable() &&
@@ -3568,13 +3569,14 @@ void MainWindow::checkRecordingPunch(int a, int b)
     }
     view->clearTimeSelection();
     m_loopAction->setChecked(loopWas);
-    m_punchPreRollBars = preRollWas;
+    m_countInBars = countInWas;
 }
 
 // Punch pre-roll and the old part's silencing (docs/punch/PLAN.md step 2),
-// the device held: Record from Stopped in punch mode starts Off / 1 / 2 bars
-// of punch-in's meter before it (clamped at 0, a meter change at punch-in
-// measuring), with no count-in, the edit cursor left where it was (Stop
+// the device held: Record from Stopped in punch mode starts the Count-in
+// setting's Off / 1 / 2 bars of punch-in's meter before it (clamped at 0, a
+// meter change at punch-in measuring; no separate pre-roll setting, 5.4),
+// with no clicks, the edit cursor left where it was (Stop
 // goes back to it); from a pause it resumes in place. During the take the
 // target track's notes starting in the range are silent (other tracks, and
 // the track outside the range, play), a note sounding into it is cut at
@@ -3677,8 +3679,7 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     m_loopAction->setChecked(false);
     const bool punchWas = m_punchAction->isChecked();
     m_punchAction->setChecked(true);
-    const int countInWas = std::exchange(m_countInBars, 2); // never used in punch mode
-    const int preRollWas = m_punchPreRollBars;
+    const int countInWas = m_countInBars; // a punch take's pre-roll (5.4)
     const bool followWas = m_followPlayheadAction->isChecked();
     m_followPlayheadAction->setChecked(false);
     view->selectTrack(pa);
@@ -3687,17 +3688,20 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     const auto soloBoth = [&] { m_audio.setSoloMask((1u << pa) | (1u << pb)); };
     soloBoth();
 
-    // Settings → Audio drives the pre-roll.
+    // Settings → Audio's Count-in drives the pre-roll; there is no
+    // separate pre-roll setting (5.4).
     if (m_settingsDialog) {
-        m_settingsDialog->audioPage()->setPunchPreRollBars(2);
-        check(m_punchPreRollBars == 2, "pre-roll: the Settings page did not set 2 bars");
+        check(!m_settingsDialog->findChild<QComboBox *>(QStringLiteral("settingsPunchPreRoll")),
+              "pre-roll: Settings still has a separate Punch pre-roll combo");
+        m_settingsDialog->audioPage()->setCountInBars(2);
+        check(m_countInBars == 2, "pre-roll: the Count-in setting did not set 2 bars");
         const bool persist = std::exchange(m_persistSession, true);
-        m_settingsDialog->audioPage()->setPunchPreRollBars(0);
-        check(m_punchPreRollBars == 0 &&
-                  QSettings().value(QStringLiteral("punchPreRollBars"), -1).toInt() == 0,
-              "pre-roll: Off from the Settings page was not applied and persisted");
+        m_settingsDialog->audioPage()->setCountInBars(0);
+        check(m_countInBars == 0 &&
+                  QSettings().value(QStringLiteral("countInBars"), -1).toInt() == 0,
+              "pre-roll: a Count-in of Off was not applied and persisted");
         m_persistSession = persist;
-        m_settingsDialog->audioPage()->setPunchPreRollBars(1);
+        m_settingsDialog->audioPage()->setCountInBars(countInWas);
     }
 
     // P4: where Record from Stopped starts. bar: punch-in's meter.
@@ -3711,7 +3715,7 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     const auto startsAt = [&](uint64_t from, uint64_t to, int bars, uint64_t want,
                               const char *what) {
         const int undoBefore = undo->index();
-        m_punchPreRollBars = bars;
+        m_countInBars = bars;
         selectTicks(from, to);
         const uint64_t cursor = to + tpb; // the edit cursor plays no part
         view->setEditCursorTick(cursor);
@@ -3757,7 +3761,7 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
         while (undo->index() > undoBefore)
             undo->undo();
         // From a pause it resumes where it paused, no pre-roll, no count-in.
-        m_punchPreRollBars = 1;
+        m_countInBars = 1;
         view->setEditCursorTick(in - 2 * tpb);
         startPlayback();
         pumpMs(100);
@@ -3789,7 +3793,7 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     doc.endEditGroup();
     const int undoSetup = undo->index();
     soloBoth();
-    m_punchPreRollBars = 1;
+    m_countInBars = 1;
 
     // Through a take: the old part silent, the rest playing; dimmed in the
     // roll; a mid-take edit keeps it.
@@ -4353,9 +4357,8 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     m_loopAction->setChecked(loopWas);
     m_punchAction->setChecked(punchWas);
     m_countInBars = countInWas;
-    m_punchPreRollBars = preRollWas;
     if (m_settingsDialog)
-        m_settingsDialog->audioPage()->setPunchPreRollBars(preRollWas);
+        m_settingsDialog->audioPage()->setCountInBars(countInWas);
 }
 
 // Record's count-in (docs/metronome/PLAN.md step 2), the device held: from

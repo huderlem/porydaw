@@ -120,7 +120,8 @@ clicks if it falls on a beat. -->
 <!-- TODO: Count-in: pressing Record while stopped clicks 1 bar (default)
 before the song starts at the edit cursor — even with the metronome off.
 Settings → Audio → Count-in when recording: Off / 1 bar / 2 bars. Not for
-Play or for punching in while playing. It counts at the tempo and time
+Play or for punching in while playing. In punch mode the same setting is
+the pre-roll instead (see Punch recording below). It counts at the tempo and time
 signature at the edit cursor, lined up so the beat carries straight into
 the song (the cursor needn't be on a bar line). With Loop on and the edit
 cursor at or past the loop end, the count-in leads into the loop start and
@@ -149,9 +150,11 @@ what's there. -->
   ruler tints the selection red: that's the punch range.
 - Record needs a time selection while Punch is on (greyed out, tooltip says
   why).
-- Record from stopped: plays from the pre-roll (Settings → Audio → Punch
-  pre-roll: Off / 1 bar / 2 bars, default 1 bar) with the song audible;
-  no count-in; the metronome clicks if it's on.
+- Record from stopped: plays from the pre-roll with the song audible —
+  the Count-in setting's bars (Settings → Audio → Count-in when recording:
+  Off / 1 bar / 2 bars, default 1 bar) before the range, in the meter at
+  punch-in, never before the song's start; Off starts at the range.
+  No count-in clicks; the metronome clicks if it's on.
 - Only what you play inside the range is kept (keys held across its edges
   are clipped to it). Knobs, bend, mod wheel, voice: only moves inside it.
 - During the take the track's old notes in the range are silent and drawn

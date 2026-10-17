@@ -25,7 +25,7 @@ selection and the take **replaces** the target track's notes there.
 | P1 | Toggle | Checkable **Punch** action on the transport toolbar beside Record, keymap command `transport.punch` (no default key), the KeyLab Punch button (§3) toggles it. Persisted app-wide in QSettings like the metronome Click toggle. Regular Record (Punch off) is unchanged: overdub from the edit cursor. |
 | P2 | Range | The punch range is the active **time selection's tick span** [startTick, endTick), latched when Record is pressed (changing the selection mid-take moves nothing). Scope (tracks/lanes) is ignored; the take still targets the selected track. While Punch is on, the ruler tints the selection band in the record color so it reads as the punch range. |
 | P3 | No selection | Punch on + no time selection: Record disabled, `recordUnavailableReason()` gives "Punch recording needs a time selection." No silent fallback to overdub. |
-| P4 | Pre-roll | Record while stopped starts playback **pre-roll** bars before punch-in with the song audible. New setting in Settings → Audio beside Count-in: Punch pre-roll Off / 1 bar / 2 bars, default 1 bar, clamped at tick 0, bars measured with the meter in force at punch-in. The count-in is NOT used in punch mode. Metronome clicks if it's on. |
+| P4 | Pre-roll | Record while stopped starts playback **pre-roll** bars before punch-in with the song audible. The pre-roll is the existing Count-in setting (Settings → Audio → Count-in when recording: Off / 1 bar / 2 bars, default 1 bar; no separate setting — revised 2026-10-17, §5.4), clamped at tick 0, bars measured with the meter in force at punch-in; Off starts at punch-in. No count-in clicks in punch mode. Metronome clicks if it's on. |
 | P5 | Window | Only input inside [in, out) is kept. A key held at punch-in starts at punch-in (as count-in-held keys do today); a note held at punch-out ends at punch-out. Same window for BEND/MOD/VOL/PAN/Voice lane writes (a control's value at punch-in is not written unless moved inside). |
 | P6 | After punch-out | Playback keeps going until Stop (no auto-stop). The take is **committed at Stop**, not at punch-out (a document edit restarts audio with all-notes-off — an audible chop right where the user is listening). Record pressed again during a punch take ends it and commits, as today. |
 | P7 | Replace | At commit the take **replaces the target track's notes** in the replaced span: notes starting inside are removed; notes starting before punch-in and sounding into it are shortened to end at punch-in. This happens even for an empty take (blanking bars is a feature). Replaced span = [in, out), or [in, stop) if stopped inside, or nothing if playback never reached punch-in. With loop passes, the replaced span is the union of what any pass covered. One undo step ("Punch record %n note(s)"; empty: "Punch record (cleared)" or similar). |
@@ -560,3 +560,30 @@ hiding).
 Sweeps: `tools/run_checks.sh` normal and ASAN, ~/pokeemerald +
 ~/teamaqua-pokeemerald: PASS (36/36 each). build, build-asan, build-dummy,
 build-nomidi, build-off: clean. clang-format 22 on touched files.
+
+### 5.4 Settings merged (2026-10-17, uncommitted)
+
+User decision 2026-10-17: one setting instead of two. The separate "Punch
+pre-roll" setting is gone (combo `settingsPunchPreRoll`,
+`AudioSettingsPage::kPunchPreRollBars*`, `punchPreRollBars()` /
+`setPunchPreRollBars` / `punchPreRollBarsChanged`, QSettings
+`punchPreRollBars`, `MainWindow::m_punchPreRollBars`); the old stored key is
+no longer read and not migrated. The Count-in setting (`countInBars`) does
+both: with Punch off it is Record's count-in as before; in punch mode its
+bars are the pre-roll (`preRollStartTick(in, m_countInBars)`, same
+computation), with no clicks. The combo keeps its short label "Count-in when
+recording:"; its tooltip says it is the pre-roll for a punch recording.
+§5.2's notes on the setting (combo, Restore Defaults, "count-in never used
+in punch mode whatever its setting") are superseded by this.
+
+Checks: `checkRecordingPunchMask` no longer pins a count-in of 2 alongside a
+separate pre-roll: Settings has no `settingsPunchPreRoll` combo, the
+Count-in combo sets the bars and persists `countInBars`, and Off / 1 / 2
+bars of count-in start the punch take at in / in − 1 bar / in − 2 bars with
+no count-in clicks. `checkRecordingPunch` sets a 1-bar count-in for its
+pre-rolled takes (its two overdubs from Stopped now count in a bar first and
+still pass as written).
+
+Mutation tests (restored from backup files): caught — pre-roll fixed at 1
+bar instead of the count-in (reccheck 4 fails), count-in clicks in punch
+mode (7), the Count-in combo not emitting (3).
