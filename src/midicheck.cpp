@@ -39,6 +39,7 @@
 #include <cstdlib>
 #include <iterator>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "audio/mcu.h"
@@ -122,6 +123,17 @@
 // ended by a release, a closing port or a song switch, and a modal dialog
 // keeping every press out while a release still ends a hold. A seek from
 // a surface during a take is --reccheck's.
+//
+// docs/virtual-keyboard/PLAN.md step 1 adds the Virtual Keyboard port: open
+// and closed (openKeyboardPorts, openPorts, never ports(), portsChanged on a
+// real change only), sendVirtual reaching the input ring (channel 1,
+// stamped) and the tap under its own name and doing nothing while closed,
+// noteStateChanged for its notes at once and for a hardware keyboard's
+// through the note monitor (never a surface's, nothing while the monitor is
+// off), a key held at close released down the same path, and the
+// enable/role setters refusing the name. In the window: Record and lane
+// Learn appear with it alone, its held note sounds and is cut at close, and
+// Settings → MIDI shows its note line while it is open.
 
 namespace {
 
@@ -693,6 +705,238 @@ void checkPortRoles()
     // The later checks start from no explicit roles.
     QSettings().remove(surfaceKey);
     QSettings().remove(keyboardKey);
+}
+
+// docs/virtual-keyboard/PLAN.md step 1: the Virtual Keyboard port on its
+// own (see the file comment).
+void checkVirtualPort()
+{
+    using Role = MidiInput::PortRole;
+    const QString name = MidiInput::virtualPortName();
+    const QString disabledKey = QStringLiteral("midi/disabledPorts");
+    const QString surfaceKey = QStringLiteral("midi/surfacePorts");
+    const QString keyboardKey = QStringLiteral("midi/keyboardPorts");
+    MidiInput midi;
+    MidiInputRing &ring = midi.ring();
+    drain(ring);
+    midi.setTapEnabled(true);
+    int portsSignals = 0, closedSignals = 0, activity = 0;
+    // (key, on, fromVirtual); closedAt, notes.size() at the last portsClosed.
+    std::vector<std::tuple<int, bool, bool>> notes;
+    size_t closedAt = 0;
+    QObject::connect(&midi, &MidiInput::portsChanged, &midi, [&portsSignals] { ++portsSignals; });
+    QObject::connect(&midi, &MidiInput::portsClosed, &midi, [&] {
+        ++closedSignals;
+        closedAt = notes.size();
+    });
+    QObject::connect(&midi, &MidiInput::activity, &midi, [&activity] { ++activity; });
+    QObject::connect(
+        &midi, &MidiInput::noteStateChanged, &midi,
+        [&notes](int key, bool on, bool fromVirtual) { notes.push_back({key, on, fromVirtual}); });
+    const auto popTaps = [&] {
+        std::vector<MidiTapMsg> out;
+        MidiTapMsg msg;
+        while (midi.popTap(&msg))
+            out.push_back(msg);
+        return out;
+    };
+
+    // Closed: nothing anywhere, and sendVirtual reaches nothing.
+    check(!midi.virtualOpen() && !midi.openPorts().contains(name) &&
+              !midi.openKeyboardPorts().contains(name) && !midi.isPortOpen(name),
+          "virtual: the Virtual Keyboard started open");
+    const uint64_t received = midi.receivedCount();
+    midi.sendVirtual({0x90, 60, 100});
+    QApplication::processEvents();
+    check(ring.size() == 0 && midi.receivedCount() == received && popTaps().empty() &&
+              notes.empty(),
+          "virtual: sendVirtual while closed reached the ring, the tap or noteStateChanged");
+    wait(MidiInput::kActivityIntervalMs * 2);
+    check(activity == 0, "virtual: sendVirtual while closed signalled activity");
+
+    // Open: an open keyboard, though never a listed (hardware) port.
+    midi.setVirtualOpen(true);
+    check(midi.virtualOpen() && midi.openKeyboardPorts().contains(name) &&
+              midi.openPorts().contains(name) && midi.isPortOpen(name) &&
+              !midi.ports().contains(name),
+          "virtual: an open Virtual Keyboard is not an open keyboard port, or is listed as "
+          "hardware");
+    check(portsSignals == 1, "virtual: opening the Virtual Keyboard did not signal portsChanged");
+    midi.setVirtualOpen(true);
+    check(portsSignals == 1, "virtual: opening it again signalled portsChanged");
+
+    // A note on reaches the ring (stamped, channel 1) and the tap under
+    // the port's name, and lights at once.
+    const int64_t before = midiClockNs();
+    midi.sendVirtual({0x93, 60, 100}); // on channel 4: sent on channel 1
+    MidiMsg msg;
+    check(ring.size() == 1 && ring.pop(&msg) && same(msg, {0x90, 60, 100}) &&
+              msg.arrivalNs >= before && msg.arrivalNs != 0 && midi.receivedCount() == received + 1,
+          "virtual: a note on did not reach the ring on channel 1 with its arrival time");
+    check(notes.size() == 1 && notes[0] == std::tuple(60, true, true),
+          "virtual: a note on did not emit noteStateChanged(fromVirtual) at once");
+    QApplication::processEvents();
+    std::vector<MidiTapMsg> taps = popTaps();
+    check(taps.size() == 1 && taps[0].status == 0x90 && taps[0].d1 == 60 && taps[0].d2 == 100 &&
+              midi.portForToken(taps[0].port) == name,
+          "virtual: the tap did not see the note on from port \"Virtual Keyboard\"");
+    check(notes.size() == 1, "virtual: a Virtual Keyboard note signalled twice");
+    wait(MidiInput::kActivityIntervalMs * 2);
+    check(activity == 1, "virtual: a Virtual Keyboard note did not signal activity");
+    // A velocity-0 note on is a release.
+    midi.sendVirtual({0x90, 60, 0});
+    check(ring.pop(&msg) && same(msg, {0x80, 60, 0}) && notes.size() == 2 &&
+              notes[1] == std::tuple(60, false, true),
+          "virtual: a velocity-0 note on did not release the key");
+    // Out-of-range data bytes are clamped to 127, never wrapped.
+    midi.sendVirtual({0x90, 200, 255});
+    check(ring.pop(&msg) && same(msg, {0x90, 127, 127}) && notes.size() == 3 &&
+              notes[2] == std::tuple(127, true, true),
+          "virtual: sendVirtual did not clamp a key or velocity above 127");
+    midi.sendVirtual({0x80, 127, 0});
+    drain(ring);
+
+    // The note monitor: a hardware keyboard's notes light keys on the UI
+    // hop while it is on; a surface's never do; off, nothing.
+    const QString keyboard = QStringLiteral("midicheck Keyboard");
+    const QString surface = QStringLiteral("midicheck DAW");
+    notes.clear();
+    midi.injectForTest({0x90, 64, 90}, keyboard);
+    QApplication::processEvents();
+    check(notes.empty(), "virtual: a hardware note signalled with the note monitor off");
+    midi.setNoteMonitorEnabled(true);
+    midi.injectForTest({0x90, 64, 90}, keyboard);
+    midi.injectForTest({0x90, 65, 90}, keyboard);
+    midi.injectForTest({0x91, 65, 0}, keyboard);   // released before the hop: nothing
+    midi.injectForTest({0xB0, 64, 127}, keyboard); // a pedal: not a key
+    midi.injectForTest({0x90, 94, 127}, surface);
+    check(notes.empty(), "virtual: the note monitor signalled synchronously, not on the UI hop");
+    QApplication::processEvents();
+    check(notes.size() == 1 && notes[0] == std::tuple(64, true, false),
+          "virtual: the note monitor did not report a hardware keyboard's note on (not "
+          "fromVirtual), or reported a pedal, a surface's note or a key pressed and released "
+          "between two hops");
+    // A later batch arrives too (the hop re-arms): a release on any
+    // channel, and a key in the upper word.
+    midi.injectForTest({0x91, 64, 0}, keyboard);
+    midi.injectForTest({0x90, 100, 80}, keyboard);
+    QApplication::processEvents();
+    check(notes.size() == 3 && notes[1] == std::tuple(64, false, false) &&
+              notes[2] == std::tuple(100, true, false),
+          "virtual: the note monitor did not report a second batch of hardware notes");
+    // Lossless: thousands of notes between two hops still end right.
+    for (int i = 0; i < 1500; ++i) {
+        midi.injectForTest({0x90, 70, 90}, keyboard);
+        midi.injectForTest({0x80, 70, 0}, keyboard);
+    }
+    midi.injectForTest({0x90, 101, 90}, keyboard);
+    QApplication::processEvents();
+    check(notes.size() == 4 && notes[3] == std::tuple(101, true, false),
+          "virtual: the note monitor lost or invented a key under a burst of notes");
+    drain(ring);
+    popTaps();
+    // The virtual port's own notes don't come back through the monitor.
+    notes.clear();
+    midi.sendVirtual({0x90, 67, 100});
+    QApplication::processEvents();
+    check(notes.size() == 1 && notes[0] == std::tuple(67, true, true),
+          "virtual: with the monitor on, a Virtual Keyboard note signalled twice");
+    // Turned off with a key still waiting for its hop: that one is dropped
+    // too, and so is one sent after.
+    midi.injectForTest({0x90, 66, 90}, keyboard);
+    midi.setNoteMonitorEnabled(false);
+    midi.injectForTest({0x80, 100, 0}, keyboard);
+    QApplication::processEvents();
+    check(notes.size() == 1,
+          "virtual: a hardware note signalled after the monitor was turned off (pending or new)");
+    // Turned on again it starts from every key up: 66 (down when it went
+    // off) and 100 (reported down) both light on their next press.
+    midi.setNoteMonitorEnabled(true);
+    midi.injectForTest({0x90, 66, 90}, keyboard);
+    midi.injectForTest({0x90, 100, 90}, keyboard);
+    QApplication::processEvents();
+    check(notes.size() == 3 && notes[1] == std::tuple(66, true, false) &&
+              notes[2] == std::tuple(100, true, false),
+          "virtual: a re-enabled note monitor did not start from every key up");
+
+    // portsClosed comes after every hardware note before it (delivered
+    // synchronously first), and the monitor then restarts from all up: an
+    // open keyboard flipped to a surface and back.
+    midi.setOpenPortsForTest({keyboard});
+    notes.clear();
+    closedSignals = 0;
+    midi.injectForTest({0x90, 61, 90}, keyboard);
+    midi.setPortRole(keyboard, Role::Surface);
+    check(closedSignals == 1 && closedAt == 1 && notes.size() == 1 &&
+              notes[0] == std::tuple(61, true, false),
+          "virtual: a hardware note on was not reported before portsClosed");
+    midi.setPortRole(keyboard, Role::Keyboard);
+    midi.injectForTest({0x90, 61, 90}, keyboard);
+    QApplication::processEvents();
+    check(closedSignals == 2 && notes.size() == 2 && notes[1] == std::tuple(61, true, false),
+          "virtual: after portsClosed, a key down before it did not light on its next press");
+    midi.setOpenPortsForTest({});
+    QSettings().remove(surfaceKey);
+    QSettings().remove(keyboardKey);
+    midi.setNoteMonitorEnabled(false);
+    QApplication::processEvents();
+    closedSignals = 0;
+    drain(ring);
+    popTaps();
+
+    // Refused: the setters change and persist nothing, and an edited file
+    // can't disable it or make it a surface.
+    portsSignals = 0;
+    midi.setPortEnabled(name, false);
+    midi.setPortRole(name, Role::Surface);
+    check(midi.isPortEnabled(name) && midi.portRole(name) == Role::Keyboard &&
+              !QSettings().contains(disabledKey) && !QSettings().contains(surfaceKey) &&
+              !QSettings().contains(keyboardKey) && portsSignals == 0 &&
+              midi.openKeyboardPorts().contains(name),
+          "virtual: setPortEnabled or setPortRole changed, persisted or signalled something for "
+          "the Virtual Keyboard");
+    {
+        QSettings().setValue(disabledKey, QStringList{name});
+        QSettings().setValue(surfaceKey, QStringList{name});
+        MidiInput edited;
+        check(edited.isPortEnabled(name) && edited.portRole(name) == Role::Keyboard,
+              "virtual: an edited settings file disabled the Virtual Keyboard or made it a "
+              "surface");
+        QSettings().remove(disabledKey);
+        QSettings().remove(surfaceKey);
+    }
+
+    // Closing with key 67 still held (and 72 pressed then released):
+    // only 67 is let go, down the same path, before the port reads closed.
+    midi.sendVirtual({0x90, 72, 100});
+    midi.sendVirtual({0x80, 72, 0});
+    drain(ring);
+    popTaps();
+    notes.clear();
+    portsSignals = 0;
+    midi.setVirtualOpen(false);
+    check(ring.size() == 1 && ring.pop(&msg) && same(msg, {0x80, 67, 0}) && msg.arrivalNs != 0,
+          "virtual: closing did not release the held key (and only it) into the ring");
+    check(notes.size() == 1 && notes[0] == std::tuple(67, false, true),
+          "virtual: closing did not report the held key released");
+    QApplication::processEvents();
+    taps = popTaps();
+    check(taps.size() == 1 && taps[0].status == 0x80 && taps[0].d1 == 67 &&
+              midi.portForToken(taps[0].port) == name,
+          "virtual: the release at close did not reach the tap from the Virtual Keyboard");
+    check(portsSignals == 1 && closedSignals == 0 && !midi.virtualOpen() &&
+              !midi.openKeyboardPorts().contains(name) && !midi.isPortOpen(name),
+          "virtual: closing did not signal portsChanged once (and no portsClosed), or left it "
+          "open");
+    midi.setVirtualOpen(false);
+    check(portsSignals == 1, "virtual: closing it again signalled portsChanged");
+    // Reopened, nothing is held any more: closing again sends nothing.
+    midi.setVirtualOpen(true);
+    midi.setVirtualOpen(false);
+    check(ring.size() == 0, "virtual: a key released at close was released again");
+    midi.sendVirtual({0x90, 60, 100});
+    check(ring.size() == 0, "virtual: sendVirtual after closing reached the ring");
+    midi.setTapEnabled(false);
 }
 
 // docs/midi-controls/PLAN.md step 1: the route table on its own.
@@ -1555,6 +1799,7 @@ int MainWindow::runMidiWindowCheck(const QString &projectRoot, const QString &so
     checkLaneLearn();
     checkSurfacePorts();
     checkSurfaceTransport();
+    checkVirtualWindow();
     return g_failures - before;
 }
 
@@ -1627,6 +1872,67 @@ void MainWindow::checkSurfacePorts()
     midi.setOpenPortsForTest({});
     QSettings().remove(QStringLiteral("midi/surfacePorts"));
     QSettings().remove(QStringLiteral("midi/keyboardPorts"));
+}
+
+// docs/virtual-keyboard/PLAN.md step 1, the window's half: the Virtual
+// Keyboard alone is a keyboard (Record, lane Learn), its held note sounds
+// and closing cuts it, and Settings → MIDI says it is open.
+void MainWindow::checkVirtualWindow()
+{
+    MidiInput &midi = midiInput();
+    SongView *view = m_active->view;
+    if (!midi.openKeyboardPorts().isEmpty()) {
+        std::printf("midicheck: virtual window checks SKIP (a real MIDI keyboard port is open)\n");
+        return;
+    }
+    QWidget *page = settingsDialog()->midiPage();
+    auto *note = page->findChild<QLabel *>(QStringLiteral("settingsMidiVirtualNote"));
+    check(!m_recordAction->isVisible() && !view->midiControls().keyboard && note &&
+              !note->isVisibleTo(page),
+          "virtual window: Record, lane Learn or the Settings note showed with no keyboard");
+    midi.setVirtualOpen(true);
+    QApplication::processEvents(); // the page follows portsChanged queued
+    check(m_recordAction->isVisible() && view->midiControls().keyboard,
+          "virtual window: the Virtual Keyboard alone did not show Record or lane Learn");
+    check(recordUnavailableReason() != tr("Connect a MIDI keyboard to record."),
+          "virtual window: Record still asks for a keyboard with the Virtual Keyboard open");
+    check(note && note->isVisibleTo(page),
+          "virtual window: Settings → MIDI does not say the Virtual Keyboard is open");
+    // Inset like the group boxes, and, without a backend, worded so it
+    // reads with the "no MIDI" message rather than against it.
+    const auto *unavailable = page->findChild<QLabel *>(QStringLiteral("settingsMidiUnavailable"));
+    const bool noBackend = unavailable && unavailable->isVisibleTo(page);
+    check(note && note->contentsMargins().left() > 0 &&
+              note->text().contains(QStringLiteral("without a MIDI backend")) == noBackend,
+          "virtual window: the Settings note sits flush at the page edge, or its wording does "
+          "not follow the backend");
+
+    // A key held through the close is released on the audio thread too.
+    if (!m_audioOk) {
+        std::printf("midicheck: virtual live play SKIP (no audio device)\n");
+    } else {
+        m_audio.holdDeviceForTest(true);
+        drain(midi.ring());
+        midi.sendVirtual({0x90, 70, 100});
+        m_audio.pumpForTest(uint32_t(m_audio.sampleRate() * 0.03));
+        uint64_t lo = 0, hi = 0;
+        m_audio.liveHeldKeys(&lo, &hi);
+        check(hi == uint64_t(1) << (70 - 64),
+              "virtual window: a Virtual Keyboard note is not held by live play");
+        midi.setVirtualOpen(false);
+        m_audio.pumpForTest(uint32_t(m_audio.sampleRate() * 0.03));
+        m_audio.liveHeldKeys(&lo, &hi);
+        check(lo == 0 && hi == 0,
+              "virtual window: a note held when the Virtual Keyboard closed still sounds");
+        m_audio.holdDeviceForTest(false);
+    }
+    midi.setVirtualOpen(false);
+    QApplication::processEvents();
+    check(!m_recordAction->isVisible() && !view->midiControls().keyboard,
+          "virtual window: closing the Virtual Keyboard did not hide Record and lane Learn");
+    check(note && !note->isVisibleTo(page),
+          "virtual window: the Settings note outlived the Virtual Keyboard");
+    drain(midi.ring());
 }
 
 // docs/control-surface/PLAN.md step 2, the window's half: a Surface port's
@@ -2852,6 +3158,7 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel, const QSt
     checkRing();
     checkService();
     checkPortRoles();
+    checkVirtualPort();
     checkMcuDecoder();
     checkGridSteps();
     checkRoutesTable();

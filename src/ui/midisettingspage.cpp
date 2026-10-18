@@ -298,6 +298,15 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     auto *outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(0, 0, 0, 0);
 
+    // The Virtual Keyboard isn't a listed port (it has no checkbox or role
+    // to set), so one line says it is there while its window is open. Its
+    // text follows the backend (syncBackend); its margins, the group boxes'
+    // (below, once their layout exists).
+    m_virtualNote = new QLabel(this);
+    m_virtualNote->setObjectName(QStringLiteral("settingsMidiVirtualNote"));
+    m_virtualNote->setWordWrap(true);
+    outerLayout->addWidget(m_virtualNote);
+
     // No backend: why, and a way to try again (a MIDI system that starts
     // later, a driver installed meanwhile).
     m_unavailable = new QWidget(this);
@@ -328,6 +337,10 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     m_controls = new QWidget;
     auto *pageLayout = new QVBoxLayout(m_controls);
     outerLayout->addWidget(m_controlsScroll, 1);
+    // Inset as the group boxes (and the no-backend message) are, not flush
+    // at the page edge; the view below supplies the gap under it.
+    const QMargins inset = pageLayout->contentsMargins();
+    m_virtualNote->setContentsMargins(inset.left(), inset.top(), inset.right(), 0);
 
     // Input ports: every port plays unless unchecked, and a keyboard
     // plugged in later joins on its own.
@@ -628,6 +641,13 @@ void MidiSettingsPage::syncBackend()
     m_unavailableLabel->setText(m_midi.backendStatus());
     m_unavailable->setVisible(!controls);
     m_controlsScroll->setVisible(controls);
+    // Without a backend the message below says MIDI is unavailable; the
+    // note says what still works.
+    m_virtualNote->setText(
+        controls ? tr("The Virtual Keyboard is open and plays like a keyboard port.")
+                 : tr("The Virtual Keyboard is open: it plays and records without a MIDI "
+                      "backend."));
+    m_virtualNote->setVisible(m_midi.virtualOpen());
 }
 
 // Controls follow the service (startup values, or a change made elsewhere);
@@ -743,9 +763,9 @@ void MidiSettingsPage::rebuildPorts()
         m_portsStatus->setText(tr("No MIDI input ports found. Connect a keyboard; it appears "
                                   "here on its own."));
     else
-        m_portsStatus->setText(
-            tr("Listening to %n port(s) through %1.", nullptr, int(m_midi.openPorts().size()))
-                .arg(m_midi.backendName()));
+        m_portsStatus->setText(tr("Listening to %n port(s) through %1.", nullptr,
+                                  int(m_midi.openPorts().size()) - (m_midi.virtualOpen() ? 1 : 0))
+                                   .arg(m_midi.backendName()));
 }
 
 void MidiSettingsPage::portItemChanged(QListWidgetItem *item)

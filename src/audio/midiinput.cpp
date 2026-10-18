@@ -5,6 +5,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
+#include <QThread>
 #include <QTimer>
 
 #include <algorithm>
@@ -159,6 +160,8 @@ MidiInput::MidiInput(QObject *parent) : QObject(parent)
         std::clamp(settings.value(kLatencyKey, kLatencyAuto).toInt(), kLatencyAuto, kLatencyMaxMs);
     if (settings.contains(kRoutesKey))
         m_routes = MidiRoutes::fromStrings(settings.value(kRoutesKey).toStringList());
+    // Before any hardware port: the Virtual Keyboard's token is fixed (1).
+    m_virtualToken = portToken(virtualPortName());
 
     m_learnPoll = new QTimer(this);
     m_learnPoll->setInterval(kLearnPollMs);
@@ -321,6 +324,8 @@ QStringList MidiInput::openPorts() const
     for (const auto &port : m_open)
         names.append(port->id);
     names.append(m_testOpen);
+    if (m_virtualOpen)
+        names.append(virtualPortName());
     return names;
 }
 
@@ -336,13 +341,16 @@ QStringList MidiInput::openKeyboardPorts() const
 
 bool MidiInput::isPortOpen(const QString &name) const
 {
+    if (m_virtualOpen && name == virtualPortName())
+        return true;
     return std::any_of(m_open.begin(), m_open.end(),
                        [&name](const auto &port) { return port->id == name; });
 }
 
 bool MidiInput::isPortEnabled(const QString &name) const
 {
-    return !m_disabled.contains(name);
+    // The Virtual Keyboard can't be disabled, even by an edited file.
+    return name == virtualPortName() || !m_disabled.contains(name);
 }
 
 void MidiInput::saveDisabledPorts()
@@ -356,6 +364,10 @@ void MidiInput::saveDisabledPorts()
 
 void MidiInput::setPortEnabled(const QString &name, bool enabled)
 {
+    // Its window opens and closes it (setVirtualOpen); there is no device
+    // to enable (docs/virtual-keyboard/PLAN.md D8).
+    if (name == virtualPortName())
+        return;
     const bool wasEnabled = !m_disabled.contains(name);
     if (wasEnabled != enabled) {
         if (enabled)
@@ -374,6 +386,9 @@ void MidiInput::setPortEnabled(const QString &name, bool enabled)
 
 MidiInput::PortRole MidiInput::portRole(const QString &name) const
 {
+    // Always a keyboard: it is one (D8), and nothing else can play it.
+    if (name == virtualPortName())
+        return PortRole::Keyboard;
     if (m_surfacePorts.contains(name))
         return PortRole::Surface;
     if (m_keyboardPorts.contains(name))
@@ -396,8 +411,8 @@ void MidiInput::savePortRoles()
 
 void MidiInput::setPortRole(const QString &name, PortRole role)
 {
-    if (name.isEmpty())
-        return;
+    if (name.isEmpty() || name == virtualPortName())
+        return; // the Virtual Keyboard is a keyboard (portRole)
     const PortRole was = portRole(name);
     QStringList &mine = role == PortRole::Surface ? m_surfacePorts : m_keyboardPorts;
     QStringList &other = role == PortRole::Surface ? m_keyboardPorts : m_surfacePorts;
@@ -422,8 +437,10 @@ void MidiInput::setPortRole(const QString &name, PortRole role)
     const bool open = openPorts().contains(name);
     emit settingsChanged();
     emit portsChanged(); // the open keyboards changed, and the page shows the role
-    if (open)
+    if (open) {
+        flushMonitorForClose();
         emit portsClosed();
+    }
 }
 
 bool MidiInput::openPort(const QString &name)
@@ -515,6 +532,7 @@ bool MidiInput::closeQuietly(const QString &name)
         return false;
     shutPort(*it);
     m_open.erase(it);
+    flushMonitorForClose();
     emit portsClosed();
     return true;
 }
@@ -528,6 +546,7 @@ void MidiInput::closeAll(bool quietly)
     m_open.clear();
     if (quietly)
         return;
+    flushMonitorForClose();
     emit portsClosed();
     emit portsChanged();
 }
@@ -587,8 +606,10 @@ void MidiInput::rescan(bool userAsked)
         if (isPortEnabled(id) && !isPortOpen(id) && !m_failed.contains(id))
             changed |= openQuietly(id);
     }
-    if (closed)
+    if (closed) {
+        flushMonitorForClose();
         emit portsClosed();
+    }
     if (changed)
         emit portsChanged();
 }
@@ -824,6 +845,109 @@ void MidiInput::deliverSurface()
     emit surfaceReady();
 }
 
+void MidiInput::setVirtualOpen(bool open)
+{
+    if (m_virtualOpen == open)
+        return;
+    if (!open) {
+        // Every key the window still holds is let go while the port is
+        // open, down the path its note on took: live play and a take both
+        // see the note off, and the window's lit keys go out.
+        // Each note off clears its own bit, so the set ends empty.
+        for (int key = 0; key < 128; ++key) {
+            if (m_virtualHeld[key >> 6] & (uint64_t(1) << (key & 63)))
+                sendVirtualNow({0x80, uint8_t(key), 0});
+        }
+    }
+    m_virtualOpen = open;
+    emit portsChanged(); // Record and Learn follow openKeyboardPorts
+}
+
+void MidiInput::sendVirtual(const MidiMsg &msg)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (m_virtualOpen)
+        sendVirtualNow(msg);
+}
+
+void MidiInput::sendVirtualNow(const MidiMsg &msg)
+{
+    // Channel 1, as the port is (D8): the held set is per key only, so its
+    // release on close always matches what it releases.
+    uint8_t status = msg.status;
+    if (status >= 0x80 && status < 0xF0)
+        status &= 0xF0;
+    // Data bytes are 0–127 (sendVirtual): clamped, never wrapped, so a
+    // note on's velocity stays 1–127 and a velocity-0 one stays an off.
+    const unsigned char bytes[3] = {status, std::min<uint8_t>(msg.d1, 127),
+                                    std::min<uint8_t>(msg.d2, 127)};
+    MidiMsg parsed;
+    const bool note = parse(bytes, sizeof bytes, &parsed) &&
+                      ((parsed.status & 0xF0) == 0x90 || (parsed.status & 0xF0) == 0x80);
+    const bool on = note && (parsed.status & 0xF0) == 0x90;
+    if (note) {
+        const uint64_t bit = uint64_t(1) << (parsed.d1 & 63);
+        if (on)
+            m_virtualHeld[parsed.d1 >> 6] |= bit;
+        else
+            m_virtualHeld[parsed.d1 >> 6] &= ~bit;
+    }
+    receive(bytes, sizeof bytes, midiClockNs(), m_virtualToken, /*surface=*/false,
+            /*monitor=*/false);
+    // Already on the UI thread: no hop to wait for (D9).
+    if (note)
+        emit noteStateChanged(parsed.d1, on, /*fromVirtual=*/true);
+}
+
+void MidiInput::setNoteMonitorEnabled(bool on)
+{
+    if (m_monitorEnabled.load(std::memory_order_relaxed) == on)
+        return;
+    m_monitorEnabled.store(on, std::memory_order_release);
+    // Reset either way, as the tap is emptied (setTapEnabled): a re-enable
+    // starts from every key up.
+    resetMonitor();
+}
+
+void MidiInput::resetMonitor()
+{
+    for (auto &word : m_monitorDown)
+        word.store(0, std::memory_order_release);
+    m_monitorReported = {};
+}
+
+void MidiInput::deliverMonitor()
+{
+    // As deliverTap: cleared before the snapshot, so a key that changes
+    // during it posts a new hop.
+    m_monitorPosted.exchange(false, std::memory_order_acq_rel);
+    for (int word = 0; word < 2; ++word) {
+        if (!m_monitorEnabled.load(std::memory_order_acquire))
+            return; // turned off (here, or by a receiver below): reset already
+        const uint64_t now = m_monitorDown[word].load(std::memory_order_acquire);
+        const uint64_t changed = now ^ m_monitorReported[word];
+        m_monitorReported[word] = now;
+        for (int bit = 0; bit < 64 && (changed >> bit) != 0; ++bit) {
+            if (!((changed >> bit) & 1))
+                continue;
+            emit noteStateChanged(word * 64 + bit, (now >> bit) & 1, /*fromVirtual=*/false);
+            if (!m_monitorEnabled.load(std::memory_order_acquire))
+                return;
+        }
+    }
+}
+
+void MidiInput::flushMonitorForClose()
+{
+    if (!m_monitorEnabled.load(std::memory_order_acquire))
+        return; // off: nothing to report, and already every key up
+    deliverMonitor();
+    // The closed port's keys never send their note-offs, and the receiver
+    // clears its hardware keys on portsClosed: start again from all up. A
+    // key still held on another open port lights again on its next press.
+    resetMonitor();
+}
+
 void MidiInput::setPortListForTest(const QStringList &names)
 {
     m_scan = scanned(names, PortNaming::Plain);
@@ -856,7 +980,7 @@ int64_t midiClockNs()
 }
 
 void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port,
-                        bool surface)
+                        bool surface, bool monitor)
 {
     // A control surface's buttons are notes and CCs too, but they never
     // play, record, light the keyboard or get learned: only the surface
@@ -894,6 +1018,22 @@ void MidiInput::receive(const unsigned char *bytes, size_t size, int64_t arrival
         // One queued hop at a time; deliverActivity re-arms it.
         if (!m_activityPosted.exchange(true, std::memory_order_acq_rel))
             QMetaObject::invokeMethod(this, &MidiInput::deliverActivity, Qt::QueuedConnection);
+        // The note monitor (docs/virtual-keyboard/PLAN.md D9): lit keys for
+        // the Virtual Keyboard window, from the UI side only. Off, it costs
+        // this one load.
+        const uint8_t type = msg.status & 0xF0;
+        if (monitor && (type == 0x90 || type == 0x80) &&
+            m_monitorEnabled.load(std::memory_order_acquire)) {
+            // msg is normalised: a velocity-0 note on reads 0x80 here.
+            std::atomic<uint64_t> &word = m_monitorDown[(msg.d1 >> 6) & 1];
+            const uint64_t bit = uint64_t(1) << (msg.d1 & 63);
+            const uint64_t was = type == 0x90 ? word.fetch_or(bit, std::memory_order_acq_rel)
+                                              : word.fetch_and(~bit, std::memory_order_acq_rel);
+            // Only a real change needs a hop (a repeated off, say, doesn't).
+            if (((was & bit) != 0) != (type == 0x90) &&
+                !m_monitorPosted.exchange(true, std::memory_order_acq_rel))
+                QMetaObject::invokeMethod(this, &MidiInput::deliverMonitor, Qt::QueuedConnection);
+        }
     }
     // The script tap, independently: it keeps what live play drops
     // (aftertouch, system messages) and the bytes as sent.

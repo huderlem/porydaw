@@ -61,7 +61,8 @@ class MidiSettingsPage : public QWidget
     void fitWidth();
     static constexpr int kMinPortRows = 2;
     static constexpr int kMaxPortRows = 5;
-    // Shows the controls or the no-backend message, whichever applies.
+    // Shows the controls or the no-backend message, whichever applies, and
+    // the Virtual Keyboard's note while it is open.
     void syncBackend();
     void portItemChanged(QListWidgetItem *item);
     void loadPreferences();
@@ -72,6 +73,9 @@ class MidiSettingsPage : public QWidget
     QWidget *m_controls = nullptr;
     QWidget *m_unavailable = nullptr;
     QLabel *m_unavailableLabel = nullptr;
+    // "The Virtual Keyboard is open..." while it is (docs/virtual-keyboard/
+    // PLAN.md D8): above both views, since it plays without a backend too.
+    QLabel *m_virtualNote = nullptr;
     QListWidget *m_ports = nullptr;
     // The port rows' delegate (a PortDelegate: role boxes, elided names).
     QStyledItemDelegate *m_portDelegate = nullptr;

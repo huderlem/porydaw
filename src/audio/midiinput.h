@@ -134,6 +134,12 @@ class MidiSurfaceRing : public MidiRing<MidiTapMsg, 256>
 // Mackie Control "DAW" port) never does, and its messages go to the
 // surface ring instead (popSurface) and to the script tap.
 //
+// One more port is built in (docs/virtual-keyboard/PLAN.md D8): the
+// Virtual Keyboard window's, named virtualPortName(). It is a state, not a
+// device: open while the window shows (setVirtualOpen), always a Keyboard,
+// never disabled, never listed by ports(); the window feeds it on the UI
+// thread through sendVirtual.
+//
 // Without a usable backend (a build without RtMidi or with only its dummy
 // API, or a system where the backend fails to start — WSL has no ALSA
 // sequencer) everything still works and lists no ports; backendStatus()
@@ -196,7 +202,8 @@ class MidiInput : public QObject
     // The identities of the ports seen by the last scan, in the backend's
     // order.
     QStringList ports() const;
-    // The ports currently open (receiving), in the order they opened.
+    // The ports currently open (receiving), in the order they opened; the
+    // Virtual Keyboard, while open, comes last.
     QStringList openPorts() const;
     // The open ports whose role is Keyboard: what "a keyboard is connected"
     // means (Record, a lane menu's Learn). A control surface alone isn't one.
@@ -325,11 +332,56 @@ class MidiInput : public QObject
     // Messages that reached the ring (any thread's count).
     uint64_t receivedCount() const { return m_received.load(std::memory_order_relaxed); }
 
+    // The Virtual Keyboard port (docs/virtual-keyboard/PLAN.md D8, step 1).
+    // Its identity, as openPorts, openKeyboardPorts and the script tap
+    // (portForToken) name it. setPortEnabled and setPortRole refuse it
+    // (nothing changes, nothing is persisted), and its role is always
+    // Keyboard, whatever an edited settings file says.
+    static QString virtualPortName() { return QStringLiteral("Virtual Keyboard"); }
+    // Open while the window is visible: it then counts as an open keyboard,
+    // so Record and a lane menu's Learn appear with no change at those
+    // sites. A real change emits portsChanged. Closing first releases every
+    // key sendVirtual left held (a note off each, down the same path), so
+    // nothing sticks on the audio thread; it never reports portsClosed,
+    // which would cut a hardware keyboard's held notes too.
+    void setVirtualOpen(bool open);
+    bool virtualOpen() const { return m_virtualOpen; }
+    // UI thread only (asserted): the window's message takes a port
+    // callback's path (Learn, parse, ring push, tap with the port's token,
+    // activity), stamped arrivalNs = midiClockNs(). A channel-voice message
+    // is sent on channel 1, as D8 has the port. d1 and d2 are 0–127 (a
+    // larger value is clamped to 127, so a note on keeps a velocity of
+    // 1–127); a velocity-0 note on stays a note off. A note on or off also
+    // emits noteStateChanged(key, on, fromVirtual = true) at once. Does
+    // nothing (and counts nothing) while the port is closed.
+    void sendVirtual(const MidiMsg &msg);
+
+    // The note monitor (docs/virtual-keyboard/PLAN.md D9): while enabled,
+    // the hardware Keyboard-role ports' keys are kept as a 128-bit "down"
+    // set (two atomic words the MIDI threads set and clear), and the UI
+    // thread, one queued hop at a time, emits noteStateChanged(key, on,
+    // fromVirtual = false) for each key whose state differs from what it
+    // last reported (a control surface's notes never count). Lossless
+    // however many notes arrive between hops; a key pressed and released
+    // between two hops reports nothing. Disabled, the MIDI threads skip it
+    // at the cost of one load; enabling or disabling resets the set and the
+    // reported state to every key up, so it starts clean. Before every
+    // portsClosed the monitor is delivered synchronously and then reset the
+    // same way (see portsClosed). The Virtual Keyboard's own notes signal
+    // whether or not it is enabled, and never through the monitor.
+    void setNoteMonitorEnabled(bool on);
+    bool noteMonitorEnabled() const { return m_monitorEnabled.load(std::memory_order_relaxed); }
+
   signals:
     // The port list or the open set changed.
     void portsChanged();
     // At least one open port closed (unplugged, disabled, reopened by
-    // Refresh): whatever keys it held can never send their note-offs.
+    // Refresh, or flipped role): whatever keys it held can never send their
+    // note-offs. Every hardware note state that came in before it has
+    // already been reported (the note monitor is delivered synchronously
+    // just before), and the monitor then restarts from every key up, so a
+    // receiver may clear all its hardware-lit keys here and stay in step.
+    // Never emitted for the Virtual Keyboard (setVirtualOpen).
     void portsClosed();
     // Input arrived (throttled, UI thread).
     void activity();
@@ -345,6 +397,13 @@ class MidiInput : public QObject
     void learnFinished(int lane, int cc, int movedFrom);
     // Learn for lane stopped without a CC: cancelled, or timed out.
     void learnCancelled(int lane, bool timedOut);
+    // A Keyboard-role port's key went down (on) or up (UI thread). With
+    // fromVirtual, the Virtual Keyboard's own, emitted at once from
+    // sendVirtual or setVirtualOpen(false); otherwise a hardware port's,
+    // through the note monitor (setNoteMonitorEnabled), so a window can
+    // keep its own held keys apart from a keyboard's. A velocity-0 note on
+    // is an off.
+    void noteStateChanged(int key, bool on, bool fromVirtual);
 
   private:
     struct OpenPort;
@@ -359,9 +418,20 @@ class MidiInput : public QObject
     // Any thread: parse, push, flag activity. port is the sender's token;
     // surface, whether its role is Surface (then only the surface ring and
     // the tap see the message).
+    // monitor: whether a note goes to the note monitor (the Virtual
+    // Keyboard's signal on their own, in sendVirtual).
     void receive(const unsigned char *bytes, size_t size, int64_t arrivalNs, uint16_t port,
-                 bool surface);
+                 bool surface, bool monitor = true);
+    // sendVirtual's body, open or not (setVirtualOpen's release runs it
+    // before the port reads closed).
+    void sendVirtualNow(const MidiMsg &msg);
     void deliverActivity();
+    void deliverMonitor();
+    // Before each portsClosed: deliverMonitor at once, then reset the
+    // monitor to every key up (both the down set and the reported state).
+    void flushMonitorForClose();
+    // Every key up, down set and reported state (setNoteMonitorEnabled).
+    void resetMonitor();
     void deliverTap();
     void deliverSurface();
     // UI thread: the token for a port identity, assigned on first use and
@@ -440,6 +510,20 @@ class MidiInput : public QObject
     int m_learnLane = MidiRoutes::kNone;
     QTimer *m_learnPoll = nullptr;
     QTimer *m_learnTimeout = nullptr;
+
+    // The Virtual Keyboard (UI thread only): open, its tap token (assigned
+    // first, so always 1), and the keys sendVirtual holds down, bit k for
+    // key k, so closing can release them.
+    bool m_virtualOpen = false;
+    uint16_t m_virtualToken = 0;
+    std::array<uint64_t, 2> m_virtualHeld{};
+    // The note monitor: the hardware keys down (bit k of word k / 64, set
+    // and cleared by the MIDI threads), what deliverMonitor last reported
+    // (UI thread), and the hop flag (as m_tapPosted).
+    std::array<std::atomic<uint64_t>, 2> m_monitorDown{};
+    std::array<uint64_t, 2> m_monitorReported{};
+    std::atomic<bool> m_monitorEnabled{false};
+    std::atomic<bool> m_monitorPosted{false};
 
     std::atomic<uint64_t> m_received{0};
     // Set by the producer that posts the activity hop; cleared on the UI

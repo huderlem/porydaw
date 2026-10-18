@@ -350,6 +350,10 @@ class MainWindow : public QMainWindow
     // Step 2: MCU transport buttons and the jog wheel driving the
     // transport from a surface port (midicheck.cpp).
     void checkSurfaceTransport();
+    // The Virtual Keyboard port in the window (docs/virtual-keyboard/
+    // PLAN.md step 1): Record, lane Learn and the Settings note follow it,
+    // and closing it cuts a held note (midicheck.cpp).
+    void checkVirtualWindow();
 
     // Control surface dispatch (docs/control-surface/PLAN.md §3.3): drains
     // MidiInput's surface ring (on surfaceReady) through mcu::decode into
