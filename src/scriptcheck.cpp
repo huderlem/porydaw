@@ -2928,6 +2928,68 @@ void runAdapterChecks(const Check &check, scripting::ScriptHost &host, SongSessi
         check(*session.vgSource->voiceAt(slot) == v0 && !session.vgSource->dirty(),
               "undo after the partial-envelope crossing did not restore the voice");
     }
+    // A reversed sample type follows the project, as the dock does: a
+    // spelling it lacks lands as the twin it defines (pret pokeemerald
+    // defines only voice_directsound_reverse); with neither, it's refused.
+    // A second pass hides the project's macro scan: an empty scan gates
+    // nothing, so either spelling is written as asked.
+    {
+        const scripting::HostBindings realBindings = host.bindings();
+        for (int pass = 0; pass < 2; pass++) {
+            if (pass == 1) {
+                scripting::HostBindings unscanned = realBindings;
+                unscanned.voicegroupCatalog = [real = realBindings.voicegroupCatalog] {
+                    scripting::VoicegroupCatalog catalog =
+                        real ? real() : scripting::VoicegroupCatalog();
+                    catalog.voiceMacroWords.clear();
+                    return catalog;
+                };
+                host.setBindings(unscanned);
+            }
+            const QStringList words = host.bindings().voicegroupCatalog
+                                          ? host.bindings().voicegroupCatalog().voiceMacroWords
+                                          : QStringList();
+            // (Also by way of a Square 1 first, so the second edit crosses
+            // envelope families and re-applies the spec over a fresh envelope.)
+            for (int i = 0; i < 4; i++) {
+                const VgMacro asked = i % 2 ? VgMacro::DirectSoundReverse : VgMacro::DirectSoundAlt;
+                const QString viaSquare =
+                    i >= 2 ? QStringLiteral("porydaw.edit.setVoice(%1, {type: 'voice_square_1'}); ")
+                                 .arg(slot)
+                           : QString();
+                const VgMacro twin = asked == VgMacro::DirectSoundAlt ? VgMacro::DirectSoundReverse
+                                                                      : VgMacro::DirectSoundAlt;
+                // (An empty scan gates nothing: either spelling is kept.)
+                const bool keeps = words.isEmpty() || words.contains(vgMacroName(asked));
+                const VgMacro expected = keeps ? asked : twin;
+                const bool defined = keeps || words.contains(vgMacroName(twin));
+                run(QStringLiteral("porydaw.edit.transaction('Rev', function () { %3"
+                                   "porydaw.edit.setVoice(%1, {type: '%2', symbol: "
+                                   "porydaw.voicegroup.symbols().directSound[0]}); })")
+                        .arg(slot)
+                        .arg(vgMacroName(asked), viaSquare));
+                const VgVoice *v = session.vgSource->voiceAt(slot);
+                if (defined)
+                    check(v && v->macro == expected &&
+                              session.vgSource->renderPreview().contains(
+                                  (vgMacroName(expected) + QLatin1Char(' ')).toUtf8()),
+                          qPrintable(QStringLiteral("setVoice({type: '%1'}) did not write the "
+                                                    "project's spelling %2")
+                                         .arg(vgMacroName(asked), vgMacroName(expected))));
+                else
+                    check(v && *v == v0 && errorLogged("doesn't define"),
+                          qPrintable(
+                              QStringLiteral("setVoice({type: '%1'}) was accepted in a project "
+                                             "that defines neither reverse macro")
+                                  .arg(vgMacroName(asked))));
+                while (undo.index() > index0)
+                    undo.undo();
+                check(*session.vgSource->voiceAt(slot) == v0 && !session.vgSource->dirty(),
+                      "undo after the reversed setVoice did not restore the voice");
+            }
+        }
+        host.setBindings(realBindings);
+    }
     check(run(QStringLiteral("porydaw.edit.transaction('B1', function () { porydaw.edit.setVoice("
                              "999, {attack: 1}); })"))
                   .isNull() &&

@@ -30,7 +30,7 @@ enum class VgAuditionKind { Sample, Wave, Keysplit };
 // with press-and-hold audition, plus an editor panel for the selected voice.
 // A voice row's context menu (and the voicegroup.copy / voicegroup.paste
 // shortcuts) copies, pastes, and clears one voice through the system
-// clipboard as its .inc macro line.
+// clipboard as its .inc macro line, and switches it between its variants.
 // Basic voice types (sample/square/wave/noise) plus keysplit, drumkit, and
 // Golden Sun synth voices are editable when a source file was located; cry
 // voices stay read-only.
@@ -149,6 +149,17 @@ class VoicegroupBrowser : public QWidget
     void copyVoice(int slot);
     void pasteVoice(int slot);
     void clearVoice(int slot);
+    // The context menu's variant radio group for a voice: its macro's
+    // siblings that share an envelope family (Normal / No Resample /
+    // Reversed for a plain sample, Normal / Reversed for a compressed one,
+    // Normal / Detuned for squares and waves), each one this project defines
+    // (the current macro always). Empty — no group — for synth, keysplit,
+    // drumkit, and noise voices, or when one choice is all that's left.
+    QList<QPair<QString, VgMacro>> voiceVariants(const VgVoice &voice, int slot) const;
+    void setVoiceVariant(int slot, VgMacro macro);
+    // Whether this project's macro scan allows a sample macro (any non-sample
+    // macro, and every macro when the scan found nothing, passes).
+    bool sampleMacroDefined(VgMacro macro) const;
     // The voice on the clipboard: the private MIME's line and synth
     // descriptor when present, else the plain text parsed as a .inc line.
     // *overflow (optional) as VoicegroupSource::parseVoiceLine reports it.

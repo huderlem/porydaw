@@ -1,5 +1,6 @@
 #include "voicegroupbrowser.h"
 
+#include <QActionGroup>
 #include <QClipboard>
 #include <QComboBox>
 #include <QEvent>
@@ -63,9 +64,9 @@ bool sameVoiceLine(const VgVoice &a, const VgVoice &b)
 // chosen symbol alone decides which macro the line gets (see commitEdit).
 //
 // The compressed Sample variants are pokeemerald-expansion macros, offered
-// only in projects that define them (macroOffered). voice_directsound_reverse
-// is never offered: it assembles the same byte as voice_directsound_alt,
-// which every project has.
+// only in projects that define them. The DirectSoundAlt entry stands for
+// "Sample (reversed)" in whichever spelling the project defines (_alt or its
+// twin _reverse; see populateEditor), so it is listed once either way.
 const VgMacro kSelectableMacros[] = {
     VgMacro::DirectSound,
     VgMacro::DirectSoundNoResample,
@@ -811,17 +812,28 @@ void VoicegroupBrowser::populateEditor()
 
     // The selectable types (with Synth after the Sample variants when the
     // project has synth support), plus the current one when it's an _alt CGB
-    // variant we display but never offer.
+    // variant we display but never offer. The reversed entry carries the
+    // voice's own reverse spelling, else the one the project defines (and is
+    // left out when the project's scan found neither).
     const int shownData = synth ? kSynthTypeData : int(typeComboMacro(voice->macro));
     m_typeCombo->clear();
-    for (VgMacro macro : kSelectableMacros) {
-        if (vgMacroIsCompressed(macro) && !m_voiceMacroWords.contains(vgMacroName(macro)))
-            continue;
-        m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
-        const QString tip = typeItemTip(macro);
-        if (!tip.isEmpty())
-            m_typeCombo->setItemData(m_typeCombo->count() - 1, tip, Qt::ToolTipRole);
-        if (macro == VgMacro::DirectSoundAlt && (m_synths.available() || synth))
+    for (VgMacro listed : kSelectableMacros) {
+        VgMacro macro = listed;
+        if (listed == VgMacro::DirectSoundAlt)
+            macro = vgMacroIsReverseSample(voice->macro) && !synth
+                        ? voice->macro
+                        : vgProjectReverseMacro(m_voiceMacroWords);
+        const bool offered = vgMacroIsCompressed(macro)
+                                 ? m_voiceMacroWords.contains(vgMacroName(macro))
+                                 : !vgMacroIsReverseSample(macro) || int(macro) == shownData ||
+                                       sampleMacroDefined(macro);
+        if (offered) {
+            m_typeCombo->addItem(vgMacroDisplayName(macro), int(macro));
+            const QString tip = typeItemTip(macro);
+            if (!tip.isEmpty())
+                m_typeCombo->setItemData(m_typeCombo->count() - 1, tip, Qt::ToolTipRole);
+        }
+        if (listed == VgMacro::DirectSoundAlt && (m_synths.available() || synth))
             m_typeCombo->addItem(tr("Synth (Golden Sun)"), kSynthTypeData);
     }
     if (m_typeCombo->findData(shownData) < 0)
@@ -924,10 +936,11 @@ void VoicegroupBrowser::commitEdit()
         // carries the waveform and pulse parameters, deduplicated across the
         // project's definitions (param-named entries are minted on demand).
         // (Never a compressed one: its symbol is read as a cry everywhere.)
-        v.macro = !macroIsDsFamily(cur->macro)                          ? VgMacro::DirectSound
-                  : cur->macro == VgMacro::DirectSoundCompressed        ? VgMacro::DirectSound
-                  : cur->macro == VgMacro::DirectSoundCompressedReverse ? VgMacro::DirectSoundAlt
-                                                                        : cur->macro;
+        v.macro = !macroIsDsFamily(cur->macro)                   ? VgMacro::DirectSound
+                  : cur->macro == VgMacro::DirectSoundCompressed ? VgMacro::DirectSound
+                  : cur->macro == VgMacro::DirectSoundCompressedReverse
+                      ? vgProjectReverseMacro(m_voiceMacroWords)
+                      : cur->macro;
         v.keysplitTable.clear();
         VgSynthDesc desc;
         QString symbol;
@@ -1180,8 +1193,99 @@ void VoicegroupBrowser::showVoiceMenu(const QPoint &pos)
     QAction *clear = menu.addAction(tr("Clear"), this, [this, slot] { clearVoice(slot); });
     clear->setToolTip(tr("Replace this voice with the unused-slot placeholder."));
     clear->setEnabled(editable && !m_viewOnly && !sameVoiceLine(*voice, kPlaceholderVoice));
+    const QList<QPair<QString, VgMacro>> variants =
+        editable ? voiceVariants(*voice, slot) : QList<QPair<QString, VgMacro>>();
+    if (!variants.isEmpty()) {
+        menu.addSeparator();
+        auto *group = new QActionGroup(&menu);
+        group->setExclusive(true);
+        for (const auto &[label, macro] : variants) {
+            QAction *action = menu.addAction(
+                label, this, [this, slot, macro = macro] { setVoiceVariant(slot, macro); });
+            action->setCheckable(true);
+            action->setChecked(macro == voice->macro || (vgMacroIsReverseSample(macro) &&
+                                                         vgMacroIsReverseSample(voice->macro)));
+            action->setEnabled(!m_viewOnly);
+            action->setToolTip(typeItemTip(macro));
+            group->addAction(action);
+        }
+    }
     menu.setToolTipsVisible(true);
     menu.exec(m_tree->viewport()->mapToGlobal(pos));
+}
+
+bool VoicegroupBrowser::sampleMacroDefined(VgMacro macro) const
+{
+    return !vgMacroIsDirectSound(macro) || m_voiceMacroWords.isEmpty() ||
+           m_voiceMacroWords.contains(vgMacroName(macro));
+}
+
+QList<QPair<QString, VgMacro>> VoicegroupBrowser::voiceVariants(const VgVoice &voice,
+                                                                int slot) const
+{
+    VgSynthDesc desc;
+    if (synthDescFor(voice, slot, &desc))
+        return {};
+    const QString normal = tr("Normal");
+    const QString detuned = tr("Detuned");
+    // A reversed voice keeps its own spelling when the project defines it
+    // and is offered the twin it does define otherwise (so re-picking the
+    // checked Reversed repairs the line); Reversed on any other voice writes
+    // the spelling this project defines.
+    const VgMacro reverse = vgMacroIsReverseSample(voice.macro)
+                                ? vgAdoptDefinedReverse(voice.macro, m_voiceMacroWords)
+                                : vgProjectReverseMacro(m_voiceMacroWords);
+    QList<QPair<QString, VgMacro>> all;
+    switch (voice.macro) {
+    case VgMacro::DirectSound:
+    case VgMacro::DirectSoundNoResample:
+    case VgMacro::DirectSoundAlt:
+    case VgMacro::DirectSoundReverse:
+        all = {{normal, VgMacro::DirectSound},
+               {tr("No Resample"), VgMacro::DirectSoundNoResample},
+               {tr("Reversed"), reverse}};
+        break;
+    case VgMacro::DirectSoundCompressed:
+    case VgMacro::DirectSoundCompressedReverse:
+        all = {{normal, VgMacro::DirectSoundCompressed},
+               {tr("Reversed"), VgMacro::DirectSoundCompressedReverse}};
+        break;
+    // The detuned _alt PSG macros are vanilla (the scan covers only sample
+    // macros): every project defines them.
+    case VgMacro::Square1:
+    case VgMacro::Square1Alt:
+        all = {{normal, VgMacro::Square1}, {detuned, VgMacro::Square1Alt}};
+        break;
+    case VgMacro::Square2:
+    case VgMacro::Square2Alt:
+        all = {{normal, VgMacro::Square2}, {detuned, VgMacro::Square2Alt}};
+        break;
+    case VgMacro::ProgWave:
+    case VgMacro::ProgWaveAlt:
+        all = {{normal, VgMacro::ProgWave}, {detuned, VgMacro::ProgWaveAlt}};
+        break;
+    default: // noise (its _alt is inert), keysplit, drumkit
+        return {};
+    }
+    QList<QPair<QString, VgMacro>> offered;
+    for (const auto &variant : all) {
+        if (variant.second == voice.macro || sampleMacroDefined(variant.second))
+            offered.append(variant);
+    }
+    return offered.size() > 1 ? offered : QList<QPair<QString, VgMacro>>();
+}
+
+void VoicegroupBrowser::setVoiceVariant(int slot, VgMacro macro)
+{
+    const VgVoice *cur = m_source ? m_source->voiceAt(slot) : nullptr;
+    if (!cur || m_viewOnly || cur->macro == macro)
+        return;
+    // Variants share an envelope family, so the symbol, key, pan, and ADSR
+    // all carry over: only the macro word changes.
+    VgVoice voice = *cur;
+    voice.macro = macro;
+    emit voiceEditRequested(slot, voice, vgVoiceStructuralChange(*cur, voice),
+                            tr("set voice %1 variant").arg(slot));
 }
 
 QString VoicegroupBrowser::notEditableReason(int slot) const
@@ -1265,26 +1369,13 @@ bool VoicegroupBrowser::resolvePastedVoice(VgVoice *voice, const std::optional<V
         return false;
     }
     // Sample macros are gated on what asm/macros defines (an empty list
-    // means the scan found nothing to go on, so the line is trusted). The
-    // reverse twins assemble the same type byte, but projects define one
-    // or the other (pret pokeemerald only _reverse, pokeemerald-expansion
-    // only _alt): a reversed voice keeps its spelling when this project
-    // defines it and otherwise lands as the twin this project has.
-    if (vgMacroIsDirectSound(voice->macro) && !m_voiceMacroWords.isEmpty()) {
-        if ((voice->macro == VgMacro::DirectSoundAlt ||
-             voice->macro == VgMacro::DirectSoundReverse) &&
-            !m_voiceMacroWords.contains(vgMacroName(voice->macro))) {
-            const VgMacro twin = voice->macro == VgMacro::DirectSoundAlt
-                                     ? VgMacro::DirectSoundReverse
-                                     : VgMacro::DirectSoundAlt;
-            if (m_voiceMacroWords.contains(vgMacroName(twin)))
-                voice->macro = twin;
-        }
-        const QString word = vgMacroName(voice->macro);
-        if (!m_voiceMacroWords.contains(word)) {
-            *why = tr("Can't paste: this project doesn't define %1.").arg(word);
-            return false;
-        }
+    // means the scan found nothing to go on, so the line is trusted). A
+    // reversed voice keeps its spelling when this project defines it and
+    // otherwise lands as the reverse twin this project has.
+    voice->macro = vgAdoptDefinedReverse(voice->macro, m_voiceMacroWords);
+    if (!sampleMacroDefined(voice->macro)) {
+        *why = tr("Can't paste: this project doesn't define %1.").arg(vgMacroName(voice->macro));
+        return false;
     }
     if (!vgMacroHasSymbol(voice->macro))
         return true;

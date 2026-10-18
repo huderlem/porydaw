@@ -43,6 +43,30 @@ levels than sampled voices. -->
 loop badges with rate/length details, audition-on-highlight through the
 voice's own envelope; typing a symbol the scan didn't find still works. -->
 
+### Copy, paste, clear, and variants
+
+<!-- TODO: The voice list's right-click menu (right-click selects the row and
+doesn't audition):
+- Copy / Paste (Ctrl+C / Ctrl+V with the voice list focused; rebindable in
+  Settings → Keyboard Shortcuts) — one voice at a time; Paste replaces the
+  whole voice, key and pan included; works on any editable slot.
+- Clipboard is plain text: the voice's .inc macro line, so it pastes into a
+  text editor, and a line copied out of a .inc file pastes in. Works across
+  tabs and between Porydaw windows (synth voices carry their definition).
+- When Paste refuses (status-bar message, nothing changes): a sample, wave,
+  drumkit, keysplit, or cry the project doesn't have; a macro the project
+  doesn't define (e.g. compressed voices in vanilla pokeemerald); a number
+  out of range. A keysplit adopts the project's keysplit table.
+- Clear — writes the unused-slot placeholder (voice_square_1 60, 0, 0, 2, 0,
+  0, 15, 0); no shortcut.
+- Variants — Normal / No Resample / Reversed (samples), Normal / Reversed
+  (compressed samples), Normal / Detuned (Square 1, Square 2, Wave). Only
+  variants the project defines; the envelope, sample, key, and pan stay.
+  Reversed writes voice_directsound_alt or voice_directsound_reverse,
+  whichever the project defines.
+- Undo — each Paste / Clear / variant change is one undo step; view-only
+  tabs (song bundles) allow Copy only. -->
+
 ## Assigning instruments to tracks
 
 <!-- TODO: How a track picks its voice (program change / instrument

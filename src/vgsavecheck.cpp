@@ -911,8 +911,10 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 return tree->visualItemRect(tree->topLevelItem(slot)).center();
             };
             // Opens the row's context menu, records each item's enabled
-            // state, and picks `pick` (Escape when it is absent/disabled).
-            const auto runMenu = [&](int slot, const QString &pick, QHash<QString, bool> *enabled) {
+            // (and, given `checked`, each checkable item's checked) state,
+            // and picks `pick` (Escape when it is absent/disabled).
+            const auto runMenu = [&](int slot, const QString &pick, QHash<QString, bool> *enabled,
+                                     QHash<QString, bool> *checked = nullptr) {
                 const QPoint pos = rowPos(slot);
                 bool seen = false;
                 QTimer::singleShot(0, this, [&] {
@@ -926,6 +928,8 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                             if (a->isSeparator())
                                 continue;
                             enabled->insert(a->text(), a->isEnabled());
+                            if (checked && a->isCheckable())
+                                checked->insert(a->text(), a->isChecked());
                             if (a->text() == pick && a->isEnabled())
                                 chosen = a;
                         }
@@ -1430,6 +1434,367 @@ bool MainWindow::runVgSaveCheck(const QString &projectRoot, const QString &songL
                 check(synthMime(QStringLiteral("VgSaveCheckSaw"), saw) ==
                           QStringLiteral("VgSaveCheckSaw"),
                       "a synth with the local definition's descriptor did not keep its name");
+            }
+
+            // 10d. The variant radio group: siblings that share an envelope
+            // family (Normal / No Resample / Reversed, Normal / Reversed for
+            // compressed samples, Normal / Detuned for squares and waves),
+            // only those the project defines; the current macro is checked;
+            // each pick is one labelled undo entry that changes nothing but
+            // the macro word. Reversed writes the project's own spelling, in
+            // the menu and in the Type dropdown alike.
+            {
+                const QString plainW = QStringLiteral("voice_directsound");
+                const QString noResW = QStringLiteral("voice_directsound_no_resample");
+                const QString altW = QStringLiteral("voice_directsound_alt");
+                const QString revW = QStringLiteral("voice_directsound_reverse");
+                const QString compW = QStringLiteral("voice_directsound_compressed");
+                const QString compRevW = QStringLiteral("voice_directsound_compressed_reverse");
+                const QStringList allWords{plainW, noResW, altW, revW, compW, compRevW};
+                const QStringList &cries = vgCatalog(tab->root).cries;
+                const QString normal = tr("Normal"), noRes = tr("No Resample"),
+                              reversed = tr("Reversed"), detuned = tr("Detuned");
+                const QString variantText = tr("set voice %1 variant").arg(pasteSlot);
+                // A fixture voice over pasteSlot, as the one entry above
+                // baseIndex, in a project defining `words` (set after the
+                // structural reload, which hands the browser the real scan).
+                const auto setFixture = [&](const QStringList &words, const QString &line) {
+                    unwind();
+                    VgVoice v;
+                    if (!VoicegroupSource::parseVoiceLine(line.toUtf8(), &v))
+                        return false;
+                    emit m_vgBrowser->voiceEditRequested(pasteSlot, v, true,
+                                                         QStringLiteral("vgsavecheck fixture"));
+                    m_vgBrowser->setSampleVariants(words, cries);
+                    return stack->index() == baseIndex + 1 && voiceAt(pasteSlot) == v;
+                };
+                struct MenuState {
+                    QStringList group; // the checkable items, sorted
+                    QString checked;
+                    bool anyEnabled = false;
+                    bool allEnabled = true;
+                };
+                const auto menuState = [&](int slot) {
+                    QHash<QString, bool> enabled, checked;
+                    runMenu(slot, QString(), &enabled, &checked);
+                    MenuState st;
+                    for (auto it = checked.cbegin(); it != checked.cend(); ++it) {
+                        st.group.append(it.key());
+                        if (it.value())
+                            st.checked = it.key();
+                        st.anyEnabled |= enabled.value(it.key());
+                        st.allEnabled &= enabled.value(it.key());
+                    }
+                    st.group.sort();
+                    return st;
+                };
+                const auto sorted = [](QStringList list) {
+                    list.sort();
+                    return list;
+                };
+                const auto pick = [&](const QString &label) {
+                    QHash<QString, bool> enabled;
+                    runMenu(pasteSlot, label, &enabled);
+                };
+                // Only the macro moved.
+                const auto sameButMacro = [](const VgVoice &a, const VgVoice &b) {
+                    VgVoice c = a;
+                    c.macro = b.macro;
+                    return c == b;
+                };
+                const QString dsFixture =
+                    QStringLiteral("voice_directsound 50, 70, %1, 250, 10, 200, 30").arg(sample);
+
+                // Plain samples, per what the project defines.
+                struct Gate {
+                    QStringList words;
+                    QStringList group;
+                    int reversedMacro; // what Reversed writes; -1 when absent
+                };
+                const Gate gates[] = {
+                    {{plainW, noResW, altW},
+                     {normal, noRes, reversed},
+                     int(VgMacro::DirectSoundAlt)},
+                    {{plainW, noResW, revW},
+                     {normal, noRes, reversed},
+                     int(VgMacro::DirectSoundReverse)},
+                    {{plainW, noResW, altW, revW},
+                     {normal, noRes, reversed},
+                     int(VgMacro::DirectSoundAlt)},
+                    {{}, {normal, noRes, reversed}, int(VgMacro::DirectSoundAlt)},
+                    {{plainW, noResW}, {normal, noRes}, -1},
+                    {{plainW}, {}, -1},
+                };
+                for (const Gate &gate : gates) {
+                    const QString words =
+                        QStringLiteral("[%1]").arg(gate.words.join(QStringLiteral(", ")));
+                    if (!check(setFixture(gate.words, dsFixture),
+                               "the plain-sample variant fixture did not land"))
+                        continue;
+                    const MenuState st = menuState(pasteSlot);
+                    check(st.group == sorted(gate.group) &&
+                              (gate.group.isEmpty() || (st.checked == normal && st.allEnabled)),
+                          qPrintable(
+                              QStringLiteral("a plain sample's variant group is wrong for "
+                                             "macros %1: [%2], checked '%3'")
+                                  .arg(words, st.group.join(QStringLiteral(", ")), st.checked)));
+                    if (gate.reversedMacro < 0)
+                        continue;
+                    const VgVoice before = voiceAt(pasteSlot);
+                    pick(reversed);
+                    const VgVoice after = voiceAt(pasteSlot);
+                    check(after.macro == VgMacro(gate.reversedMacro) &&
+                              sameButMacro(before, after) && stack->index() == baseIndex + 2 &&
+                              stack->text(baseIndex + 1) == variantText,
+                          qPrintable(QStringLiteral("Reversed did not write %1 as one \"set "
+                                                    "voice N variant\" entry for macros %2")
+                                         .arg(vgMacroName(VgMacro(gate.reversedMacro)), words)));
+                    check(menuState(pasteSlot).checked == reversed,
+                          "the reversed voice does not show Reversed checked");
+                    pick(noRes);
+                    check(voiceAt(pasteSlot).macro == VgMacro::DirectSoundNoResample &&
+                              sameButMacro(before, voiceAt(pasteSlot)) &&
+                              stack->index() == baseIndex + 3,
+                          "No Resample did not land as its own entry");
+                    stack->undo();
+                    check(voiceAt(pasteSlot) == after,
+                          "one undo did not return to the reversed variant");
+                }
+
+                // A reversed voice shows as Reversed in either spelling. One
+                // the project defines (or that no scan can judge, or that has
+                // no defined twin) keeps it: re-picking is a no-op. One the
+                // project lacks while it defines the twin is one click from
+                // repaired: re-picking Reversed writes the twin as one
+                // labelled entry.
+                const struct {
+                    QStringList words;
+                    VgMacro macro;
+                    VgMacro repaired; // what re-picking Reversed leaves
+                } reversedCases[] = {
+                    {{plainW, noResW, altW, revW},
+                     VgMacro::DirectSoundReverse,
+                     VgMacro::DirectSoundReverse},
+                    {{plainW, noResW, altW, revW},
+                     VgMacro::DirectSoundAlt,
+                     VgMacro::DirectSoundAlt},
+                    {{}, VgMacro::DirectSoundReverse, VgMacro::DirectSoundReverse},
+                    {{plainW, noResW}, VgMacro::DirectSoundAlt, VgMacro::DirectSoundAlt},
+                    {{plainW, noResW, altW}, VgMacro::DirectSoundReverse, VgMacro::DirectSoundAlt},
+                    {{plainW, noResW, revW}, VgMacro::DirectSoundAlt, VgMacro::DirectSoundReverse},
+                };
+                for (const auto &rc : reversedCases) {
+                    const QString words =
+                        QStringLiteral("[%1]").arg(rc.words.join(QStringLiteral(", ")));
+                    if (!check(
+                            setFixture(rc.words, QStringLiteral("%1 50, 70, %2, 250, 10, 200, 30")
+                                                     .arg(vgMacroName(rc.macro), sample)),
+                            "the reversed-sample fixture did not land"))
+                        continue;
+                    const MenuState st = menuState(pasteSlot);
+                    check(st.group == sorted({normal, noRes, reversed}) && st.checked == reversed,
+                          qPrintable(QStringLiteral("a %1 voice does not show Reversed checked "
+                                                    "for macros %2")
+                                         .arg(vgMacroName(rc.macro), words)));
+                    const VgVoice before = voiceAt(pasteSlot);
+                    pick(reversed);
+                    const bool repairs = rc.repaired != rc.macro;
+                    check(voiceAt(pasteSlot).macro == rc.repaired &&
+                              sameButMacro(before, voiceAt(pasteSlot)) &&
+                              stack->index() == baseIndex + (repairs ? 2 : 1) &&
+                              (!repairs || stack->text(baseIndex + 1) == variantText),
+                          qPrintable(
+                              repairs
+                                  ? QStringLiteral("re-picking Reversed did not repair %1 to "
+                                                   "%2 as one \"set voice N variant\" entry "
+                                                   "for macros %3")
+                                        .arg(vgMacroName(rc.macro), vgMacroName(rc.repaired), words)
+                                  : QStringLiteral("re-picking the checked Reversed changed "
+                                                   "a %1 voice for macros %2")
+                                        .arg(vgMacroName(rc.macro), words)));
+                    if (repairs) {
+                        // (The macro change reloaded the real scan.)
+                        m_vgBrowser->setSampleVariants(rc.words, cries);
+                        check(menuState(pasteSlot).checked == reversed,
+                              "the repaired voice does not show Reversed checked");
+                        pick(reversed);
+                        check(stack->index() == baseIndex + 2 &&
+                                  voiceAt(pasteSlot).macro == rc.repaired,
+                              "re-picking Reversed on the repaired voice changed it");
+                    }
+                    const int at = stack->index();
+                    pick(normal);
+                    check(voiceAt(pasteSlot).macro == VgMacro::DirectSound &&
+                              stack->index() == at + 1,
+                          "Normal did not switch a reversed voice back to voice_directsound");
+                }
+
+                // Compressed samples: Normal / Reversed, both defined or no
+                // group at all.
+                const QString cry = cries.value(0);
+                if (check(!cry.isEmpty(), "no cry symbol for the compressed variant checks")) {
+                    const QString compFixture =
+                        QStringLiteral("voice_directsound_compressed 60, 0, %1, 255, 0, 255, 0")
+                            .arg(cry);
+                    if (check(setFixture(allWords, compFixture),
+                              "the compressed variant fixture did not land")) {
+                        const MenuState st = menuState(pasteSlot);
+                        check(st.group == sorted({normal, reversed}) && st.checked == normal,
+                              "a compressed voice's variant group is not Normal / Reversed");
+                        const VgVoice before = voiceAt(pasteSlot);
+                        pick(reversed);
+                        check(voiceAt(pasteSlot).macro == VgMacro::DirectSoundCompressedReverse &&
+                                  sameButMacro(before, voiceAt(pasteSlot)) &&
+                                  stack->index() == baseIndex + 2,
+                              "Reversed did not write voice_directsound_compressed_reverse");
+                    }
+                    if (check(setFixture({plainW, compW}, compFixture),
+                              "the compressed variant fixture did not land"))
+                        check(menuState(pasteSlot).group.isEmpty(),
+                              "a compressed voice offers Reversed without its macro");
+                    if (check(setFixture({}, compFixture),
+                              "the compressed variant fixture did not land"))
+                        check(menuState(pasteSlot).group == sorted({normal, reversed}),
+                              "an empty macro scan gated the compressed variants");
+                }
+
+                // Squares and waves: Normal / Detuned, never gated by the
+                // (sample-only) macro scan.
+                const struct {
+                    QString line;
+                    VgMacro plain;
+                    VgMacro alt;
+                } psgCases[] = {
+                    {QStringLiteral("voice_square_1 60, 0, 21, 1, 1, 2, 9, 3"), VgMacro::Square1,
+                     VgMacro::Square1Alt},
+                    {QStringLiteral("voice_square_2_alt 60, 0, 1, 1, 2, 9, 3"), VgMacro::Square2,
+                     VgMacro::Square2Alt},
+                    {QStringLiteral("voice_programmable_wave 60, 0, %1, 1, 2, 9, 3").arg(wave),
+                     VgMacro::ProgWave, VgMacro::ProgWaveAlt},
+                };
+                for (const auto &pc : psgCases) {
+                    if (!check(setFixture({plainW}, pc.line),
+                               "the PSG variant fixture did not land"))
+                        continue;
+                    const VgVoice before = voiceAt(pasteSlot);
+                    const bool startsAlt = before.macro == pc.alt;
+                    const MenuState st = menuState(pasteSlot);
+                    check(st.group == sorted({normal, detuned}) &&
+                              st.checked == (startsAlt ? detuned : normal),
+                          qPrintable(QStringLiteral("%1's variant group is not Normal / Detuned "
+                                                    "with the current one checked")
+                                         .arg(vgMacroName(before.macro))));
+                    pick(startsAlt ? normal : detuned);
+                    const VgVoice after = voiceAt(pasteSlot);
+                    check(after.macro == (startsAlt ? pc.plain : pc.alt) &&
+                              sameButMacro(before, after) && stack->index() == baseIndex + 2 &&
+                              stack->text(baseIndex + 1) == variantText,
+                          qPrintable(QStringLiteral("the %1 variant pick did not switch only the "
+                                                    "macro as one entry")
+                                         .arg(vgMacroName(before.macro))));
+                }
+
+                // No group: noise (its _alt is inert), keysplit, drumkit,
+                // synth, and rows without an editable voice.
+                QStringList noGroup{QStringLiteral("voice_noise 60, 0, 0, 0, 2, 9, 3"),
+                                    QStringLiteral("voice_noise_alt 60, 0, 1, 0, 2, 9, 3"),
+                                    QStringLiteral("voice_keysplit_all %1").arg(drumkit)};
+                if (!keysplits.isEmpty())
+                    noGroup.append(QStringLiteral("voice_keysplit %1, %2")
+                                       .arg(keysplits.first().first, keysplits.first().second));
+                if (vgCatalog(tab->root).synths.creatable())
+                    noGroup.append(QStringLiteral(
+                        "voice_directsound 60, 0, VgSaveCheckSaw, 255, 0, 255, 165"));
+                for (const QString &line : noGroup) {
+                    if (check(setFixture(allWords, line), "a no-variant fixture did not land"))
+                        check(
+                            menuState(pasteSlot).group.isEmpty(),
+                            qPrintable(QStringLiteral("a variant group showed for %1").arg(line)));
+                }
+                unwind();
+                if (emptySlot >= 0)
+                    check(menuState(emptySlot).group.isEmpty(),
+                          "a row without an editable voice shows a variant group");
+
+                // View-only: the group shows, every item disabled.
+                if (check(setFixture(allWords, dsFixture), "the view-only fixture did not land")) {
+                    m_vgBrowser->setViewOnly(true);
+                    const MenuState st = menuState(pasteSlot);
+                    check(!st.group.isEmpty() && !st.anyEnabled,
+                          "view-only left the variant items enabled");
+                    pick(reversed);
+                    check(stack->index() == baseIndex + 1,
+                          "a variant pick edited a view-only voicegroup");
+                    m_vgBrowser->setViewOnly(false);
+                }
+
+                // The Type dropdown lists "Sample (reversed)" once, as the
+                // voice's own spelling or else the project's, and writes it.
+                QComboBox *typeCombo = nullptr;
+                for (QComboBox *combo : m_vgBrowser->findChildren<QComboBox *>()) {
+                    if (combo->findData(int(VgMacro::Square1)) >= 0)
+                        typeCombo = combo;
+                }
+                const QString reversedName = vgMacroDisplayName(VgMacro::DirectSoundAlt);
+                const struct {
+                    QStringList words;
+                    QString line;
+                    int listed; // the reversed entry's macro; -1 when absent
+                } typeCases[] = {
+                    {{plainW, noResW, revW}, dsFixture, int(VgMacro::DirectSoundReverse)},
+                    {{plainW, noResW, altW, revW}, dsFixture, int(VgMacro::DirectSoundAlt)},
+                    {{plainW, noResW, altW}, dsFixture, int(VgMacro::DirectSoundAlt)},
+                    {{}, dsFixture, int(VgMacro::DirectSoundAlt)},
+                    {{plainW, noResW}, dsFixture, -1},
+                    {{plainW, noResW, altW, revW},
+                     QStringLiteral("voice_directsound_reverse 50, 70, %1, 250, 10, 200, 30")
+                         .arg(sample),
+                     int(VgMacro::DirectSoundReverse)},
+                };
+                if (check(typeCombo != nullptr, "no Type combo for the reverse-spelling checks")) {
+                    for (const auto &tc : typeCases) {
+                        if (!check(setFixture(tc.words, tc.line),
+                                   "the Type dropdown fixture did not land"))
+                            continue;
+                        m_vgBrowser->selectSlot(dsSlot);
+                        m_vgBrowser->selectSlot(pasteSlot);
+                        int named = 0;
+                        for (int i = 0; i < typeCombo->count(); i++)
+                            named += typeCombo->itemText(i) == reversedName ? 1 : 0;
+                        const int altIdx = typeCombo->findData(int(VgMacro::DirectSoundAlt));
+                        const int revIdx = typeCombo->findData(int(VgMacro::DirectSoundReverse));
+                        const int idx = tc.listed == int(VgMacro::DirectSoundAlt) ? altIdx : revIdx;
+                        const bool listedOk =
+                            tc.listed < 0 ? named == 0 && altIdx < 0 && revIdx < 0
+                                          : named == 1 && idx >= 0 && (altIdx < 0 || revIdx < 0);
+                        const QString words =
+                            QStringLiteral("[%1]").arg(tc.words.join(QStringLiteral(", ")));
+                        if (!check(listedOk,
+                                   qPrintable(QStringLiteral("the Type dropdown's reversed entry "
+                                                             "is wrong for macros %1 (%2 entries)")
+                                                  .arg(words)
+                                                  .arg(named))) ||
+                            tc.listed < 0)
+                            continue;
+                        const VgVoice before = voiceAt(pasteSlot);
+                        if (before.macro == VgMacro(tc.listed)) {
+                            check(typeCombo->currentIndex() == idx,
+                                  "the Type dropdown does not show a _reverse voice's entry");
+                            continue;
+                        }
+                        typeCombo->setCurrentIndex(idx);
+                        QMetaObject::invokeMethod(typeCombo, "activated", Qt::DirectConnection,
+                                                  Q_ARG(int, idx));
+                        check(voiceAt(pasteSlot).macro == VgMacro(tc.listed) &&
+                                  stack->index() == baseIndex + 2,
+                              qPrintable(QStringLiteral("the Type dropdown did not write %1 for "
+                                                        "macros %2")
+                                             .arg(vgMacroName(VgMacro(tc.listed)), words)));
+                    }
+                }
+                unwind();
+                m_vgBrowser->setSampleVariants(vgCatalog(tab->root).voiceMacroWords, cries);
+                check(voiceAt(pasteSlot) == target, "the variant checks left the voice changed");
             }
 
             // View-only: Copy stays, Paste and Clear are disabled, and the

@@ -187,7 +187,7 @@ var ids = porydaw.edit.transaction("Insert chord", function () {
 | `moveLanePoints(track, cc, [{tick, newTick?, newValue?}])` | Moves the list of CC points, each to a new tick and value |
 | `deleteLanePoints(track, cc, [ticks])` | Deletes the list of CC points |
 | `setSettings({...})` | Partial update of `song.settings()` |
-| `setVoice(slot, {...})` | Partial update of one voice in the song's voicegroup (`porydaw.voicegroup` below) |
+| `setVoice(slot, {...})` | Partial update of one voice in the song's voicegroup (`porydaw.voicegroup` below). A sample `type` (`voice_directsound_*`) the project's macros don't define is refused. The reversed-sample twins `voice_directsound_alt` / `voice_directsound_reverse` are written in whichever spelling the project defines |
 | `setStartTempo(bpm)` | Sets the tempo at the start of the song (beats per minute) |
 | `setLoop(start, end)` | Sets the loop markers. (`null` means "remove the marker") |
 | `setTimeSig(tick, numerator, denominator)` | Sets the time signature at the given tick |

@@ -625,6 +625,110 @@ void runBundleImportSections(const QString &scratchDir, int *failures)
                QStringLiteral("label-style: keysplit and drumkit resolve"));
     }
 
+    { // ---- reverse twins: a reversed sample lands in the spelling the project defines -------
+        // A bundle whose reversed samples are spelled `spelling` (the flute
+        // with a comment naming the macro, and the drumset's kick).
+        const auto reversedBundle = [&](const char *name, const QByteArray &spelling) {
+            const QString dir = path(name);
+            copyTree(bundle, dir);
+            const QString top = dir + QStringLiteral("/sound/voicegroups/bundle_song.inc");
+            QByteArray bytes = readFile(top);
+            bytes.replace("\tvoice_directsound 60, 0, DirectSoundWaveData_flute, 255, 0, 255, 165",
+                          "\t" + spelling +
+                              " 60, 0, DirectSoundWaveData_flute, 255, 0, 255, 165 @ " + spelling);
+            writeFile(top, bytes);
+            const QString drumset = dir + QStringLiteral("/sound/voicegroups/test_drumset.inc");
+            bytes = readFile(drumset);
+            bytes.replace("\tvoice_directsound_no_resample 60, 64, DirectSoundWaveData_kick,",
+                          "\t" + spelling + " 60, 64, DirectSoundWaveData_kick,");
+            writeFile(drumset, bytes);
+            return dir;
+        };
+        // A project whose asm/macros defines the given sample macros.
+        const auto macroProject = [&](const char *name, const QByteArray &macros) {
+            const QString root = path(name);
+            QByteArray defs;
+            for (const QByteArray &word : macros.split(' '))
+                defs += "\t.macro " + word + " key:req\n\t.endm\n";
+            expect(buildEmptyProject(root) &&
+                       writeFile(root + QStringLiteral("/asm/macros/music_voice.inc"), defs),
+                   QStringLiteral("reverse twins: %1 project builds").arg(QLatin1String(name)));
+            return root;
+        };
+        const QByteArray base = "voice_directsound voice_directsound_no_resample cry cry_reverse ";
+        const QString altBundle = reversedBundle("alt_bundle", "voice_directsound_alt");
+        const QString reverseBundle = reversedBundle("reverse_bundle", "voice_directsound_reverse");
+        expect(readFile(altBundle + QStringLiteral("/sound/voicegroups/bundle_song.inc"))
+                       .contains("voice_directsound_alt 60, 0, DirectSoundWaveData_flute") &&
+                   readFile(reverseBundle + QStringLiteral("/sound/voicegroups/test_drumset.inc"))
+                       .contains("voice_directsound_reverse 60, 64, DirectSoundWaveData_kick"),
+               QStringLiteral("reverse twins: the bundles carry their spelling"));
+
+        // Each spelling into a project that defines only the other one: the
+        // written lines use the project's spelling (never inside a comment),
+        // the voicegroup sounds like the bundle's, and a re-import compares
+        // the renamed sub-voicegroup equal to the one it wrote.
+        const struct {
+            const char *tag;
+            QString bundle;
+            QByteArray projectWord, bundleWord;
+        } cases[] = {
+            {"pret", altBundle, "voice_directsound_reverse", "voice_directsound_alt"},
+            {"expansion", reverseBundle, "voice_directsound_alt", "voice_directsound_reverse"},
+        };
+        for (const auto &c : cases) {
+            const QString tag = QStringLiteral("reverse twins (%1)").arg(QLatin1String(c.tag));
+            const QString root =
+                macroProject(c.tag == QByteArray("pret") ? "pret_macros" : "expansion_macros",
+                             base + c.projectWord);
+            const ImportPlan plan = SongBundle::makeImportPlan(c.bundle, root);
+            QString error;
+            expect(plan.ok() && SongBundle::applyImportPlan(plan, &error),
+                   tag + QStringLiteral(": import applies: ") + describePlan(plan) + error);
+            const QByteArray top = readFile(root + QStringLiteral("/sound/voicegroups/") +
+                                            plan.voicegroup.name + QStringLiteral(".inc"));
+            const QByteArray drums =
+                readFile(root + QStringLiteral("/sound/voicegroups/test_drumset.inc"));
+            expect(
+                top.contains("\t" + c.projectWord +
+                             " 60, 0, DirectSoundWaveData_flute, 255, 0, 255, 165 @ " +
+                             c.bundleWord + "\n") &&
+                    drums.contains("\t" + c.projectWord + " 60, 64, DirectSoundWaveData_kick,") &&
+                    !drums.contains(c.bundleWord),
+                tag + QStringLiteral(": the lines are written as ") +
+                    QString::fromLatin1(c.projectWord) + QStringLiteral(", comments untouched:\n") +
+                    QString::fromUtf8(top.left(300)));
+            expectLoadsLikeBundle(tag, c.bundle, plan);
+            const ImportPlan again = SongBundle::makeImportPlan(c.bundle, root);
+            expect(again.ok() &&
+                       isItem(again.subVoicegroups, QStringLiteral("voicegroup_test_drumset"),
+                              ImportAction::Reuse, QStringLiteral("voicegroup_test_drumset")),
+                   tag + QStringLiteral(": a re-import reuses the drumset it wrote: ") +
+                       describePlan(again));
+        }
+
+        // Neither spelling defined: both refuse, naming the macro.
+        const QString neither = macroProject("neither_macros", base.trimmed());
+        for (const QByteArray &word :
+             {QByteArray("voice_directsound_alt"), QByteArray("voice_directsound_reverse")}) {
+            const ImportPlan plan = SongBundle::makeImportPlan(
+                word.endsWith("alt") ? altBundle : reverseBundle, neither);
+            expect(!plan.ok() && plan.refusals.join(QLatin1Char(' ')).contains(word),
+                   QStringLiteral("reverse twins: %1 refuses where neither is defined: ")
+                           .arg(QString::fromLatin1(word)) +
+                       describePlan(plan));
+        }
+        // No sample macros found at all: vanilla's _alt is trusted as written.
+        const QString unknown = path("unscanned_macros");
+        expect(buildEmptyProject(unknown),
+               QStringLiteral("reverse twins: unscanned project builds"));
+        const ImportPlan trusted = SongBundle::makeImportPlan(altBundle, unknown);
+        expect(trusted.ok() && trusted.voicegroup.lines.join('\n').contains(
+                                   "\tvoice_directsound_alt 60, 0, DirectSoundWaveData_flute"),
+               QStringLiteral("reverse twins: an unscanned project trusts _alt: ") +
+                   describePlan(trusted));
+    }
+
     { // ---- damaged, hostile and unusable inputs ----------------------------------------------
         const QString root = path("refusals");
         expect(buildEmptyProject(root), QStringLiteral("refusal project builds"));

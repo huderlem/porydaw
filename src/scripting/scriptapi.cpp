@@ -1968,14 +1968,18 @@ bool parseVgMacro(const QString &text, VgMacro *out)
     return false;
 }
 
-// The pokeemerald-expansion sample macros only assemble where the project
-// defines them; every other macro is vanilla.
-bool voiceMacroDefined(const ScriptHost &host, VgMacro macro)
+// Sample macros only assemble where the project's asm/macros defines them
+// (an empty scan found nothing to go on, so it gates nothing, as in the
+// dock). A reverse macro the project lacks becomes the twin it defines (as
+// the dock's Paste does), so *macro may change. Every other macro is vanilla.
+bool adoptDefinedVoiceMacro(const ScriptHost &host, VgMacro *macro)
 {
-    if (macro != VgMacro::DirectSoundReverse && !vgMacroIsCompressed(macro))
-        return true;
-    return host.bindings().voicegroupCatalog &&
-           host.bindings().voicegroupCatalog().voiceMacroWords.contains(vgMacroName(macro));
+    const QStringList defined = host.bindings().voicegroupCatalog
+                                    ? host.bindings().voicegroupCatalog().voiceMacroWords
+                                    : QStringList();
+    *macro = vgAdoptDefinedReverse(*macro, defined);
+    return !vgMacroIsDirectSound(*macro) || defined.isEmpty() ||
+           defined.contains(vgMacroName(*macro));
 }
 
 QString vgLineKindName(VgLineKind kind)
@@ -2916,7 +2920,7 @@ void EditApi::setVoice(int slot, const QVariantMap &spec)
         VgVoice voice = before;
         if (!applyVoiceSpec(spec, &voice, &error)) {
             throwError(QStringLiteral("edit.setVoice: ") + error);
-        } else if (voice.macro != before.macro && !voiceMacroDefined(m_host, voice.macro)) {
+        } else if (voice.macro != before.macro && !adoptDefinedVoiceMacro(m_host, &voice.macro)) {
             throwError(QStringLiteral("edit.setVoice: this project doesn't define the %1 macro")
                            .arg(vgMacroName(voice.macro)));
         } else {
@@ -2930,12 +2934,14 @@ void EditApi::setVoice(int slot, const QVariantMap &spec)
                 m_host.bindings().typicalAdsr) {
                 VgAdsr adsr;
                 m_host.bindings().typicalAdsr(voice.macro, voice.symbol, &adsr);
+                const VgMacro adopted = voice.macro; // the project's spelling
                 voice = before;
                 voice.attack = adsr.attack;
                 voice.decay = adsr.decay;
                 voice.sustain = adsr.sustain;
                 voice.release = adsr.release;
                 applyVoiceSpec(spec, &voice, &error); // validated above
+                voice.macro = adopted;
             }
             const bool cgb = vgMacroIsCgb(voice.macro);
             voice.attack = std::clamp(voice.attack, 0, cgb ? 7 : 255);

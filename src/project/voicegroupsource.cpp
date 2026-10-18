@@ -691,6 +691,29 @@ bool vgMacroIsCompressed(VgMacro macro)
            macro == VgMacro::DirectSoundCompressedReverse;
 }
 
+bool vgMacroIsReverseSample(VgMacro macro)
+{
+    return macro == VgMacro::DirectSoundAlt || macro == VgMacro::DirectSoundReverse;
+}
+
+VgMacro vgProjectReverseMacro(const QStringList &definedWords)
+{
+    return !definedWords.contains(vgMacroName(VgMacro::DirectSoundAlt)) &&
+                   definedWords.contains(vgMacroName(VgMacro::DirectSoundReverse))
+               ? VgMacro::DirectSoundReverse
+               : VgMacro::DirectSoundAlt;
+}
+
+VgMacro vgAdoptDefinedReverse(VgMacro macro, const QStringList &definedWords)
+{
+    if (!vgMacroIsReverseSample(macro) || definedWords.isEmpty() ||
+        definedWords.contains(vgMacroName(macro)))
+        return macro;
+    const VgMacro twin =
+        macro == VgMacro::DirectSoundAlt ? VgMacro::DirectSoundReverse : VgMacro::DirectSoundAlt;
+    return definedWords.contains(vgMacroName(twin)) ? twin : macro;
+}
+
 bool vgMacroIsCgb(VgMacro macro)
 {
     switch (macro) {

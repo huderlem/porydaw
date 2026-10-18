@@ -17,10 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a metronome. Toggle it with the new `Metronome` button on the transport toolbar (keyboard shortcut `C`). It clicks every beat, following the song's tempo and time signature. Set its volume in `Settings -> Audio`.
 - Added `Settings -> Audio -> Output device` to configure playback latency when playing a MIDI keyboard.
    - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
+- Added a right-click menu to the voicegroup dock's voice list: `Copy`, `Paste` and `Clear` a voice (`Ctrl+C` / `Ctrl+V` also work), and switch a voice between its variants (`Normal`, `No Resample`, `Reversed`, `Detuned`). Copied voices are plain `.inc` lines, so they can be pasted into a text editor or copied from one.
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.
 - Fixed `LFOS` changes restarting the modulation wave during playback.
+- Fixed reversed sample voices being written as `voice_directsound_alt` in projects that only define `voice_directsound_reverse` (such as current pokeemerald). Porydaw now writes whichever one the project defines.
 
 ## [1.3.0] - 2026-10-04
 

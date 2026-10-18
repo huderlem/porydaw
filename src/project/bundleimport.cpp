@@ -714,18 +714,31 @@ ImportPlan makeImportPlan(const QString &bundleRoot, const QString &projectRoot,
                    .arg(newSynths.join(QStringLiteral(", "))));
 
     // The pokeemerald-expansion sample macros (voice_directsound_compressed,
-    // cry_custom, ...): vanilla projects have no such words to assemble.
+    // cry_custom, ...): vanilla projects have no such words to assemble. The
+    // reverse twins voice_directsound_alt / _reverse assemble the same type
+    // byte, but projects define one or the other (pret pokeemerald only
+    // _reverse, pokeemerald-expansion only _alt): a spelling the project
+    // lacks is renamed to the twin it defines. _alt counts as vanilla only
+    // when the scan found no sample macros to go on.
     {
-        static const QSet<QString> vanilla = {QStringLiteral("voice_directsound"),
-                                              QStringLiteral("voice_directsound_no_resample"),
-                                              QStringLiteral("voice_directsound_alt"),
-                                              QStringLiteral("cry"), QStringLiteral("cry_reverse")};
         const QStringList defined = VoicegroupSource::directSoundCatalog(P).voiceMacroWords;
+        QSet<QString> vanilla = {QStringLiteral("voice_directsound"),
+                                 QStringLiteral("voice_directsound_no_resample"),
+                                 QStringLiteral("cry"), QStringLiteral("cry_reverse")};
+        if (defined.isEmpty())
+            vanilla.insert(vgMacroName(VgMacro::DirectSoundAlt));
+        for (VgMacro reverse : {VgMacro::DirectSoundAlt, VgMacro::DirectSoundReverse}) {
+            const QString word = vgMacroName(reverse);
+            const QString adopted = vgMacroName(vgAdoptDefinedReverse(reverse, defined));
+            if (adopted != word && refs.macroWords.contains(word))
+                renames.insert(word, adopted);
+        }
         QStringList missing;
         for (const QString &word : sortedList(refs.macroWords)) {
             const bool sampleMacro = word.startsWith(QLatin1String("voice_directsound")) ||
                                      word.startsWith(QLatin1String("cry"));
-            if (sampleMacro && !vanilla.contains(word) && !defined.contains(word))
+            if (sampleMacro && !vanilla.contains(word) && !defined.contains(word) &&
+                !renames.contains(word))
                 missing.append(word);
         }
         if (!missing.isEmpty())

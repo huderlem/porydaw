@@ -46,6 +46,19 @@ bool vgMacroIsDirectSound(VgMacro macro);  // any voice_directsound* sample voic
 bool vgMacroIsCompressed(VgMacro macro);   // plays a DPCM-compressed (cry) sample
 bool vgMacroIsCgb(VgMacro macro);          // CGB ADSR ranges (A/D/R 0-7, S 0-15)
 
+// The reverse sample macros: voice_directsound_alt and _reverse assemble the
+// same type byte, but projects define one or the other (pret pokeemerald
+// only _reverse, pokeemerald-expansion only _alt). definedWords is the
+// project's VgDirectSoundScan::voiceMacroWords; an empty list means the scan
+// found nothing to go on, so it gates nothing.
+bool vgMacroIsReverseSample(VgMacro macro); // voice_directsound_alt / _reverse
+// The spelling a newly reversed sample voice gets: _alt unless the project
+// defines only _reverse (both defined keeps vanilla's _alt).
+VgMacro vgProjectReverseMacro(const QStringList &definedWords);
+// macro, or its reverse twin when the project lacks macro's spelling but
+// defines the twin's (a defined spelling is kept as written).
+VgMacro vgAdoptDefinedReverse(VgMacro macro, const QStringList &definedWords);
+
 // One editable voice's parsed macro arguments, exactly as written in the file
 // (unpacked: pan/duty/period/sweep are the raw macro args, not the ToneData
 // encodings).
