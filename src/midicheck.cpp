@@ -1906,6 +1906,17 @@ void MainWindow::checkVirtualWindow()
               note->text().contains(QStringLiteral("without a MIDI backend")) == noBackend,
           "virtual window: the Settings note sits flush at the page edge, or its wording does "
           "not follow the backend");
+    // Hand-off iii (step 2): with or without a backend, the open Virtual
+    // Keyboard has Fixed velocity, the Recording offset and the Controls;
+    // without one there are still no ports to list.
+    const auto shown = [page](const char *name) {
+        auto *w = page->findChild<QWidget *>(QString::fromLatin1(name));
+        return w && w->isVisibleTo(page);
+    };
+    check(shown("settingsMidiFixedVelocity") && shown("settingsMidiLatency") &&
+              shown("settingsMidiRouteVOL") && shown("settingsMidiPortsGroup") != noBackend,
+          "virtual window: with the Virtual Keyboard open, Settings → MIDI hides Fixed velocity, "
+          "the Recording offset or the Controls, or lists ports without a backend");
 
     // A key held through the close is released on the audio thread too.
     if (!m_audioOk) {
@@ -1932,6 +1943,9 @@ void MainWindow::checkVirtualWindow()
           "virtual window: closing the Virtual Keyboard did not hide Record and lane Learn");
     check(note && !note->isVisibleTo(page),
           "virtual window: the Settings note outlived the Virtual Keyboard");
+    check(shown("settingsMidiFixedVelocity") != noBackend,
+          "virtual window: without a backend, Settings → MIDI kept its controls after the "
+          "Virtual Keyboard closed (or, with one, hid them)");
     drain(midi.ring());
 }
 

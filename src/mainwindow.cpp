@@ -106,6 +106,7 @@
 #include "ui/theme/themeruntime.h"
 #include "ui/typography.h"
 #include "ui/viewsidecar.h"
+#include "ui/virtualkeyboardwindow.h"
 #include "ui/voicegroupbrowser.h"
 #ifdef PORYDAW_SCRIPTING
 #include "scripting/pluginspage.h"
@@ -195,6 +196,9 @@ const QString kCountInBarsKey = QStringLiteral("countInBars");
 // Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
 // metronome.
 const QString kPunchKey = QStringLiteral("punch");
+// Whether the Virtual MIDI Keyboard window shows (docs/virtual-keyboard/
+// PLAN.md D1); the window persists its own octave, velocity and geometry.
+const QString kVirtualKeyboardVisibleKey = QStringLiteral("virtualKeyboard/visible");
 // The output device's buffering (Settings → Audio → Output device):
 // buffer size in ms (0 = the backend's default) and WASAPI exclusive mode.
 const QString kAudioPeriodMsKey = QStringLiteral("audio/periodMs");
@@ -669,6 +673,15 @@ MainWindow::~MainWindow()
         m_uiTimer->stop();
     if (m_playheadTimer)
         m_playheadTimer->stop();
+    // The Virtual Keyboard window first, while MidiInput (destroyed before
+    // the Qt children) is still here: it releases what it holds and closes
+    // its port (docs/virtual-keyboard/PLAN.md §4.1 hand-off i). Blocked, so
+    // the port closing reaches no slot of this window on its way out.
+    if (m_virtualKeyboard) {
+        const QSignalBlocker blocker(m_midiInput.get());
+        delete m_virtualKeyboard;
+        m_virtualKeyboard = nullptr;
+    }
     // No more MIDI input (quietly: no slot of a half-destroyed window may
     // run), then stop the audio thread before the sessions free the
     // timeline and voicegroup it borrows.
@@ -1332,6 +1345,36 @@ void MainWindow::buildUi()
     m_pluginPanelsMenu->menuAction()->setVisible(false);
 #endif
 
+    // The Virtual MIDI Keyboard (docs/virtual-keyboard/PLAN.md D1): a tool
+    // window over this one. Shown, its port is open, so Record and lane
+    // Learn appear with no MIDI device. Visibility persists here; startup
+    // restores it after this window shows (restoreVirtualKeyboard).
+    m_virtualKeyboard = new VirtualKeyboardWindow(m_midiInput.get(), this);
+    m_virtualKeyboardAction = viewMenu->addAction(tr("Virtual MIDI &Keyboard"));
+    m_virtualKeyboardAction->setObjectName(QStringLiteral("viewVirtualKeyboardAction"));
+    m_virtualKeyboardAction->setCheckable(true);
+    keys.attach(QStringLiteral("view.virtual_keyboard"), m_virtualKeyboardAction);
+    connect(m_virtualKeyboardAction, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue(kVirtualKeyboardVisibleKey, on);
+        if (on) {
+            updateVirtualKeyboardTarget();
+            // The user's toggle hands it the keys (typing, step 3); the
+            // startup restore leaves them with this window.
+            const bool activate = !m_restoringVirtualKeyboard;
+            m_virtualKeyboard->setAttribute(Qt::WA_ShowWithoutActivating, !activate);
+            m_virtualKeyboard->show();
+            m_virtualKeyboard->raise();
+            if (activate) {
+                m_virtualKeyboard->activateWindow();
+                m_virtualKeyboardActivations++;
+            }
+        } else {
+            m_virtualKeyboard->hide();
+        }
+    });
+    connect(m_virtualKeyboard, &VirtualKeyboardWindow::closeRequested, m_virtualKeyboardAction,
+            [this] { m_virtualKeyboardAction->setChecked(false); });
+
     // App-wide view preferences, set off by a separator from the per-song
     // view state above: these persist in QSettings and apply to every open
     // tab at once. (The theme and typeface live in Edit → Settings.)
@@ -1699,6 +1742,9 @@ SongSession *MainWindow::createSession()
     // Moving the edit cursor while playing (or paused) seeks playback there,
     // chasing controller state to the landing position.
     connect(s->view, &SongView::editCursorMoved, this, [this, s](uint64_t tick) {
+        // The header's voice follows the edit cursor; so does the keyboard's.
+        if (s == m_active)
+            updateVirtualKeyboardTarget();
         if (s == m_active && m_audioOk && m_audio.songLoaded() &&
             m_audio.transport() != Transport::Stopped) {
             const uint64_t targetSample = m_audio.timeline()->sampleForTick(tick);
@@ -5716,6 +5762,46 @@ void MainWindow::publishLiveTarget()
     m_audio.setLiveTarget(track);
     // Whether Record can start depends on the selection too.
     syncRecordAction();
+    updateVirtualKeyboardTarget();
+}
+
+void MainWindow::updateVirtualKeyboardTarget()
+{
+    if (!m_virtualKeyboard)
+        return;
+    // What the keyboard plays into (D9): the take's track while recording,
+    // else the selected one, with its voice at the edit cursor. Not the
+    // header's instrumentLabel: that follows the playhead while playing,
+    // which this line would only catch on the next selection or cursor
+    // move, and then keep after the stop.
+    const MidiTimeline *timeline = m_active ? m_active->view->timeline() : nullptr;
+    if (!timeline) {
+        m_virtualKeyboard->setTarget(tr("No song open"));
+        return;
+    }
+    int track = m_active->view->selectedTrack();
+    if (m_takeSession == m_active)
+        track = m_take.track();
+    if (track < 0 || track >= 16) {
+        m_virtualKeyboard->setTarget(tr("No track selected"));
+        return;
+    }
+    QString name = timeline->tracks[track].name;
+    if (name.isEmpty())
+        name = tr("Track %1").arg(track + 1);
+    m_virtualKeyboard->setTarget(
+        QStringLiteral("%1 · %2 — %3")
+            .arg(track + 1)
+            .arg(name, m_active->view->instrumentLabelAt(track, m_active->view->editCursorTick())));
+}
+
+void MainWindow::restoreVirtualKeyboard()
+{
+    if (QSettings().value(kVirtualKeyboardVisibleKey, false).toBool()) {
+        m_restoringVirtualKeyboard = true;
+        m_virtualKeyboardAction->setChecked(true);
+        m_restoringVirtualKeyboard = false;
+    }
 }
 
 void MainWindow::syncLiveSettings()

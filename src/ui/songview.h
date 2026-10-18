@@ -489,6 +489,9 @@ class SongView : public QWidget
         return trackPanAt(track, atTick);
     }
     QString instrumentLabel(int track) const; // "042 name (type)" from the voicegroup
+    // instrumentLabel's text for the voice in effect at tick, not at the
+    // display position (the Virtual Keyboard follows the edit cursor).
+    QString instrumentLabelAt(int track, uint64_t tick) const;
     QString voiceShortName(uint8_t program) const;
     QString voiceLabel(uint8_t program) const; // "042 name", the marker/header format
 

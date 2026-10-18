@@ -131,6 +131,11 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel,
 // window with the audio device parked. Writes into the project (a bundle
 // export): scratch copy only. Redirects QSettings itself.
 int runRecordCheck(const QString &projectRoot, const QString &songLabel);
+// vkeycheck.cpp; Virtual MIDI Keyboard check (docs/virtual-keyboard/PLAN.md
+// step 2): the window driven offscreen with the song open, its notes read
+// from the input ring with the audio device parked. Redirects QSettings
+// itself; the project is only read.
+int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -243,6 +248,9 @@ int main(int argc, char *argv[])
         const QString shot = midiCheck + 3 < args.size() ? args[midiCheck + 3] : QString();
         return runMidiCheck(args[midiCheck + 1], args[midiCheck + 2], shot);
     }
+    const int vkeyCheck = args.indexOf(QStringLiteral("--vkeycheck"));
+    if (vkeyCheck >= 0 && vkeyCheck + 2 < args.size())
+        return runVirtualKeyboardCheck(args[vkeyCheck + 1], args[vkeyCheck + 2]);
     const int recCheck = args.indexOf(QStringLiteral("--reccheck"));
     if (recCheck >= 0 && recCheck + 2 < args.size())
         return runRecordCheck(args[recCheck + 1], args[recCheck + 2]);
@@ -311,6 +319,8 @@ int main(int argc, char *argv[])
         // restored tabs, so the bundle is what the user lands on.
         window.openCommandLinePaths(args.mid(1));
     });
+    // After the main window shows, so the tool window opens over it.
+    window.restoreVirtualKeyboard();
 #ifdef PORYDAW_SCRIPTING
     // Interactive launches only: harnesses never run the user's plugins.
     window.loadPlugins();

@@ -345,6 +345,8 @@ MidiSettingsPage::MidiSettingsPage(MidiInput &midi, QWidget *parent, bool showWi
     // Input ports: every port plays unless unchecked, and a keyboard
     // plugged in later joins on its own.
     auto *portsGroup = new QGroupBox(tr("Input ports"), m_controls);
+    portsGroup->setObjectName(QStringLiteral("settingsMidiPortsGroup"));
+    m_portsGroup = portsGroup;
     m_ports = new QListWidget(m_controls);
     m_ports->setObjectName(QStringLiteral("settingsMidiPorts"));
     m_ports->setSelectionMode(QAbstractItemView::NoSelection);
@@ -638,9 +640,17 @@ void MidiSettingsPage::hideEvent(QHideEvent *event)
 void MidiSettingsPage::syncBackend()
 {
     const bool controls = m_midi.backendAvailable() || m_showWithoutBackend;
+    // The Virtual Keyboard records without a backend, so its user needs
+    // Fixed velocity, the Recording offset and the Controls then too; there
+    // are still no ports to list, and the message keeps saying why.
+    const bool settings = controls || m_midi.virtualOpen();
     m_unavailableLabel->setText(m_midi.backendStatus());
     m_unavailable->setVisible(!controls);
-    m_controlsScroll->setVisible(controls);
+    m_controlsScroll->setVisible(settings);
+    m_portsGroup->setVisible(controls);
+    // Both shown, the message takes only its own height.
+    if (auto *outer = qobject_cast<QVBoxLayout *>(layout()))
+        outer->setStretchFactor(m_unavailable, settings ? 0 : 1);
     // Without a backend the message below says MIDI is unavailable; the
     // note says what still works.
     m_virtualNote->setText(

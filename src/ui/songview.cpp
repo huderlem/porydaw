@@ -11564,9 +11564,14 @@ QString SongView::voiceLabel(uint8_t program) const
 
 QString SongView::instrumentLabel(int track) const
 {
+    return instrumentLabelAt(track, displayTick());
+}
+
+QString SongView::instrumentLabelAt(int track, uint64_t tick) const
+{
     if (!m_timeline)
         return QString();
-    const int prog = currentProgram(track);
+    const int prog = programAtTick(track, tick);
     if (prog < 0)
         return tr("(no voice set)");
     return voiceLabel(uint8_t(prog));

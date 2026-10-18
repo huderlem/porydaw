@@ -62,7 +62,10 @@ class MidiSettingsPage : public QWidget
     static constexpr int kMinPortRows = 2;
     static constexpr int kMaxPortRows = 5;
     // Shows the controls or the no-backend message, whichever applies, and
-    // the Virtual Keyboard's note while it is open.
+    // the Virtual Keyboard's note while it is open. Without a backend the
+    // open Virtual Keyboard still brings back the controls a keyboard uses
+    // (Playing and recording, Controls), under the message, with no port
+    // list (docs/virtual-keyboard/PLAN.md §4.1 hand-off iii).
     void syncBackend();
     void portItemChanged(QListWidgetItem *item);
     void loadPreferences();
@@ -72,6 +75,7 @@ class MidiSettingsPage : public QWidget
     QScrollArea *m_controlsScroll = nullptr;
     QWidget *m_controls = nullptr;
     QWidget *m_unavailable = nullptr;
+    QWidget *m_portsGroup = nullptr;
     QLabel *m_unavailableLabel = nullptr;
     // "The Virtual Keyboard is open..." while it is (docs/virtual-keyboard/
     // PLAN.md D8): above both views, since it plays without a backend too.

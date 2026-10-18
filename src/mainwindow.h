@@ -31,6 +31,7 @@ class QSpinBox;
 class QToolBar;
 class QToolButton;
 class CompanionWidget;
+class VirtualKeyboardWindow;
 class MidiInput;
 class QTimer;
 class QWidget;
@@ -192,6 +193,15 @@ class MainWindow : public QMainWindow
     // exist. Called after show() on interactive launches only, so the
     // harnesses never inherit (or overwrite) the user's session.
     void restoreSession();
+    // Shows the Virtual MIDI Keyboard if it was showing when the app last
+    // quit. Interactive launches only, after show(), like restoreSession.
+    void restoreVirtualKeyboard();
+
+    // Virtual MIDI Keyboard check (--vkeycheck; vkeycheck.cpp,
+    // docs/virtual-keyboard/PLAN.md step 2): the window driven offscreen
+    // with the song open. QSettings must be redirected. Returns the number
+    // of failed expectations.
+    int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel);
 
   protected:
     void closeEvent(QCloseEvent *event) override;
@@ -251,6 +261,9 @@ class MainWindow : public QMainWindow
     // MIDI live play (docs/midi-input/PLAN.md step 2): the engine's live
     // target is the active tab's selected track, -1 without one.
     void publishLiveTarget();
+    // The Virtual MIDI Keyboard's track-and-voice line follows the live
+    // target (publishLiveTarget) and the edit cursor (the header's voice).
+    void updateVirtualKeyboardTarget();
     void syncLiveSettings();
     // Mirrors the engine's held-key mask onto the active roll's keyboard,
     // and reports a keyboard program change the engine ignored (J3).
@@ -874,6 +887,14 @@ class MainWindow : public QMainWindow
     QSpinBox *m_tempoSpin = nullptr;
     QToolButton *m_tempoWarning = nullptr;
     CompanionWidget *m_companion = nullptr;
+    // docs/virtual-keyboard/PLAN.md: deleted first in ~MainWindow.
+    VirtualKeyboardWindow *m_virtualKeyboard = nullptr;
+    QAction *m_virtualKeyboardAction = nullptr;
+    // Inside restoreVirtualKeyboard: show the window without activating it.
+    bool m_restoringVirtualKeyboard = false;
+    // How often showing it activated it (for --vkeycheck, where offscreen
+    // activates every shown window regardless).
+    int m_virtualKeyboardActivations = 0;
     QAction *m_companionAction = nullptr;
     uint64_t m_companionLastSample = UINT64_MAX;
     QAction *m_tempoWarningAction = nullptr; // the toolbar's wrapper; owns visibility

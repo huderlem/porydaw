@@ -83,6 +83,11 @@ const Def kDefs[] = {
      QKeySequence::UnknownKey, ""},
     {"view.companion", Context::Global, QT_TR_NOOP("View"), QT_TR_NOOP("Show Beat Companion"),
      QKeySequence::UnknownKey, ""},
+    // docs/virtual-keyboard/PLAN.md D1: Reaper's chord for its virtual
+    // keyboard. A window shortcut on the main window (WindowShortcut), so a
+    // text field there never sees Alt+B, and the menu bar has no &B.
+    {"view.virtual_keyboard", Context::Global, QT_TR_NOOP("View"),
+     QT_TR_NOOP("Virtual MIDI Keyboard"), QKeySequence::UnknownKey, "Alt+B"},
     // Tools
     {"midi.panic", Context::Global, QT_TR_NOOP("Tools"), QT_TR_NOOP("MIDI: All Notes Off"),
      QKeySequence::UnknownKey, ""},

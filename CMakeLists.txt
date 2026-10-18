@@ -226,6 +226,8 @@ qt_add_library(porydaw_app STATIC
     src/ui/audiosettingspage.h
     src/ui/midisettingspage.cpp
     src/ui/midisettingspage.h
+    src/ui/virtualkeyboardwindow.cpp
+    src/ui/virtualkeyboardwindow.h
     src/ui/appearancesettingspage.cpp
     src/ui/appearancesettingspage.h
     src/ui/settingsdialog.cpp
@@ -364,6 +366,7 @@ qt_add_executable(porydaw
     src/midicheck.cpp
     src/metrocheck.cpp
     src/reccheck.cpp
+    src/vkeycheck.cpp
     src/velcheck.cpp
     resources/fonts.qrc
 )
