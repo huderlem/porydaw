@@ -171,6 +171,10 @@ class Registry : public QObject
     // Applies the command's bindings to the action now and re-applies them on
     // every user change for the action's lifetime.
     void attach(const QString &id, QAction *action);
+    // (harness) The live actions attach() has bound (the harnesses check that none is
+    // an ApplicationShortcut, which a window's ShortcutOverride can't hold
+    // back from a floating tool window: docs/virtual-keyboard/PLAN.md D4).
+    QList<QAction *> attachedActions() const;
 
   signals:
     void bindingsChanged();

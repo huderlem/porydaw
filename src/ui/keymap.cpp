@@ -724,6 +724,16 @@ void Registry::attach(const QString &id, QAction *action)
     action->setShortcuts(bindings(id));
 }
 
+QList<QAction *> Registry::attachedActions() const
+{
+    QList<QAction *> out;
+    for (const Attached &a : m_actions) {
+        if (a.action)
+            out.append(a.action.data());
+    }
+    return out;
+}
+
 void Registry::applyToActions()
 {
     m_actions.removeIf([](const Attached &a) { return a.action.isNull(); });

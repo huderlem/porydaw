@@ -1,7 +1,7 @@
 # Virtual MIDI Keyboard — play and record without a MIDI device
 
 Status: plan agreed with the user 2026-10-18; step 1 built 2026-10-18 (§4.1);
-step 2 built 2026-10-18 (uncommitted, §4.2).
+step 2 built 2026-10-18 (§4.2); step 3 built 2026-10-19 (uncommitted, §4.3).
 Work the steps **in order, one Opus subagent per step**; each step must
 leave the branch green (`tools/run_checks.sh`, normal + ASAN) and ends
 with an "As built" entry at the bottom of this file. Workflow per step:
@@ -448,4 +448,169 @@ save in `hideEvent`; W12 no clear of the window's lit bits on show; W13
 the old `fontPx(5)` minimum height. Not mutation-tested: the constructor's
 `roundBase` (equivalent to the old rounding after the clamp) and the CI
 geometry change (Qt 6.2.4 here never adjusts).
+
+### 4.3 Step 3 (2026-10-19, uncommitted)
+
+**Built.** Typing, holder counting, the ShortcutOverride claims and the
+release-everything paths, all in the window; `--vkeycheck` extended.
+
+- `src/ui/virtualkeyboardwindow.h`: physical keys (h:136: `kNoteKeys` = 29
+  in the order z s x d c v g b h n j m , | q 2 w 3 e r 5 t 6 y 7 u i 9 o 0,
+  then `kOctaveDownKey` / `kOctaveUpKey`), `KeyTable` and
+  `platformKeyTable()` (h:145), `physicalKey(event, table)` (h:154),
+  `typingOffset` (bottom row 0–12, top row 12–27, so `,` and `q` are both
+  12), `holders(key)` (h:159), `VirtualPianoWidget::endMouseDrag` (h:59).
+- `src/ui/virtualkeyboardwindow.cpp`: the tables (cpp:59 PS/2 set 1, used
+  for Windows and, + 8, for XKB; cpp:68 macOS `kVK_ANSI_*`; cpp:74 the US
+  `key()` fallback plus the shifted US symbols); `hold` / `unhold` /
+  `releaseAll` (cpp:705–733); `platformKeyTable` / `physicalKey`
+  (cpp:735, :747); `event()` (cpp:778: ShortcutOverride, WindowDeactivate,
+  WindowBlocked), `changeEvent` (cpp:806: ActivationChange to inactive),
+  `keyPressEvent` / `keyReleaseEvent` (cpp:813, :841). The mouse now goes
+  through `hold` / `unhold` too (the piano's `mouseNoteOn/Off`). `setBase`
+  calls `releaseAll` before moving; `closePort` calls it in place of the
+  mouse-only release; `openPort` resets the counts; `noteState` zeroes a
+  key's holders and typed slots when a note off it did not send arrives
+  (the port closing). The window is its own focus widget (it takes the focus on
+  `WindowActivate`; see Review fixes).
+- `src/ui/keymap.{h,cpp}`: `Registry::attachedActions()` (h:177), for the
+  ApplicationShortcut assertion.
+- `src/vkeycheck.cpp` (from :647): the step-3 block; file comment extended.
+
+**Judgment calls.**
+
+1. *Scan-code source per platform* (chosen at run time from
+   `QGuiApplication::platformName()`): `xcb` and `wayland*` → XKB keycodes
+   (`nativeScanCode` = evdev + 8); `windows` → PS/2 set 1 from
+   `nativeScanCode` (Qt passes lParam bits 16–24, extended bit included, so
+   arrows and the keypad never collide with these codes); `cocoa` →
+   `nativeVirtualKey` against `kVK_ANSI_*` (Qt leaves `nativeScanCode` 0
+   there); anything else (offscreen, minimal, eglfs) → `key()` only.
+2. *When the fallback applies.* A non-zero native code decides alone: a code
+   the table lacks is no key, never `key()`'s guess, because that guess is
+   wrong on exactly the layouts D3 is for (AZERTY's A position reports Q).
+   A zero code (offscreen, `sendEvent`'d keys, some injected/remote-desktop
+   keys on Windows) falls back to `key()` on the US letters and digits.
+   The Mac never falls back, since 0 is `kVK_ANSI_A` (unmapped). The
+   keypad (`KeypadModifier`) never plays in the fallback.
+3. *Shift is the plain key.* Shift+Z plays Z and its ShortcutOverride is
+   claimed (so no Shift+letter shortcut runs from the window either). The
+   native path ignores Shift by nature; the fallback also maps the shifted
+   US symbols (`<` `@` `#` `%` `^` `&` `(` `)` `_` `+`) to their keys, so
+   Shift+2 (`Key_At`) plays and its release as plain `2` (Shift let go
+   first) still stops it. Ctrl/Alt/Meta make a command, not a note: not
+   played, not claimed. A note's release stops it whatever the modifiers
+   are by then.
+4. *A second non-repeat press of a held key* (its release went elsewhere)
+   is the same holder: no retrigger, one release stops it.
+5. *Released everything stays silent until pressed again*: after
+   `releaseAll` (deactivation, a modal dialog, an octave shift, hide) the
+   typed keys still down are forgotten, and the mouse drag is ended
+   (`endMouseDrag`: moves no longer glide until the next press). Step 2's
+   octave shift with the mouse held used to leave the drag gliding; it no
+   longer does.
+6. *Release order* in `releaseAll`: the mouse key first (through its
+   holder), then the remaining held keys ascending.
+7. *Release triggers*: `WindowDeactivate`, `WindowBlocked` (a modal dialog,
+   even if activation doesn't move), and `ActivationChange` while
+   `!isActiveWindow()`, plus hide. An `ActivationChange` while still active
+   releases nothing.
+8. *Key events while inactive* are ignored by an `isActiveWindow()` guard in
+   `keyPressEvent`; releases are honoured whenever they arrive.
+9. *No shipped command has a bare-letter WindowShortcut today* (M, S, R, C
+   and friends dispatch from the roll), so the claim protects users' own
+   rebinds (e.g. Toggle Loop → S) and plugin actions; the harness drives
+   exactly that rebind.
+
+**Offscreen notes.** The offscreen platform has no native codes, so typing
+is driven through the `key()` fallback (the harness asserts
+`platformKeyTable()` is `None` there) and the native tables are unit-tested
+through `physicalKey` with synthetic `QKeyEvent`s carrying native codes
+(xcb, Windows and Mac codes for z, s, q, 2, comma, 0, m, minus, equals; an
+unknown code with a misleading `key()`; zero codes; the QWERTZ Y position).
+The ShortcutOverride with native codes is not driven end to end (a
+non-spontaneous key's override carries none). Offscreen never reports a
+hidden window losing activation, so a window shown again while still Qt's
+focus window is not reactivated; the harness activates the main window
+first. Activation itself works offscreen, so deactivation, inactive-window
+key events and a modal dialog are driven for real, and each release path
+is also driven alone with a synthetic event.
+
+**For the Windows check.** Real scan codes (and a non-US layout if one is
+at hand); key repeat while holding a key; Alt+Tab and a modal dialog
+(Settings) with keys held; Space and Alt+B from the window; S (or any
+rebound letter) from the window not running its shortcut; Shift+keys.
+
+**Mutation tests** (each applied alone, rebuilt, fresh scratch; CAUGHT
+unless noted, then restored): T1 a set-1 code wrong; T2 XKB offset 0; T3 a
+Mac code wrong; T4 an unknown native code falls back to `key()`; T5 a zero
+Windows code doesn't fall back; T6 `key()` checked before the native code;
+T7 keypad not excluded; T8 `Key_At` dropped from the shifted table; T9 the
+fallback's comma → period; T10 `typingOffset` off by one; T11 velocity
+fixed at 100; T12 no `isActiveWindow()` guard; T13 no modifier guard on
+press; T14/T15 auto-repeat press/release not ignored; T16 every holder
+retriggers; T17 every release sends a note off; T18 the mouse bypasses the
+holders; T19 no `releaseAll` in `setBase`; T20 `endMouseDrag` doesn't end
+the drag; T21 no WindowDeactivate; T22 no WindowBlocked; T23 no
+ActivationChange; T24 ActivationChange releases while active; T25 the
+override never claimed (the end-to-end S check fires the action); T26 the
+override ignores modifiers; T27 the override claims every key; T28 `-`/`=`
+swapped; T29 `closePort` releases the mouse only — NOT caught, equivalent
+(`setVirtualOpen(false)` releases the rest and `noteState` clears them);
+T30 `noteState` keeps the holders on a foreign note off — NOT caught,
+equivalent (`closePort`'s `releaseAll` and `openPort`'s reset); T31
+`releaseAll` keeps the typed slots — NOT caught at first, then a check
+for a key held through a deactivation and released elsewhere was added:
+still equivalent alone (`noteState`'s slot clear), T39 = T31 plus no slot
+clear in `noteState` — caught; T32 a release ignored with Ctrl held; T33
+an attached action given `Qt::ApplicationShortcut`; T34 the Mac falls back
+on 0; T35 no duplicate-press guard; T36 no `playable` check — NOT caught,
+equivalent (`hold` refuses keys above 127); T37 offscreen treated as XKB;
+T38 `releaseAll` sends no note offs for held counts.
+
+**Review fixes** (Opus review, which checked the Qt focus behaviour with
+an offscreen probe). MEDIUM: a menu popup with a key held left its note
+sounding. Menu-bar mnemonics (Alt+V and friends) are WindowShortcuts that
+fire from the active tool window (Alt chords rightly pass the override); a
+`QMenu` popup does not deactivate the window but takes every key event,
+the releases included, so no release path ran (hold Z, Alt+V, let Z go,
+Escape: C3 sounded until Z was pressed again). Now `focusOutEvent` calls
+`releaseAll` (the first popup sends the focus widget a FocusOut with
+`Qt::PopupFocusReason`), and `event()` takes the focus explicitly on
+`WindowActivate` (`setFocus(Qt::ActiveWindowFocusReason)`), since only the
+focus widget gets that FocusOut. The FocusOut that also comes with a
+deactivation or a hide is harmless: `releaseAll` is idempotent (the
+counts are zero by then, nothing is sent twice). On the Qt here (6.2.4)
+activation already makes a window with any focus policy but `NoFocus` its
+own focus widget, so the explicit `setFocus` is what keeps it from resting
+on that; the reviewer's "focusWidget() stays null" holds for a `NoFocus`
+window. LOW: the StrongFocus comment claimed the policy is what delivers
+the keys; reworded to the real mechanism. Nits: `<cstdint>` in the header,
+`platformKeyTable()` cached in a function-local static, harness-facing
+helpers marked "(harness)". `--vkeycheck`: the activated window is the
+focus object and the focus widget; with its policy set to `NoFocus` and its
+remembered focus cleared, an activation still makes it the focus widget
+(so the check rests on the explicit `setFocus`, not Qt's fallback); the
+typing checks while active go through `QGuiApplication::focusObject()`;
+hold Z, `QMenu::popup`, Z's release sent to the menu, close: exactly one
+note off, no holders, Z plays on its next press. Mutations: no FocusOut
+release — caught (the popup check); no `setFocus` on activate — caught
+(the `NoFocus` activation check; without that check it is equivalent on
+Qt 6.2.4, which gives the focus itself).
+
+**Left for step 4.** D11 docs (the manual should cover the physical-key
+layout, Shift, the octave keys, what releases held keys); the plan's
+earlier hand-offs (iv, vi); the voice label not refreshing on a voicegroup
+rename (§4.2). Also:
+
+- *macOS checklist item:* AppKit may not deliver keyUp while Cmd is held
+  (hold Z, Cmd+Z, let Z go first: Z may stick until pressed again). A
+  possible fix: `releaseAll` on a Cmd press on macOS.
+- *macOS note:* `SH_Widget_ShareActivation` keeps `isActiveWindow()` true
+  for the Tool window while the main window is active, so there only
+  `WindowDeactivate` (and the popup FocusOut) release; the
+  `ActivationChange`-while-inactive path may never fire.
+- *D11 manual line:* on X servers without evdev keycodes (XQuartz, the
+  legacy kbd driver) typing is silent by design (judgment call 2: a
+  non-zero native code the table lacks is no key, never `key()`'s guess).
 

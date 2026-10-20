@@ -7,8 +7,10 @@
 
 #include <QCloseEvent>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPaintEvent>
@@ -45,6 +47,72 @@ constexpr int kWhiteIndex[VirtualPianoWidget::kSpan] = {
 // piano's height.
 constexpr double kBlackWidth = 0.6;
 constexpr double kBlackHeight = 0.62;
+
+// D3: the physical keys by platform code, in VirtualKeyboardWindow's
+// physical-key order (z s x d c v g b h n j m , | q 2 w 3 e r 5 t 6 y 7 u i
+// 9 o 0 | - =), each the key at that US-layout position: 13 bottom-row
+// keys, 16 top-row keys, then - and =.
+constexpr int kTableSize = VirtualKeyboardWindow::kPhysicalKeys;
+
+// PS/2 scan code set 1, as Windows reports it (lParam bits 16–24). Linux
+// evdev codes are the same numbers for this block of keys.
+constexpr quint32 kSet1[kTableSize] = {
+    0x2C, 0x1F, 0x2D, 0x20, 0x2E, 0x2F, 0x22, 0x30, 0x23, 0x31, 0x24, 0x32, 0x33, 0x10, 0x03, 0x11,
+    0x04, 0x12, 0x13, 0x06, 0x14, 0x07, 0x15, 0x08, 0x16, 0x17, 0x0A, 0x18, 0x0B, 0x0C, 0x0D,
+};
+// XKB keycodes (xcb, Wayland) are the evdev code + 8.
+constexpr quint32 kXkbOffset = 8;
+
+// macOS kVK_ANSI_* virtual key codes (Carbon's Events.h), which name
+// positions on the ANSI keyboard whatever the layout.
+constexpr quint32 kMacAnsi[kTableSize] = {
+    0x06, 0x01, 0x07, 0x02, 0x08, 0x09, 0x05, 0x0B, 0x04, 0x2D, 0x26, 0x2E, 0x2B, 0x0C, 0x13, 0x0D,
+    0x14, 0x0E, 0x0F, 0x17, 0x11, 0x16, 0x10, 0x1A, 0x20, 0x22, 0x19, 0x1F, 0x1D, 0x1B, 0x18,
+};
+
+// The fallback: key() on a US layout, unshifted and shifted.
+constexpr int kUsKeys[kTableSize] = {
+    Qt::Key_Z, Qt::Key_S,     Qt::Key_X,     Qt::Key_D, Qt::Key_C, Qt::Key_V,     Qt::Key_G,
+    Qt::Key_B, Qt::Key_H,     Qt::Key_N,     Qt::Key_J, Qt::Key_M, Qt::Key_Comma, Qt::Key_Q,
+    Qt::Key_2, Qt::Key_W,     Qt::Key_3,     Qt::Key_E, Qt::Key_R, Qt::Key_5,     Qt::Key_T,
+    Qt::Key_6, Qt::Key_Y,     Qt::Key_7,     Qt::Key_U, Qt::Key_I, Qt::Key_9,     Qt::Key_O,
+    Qt::Key_0, Qt::Key_Minus, Qt::Key_Equal,
+};
+// Shift+key's key() on a US layout, where it differs (letters report the
+// same key() shifted or not).
+constexpr struct {
+    int key;
+    int physical;
+} kUsShifted[] = {
+    {Qt::Key_Less, 12},
+    {Qt::Key_At, 14},
+    {Qt::Key_NumberSign, 16},
+    {Qt::Key_Percent, 19},
+    {Qt::Key_AsciiCircum, 21},
+    {Qt::Key_Ampersand, 23},
+    {Qt::Key_ParenLeft, 26},
+    {Qt::Key_ParenRight, 28},
+    {Qt::Key_Underscore, VirtualKeyboardWindow::kOctaveDownKey},
+    {Qt::Key_Plus, VirtualKeyboardWindow::kOctaveUpKey},
+};
+
+int findCode(const quint32 (&table)[kTableSize], quint32 code, quint32 offset = 0)
+{
+    for (int i = 0; i < kTableSize; i++) {
+        if (table[i] + offset == code)
+            return i;
+    }
+    return -1;
+}
+
+// D4: Ctrl/Alt/Meta make a chord, which is a command, never a note (Alt+B,
+// Ctrl+Z). Shift is not one: Shift+Z plays Z, as the physical key is the
+// same, so a Shift held while playing neither drops the note nor runs a
+// Shift+letter shortcut.
+bool commandModifiers(const QKeyEvent *event)
+{
+    return event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
+}
 
 // A base rounded down to its C (also below zero) and clamped to C-1..C8.
 int roundBase(int base)
@@ -115,6 +183,12 @@ void VirtualPianoWidget::releaseMouseKey()
     const int key = m_mouseKey;
     m_mouseKey = -1;
     emit mouseNoteOff(key);
+}
+
+void VirtualPianoWidget::endMouseDrag()
+{
+    releaseMouseKey();
+    m_dragEnded = true;
 }
 
 void VirtualPianoWidget::forgetMouseKey(int key)
@@ -326,6 +400,7 @@ void VirtualPianoWidget::mousePressEvent(QMouseEvent *event)
     }
     // One mouse note at a time (D7): a press never stacks on a held one.
     releaseMouseKey();
+    m_dragEnded = false;
     const int key = keyAt(event->position().toPoint());
     if (key >= 0)
         sound(key);
@@ -334,7 +409,7 @@ void VirtualPianoWidget::mousePressEvent(QMouseEvent *event)
 
 void VirtualPianoWidget::mouseMoveEvent(QMouseEvent *event)
 {
-    if (!(event->buttons() & Qt::LeftButton)) {
+    if (!(event->buttons() & Qt::LeftButton) || m_dragEnded) {
         QWidget::mouseMoveEvent(event);
         return;
     }
@@ -364,10 +439,21 @@ VirtualKeyboardWindow::VirtualKeyboardWindow(MidiInput *midi, QWidget *parent)
     : QWidget(parent, Qt::Tool)
     , m_midi(midi)
 {
+    m_typed.fill(-1);
     // D1: Qt::Tool owned by the main window — above Porydaw's windows,
     // never above other applications, hidden with the app.
     setObjectName(QStringLiteral("virtualKeyboardWindow"));
     setWindowTitle(tr("Virtual MIDI Keyboard"));
+    // The window itself is the focus widget (its controls take no focus), so
+    // the ShortcutOverride and the key events of step 3 land here, and so it
+    // gets the FocusOut a menu popup sends (focusOutEvent). Being the focus
+    // widget does not come from StrongFocus as such: with any policy but
+    // NoFocus, Qt 6.2's activation falls back to making the window its own
+    // focus widget (with NoFocus, focusWidget() stays null and keys arrive
+    // only by QWidgetWindow's focus-object fallback, and no popup FocusOut
+    // ever comes). event() takes the focus explicitly on WindowActivate, so
+    // it never rests on that fallback; StrongFocus adds click-to-focus.
+    setFocusPolicy(Qt::StrongFocus);
 
     m_piano = new VirtualPianoWidget(this);
 
@@ -446,10 +532,10 @@ VirtualKeyboardWindow::VirtualKeyboardWindow(MidiInput *midi, QWidget *parent)
             saveVelocity();
     });
     connect(m_velocity, &QSlider::sliderReleased, this, &VirtualKeyboardWindow::saveVelocity);
-    connect(m_piano, &VirtualPianoWidget::mouseNoteOn, this,
-            [this](int key) { send(0x90, key, m_velocity->value()); });
-    connect(m_piano, &VirtualPianoWidget::mouseNoteOff, this,
-            [this](int key) { send(0x80, key, 0); });
+    // The mouse is one more holder (PLAN §3 step 3): a C4 typed and clicked
+    // at once sounds once and stops with the last release.
+    connect(m_piano, &VirtualPianoWidget::mouseNoteOn, this, &VirtualKeyboardWindow::hold);
+    connect(m_piano, &VirtualPianoWidget::mouseNoteOff, this, &VirtualKeyboardWindow::unhold);
     if (m_midi) {
         connect(m_midi, &MidiInput::noteStateChanged, this, &VirtualKeyboardWindow::noteState);
         // D9 / step 1 judgment call 8: a closing port never sends its
@@ -482,7 +568,10 @@ void VirtualKeyboardWindow::setBase(int base)
     base = roundBase(base);
     if (base == m_piano->base())
         return;
-    m_piano->setBase(base); // releases the mouse key first
+    // D5: every held note goes first, typed and clicked; the keys still
+    // down sound again only when pressed again.
+    releaseAll();
+    m_piano->setBase(base);
     syncOctave();
     QSettings().setValue(kBaseKey, base);
 }
@@ -551,6 +640,8 @@ void VirtualKeyboardWindow::openPort()
     // Nothing the window sent is held yet (stale bits could only come from
     // a note sent while it was hidden, e.g. midicheck opening the port).
     m_piano->clearVirtualHeld();
+    m_holders.fill(0);
+    m_typed.fill(-1);
     // The port first, so Record appears with the window; the monitor's
     // hardware keys light from here on.
     m_midi->setVirtualOpen(true);
@@ -564,7 +655,7 @@ void VirtualKeyboardWindow::closePort()
     // Hand-off ii: the mouse key's note off and setVirtualOpen(false)'s
     // releases signal noteState synchronously, from inside here.
     m_closing = true;
-    m_piano->releaseMouseKey();
+    releaseAll();
     if (m_midi) {
         m_midi->setVirtualOpen(false);
         m_midi->setNoteMonitorEnabled(false);
@@ -592,8 +683,13 @@ void VirtualKeyboardWindow::noteState(int key, bool on, bool fromVirtual)
     if (fromVirtual) {
         m_piano->setVirtualHeld(key, on);
         // Released elsewhere (the port closing): no second note off later.
-        if (!on)
+        // The window's own note off comes with the key's holders already at
+        // zero, so this forgets only what something else let go.
+        if (!on && key >= 0 && key < 128) {
             m_piano->forgetMouseKey(key);
+            m_holders[size_t(key)] = 0;
+            std::replace(m_typed.begin(), m_typed.end(), key, -1);
+        }
     } else {
         m_piano->setHardwareDown(key, on);
     }
@@ -610,5 +706,181 @@ void VirtualKeyboardWindow::saveVelocity()
     if (value != m_savedVelocity) {
         m_savedVelocity = value;
         QSettings().setValue(kVelocityKey, value);
+    }
+}
+
+void VirtualKeyboardWindow::hold(int key)
+{
+    if (key < 0 || key >= 128)
+        return;
+    if (m_holders[size_t(key)]++ == 0)
+        send(0x90, key, m_velocity->value());
+}
+
+void VirtualKeyboardWindow::unhold(int key)
+{
+    if (key < 0 || key >= 128 || m_holders[size_t(key)] == 0)
+        return;
+    if (--m_holders[size_t(key)] == 0)
+        send(0x80, key, 0);
+}
+
+void VirtualKeyboardWindow::releaseAll()
+{
+    // The bookkeeping goes first: every note off below signals noteState
+    // back synchronously.
+    m_typed.fill(-1);
+    m_piano->endMouseDrag(); // the mouse key's unhold
+    for (int key = 0; key < 128; key++) {
+        if (m_holders[size_t(key)] > 0) {
+            m_holders[size_t(key)] = 0;
+            send(0x80, key, 0);
+        }
+    }
+}
+
+VirtualKeyboardWindow::KeyTable VirtualKeyboardWindow::platformKeyTable()
+{
+    // The platform plugin cannot change at run time.
+    static const KeyTable table = [] {
+        const QString platform = QGuiApplication::platformName();
+        if (platform == QLatin1String("xcb") || platform.startsWith(QLatin1String("wayland")))
+            return KeyTable::Xkb;
+        if (platform == QLatin1String("windows"))
+            return KeyTable::Windows;
+        if (platform == QLatin1String("cocoa"))
+            return KeyTable::Mac;
+        return KeyTable::None;
+    }();
+    return table;
+}
+
+int VirtualKeyboardWindow::physicalKey(const QKeyEvent *event, KeyTable table)
+{
+    switch (table) {
+    case KeyTable::Mac:
+        return findCode(kMacAnsi, event->nativeVirtualKey());
+    case KeyTable::Xkb:
+        if (event->nativeScanCode() != 0)
+            return findCode(kSet1, event->nativeScanCode(), kXkbOffset);
+        break;
+    case KeyTable::Windows:
+        if (event->nativeScanCode() != 0)
+            return findCode(kSet1, event->nativeScanCode());
+        break;
+    case KeyTable::None:
+        break;
+    }
+    // No native code: the US layout's keys, never the keypad's digits.
+    if (event->modifiers() & Qt::KeypadModifier)
+        return -1;
+    const int key = event->key();
+    for (int i = 0; i < kTableSize; i++) {
+        if (kUsKeys[i] == key)
+            return i;
+    }
+    for (const auto &shifted : kUsShifted) {
+        if (shifted.key == key)
+            return shifted.physical;
+    }
+    return -1;
+}
+
+bool VirtualKeyboardWindow::event(QEvent *event)
+{
+    switch (event->type()) {
+    case QEvent::ShortcutOverride: {
+        // D4: a typed note (or - / =) is the window's, so the main window's
+        // WindowShortcut actions, which do fire from an active Qt::Tool
+        // child, never also run for it. Everything else passes through:
+        // Space (play/stop), Alt+B (closes this), Escape, Ctrl/Alt/Meta
+        // chords.
+        const auto *key = static_cast<QKeyEvent *>(event);
+        if (!commandModifiers(key) && physicalKey(key, platformKeyTable()) >= 0) {
+            event->accept();
+            return true;
+        }
+        break;
+    }
+    case QEvent::WindowActivate:
+        // The window is the focus widget while active, not only the focus
+        // object by fallback, so a popup's FocusOut reaches focusOutEvent.
+        if (!hasFocus())
+            setFocus(Qt::ActiveWindowFocusReason);
+        break;
+    case QEvent::WindowDeactivate:
+    case QEvent::WindowBlocked:
+        // D4: the key releases go to whichever window is active now, and a
+        // modal dialog takes the input: let everything go.
+        releaseAll();
+        break;
+    default:
+        break;
+    }
+    return QWidget::event(event);
+}
+
+void VirtualKeyboardWindow::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::ActivationChange && !isActiveWindow())
+        releaseAll();
+}
+
+void VirtualKeyboardWindow::focusOutEvent(QFocusEvent *event)
+{
+    QWidget::focusOutEvent(event);
+    // A menu popup (a menu-bar mnemonic such as Alt+V fires from this
+    // window) leaves it active but takes every key event, the releases
+    // included: let everything go, as on deactivation. releaseAll is
+    // idempotent, so the FocusOut that comes with a deactivation or a hide
+    // releases nothing twice.
+    releaseAll();
+}
+
+void VirtualKeyboardWindow::keyPressEvent(QKeyEvent *event)
+{
+    const int physical = physicalKey(event, platformKeyTable());
+    // D4: only while active (inactive, it gets no key events anyway), and
+    // never a Ctrl/Alt/Meta chord.
+    if (physical < 0 || !isActiveWindow() || commandModifiers(event)) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+    event->accept();
+    // D3: a held key sounds until released; its repeats change nothing.
+    if (event->isAutoRepeat())
+        return;
+    if (physical == kOctaveDownKey || physical == kOctaveUpKey) {
+        shiftOctave(physical == kOctaveUpKey ? 1 : -1); // releases everything first
+        return;
+    }
+    // Already down (its release went elsewhere): it is sounding.
+    if (m_typed[size_t(physical)] >= 0)
+        return;
+    const int key = base() + typingOffset(physical);
+    // D5: at C8 the keys past G9 play nothing.
+    if (!m_piano->playable(key))
+        return;
+    m_typed[size_t(physical)] = key;
+    hold(key);
+}
+
+void VirtualKeyboardWindow::keyReleaseEvent(QKeyEvent *event)
+{
+    const int physical = physicalKey(event, platformKeyTable());
+    if (physical < 0) {
+        QWidget::keyReleaseEvent(event);
+        return;
+    }
+    event->accept();
+    if (event->isAutoRepeat() || physical >= kNoteKeys)
+        return;
+    // Whatever the modifiers now (Ctrl pressed while the note was held), the
+    // release lets the note go.
+    const int key = m_typed[size_t(physical)];
+    if (key >= 0) {
+        m_typed[size_t(physical)] = -1;
+        unhold(key);
     }
 }
