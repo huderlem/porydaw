@@ -699,7 +699,7 @@ void runBundleExportSections(const QString &scratchDir, int *failures)
         // .aif-only samples (the legacy pipeline).
         QFile::rename(samples + QStringLiteral("kick.wav"), samples + QStringLiteral("kick.aif"));
         refuses("aif", {QStringLiteral("DirectSoundWaveData_kick"), QStringLiteral(".aif"),
-                        QStringLiteral("Sample Studio")});
+                        QStringLiteral(".wav")});
         QFile::rename(samples + QStringLiteral("kick.aif"), samples + QStringLiteral("kick.wav"));
 
         // A sample file that is simply gone, and a cry whose .bin isn't built.
