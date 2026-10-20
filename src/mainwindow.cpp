@@ -138,8 +138,24 @@ void showListedWarning(QWidget *parent, const QString &title, const QString &err
         return;
     }
     const QString fixed = QFontDatabase::systemFont(QFontDatabase::FixedFont).family();
+    // A long list would push the box's buttons off a laptop screen (a
+    // Modern Emerald song once listed 40+ .aif samples), so the box shows
+    // the first few entries and keeps the whole list behind Show Details,
+    // which scrolls. An entry is an unindented line plus the indented lines
+    // quoting it, so a cut never separates a place from its source text.
+    constexpr int kShownEntries = 8;
+    const QStringList lines = error.mid(split + 1).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    int entries = 0;
+    qsizetype shownLines = lines.size();
+    for (qsizetype i = 0; i < lines.size(); i++) {
+        if (i > 0 && lines.at(i).startsWith(QLatin1Char(' ')))
+            continue;
+        if (entries++ == kShownEntries)
+            shownLines = i;
+    }
+    const bool truncated = entries > kShownEntries + 2;
     QString list;
-    for (const QString &line : error.mid(split + 1).split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+    for (const QString &line : truncated ? lines.first(shownLines) : lines) {
         if (line.startsWith(QLatin1Char(' ')))
             list += QStringLiteral("<div style=\"margin-left:16px; "
                                    "font-family:'%1'; white-space:pre\">%2</div>")
@@ -153,9 +169,15 @@ void showListedWarning(QWidget *parent, const QString &title, const QString &err
                              aside < 0 ? QString() : line.mid(aside).toHtmlEscaped());
         }
     }
+    if (truncated)
+        list += QStringLiteral("<div style=\"margin-top:8px\">%1</div>")
+                    .arg(QObject::tr("…and %n more (see Details)", nullptr, entries - kShownEntries)
+                             .toHtmlEscaped());
     QMessageBox box(QMessageBox::Warning, title, error.left(split), QMessageBox::Ok, parent);
     box.setTextFormat(Qt::PlainText);
     box.setInformativeText(list);
+    if (truncated)
+        box.setDetailedText(lines.join(QLatin1Char('\n')));
     box.exec();
 }
 

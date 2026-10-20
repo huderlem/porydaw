@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed `LFOS` changes restarting the modulation wave during playback.
 - Fixed a bug where reversed directsound voices were saved as `voice_directsound_alt` in projects that only define `voice_directsound_reverse`. Porydaw now writes whichever one the project defines.
 - Fixed issue where new drumset voicegroups weren't showing up unless an existing voice used them.
+- Fixed issue where `Export Song Bundle` error message could be too large to fit on-screen.
 
 ## [1.3.0] - 2026-10-04
 

@@ -243,10 +243,10 @@ QList<VgSourceLine> continuationLines(const QString &root, const VoicegroupSourc
     return out;
 }
 
-QString joinNames(QStringList names)
+QString listNames(QStringList names)
 {
     std::sort(names.begin(), names.end());
-    return names.join(QStringLiteral(", "));
+    return names.join(QLatin1Char('\n'));
 }
 
 QStringList sortedList(const QSet<QString> &set)
@@ -649,16 +649,18 @@ bool Exporter::stage(const QString &destDir, QString *error)
     }
 
     // ---- Refusals ----
+    // One name per line after the explanation: showListedWarning lists them
+    // (and scrolls a long list) instead of wrapping one giant sentence.
     if (!aifSamples.isEmpty())
         return fail(QStringLiteral("These samples only exist as .aif files, which a bundle can't "
-                                   "carry: %1. Convert them to .wav in the Sample Studio first.")
-                        .arg(joinNames(aifSamples)));
+                                   "carry. Convert them to .wav first.\n%1")
+                        .arg(listNames(aifSamples)));
     if (!unresolved.isEmpty())
         return fail(QStringLiteral("The song's voicegroup references things this project "
-                                   "doesn't define, so the bundle would be incomplete: %1. (An "
+                                   "doesn't define, so the bundle would be incomplete. (An "
                                    "unsaved Golden Sun synth voice resolves once the song is "
-                                   "saved.)")
-                        .arg(joinNames(unresolved)));
+                                   "saved.)\n%1")
+                        .arg(listNames(unresolved)));
 
     // ---- Write the tree ----
     const QString base = QDir(destDir).absolutePath() + QLatin1Char('/');
