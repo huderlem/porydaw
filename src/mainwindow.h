@@ -198,7 +198,7 @@ class MainWindow : public QMainWindow
     void restoreVirtualKeyboard();
 
     // Virtual MIDI Keyboard check (--vkeycheck; vkeycheck.cpp,
-    // docs/virtual-keyboard/PLAN.md step 2): the window driven offscreen
+    // docs/virtual-keyboard/PLAN.md steps 2–3): the window driven offscreen
     // with the song open. QSettings must be redirected. Returns the number
     // of failed expectations.
     int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel);

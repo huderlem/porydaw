@@ -361,7 +361,7 @@ declare namespace porydaw {
         data1: number;
         /** 0 for program change (0xCn) and channel pressure (0xDn). */
         data2: number;
-        /** The sending port's name. */
+        /** The sending port's name ("Virtual Keyboard" for the built-in window, which ports() doesn't list). */
         port: string;
     }
     namespace midi {

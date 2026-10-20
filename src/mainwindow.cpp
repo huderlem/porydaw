@@ -1358,7 +1358,7 @@ void MainWindow::buildUi()
         QSettings().setValue(kVirtualKeyboardVisibleKey, on);
         if (on) {
             updateVirtualKeyboardTarget();
-            // The user's toggle hands it the keys (typing, step 3); the
+            // The user's toggle hands it the keys (for typing); the
             // startup restore leaves them with this window.
             const bool activate = !m_restoringVirtualKeyboard;
             m_virtualKeyboard->setAttribute(Qt::WA_ShowWithoutActivating, !activate);
@@ -5330,6 +5330,9 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
     }
     updateVgDockTitle();
     updateTabTitle(session);
+    // The Virtual Keyboard's line names the voice too (a rename, a type).
+    if (&session == m_active)
+        updateVirtualKeyboardTarget();
 }
 
 void MainWindow::reloadVoicegroupPreview(SongSession &session, int keepSlot)

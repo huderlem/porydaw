@@ -1,7 +1,8 @@
 # Virtual MIDI Keyboard — play and record without a MIDI device
 
 Status: plan agreed with the user 2026-10-18; step 1 built 2026-10-18 (§4.1);
-step 2 built 2026-10-18 (§4.2); step 3 built 2026-10-19 (uncommitted, §4.3).
+step 2 built 2026-10-18 (§4.2); step 3 built 2026-10-19 (§4.3); step 4
+(docs + final branch review) done 2026-10-19 (uncommitted, §4.4).
 Work the steps **in order, one Opus subagent per step**; each step must
 leave the branch green (`tools/run_checks.sh`, normal + ASAN) and ends
 with an "As built" entry at the bottom of this file. Workflow per step:
@@ -614,3 +615,41 @@ rename (§4.2). Also:
   legacy kbd driver) typing is silent by design (judgment call 2: a
   non-zero native code the table lacks is no key, never `key()`'s guess).
 
+### 4.4 Step 4 (2026-10-19, uncommitted)
+
+**Docs (D11).** `docsrc/manual/virtual-keyboard.md`, a TODO-outline stub in
+`midi-keyboard.md`'s style for the user's prose: opening the window, the
+mouse, typing (the key rows as a rendered table, comma = Q, physical
+positions, Shift, what passes through), octave, recording, lit keys, what
+releases held notes, and Things to know (hand-offs iv and vi, X servers
+without evdev keycodes, the macOS Cmd keyUp caveat). mkdocs nav entry after
+the MIDI keyboard page; a "No MIDI keyboard?" pointer at the top of
+`midi-keyboard.md`; one CHANGELOG line under Added. Hand-off iv:
+`docs/scripting/API.md` (`on("message")`'s `port`) and `porydaw.d.ts`
+(`MidiMessage.port`) say messages from the window carry "Virtual Keyboard"
+and `ports()` lists hardware only; `docsrc/reference/scripting.md`
+regenerated. Hand-off vi (Learn with only the virtual port) is documented,
+not hidden; still the user's call. `mkdocs build --strict` passes.
+
+**Final review fixes.**
+
+1. *The voice label now follows voicegroup edits* (§4.2 "Left for step 3"):
+   `MainWindow::onVoiceEdited` calls `updateVirtualKeyboardTarget` for the
+   active session, so a voice edit, its undo and its redo (all through
+   `applyVoiceEdit`) refresh the line. `--vkeycheck` switches the cursor's
+   voice to a square (structural edit) and asserts the line changes, then
+   undoes and asserts it comes back. Mutation (no call): caught. The
+   harness now writes the voicegroup preview under the scratch project's
+   `.porydaw/` (comments in `vkeycheck.cpp` and `main.cpp` updated).
+2. *Comment accuracy*: step-numbered phrasing that read as "not yet" ("the
+   key events of step 3", "for typing (step 3)") reworded; the window's
+   class comment mentions typing; the harness declarations say steps 2–3.
+
+Checked without change: Alt+B against every default binding and the menu
+bar's mnemonics (File, Edit, View, Tools, Plugins, Help: no &B); the View
+menu's &K is unique; no Qt API deprecated after 6.2 in the branch's code
+(QKeyEvent / QMouseEvent constructors are the non-deprecated forms);
+`clang-format --dry-run --Werror` clean on every touched file; settings keys
+`virtualKeyboard/{base,velocity,geometry,visible}`; harness QSettings and
+QStandardPaths isolation; ScriptHost's `on("ports")` dedups the
+`portsChanged` the virtual port emits, so plugins see no spurious change.

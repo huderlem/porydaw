@@ -132,9 +132,10 @@ int runMidiCheck(const QString &projectRoot, const QString &songLabel,
 // export): scratch copy only. Redirects QSettings itself.
 int runRecordCheck(const QString &projectRoot, const QString &songLabel);
 // vkeycheck.cpp; Virtual MIDI Keyboard check (docs/virtual-keyboard/PLAN.md
-// step 2): the window driven offscreen with the song open, its notes read
+// steps 2–3): the window driven offscreen with the song open, its notes read
 // from the input ring with the audio device parked. Redirects QSettings
-// itself; the project is only read.
+// itself; a voice edit writes the voicegroup preview under .porydaw/:
+// scratch copy only.
 int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])

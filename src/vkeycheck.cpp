@@ -25,15 +25,18 @@
 #include "audio/midiinput.h"
 #include "core/miditimeline.h"
 #include "mainwindow.h"
+#include "project/voicegroupsource.h"
+#include "songsession.h"
 #include "ui/keymap.h"
 #include "ui/songview.h"
 #include "ui/virtualkeyboardwindow.h"
 
 // --vkeycheck <projectRoot> <songLabel>: the Virtual MIDI Keyboard window
-// (docs/virtual-keyboard/PLAN.md step 2), driven offscreen with the song
+// (docs/virtual-keyboard/PLAN.md steps 2–3), driven offscreen with the song
 // open and the audio device parked, so every note the window sends stays in
 // MidiInput's input ring to be read back. QSettings is redirected into a
-// temp dir first; the project is only read.
+// temp dir first. A voice edit (undone) writes the voicegroup preview under
+// the project's .porydaw/: scratch copy only.
 //
 // Covers: the View action shows and hides the window and follows its close
 // button; shown, the Virtual Keyboard port is open and the note monitor on,
@@ -46,7 +49,8 @@
 // only hardware keys), and a lit key repaints only its own rectangle;
 // hiding with the mouse holding a key releases it once; the octave, the
 // velocity, the geometry and the visibility persist; the track-and-voice
-// line follows the selection and the edit cursor.
+// line follows the selection, the edit cursor and a voicegroup edit (and
+// its undo).
 //
 // Step 3 (typing): every one of D2's 29 keys by the key() fallback the
 // offscreen platform leaves (it has no native codes) plays its note at the
@@ -327,6 +331,29 @@ int MainWindow::runVirtualKeyboardCheck(const QString &projectRoot, const QStrin
         }
         if (!tested)
             std::printf("vkeycheck: voice-follows-cursor SKIP (no mid-song voice change)\n");
+        // A voicegroup edit that renames the voice (here its type) shows at
+        // once, and its undo puts the old name back, with no rebuild.
+        {
+            const int track = view->selectedTrack();
+            const int prog = view->programAtTick(track, view->editCursorTick());
+            const VgVoice *voice =
+                m_active->vgSource && prog >= 0 ? m_active->vgSource->voiceAt(prog) : nullptr;
+            if (check(voice != nullptr, "no editable voice at the edit cursor")) {
+                const QString before = window->target();
+                VgVoice edited = *voice;
+                edited.macro =
+                    edited.macro == VgMacro::Square2 ? VgMacro::Square1 : VgMacro::Square2;
+                onVoiceEditRequested(prog, edited, /*structural=*/true);
+                QApplication::processEvents();
+                check(window->target() != before &&
+                          window->target().endsWith(view->voiceLabel(uint8_t(prog))),
+                      "the window's voice did not follow a voicegroup edit");
+                m_active->doc.undoStack()->undo();
+                QApplication::processEvents();
+                check(window->target() == before,
+                      "the window's voice did not follow the voicegroup edit's undo");
+            }
+        }
         take(ring);
     }
 

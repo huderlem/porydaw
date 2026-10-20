@@ -3,6 +3,9 @@
 <!-- For musicians plugging in a keyboard for the first time. Symptom-first:
 "I plugged it in, now what?" -->
 
+No MIDI keyboard? See [The Virtual MIDI Keyboard](virtual-keyboard.md): play
+and record with the mouse and the computer keyboard.
+
 ## Connecting a keyboard
 
 <!-- TODO: Plug in a USB MIDI keyboard; porydaw finds it on its own within

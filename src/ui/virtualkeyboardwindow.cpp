@@ -445,7 +445,7 @@ VirtualKeyboardWindow::VirtualKeyboardWindow(MidiInput *midi, QWidget *parent)
     setObjectName(QStringLiteral("virtualKeyboardWindow"));
     setWindowTitle(tr("Virtual MIDI Keyboard"));
     // The window itself is the focus widget (its controls take no focus), so
-    // the ShortcutOverride and the key events of step 3 land here, and so it
+    // the ShortcutOverride and the typed key events land here, and so it
     // gets the FocusOut a menu popup sends (focusOutEvent). Being the focus
     // widget does not come from StrongFocus as such: with any policy but
     // NoFocus, Qt 6.2's activation falls back to making the window its own
@@ -457,7 +457,7 @@ VirtualKeyboardWindow::VirtualKeyboardWindow(MidiInput *midi, QWidget *parent)
 
     m_piano = new VirtualPianoWidget(this);
 
-    // The controls take no focus: the window keeps it, for typing (step 3).
+    // The controls take no focus: the window keeps it, for typing.
     m_down = new QToolButton(this);
     m_down->setObjectName(QStringLiteral("virtualKeyboardOctaveDown"));
     m_down->setArrowType(Qt::LeftArrow);

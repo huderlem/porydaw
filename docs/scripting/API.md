@@ -258,7 +258,7 @@ See these example plugins for reference: [`plugins/examples/vu-meter`](https://g
 | `available` | Whether a MIDI system is up. `false` in a build without MIDI support, or where the computer has none (WSL, for example) |
 | `ports()` | `[{name, open, enabled, failed, role}]`, the MIDI input ports as Settings → MIDI lists them. `name` is the port's name there (a second device with the same name is `"Name (2)"`). `enabled` is its checkbox, `open` is whether porydaw is receiving from it, and `failed` is whether it is enabled but could not be opened (another program may be using it). `role` is `"keyboard"` or `"surface"`, its Keyboard / Control surface choice: a control surface's messages reach `on("message")` but never play, record or drive Learn |
 | `dropped` | How many messages `on("message")` listeners never got, because porydaw fell more than 1024 messages behind |
-| `on("message", fn({status, data1, data2, port}))` | Callback invoked for every message a keyboard sends. `port` is the sending port's `name` |
+| `on("message", fn({status, data1, data2, port}))` | Callback invoked for every message a keyboard sends. `port` is the sending port's `name`, or `"Virtual Keyboard"` for notes played on porydaw's built-in Virtual MIDI Keyboard window (which `ports()` doesn't list: it lists hardware ports only) |
 | `on("ports", fn(ports))` | Callback invoked with `ports()` whenever it changes (a keyboard plugged in or unplugged, a port turned on or off) |
 
 Every `on()` returns a function that unsubscribes the listener.

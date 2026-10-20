@@ -16,7 +16,7 @@ class QToolButton;
 
 // The Virtual MIDI Keyboard's piano (docs/virtual-keyboard/PLAN.md D2, D5,
 // D7, D9): two octaves and a bit from a base C, 16 white keys and 12 black,
-// each labelled with the computer key that plays it (step 3) and each C with
+// each labelled with the computer key that plays it and each C with
 // its octave. It owns no MIDI state: the mouse key is reported through
 // mouseNoteOn/mouseNoteOff, and what is lit is pushed in by the window.
 //
@@ -113,11 +113,11 @@ class VirtualPianoWidget : public QWidget
     int m_labelHeight = 0;
 };
 
-// The Virtual MIDI Keyboard window (docs/virtual-keyboard/PLAN.md D1, step
-// 2): a tool window owned by the main window, so it stays above Porydaw's
+// The Virtual MIDI Keyboard window (docs/virtual-keyboard/PLAN.md D1, steps
+// 2–3): a tool window owned by the main window, so it stays above Porydaw's
 // windows and hides with the app. While it is shown the Virtual Keyboard
-// port is open and the note monitor runs; hiding it releases whatever it
-// held and closes both. Its base octave, velocity and geometry persist in
+// port is open and the note monitor runs; while it is active its keys play
+// (D3, D4); hiding it releases whatever it held and closes both. Its base octave, velocity and geometry persist in
 // QSettings (virtualKeyboard/...); whether it shows is the main window's
 // action's to persist.
 class VirtualKeyboardWindow : public QWidget
