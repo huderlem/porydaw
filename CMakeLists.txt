@@ -271,6 +271,23 @@ if(APPLE)
         ${QUARTZCORE_FRAMEWORK}
     )
 endif()
+if(UNIX AND NOT APPLE)
+    # The Virtual MIDI Keyboard rewrites its X11 window type under WSLg
+    # (virtualkeyboardwindow.cpp), which needs libxcb's headers
+    # (libxcb1-dev). Optional: without them that window is unreachable under
+    # WSLg only, and every other desktop is unaffected.
+    find_package(PkgConfig)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(XCB QUIET IMPORTED_TARGET xcb)
+    endif()
+    if(XCB_FOUND)
+        target_compile_definitions(porydaw_app PRIVATE PORYDAW_HAVE_XCB)
+        target_link_libraries(porydaw_app PRIVATE PkgConfig::XCB)
+    else()
+        message(STATUS "libxcb development files not found (install libxcb1-dev); "
+                       "the Virtual MIDI Keyboard will not take input under WSLg")
+    endif()
+endif()
 target_include_directories(porydaw_app PUBLIC
     src
     ${PORYAAAA_DIR}/third_party

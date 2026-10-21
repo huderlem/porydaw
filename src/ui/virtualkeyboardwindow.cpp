@@ -6,6 +6,7 @@
 #include "ui/m4asemantics.h"
 
 #include <QCloseEvent>
+#include <QFileInfo>
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -20,8 +21,15 @@
 #include <QSlider>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWindow>
 #include <algorithm>
 #include <cmath>
+#ifdef PORYDAW_HAVE_XCB
+#include <QtGui/qguiapplication_platform.h>
+#include <cstdlib>
+#include <cstring>
+#include <xcb/xcb.h>
+#endif
 
 namespace {
 
@@ -606,6 +614,116 @@ void VirtualKeyboardWindow::syncOctave()
     m_up->setEnabled(base < kMaxBase);
 }
 
+// WSLg (Weston's xwm behind XWayland, with Windows owning activation) breaks
+// a Qt::Tool window two ways. Its X11 type, _NET_WM_WINDOW_TYPE_UTILITY, is
+// parked at -32768,-32768: the surface still paints over the main window,
+// but XWayland maps pointer events through the X window's position, so no
+// click ever lands on it and Windows gets no window for it at all. And its
+// WM_TRANSIENT_FOR makes the shell treat it as a dialog that keeps the focus
+// over its parent: Windows activates the main window on a click, the shell
+// hands the focus straight back to the keyboard, and the main window's
+// shortcuts never fire again until the keyboard closes. Retyping the window
+// NORMAL and pointing WM_TRANSIENT_FOR at the client leader (an X window
+// that is never mapped, so it has no surface: the xwm then treats this one
+// as an ordinary toplevel, as Qt's own parentless tool windows are) gives a
+// window that is placed where it paints and swaps focus with the main
+// window like any other. Pointed, not deleted: the xwm keeps the last
+// value it read, and a deleted property reads as nothing, so a delete can
+// lose the race with an earlier read while a rewrite is picked up by the
+// next re-read. Both go on at ShowToParent, after QXcbWindow::show() has
+// written its own WM_TRANSIENT_FOR, mapped the window and synced: the xwm
+// has already read Qt's values at the MapRequest, but the rewrites dirty
+// them, and it reads them again when the window's surface appears (its
+// xserver_map_shell_surface), which waits for the first buffer this
+// window commits from the event loop, after this returns. That re-read is
+// the one that decides the surface's parent and placement.
+// The main window's WindowShortcut actions still fire from here: that
+// depends on the Qt::Tool flag, not on the X11 properties. WSL only:
+// elsewhere UTILITY keeps its usual desktop behavior (above the parent, no
+// taskbar entry). Costs under WSLg: the keyboard is a peer window, so the
+// main window can cover it, and it has its own taskbar entry.
+static bool underWslg()
+{
+#if defined(PORYDAW_HAVE_XCB) && QT_CONFIG(xcb)
+    if (QGuiApplication::platformName() != QLatin1String("xcb"))
+        return false;
+    // WSL, and WSLg's own X server rather than a Windows one (VcXsrv, X410)
+    // reached from WSL: /mnt/wslg is WSLg's mount.
+    if (!qEnvironmentVariableIsSet("WSL_DISTRO_NAME") && !qEnvironmentVariableIsSet("WSL_INTEROP"))
+        return false;
+    return QFileInfo::exists(QStringLiteral("/mnt/wslg"));
+#else
+    return false;
+#endif
+}
+
+// Before the map (QEvent::Show): with no transient parent on the QWindow,
+// QXcbWindow::show() writes the client leader into WM_TRANSIENT_FOR itself,
+// so the xwm never reads the main window there, and Qt no longer lists this
+// window among the main window's transient children, whose WM_TRANSIENT_FOR
+// it rewrites whenever the main window's native window is recreated (Qt
+// 6.9), which would otherwise bring the dialog treatment back silently
+// while the keyboard stays open. Under WSLg only. One cost: a WindowModal
+// dialog of the main window (the export progress) no longer blocks this
+// window there; application-modal ones still do.
+static void detachWslgTransientParent(QWidget *window)
+{
+    if (!underWslg())
+        return;
+    if (QWindow *handle = window->windowHandle())
+        handle->setTransientParent(nullptr);
+}
+
+static void applyWslgWindowFixups(QWidget *window)
+{
+#if defined(PORYDAW_HAVE_XCB) && QT_CONFIG(xcb)
+    if (!underWslg())
+        return;
+    auto *x11 = qGuiApp->nativeInterface<QNativeInterface::QX11Application>();
+    if (!x11)
+        return;
+    xcb_connection_t *connection = x11->connection();
+    if (!connection)
+        return;
+    // One round trip for the atoms, one for the leader.
+    const char *const names[] = {"_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_NORMAL",
+                                 "WM_CLIENT_LEADER"};
+    xcb_intern_atom_cookie_t cookies[3];
+    for (int i = 0; i < 3; i++)
+        cookies[i] = xcb_intern_atom(connection, 0, uint16_t(std::strlen(names[i])), names[i]);
+    xcb_atom_t atoms[3] = {XCB_ATOM_NONE, XCB_ATOM_NONE, XCB_ATOM_NONE};
+    for (int i = 0; i < 3; i++) {
+        xcb_intern_atom_reply_t *reply = xcb_intern_atom_reply(connection, cookies[i], nullptr);
+        if (reply)
+            atoms[i] = reply->atom;
+        std::free(reply);
+    }
+    const xcb_atom_t type = atoms[0], normal = atoms[1], clientLeader = atoms[2];
+    if (type == XCB_ATOM_NONE || normal == XCB_ATOM_NONE)
+        return;
+    const auto id = xcb_window_t(window->winId());
+    // Qt's client leader, from this window's WM_CLIENT_LEADER; the root
+    // window (unknown to the xwm too) if that is somehow missing.
+    xcb_window_t leader = xcb_setup_roots_iterator(xcb_get_setup(connection)).data->root;
+    if (clientLeader != XCB_ATOM_NONE) {
+        const xcb_get_property_cookie_t cookie =
+            xcb_get_property(connection, 0, id, clientLeader, XCB_ATOM_WINDOW, 0, 1);
+        xcb_get_property_reply_t *reply = xcb_get_property_reply(connection, cookie, nullptr);
+        if (reply && reply->type == XCB_ATOM_WINDOW && reply->format == 32 && reply->value_len >= 1)
+            leader = *static_cast<xcb_window_t *>(xcb_get_property_value(reply));
+        std::free(reply);
+    }
+    xcb_change_property(connection, XCB_PROP_MODE_REPLACE, id, type, XCB_ATOM_ATOM, 32, 1, &normal);
+    // Qt wrote the same leader itself (detachWslgTransientParent); this
+    // guards the value against any later Qt write of the main window.
+    xcb_change_property(connection, XCB_PROP_MODE_REPLACE, id, XCB_ATOM_WM_TRANSIENT_FOR,
+                        XCB_ATOM_WINDOW, 32, 1, &leader);
+    xcb_flush(connection);
+#else
+    Q_UNUSED(window);
+#endif
+}
+
 void VirtualKeyboardWindow::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
@@ -802,6 +920,15 @@ bool VirtualKeyboardWindow::event(QEvent *event)
         }
         break;
     }
+    case QEvent::Show:
+        // Before show_sys() maps the window; its QWindow exists by now.
+        detachWslgTransientParent(this);
+        break;
+    case QEvent::ShowToParent:
+        // After show(): QXcbWindow::show() has set the properties this
+        // rewrites and mapped the window (see applyWslgWindowFixups).
+        applyWslgWindowFixups(this);
+        break;
     case QEvent::WindowActivate:
         // The window is the focus widget while active, not only the focus
         // object by fallback, so a popup's FocusOut reaches focusOutEvent.
