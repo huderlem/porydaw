@@ -105,11 +105,17 @@ bool AudioEngine::init(QString *error)
     m_bufR = std::make_unique<float[]>(m_bufCapacity);
     m_pvL = std::make_unique<float[]>(m_bufCapacity);
     m_pvR = std::make_unique<float[]>(m_bufCapacity);
+    m_lvL = std::make_unique<float[]>(m_bufCapacity);
+    m_lvR = std::make_unique<float[]>(m_bufCapacity);
 
     m_engine = std::make_unique<M4AEngine>();
     m4a_engine_init(m_engine.get(), float(m_sampleRate));
     m_previewEngine = std::make_unique<M4AEngine>();
     m4a_engine_init(m_previewEngine.get(), float(m_sampleRate));
+    m_liveEngine = std::make_unique<M4AEngine>();
+    m4a_engine_init(m_liveEngine.get(), float(m_sampleRate));
+    m4a_engine_set_live_mode(m_liveEngine.get(), true);
+    m_player.setMirror(m_liveEngine.get());
 
     if (ma_device_start(m_device) != MA_SUCCESS) {
         if (error)
@@ -143,6 +149,11 @@ void AudioEngine::shutdown()
     if (m_previewEngine) {
         m4a_engine_destroy(m_previewEngine.get());
         m_previewEngine.reset();
+    }
+    m_player.setMirror(nullptr);
+    if (m_liveEngine) {
+        m4a_engine_destroy(m_liveEngine.get());
+        m_liveEngine.reset();
     }
     m_audition.reset();
     m_timeline = nullptr;
@@ -325,6 +336,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
         TimelinePlayer::primeVoices(m_engine.get(), m_timeline, 0);
     }
     resetPreviewEngine();
+    resetLiveEngine(0);
     clearTimedPreviews();
     // The fresh engine holds nothing the keyboard moved.
     m_liveTouched = TouchedLanes();
@@ -346,6 +358,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_playhead.store(0);
     m_activePcm.store(0);
     m_activeCgb.store(0);
+    m_activeLivePcm.store(0);
 
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -414,6 +427,7 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // (e.g. clearing a lane), which would otherwise stay latched until stop.
     TimelinePlayer::chase(m_engine.get(), m_timeline, pos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, pos);
+    syncLiveEngine(pos);
     // Except on the lanes a take holds: what you hear there stays what the
     // take commits, edit or no edit.
     reapplyLiveLatch();
@@ -459,6 +473,7 @@ void AudioEngine::applyPendingSeek()
     dropLiveLatch(); // the pass ends; the full chase covers its lanes
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
+    syncLiveEngine(samplePos);
 }
 
 void AudioEngine::updateSettings(const SongSettings &settings)
@@ -470,6 +485,7 @@ void AudioEngine::updateSettings(const SongSettings &settings)
     // volume or polyphony edit never restarts the PCM ring.
     applySongSettings(m_engine.get(), m_settings);
     resetPreviewEngine();
+    resetLiveEngine(m_playhead.load());
     if (m_deviceStarted)
         ma_device_start(m_device);
 }
@@ -490,6 +506,7 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
         reapplyLiveLatch(); // as updateTimeline
     }
     resetPreviewEngine();
+    resetLiveEngine(m_playhead.load());
     if (m_deviceStarted)
         ma_device_start(m_device);
 }
@@ -512,6 +529,46 @@ void AudioEngine::resetPreviewEngine()
     m_previewVoiceKey = -1;
     // The reinit destroyed every channel, so all audition slots retire.
     m_audition.reset();
+}
+
+// Rebuilds the live instance: live mode, the song's voicegroup and settings
+// (the HQ mixer is vanilla there: live mode has no HQ path), then the
+// song's track state at `pos`. Cold: callers have stopped the device.
+void AudioEngine::resetLiveEngine(uint64_t pos)
+{
+    if (!m_liveEngine)
+        return;
+    m4a_engine_destroy(m_liveEngine.get());
+    m4a_engine_init(m_liveEngine.get(), float(m_sampleRate));
+    m4a_engine_set_live_mode(m_liveEngine.get(), true);
+    m4a_engine_set_voicegroup(m_liveEngine.get(), previewVoices());
+    applySongSettings(m_liveEngine.get(), m_settings);
+    // The reinit destroyed every channel: nothing timed or held survives.
+    m_timedActiveCount = 0;
+    m_previewTrack = -1;
+    m_previewKey = -1;
+    syncLiveEngine(pos);
+}
+
+// The live instance's tracks follow the song's state at `pos`, as the main
+// engine's do (chase + primeVoices), plus the lanes the keyboard holds.
+void AudioEngine::syncLiveEngine(uint64_t pos)
+{
+    if (!m_liveEngine || !m_timeline)
+        return;
+    TimelinePlayer::chase(m_liveEngine.get(), m_timeline, pos);
+    TimelinePlayer::primeVoices(m_liveEngine.get(), m_timeline, pos);
+    if (m_liveLatch.any() && capturing()) {
+        const int track = m_liveLatch.track;
+        const TouchedLanes &lanes = m_liveLatch.lanes;
+        if (lanes.program)
+            m4a_engine_program_change(m_liveEngine.get(), track, m_liveProgramValue);
+        for (int cc = 0; cc < 128; cc++)
+            if (lanes.hasCc(uint8_t(cc)))
+                m4a_engine_cc(m_liveEngine.get(), track, uint8_t(cc), m_liveCcValue[cc]);
+        if (lanes.bend)
+            m4a_engine_pitch_bend(m_liveEngine.get(), track, m_liveBendValue);
+    }
 }
 
 // The volume byte carried by a preview command: 0xFF means "leave the track's
@@ -582,6 +639,7 @@ void AudioEngine::unloadSong()
     m_liveFollow = LiveFollow();
     dropPunchMask();
     resetPreviewEngine();
+    resetLiveEngine(0);
     clearTimedPreviews();
     m_click.cut(); // the skipped transition would have cut it too
     m_clickQueueCount = 0;
@@ -748,7 +806,6 @@ void AudioEngine::finishCountIn()
     // A start at or past the loop end (a seek during the count-in) wraps
     // now, before the take begins: settleLoopWrap held off while the song
     // was held, and the take's Begin and held keys belong at the loop start.
-    fillPunchHeld();
     m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
                         &m_liveLatch, &m_punchMask);
     syncCapture();
@@ -880,6 +937,7 @@ void AudioEngine::queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to
 void AudioEngine::cutAllSound()
 {
     m4a_engine_all_sound_off(m_engine.get());
+    m4a_engine_all_sound_off(m_liveEngine.get());
     m_click.cut();
     m_timedActiveCount = 0;
     m_timedRead.store(m_timedWrite.load(std::memory_order_acquire), std::memory_order_release);
@@ -895,8 +953,10 @@ void AudioEngine::applyMuteTransition()
         return;
     const uint32_t newlyMuted = em & ~m_appliedMute;
     for (int track = 0; track < MAX_TRACKS; track++) {
-        if ((newlyMuted >> track) & 1)
+        if ((newlyMuted >> track) & 1) {
             m4a_engine_all_notes_off(m_engine.get(), track);
+            m4a_engine_all_notes_off(m_liveEngine.get(), track);
+        }
     }
     m_appliedMute = em;
 }
@@ -910,7 +970,7 @@ void AudioEngine::applyPreviewNote()
 
     // A new preview releases the previous one so previews never stack.
     if (m_previewKey >= 0) {
-        m4a_engine_note_off(m_engine.get(), m_previewTrack, uint8_t(m_previewKey));
+        m4a_engine_note_off(m_liveEngine.get(), m_previewTrack, uint8_t(m_previewKey));
         m_previewTrack = -1;
         m_previewKey = -1;
     }
@@ -922,8 +982,8 @@ void AudioEngine::applyPreviewNote()
     if (velocity > 0) {
         // Live note: no timeline position for any overflow event it causes,
         // and it stays audible in the solo-overflow invert mode.
-        m_engine->polyEventClock = M4A_POLY_TICK_NONE;
-        m_engine->auditionNote = true;
+        m_liveEngine->polyEventClock = M4A_POLY_TICK_NONE;
+        m_liveEngine->auditionNote = true;
         previewNoteOn(track, key, velocity, volume, pan);
         m_previewTrack = track;
         m_previewKey = key;
@@ -933,7 +993,7 @@ void AudioEngine::applyPreviewNote()
 void AudioEngine::previewNoteOn(uint8_t track, uint8_t key, uint8_t velocity, uint8_t volume,
                                 uint8_t pan)
 {
-    TimelinePlayer::auditionNoteOn(m_engine.get(), track, key, velocity,
+    TimelinePlayer::auditionNoteOn(m_liveEngine.get(), track, key, velocity,
                                    volume == 0xFF ? -1 : int(volume),
                                    pan == 0xFF ? M4A_AUDITION_PAN_NONE : int(pan) - 64);
 }
@@ -963,7 +1023,7 @@ void AudioEngine::applyTimedPreviews(uint32_t frameCount)
         }
         m_timedActive[i].remaining -= frameCount;
         if (m_timedActive[i].remaining <= 0) {
-            m4a_engine_note_off(m_engine.get(), m_timedActive[i].track, m_timedActive[i].key);
+            m4a_engine_note_off(m_liveEngine.get(), m_timedActive[i].track, m_timedActive[i].key);
             m_timedActive[i] = m_timedActive[--m_timedActiveCount];
         } else {
             i++;
@@ -1005,12 +1065,12 @@ void AudioEngine::startActive(uint8_t track, uint8_t key, uint8_t velocity, uint
                     slot = i;
             }
         }
-        m4a_engine_note_off(m_engine.get(), m_timedActive[slot].track, m_timedActive[slot].key);
+        m4a_engine_note_off(m_liveEngine.get(), m_timedActive[slot].track, m_timedActive[slot].key);
     }
     // Auditions are live notes: no timeline position for overflow events,
     // and they stay audible in the solo-overflow invert mode.
-    m_engine->polyEventClock = M4A_POLY_TICK_NONE;
-    m_engine->auditionNote = true;
+    m_liveEngine->polyEventClock = M4A_POLY_TICK_NONE;
+    m_liveEngine->auditionNote = true;
     previewNoteOn(track, key, velocity, volume, pan);
     m_timedActive[slot] = {track, key, held, m_activeOrder++, remaining};
 }
@@ -1019,7 +1079,7 @@ bool AudioEngine::releaseActive(uint8_t track, uint8_t key)
 {
     for (int i = 0; i < m_timedActiveCount; i++) {
         if (m_timedActive[i].track == track && m_timedActive[i].key == key) {
-            m4a_engine_note_off(m_engine.get(), track, key);
+            m4a_engine_note_off(m_liveEngine.get(), track, key);
             m_timedActive[i] = m_timedActive[--m_timedActiveCount];
             return true;
         }
@@ -1106,9 +1166,12 @@ void AudioEngine::applyMidiInput()
         // keyboard moved, as chased at the playhead; every other track and
         // parameter untouched. The latch is a subset of the touched lanes,
         // so that chase covers it too.
-        if (m_liveTrack >= 0 && m_timeline)
+        if (m_liveTrack >= 0 && m_timeline) {
             TimelinePlayer::chaseTouched(m_engine.get(), m_timeline, m_player.position(),
                                          m_liveTrack, m_liveTouched);
+            TimelinePlayer::chaseTouched(m_liveEngine.get(), m_timeline, m_player.position(),
+                                         m_liveTrack, m_liveTouched);
+        }
         m_liveTouched = TouchedLanes();
         dropLiveLatch();
         m_liveTrack = target;
@@ -1238,7 +1301,10 @@ void AudioEngine::applyLiveBend(int16_t bend, bool reset)
     if (take && !reset)
         m_captureMoved.bend = true;
     if (m_liveTrack >= 0) {
+        // Both engines: the live notes, and the song's own on the track
+        // (the take records the lane for them too).
         m4a_engine_pitch_bend(m_engine.get(), m_liveTrack, bend);
+        m4a_engine_pitch_bend(m_liveEngine.get(), m_liveTrack, bend);
         m_liveTouched.bend = true;
         m_liveBendValue = bend;
         // D3: the song's bend stops here until the pass ends. A reset only
@@ -1260,6 +1326,7 @@ void AudioEngine::applyLiveControl(uint8_t lane, uint8_t value, bool reset)
         m_captureMoved.setCc(lane);
     if (m_liveTrack >= 0) {
         m4a_engine_cc(m_engine.get(), m_liveTrack, lane, value);
+        m4a_engine_cc(m_liveEngine.get(), m_liveTrack, lane, value);
         m_liveTouched.setCc(lane);
         m_liveCcValue[lane & 0x7F] = value;
         // As for the bend: latched by a sounding move in the take, or by a
@@ -1297,9 +1364,12 @@ void AudioEngine::releaseLiveLatch(uint64_t pos)
 {
     if (!m_liveLatch.any())
         return;
-    if (m_timeline)
+    if (m_timeline) {
         TimelinePlayer::chaseTouched(m_engine.get(), m_timeline, pos, m_liveLatch.track,
                                      m_liveLatch.lanes);
+        TimelinePlayer::chaseTouched(m_liveEngine.get(), m_timeline, pos, m_liveLatch.track,
+                                     m_liveLatch.lanes);
+    }
     dropLiveLatch();
 }
 
@@ -1317,13 +1387,15 @@ void AudioEngine::reapplyLiveLatch()
     const int track = m_liveLatch.track;
     const TouchedLanes &lanes = m_liveLatch.lanes;
     // In chase()'s order: the voice before the CCs.
-    if (lanes.program)
-        m4a_engine_program_change(m_engine.get(), track, m_liveProgramValue);
-    for (int cc = 0; cc < 128; cc++)
-        if (lanes.hasCc(uint8_t(cc)))
-            m4a_engine_cc(m_engine.get(), track, uint8_t(cc), m_liveCcValue[cc]);
-    if (lanes.bend)
-        m4a_engine_pitch_bend(m_engine.get(), track, m_liveBendValue);
+    for (M4AEngine *engine : {m_engine.get(), m_liveEngine.get()}) {
+        if (lanes.program)
+            m4a_engine_program_change(engine, track, m_liveProgramValue);
+        for (int cc = 0; cc < 128; cc++)
+            if (lanes.hasCc(uint8_t(cc)))
+                m4a_engine_cc(engine, track, uint8_t(cc), m_liveCcValue[cc]);
+        if (lanes.bend)
+            m4a_engine_pitch_bend(engine, track, m_liveBendValue);
+    }
 }
 
 void AudioEngine::applyLiveProgram(uint8_t program)
@@ -1351,6 +1423,7 @@ void AudioEngine::applyLiveProgram(uint8_t program)
     if (m_liveTrack < 0)
         return;
     m4a_engine_program_change(m_engine.get(), m_liveTrack, program);
+    m4a_engine_program_change(m_liveEngine.get(), m_liveTrack, program);
     m_liveTouched.program = true;
     m_liveProgramValue = program; // for reapplyLiveLatch
     // D3: the song's program changes on the track stop here until the pass
@@ -1556,18 +1629,6 @@ void AudioEngine::applyPunchMask()
     m_punchMask.outSample = m_timeline->sampleForTick(r.outTick);
 }
 
-void AudioEngine::fillPunchHeld()
-{
-    if (!m_punchMask.any())
-        return;
-    m_punchMask.held[0] = m_punchMask.held[1] = 0;
-    for (int i = 0; i < m_timedActiveCount; i++) {
-        const ActiveTimed &a = m_timedActive[i];
-        if (a.held && int(a.track) == m_punchMask.track)
-            m_punchMask.held[a.key >> 6] |= uint64_t(1) << (a.key & 63);
-    }
-}
-
 bool AudioEngine::pushCapture(uint8_t kind, uint64_t samplePos, uint8_t key, uint8_t velocity,
                               uint64_t resumePos, int16_t value, uint8_t flags)
 {
@@ -1623,7 +1684,6 @@ void AudioEngine::settleLoopWrap()
         return;
     const uint64_t from = m_player.position();
     const uint32_t wraps = m_player.wrapCount();
-    fillPunchHeld();
     m_player.settleWrap(m_engine.get(), m_timeline, m_loopEnabled.load(), m_appliedMute,
                         &m_liveLatch, &m_punchMask);
     if (m_player.wrapCount() != wraps)
@@ -1741,6 +1801,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     if (refreshGen != m_appliedRefreshVoices) {
         m_appliedRefreshVoices = refreshGen;
         m4a_engine_refresh_voices(m_engine.get());
+        m4a_engine_refresh_voices(m_liveEngine.get());
     }
 
     M4AEngine *engine = m_engine.get();
@@ -1775,7 +1836,6 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             const uint64_t p0 = m_player.position();
             const uint32_t w0 = m_player.wrapCount();
             // The only latched render: every offline path passes none.
-            fillPunchHeld();
             m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
                             &m_liveLatch, &m_punchMask);
             if (metronomeOn)
@@ -1796,10 +1856,12 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
         // The audition instance is mixed on top so voice previews are heard
         // as they would sound in the song, without touching playback state.
         m4a_engine_process(m_previewEngine.get(), m_pvL.get(), m_pvR.get(), int(n));
+        // And the live instance: the keyboard and the roll's previews.
+        m4a_engine_process(m_liveEngine.get(), m_lvL.get(), m_lvR.get(), int(n));
 
         for (uint32_t i = 0; i < n; i++) {
-            interleavedOut[(done + i) * 2] = (m_bufL[i] + m_pvL[i]) * gain;
-            interleavedOut[(done + i) * 2 + 1] = (m_bufR[i] + m_pvR[i]) * gain;
+            interleavedOut[(done + i) * 2] = (m_bufL[i] + m_pvL[i] + m_lvL[i]) * gain;
+            interleavedOut[(done + i) * 2 + 1] = (m_bufR[i] + m_pvR[i] + m_lvR[i]) * gain;
         }
         done += n;
         // The song starts on the frame after the count-in's last. A wrap it
@@ -1834,4 +1896,10 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     }
     m_activePcm.store(pcm);
     m_activeCgb.store(cgb);
+    int live = 0;
+    for (int i = 0; i < m_liveEngine->maxPcmChannels; i++) {
+        if (m_liveEngine->pcmChannels[i].status & CHN_ON)
+            live++;
+    }
+    m_activeLivePcm.store(live);
 }

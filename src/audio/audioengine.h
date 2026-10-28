@@ -3,6 +3,7 @@
 #include <QString>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <type_traits>
@@ -346,11 +347,27 @@ class AudioEngine
         *samplePos = packed & kCaptureClockPosMask;
         *segment = uint32_t(packed >> kCaptureClockPosBits);
     }
-    // The device's output latency, the "Auto" recording offset: you heard
-    // the song about this long after the player rendered it.
+    // The device's output latency: the song reaches the speakers about this
+    // long after the callback rendered it.
     uint64_t outputLatencySamples() const
     {
         return uint64_t(m_periodFrames) * uint64_t(m_periodCount);
+    }
+    // The main engine's own latency on top of that: a song event dispatched
+    // at a timeline position is processed at the next VBlank tick and mixed
+    // into the DMA ring slot the DMA reads a frame later (18–31 ms measured
+    // for PCM; the mean, a frame and a half). The live engine has none of
+    // it, so a key played against what you heard is this much ahead of the
+    // song it was played to.
+    static constexpr double kEngineLatencySeconds = 1.5 / 59.7275;
+    uint64_t engineLatencySamples() const
+    {
+        return uint64_t(std::llround(kEngineLatencySeconds * m_sampleRate));
+    }
+    // The "Auto" recording offset: device plus engine latency.
+    uint64_t recordingAutoLatencySamples() const
+    {
+        return outputLatencySamples() + engineLatencySamples();
     }
 
     // Harness only (--midicheck): park the device so a check can drive the
@@ -365,6 +382,8 @@ class AudioEngine
     uint64_t clicksQueuedForTest() const { return m_clicksQueued; }
     // Harness only: the main engine's state, read with the device held.
     const M4AEngine *engineForTest() const { return m_engine.get(); }
+    // Harness only: the live instance (keyboard notes and roll previews).
+    const M4AEngine *liveEngineForTest() const { return m_liveEngine.get(); }
     // With the device held: the recording latch as the callback left it.
     LaneLatch liveLatchForTest() const { return m_liveLatch; }
     // With the device held: the punch mask as the callback left it.
@@ -483,6 +502,9 @@ class AudioEngine
     }
     int activePcmChannels() const { return m_activePcm.load(); }
     int activeCgbChannels() const { return m_activeCgb.load(); }
+    // The live instance's sounding PCM channels (keyboard notes, roll
+    // previews): apart from the song's, which they no longer compete with.
+    int activeLivePcmChannels() const { return m_activeLivePcm.load(); }
     int maxPcmChannels() const { return m_settings.maxPcmChannels; }
     int trackBudget() const { return m_settings.trackBudget; }
     uint64_t polyLostTotal() const; // dropped + stolen, all tracks (no tail cuts)
@@ -628,8 +650,6 @@ class AudioEngine
     void placePunchMask();
     // The UI narrowed, cleared or replaced it.
     void applyPunchMask();
-    // The keys the keyboard holds on the mask's track, before a render.
-    void fillPunchHeld();
     void dropPunchMask();
     // TimelinePlayer::settleWrap at the callback's top, with the take's
     // Boundary.
@@ -665,6 +685,17 @@ class AudioEngine
     // Audition instance: voice previews and sample auditions, mixed on top
     // of the main engine.
     std::unique_ptr<M4AEngine> m_previewEngine;
+    // Live instance (docs/live-latency/PLAN.md): everything the user plays
+    // by hand — the MIDI/virtual keyboard, roll clicks and band sweeps —
+    // sounds here, in the engine's live mode (a few ms instead of the
+    // hardware's one to two frames), mixed on top of the song. Its tracks
+    // mirror the song's state (chased with the main engine, and fed every
+    // non-note event the player dispatches), never its notes, so a live
+    // note gets the track's voice and controllers without competing for the
+    // song's channels.
+    std::unique_ptr<M4AEngine> m_liveEngine;
+    void resetLiveEngine(uint64_t pos);
+    void syncLiveEngine(uint64_t pos);
     // Sample Editor audition slots (PLAN.md §4), played on the audition
     // instance's track 1 (previewVoice owns track 0).
     static constexpr int kAuditionTrack = 1;
@@ -783,6 +814,7 @@ class AudioEngine
     // Telemetry (audio thread writes, UI reads)
     std::atomic<uint64_t> m_playhead{0};
     std::atomic<int> m_activePcm{0};
+    std::atomic<int> m_activeLivePcm{0};
     std::atomic<int> m_activeCgb{0};
     std::atomic<uint64_t> m_liveHeldLo{0};
     std::atomic<uint64_t> m_liveHeldHi{0};
@@ -895,6 +927,8 @@ class AudioEngine
     // Scratch deinterleave buffers (allocated in init)
     std::unique_ptr<float[]> m_bufL;
     std::unique_ptr<float[]> m_bufR;
+    std::unique_ptr<float[]> m_lvL; // live engine mix
+    std::unique_ptr<float[]> m_lvR;
     std::unique_ptr<float[]> m_pvL; // voice-preview engine mix
     std::unique_ptr<float[]> m_pvR;
     uint32_t m_bufCapacity = 0;

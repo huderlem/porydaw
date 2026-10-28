@@ -2503,7 +2503,8 @@ void MainWindow::checkLivePlay()
     const MidiTimeline *timeline = m_active->timeline.get();
     m_audio.holdDeviceForTest(true);
     drain(midi.ring());
-    const M4AEngine *engine = m_audio.engineForTest();
+    // Live notes sound on the live instance (docs/live-latency/PLAN.md).
+    const M4AEngine *engine = m_audio.liveEngineForTest();
     const double rate = m_audio.sampleRate();
     const auto pumpMs = [&](int ms) { m_audio.pumpForTest(uint32_t(rate * ms / 1000.0)); };
     const auto send = [&](uint8_t status, uint8_t d1, uint8_t d2) {

@@ -3469,7 +3469,8 @@ void MainWindow::refreshDeviceStatus()
     m_settingsDialog->audioPage()->setDeviceStatus(status,
                                                    m_audioOk ? m_audio.deviceWarning() : QString());
     m_settingsDialog->midiPage()->setAutoLatencyMs(
-        m_audioOk ? int(std::llround(double(m_audio.outputLatencySamples()) * 1000.0 / rate)) : -1);
+        m_audioOk ? int(std::llround(double(m_audio.recordingAutoLatencySamples()) * 1000.0 / rate))
+                  : -1);
 }
 
 // The settings were read at construction, before a harness turned
@@ -6338,7 +6339,7 @@ uint64_t MainWindow::recordingLatencySamples() const
 {
     const int ms = m_midiInput->latencyMs();
     if (ms == MidiInput::kLatencyAuto)
-        return m_audioOk ? m_audio.outputLatencySamples() : 0;
+        return m_audioOk ? m_audio.recordingAutoLatencySamples() : 0;
     return uint64_t(std::llround(double(std::max(ms, 0)) * m_audio.sampleRate() / 1000.0));
 }
 

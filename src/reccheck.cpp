@@ -2279,17 +2279,22 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         midi.setLatencyMs(0);
     }
 
-    // Auto offset: the device's output latency (period × periods). A fixed
-    // offset is that many ms.
+    // Auto offset: the device's output latency (period × periods) plus the
+    // main engine's own (the song reaches the DMA ring a frame and a half
+    // after its timeline position; the live engine's keys have none of
+    // it). A fixed offset is that many ms.
     {
         midi.setLatencyMs(100);
         check(recordingLatencySamples() == uint64_t(std::llround(rate * 0.1)),
               "record: a 100 ms recording offset is not 100 ms of samples");
         midi.setLatencyMs(MidiInput::kLatencyAuto);
         const uint64_t latency = recordingLatencySamples();
-        check(latency == uint64_t(m_audio.periodSizeFrames()) * uint64_t(m_audio.periodCount()) &&
-                  latency > 0,
-              "record: the Auto offset is not the device's output latency");
+        const uint64_t device =
+            uint64_t(m_audio.periodSizeFrames()) * uint64_t(m_audio.periodCount());
+        check(latency == device + m_audio.engineLatencySamples() && device > 0 &&
+                  m_audio.engineLatencySamples() > uint64_t(rate * 0.020) &&
+                  m_audio.engineLatencySamples() < uint64_t(rate * 0.032),
+              "record: the Auto offset is not the device's output latency plus the engine's");
         view->setEditCursorTick(tpb * 4);
         m_recordAction->trigger();
         pumpMs(500);
@@ -3608,20 +3613,24 @@ void MainWindow::checkRecordingPunchMask(const QString &scratchDir)
     const auto recording = [&] { return m_takeSession != nullptr; };
     const auto message = [&] { return statusBar()->currentMessage(); };
     const auto mask = [&] { return m_audio.punchMaskForTest(); };
-    // Keys of the channels keyed on (sounding, not yet released) on a track.
+    // Keys of the channels keyed on (sounding, not yet released) on a track:
+    // the song's on the main engine, the keyboard's on the live one.
+    const M4AEngine *liveEngine = m_audio.liveEngineForTest();
     const auto keyed = [&](int track) {
         std::vector<int> keys;
-        for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
-            const M4APCMChannel &ch = engine->pcmChannels[i];
-            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
-                ch.trackIndex == track)
-                keys.push_back(ch.midiKey);
-        }
-        for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
-            const M4ACGBChannel &ch = engine->cgbChannels[i];
-            if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
-                ch.trackIndex == track)
-                keys.push_back(ch.midiKey);
+        for (const M4AEngine *e : {engine, liveEngine}) {
+            for (int i = 0; i < MAX_PCM_CHANNELS; i++) {
+                const M4APCMChannel &ch = e->pcmChannels[i];
+                if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                    ch.trackIndex == track)
+                    keys.push_back(ch.midiKey);
+            }
+            for (int i = 0; i < MAX_CGB_CHANNELS; i++) {
+                const M4ACGBChannel &ch = e->cgbChannels[i];
+                if ((ch.status & CHN_ON) && !(ch.status & (CHN_STOP | CHN_IEC)) &&
+                    ch.trackIndex == track)
+                    keys.push_back(ch.midiKey);
+            }
         }
         std::sort(keys.begin(), keys.end());
         return keys;

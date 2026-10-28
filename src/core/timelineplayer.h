@@ -61,13 +61,11 @@ struct LaneLatch {
 // player is before inSample again (a loop wrap or a seek back), and takes
 // only notes that started before outTick (what the commit truncates; a TIE
 // from after the range carried across a loop wrap keeps sounding) with
-// their gate-carried releases. A key the keyboard holds on the track
-// (held, filled by the caller before each render) is not released: the
-// engine stops channels by track+key, so its note-off would silence the
-// player's own note too; the song's note on that key is let go instead
-// (no longer keyed on), and ends with the keyboard's release. A song
-// note-off on the track for a key the player hasn't keyed on is dropped
-// too: it belongs to a silenced (or released) note, and would otherwise
+// their gate-carried releases. The keyboard's own notes sound on the live
+// engine (docs/live-latency/PLAN.md), so a key it holds is not this
+// engine's and the song's note on it is released like any other. A song
+// note-off on the track for a key the player hasn't keyed on is dropped:
+// it belongs to a silenced (or released) note, and would otherwise
 // cut the keyboard's own note on that key. Plain data: the audio thread
 // keeps one; offline paths never pass one.
 struct NoteMask {
@@ -75,14 +73,12 @@ struct NoteMask {
     uint64_t inTick = 0, outTick = 0;     // note-ons in [inTick, outTick) are silent
     uint64_t inSample = 0, outSample = 0; // the same range on the timeline
     bool cut = false;                     // this pass released the track at inSample
-    uint64_t held[2] = {0, 0};            // keys the keyboard holds on track
 
     bool any() const { return track >= 0 && outTick > inTick; }
     bool silences(const TimelineEvent &ev) const
     {
         return ev.type == 0x9 && ev.track == track && ev.tick >= inTick && ev.tick < outTick;
     }
-    bool holds(int key) const { return (held[(key >> 6) & 1] >> (key & 63)) & 1; }
 };
 
 // Walks a MidiTimeline, dispatching events to an M4AEngine and rendering
@@ -201,6 +197,13 @@ class TimelinePlayer
                 uint32_t frames, bool looping, uint32_t muteMask, LaneLatch *latch = nullptr,
                 NoteMask *mask = nullptr);
 
+    // A second engine that follows the song's track state without playing
+    // its notes (docs/live-latency/PLAN.md): every CC, program, bend, XCMD
+    // and tempo the render dispatches goes to it too, the latch's held lanes
+    // skipped for both, so a note the user plays on it sounds with the
+    // track's voice and controllers as they stand in the song. Null: none.
+    void setMirror(M4AEngine *mirror) { m_mirror = mirror; }
+
     // A position at or past the loop end (a start or seek there, or the
     // last render ending exactly on it) wraps before the next render plays
     // a sample: does that wrap now, exactly as render() would first, so a
@@ -228,6 +231,7 @@ class TimelinePlayer
         m_pendingOffCount = 0;
     }
 
+    M4AEngine *m_mirror = nullptr;
     uint64_t m_pos = 0;
     size_t m_cursor = 0;
     uint32_t m_wraps = 0;

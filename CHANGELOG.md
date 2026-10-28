@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `Settings -> Audio -> HQ mixer (ipatix)` to play PCM channels through ipatix's High-Quality Audio Mixer, for projects that have installed it. Off by default (the games' stock mixer).
    - The HQ mixer has no 7884 Hz mix rate; that choice snaps to 13379 Hz while it is on.
    - Plugins read and set it through `porydaw.audio.engine.hqMixer`.
+- Playing from a MIDI keyboard (or the virtual keyboard) and clicking notes in the roll now respond in a few milliseconds instead of one to two GBA frames. They play through a separate low-latency engine instance that follows the song's track state, while the song itself keeps the game's exact timing.
+   - Live notes no longer share the song's PCM channels (and no longer show in the polyphony meter).
+   - The `Auto` recording offset now includes the engine's own latency, so a take lands where you heard the song.
 
 ## Changed
 - Removed the `GBA analog output filter` and the `Host rate` PCM mix rate options from `Settings -> Audio`: the engine now models the GBA's output stage itself, and the PCM rate is always one of the game's `m4aSoundInit` rates. A saved host-rate setting falls back to 13379 Hz.

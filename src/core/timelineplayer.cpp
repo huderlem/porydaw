@@ -243,10 +243,9 @@ void TimelinePlayer::cutMaskedTrack(M4AEngine *engine, const NoteMask &mask)
         // (carried here by a loop wrap) keeps sounding, its release too.
         if (!m_keyedOn[track][key] || m_keyedOnTick[track][key] >= mask.outTick)
             continue;
-        // A key the keyboard holds: its note-off would stop the keyboard's
-        // note too. The song's ends with the keyboard's release.
-        if (!mask.holds(key))
-            m4a_engine_note_off(engine, uint8_t(track), uint8_t(key));
+        // The keyboard's notes sound on the live engine, so a key it holds
+        // is not this engine's: the song's note ends here.
+        m4a_engine_note_off(engine, uint8_t(track), uint8_t(key));
         m_keyedOn[track][key] = false;
         // Its gate-carried release has nothing left to release (and would
         // cut a held key).
@@ -315,6 +314,8 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                 m_keyedOn[ev.track][ev.data0 & 0x7F] = false;
             }
             dispatchEvent(engine, ev, muteMask);
+            if (m_mirror && ev.type != 0x8 && ev.type != 0x9)
+                dispatchEvent(m_mirror, ev, muteMask);
         }
         if (loop && m_pos >= timeline->loopEndSample) {
             wrapNotes(engine, timeline);

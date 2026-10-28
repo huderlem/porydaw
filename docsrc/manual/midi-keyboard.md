@@ -67,8 +67,10 @@ loudness instead of how hard you hit the key. -->
 <!-- TODO: Stuck notes: Tools → MIDI: All Notes Off. Unplugging the keyboard
 also releases everything it held. -->
 
-<!-- TODO: Polyphony applies — live notes share the GBA's voices with the
-song, so a big chord over a busy song can cut notes (link polyphony.md). -->
+<!-- TODO: Live notes play on their own low-latency engine instance, so
+they respond in a few ms and never compete with the song's channels; the
+song's polyphony limit still applies to what you record once it plays back
+as part of the song (link polyphony.md). -->
 
 ## Recording
 

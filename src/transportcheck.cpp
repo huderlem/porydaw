@@ -238,6 +238,8 @@ int runTransportCheck()
         fail("audio thread did not apply the reset seek");
 
     const auto active = [&] { return engine.activePcmChannels(); };
+    // Previews sound on the live instance (docs/live-latency/PLAN.md).
+    const auto activeLive = [&] { return engine.activeLivePcmChannels(); };
     engine.play();
     if (!waitFor([&] { return engine.playheadSamples() > 0; }, 2000)) {
         fail("playback did not start for pending-seek cancellation check");
@@ -265,12 +267,12 @@ int runTransportCheck()
     // control expectation changed).
     const auto ringingTail = [&](uint8_t track) {
         engine.previewNoteTimed(track, 60, 127, uint32_t(0.15 * engine.sampleRate()));
-        if (!waitFor([&] { return active() >= 1; }, 2000)) {
+        if (!waitFor([&] { return activeLive() >= 1; }, 2000)) {
             fail("timed preview never sounded");
             return false;
         }
         QThread::msleep(400); // note-off sent; the slow release rings on
-        if (active() < 1) {
+        if (activeLive() < 1) {
             fail("slow-release tail died early (control expectation changed?)");
             return false;
         }
@@ -280,18 +282,18 @@ int runTransportCheck()
     // Stopped → Playing: the ringing tail must be cut when playback starts.
     if (ringingTail(0)) {
         engine.play();
-        if (!waitFor([&] { return active() == 0; }, 2000))
+        if (!waitFor([&] { return activeLive() == 0; }, 2000))
             fail("audition tail persisted after playback started from stop");
     }
 
     // Playing → Paused: pausing silences like Stop — a preview sounding
     // when pause hits must not ring through it.
     engine.previewNoteTimed(0, 60, 127, uint32_t(60.0 * engine.sampleRate()));
-    if (!waitFor([&] { return active() >= 1; }, 2000)) {
+    if (!waitFor([&] { return activeLive() >= 1; }, 2000)) {
         fail("timed preview during playback never sounded");
     } else {
         engine.pause();
-        if (!waitFor([&] { return active() == 0; }, 2000))
+        if (!waitFor([&] { return activeLive() == 0; }, 2000))
             fail("pause left the preview ringing");
     }
 
@@ -302,7 +304,7 @@ int runTransportCheck()
     if (ringingTail(0)) {
         engine.seek(0);
         engine.play();
-        if (!waitFor([&] { return active() == 0; }, 2000))
+        if (!waitFor([&] { return activeLive() == 0; }, 2000))
             fail("audition tail persisted after Space-style seek + play from pause");
     }
 
@@ -311,11 +313,11 @@ int runTransportCheck()
     engine.pause();
     QThread::msleep(300); // the pause transition drains the preview ring
     engine.previewNoteTimed(1, 64, 127, uint32_t(60.0 * engine.sampleRate()));
-    if (!waitFor([&] { return active() >= 1; }, 2000)) {
+    if (!waitFor([&] { return activeLive() >= 1; }, 2000)) {
         fail("timed preview during pause never sounded");
     } else {
         engine.play();
-        if (!waitFor([&] { return active() == 0; }, 2000))
+        if (!waitFor([&] { return activeLive() == 0; }, 2000))
             fail("counting-down preview persisted after resuming playback");
     }
 
