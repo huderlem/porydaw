@@ -625,22 +625,18 @@ void AudioApi::setEngine(const QVariantMap &spec)
             next.maxPcmChannels = n;
         } else if (key == QLatin1String("pcmMixRate")) {
             int rate = 0;
-            const bool listed =
-                integer(&rate) &&
-                (rate == 0 || std::find(std::begin(kGbaMixRates), std::end(kGbaMixRates), rate) !=
-                                  std::end(kGbaMixRates));
-            if (!listed) {
-                throwError(QStringLiteral("audio.setEngine: pcmMixRate must be 0 (the host "
-                                          "rate) or one of audio.engineLimits().mixRates"));
+            if (!integer(&rate) || !isGbaMixRate(rate)) {
+                throwError(QStringLiteral("audio.setEngine: pcmMixRate must be one of "
+                                          "audio.engineLimits().mixRates"));
                 return;
             }
             next.pcmMixRate = float(rate);
-        } else if (key == QLatin1String("analogFilter")) {
+        } else if (key == QLatin1String("hqMixer")) {
             if (v.typeId() != QMetaType::Bool) {
-                throwError(QStringLiteral("audio.setEngine: analogFilter must be a boolean"));
+                throwError(QStringLiteral("audio.setEngine: hqMixer must be a boolean"));
                 return;
             }
-            next.analogFilter = v.toBool();
+            next.hqMixer = v.toBool();
         } else {
             throwError(QStringLiteral("audio.setEngine: unknown key '%1'").arg(key));
             return;

@@ -2459,13 +2459,17 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot,
             std::fprintf(stderr, "samplecheck: FAIL: engineloop voicegroup_load\n");
             failures++;
         } else {
-            // Render at the sample's effective rate with the PCM mix
-            // following the host rate: the channel steps ~1 source sample
-            // per output sample and the only smoothing is m4a_channel's own
-            // linear interpolation, including its wrap across the loop seam.
+            // Render through the GBA hardware model at the game's mix rate:
+            // SoundMainRAM's interpolating mixer plays the loop a frame at a
+            // time into the DMA ring, and the DAC stream reaches the host
+            // rate through the band-limited resampler. The seam is judged
+            // twice: in the source (the committed bytes must join as
+            // smoothly as the body) and on the output (the engine must not
+            // put a step there that the loop body never has).
+            constexpr float kHostRate = 44100.0f;
             auto *engine = new M4AEngine();
-            m4a_engine_init(engine, float(out.freq) / 1024.0f);
-            m4a_engine_set_pcm_mix_rate(engine, 0.0f);
+            m4a_engine_init(engine, kHostRate);
+            m4a_engine_set_pcm_freq_mode(engine, m4a_pcm_freq_mode_from_hz(13379.0));
             m4a_engine_set_voicegroup(engine, vg->voices);
             m4a_engine_program_change(engine, 0, 0);
             m4a_engine_note_on(engine, 0, 60, 127);
@@ -2477,48 +2481,60 @@ int runSampleCheck(const QString &scratchDir, const QString &corpusRoot,
             expect(ch != nullptr, "engine-loop note keys a channel");
             int wraps = 0;
             double maxBodyStep = 0.0, maxWrapStep = 0.0, peak = 0.0;
+            // The mixer's remaining-sample counter reloads at a wrap; the
+            // output lags the mix by the DMA ring, so the steps are judged
+            // over the whole looped stretch rather than at a wrap instant.
+            double maxStep = 0.0;
             if (ch) {
                 float l = 0.0f, r = 0.0f;
                 double prev = 0.0;
                 bool prevValid = false;
                 qint32 prevCount = ch->count;
-                // A wrap influences the interpolated output for a couple of
-                // samples (seam interpolation, then the mix upsampler's
-                // one-sample memory) — classify that whole window as wrap.
-                int wrapWindow = 0;
+                int sinceFirstWrap = 0;
                 for (int i = 0; i < 400000 && wraps < 5; i++) {
                     m4a_engine_process(engine, &l, &r, 1);
-                    if (ch->count > prevCount) {
+                    if (ch->count > prevCount)
                         wraps++;
-                        wrapWindow = 2;
-                    }
                     prevCount = ch->count;
                     const double v = double(l);
-                    if (wraps >= 1) { // fully inside the loop region
-                        if (prevValid) {
-                            const double step = std::abs(v - prev);
-                            if (wrapWindow > 0)
-                                maxWrapStep = qMax(maxWrapStep, step);
-                            else
-                                maxBodyStep = qMax(maxBodyStep, step);
-                        }
+                    // Fully inside the loop region once the first wrap's
+                    // frame has drained through the ring (a generous
+                    // quarter second).
+                    if (wraps >= 1 && ++sinceFirstWrap > int(kHostRate / 4)) {
+                        if (prevValid)
+                            maxStep = qMax(maxStep, std::abs(v - prev));
                         peak = qMax(peak, std::abs(v));
                         prevValid = true;
                     }
-                    if (wrapWindow > 0)
-                        wrapWindow--;
                     prev = v;
                 }
             }
             expect(wraps >= 5, "at least 4 full loop wraps rendered");
             // 1 LSB in output units: the loop region's peak s8 value maps to
             // the rendered peak (the envelope is constant at full sustain).
-            int maxS8 = 1;
-            for (quint32 i = out.loopStart; i < out.size; i++)
-                maxS8 = qMax(maxS8, std::abs(int(qint8(out.s8.at(qsizetype(i))))));
+            // The body's own largest step, seam pair EXCLUDED, is what a
+            // clean loop may show. The seam pair (last byte back to
+            // loopStart) is held to that same bound in the source domain,
+            // so a loop point that lands on a discontinuity fails here
+            // instead of raising the bar for the output check below.
+            int maxS8 = 1, maxBodyS8Step = 0;
+            for (quint32 i = out.loopStart; i + 1 < out.size; i++) {
+                const int cur = qint8(out.s8.at(qsizetype(i)));
+                const int next = qint8(out.s8.at(qsizetype(i + 1)));
+                maxS8 = qMax(maxS8, std::abs(cur));
+                maxBodyS8Step = qMax(maxBodyS8Step, std::abs(next - cur));
+            }
+            const int seamS8Step = std::abs(int(qint8(out.s8.at(qsizetype(out.loopStart)))) -
+                                            int(qint8(out.s8.at(qsizetype(out.size - 1)))));
+            expect(seamS8Step <= maxBodyS8Step + 2, "the committed loop seam joins as smoothly "
+                                                    "as the loop body (+2 LSB)");
             const double lsb = peak / double(maxS8);
-            expect(peak > 0.0 && maxWrapStep <= maxBodyStep + 2.0 * lsb + 1e-9,
-                   "loop-wrap steps stay within body steps + 2 LSB");
+            maxBodyStep = maxBodyS8Step * lsb;
+            maxWrapStep = maxStep;
+            // On the output the resampler's step response can overshoot a
+            // source step, so allow half again plus 2 LSB.
+            expect(peak > 0.0 && maxStep <= 1.5 * maxBodyStep + 2.0 * lsb + 1e-9,
+                   "rendered steps (loop seam included) stay within 1.5x the body's steps + 2 LSB");
             m4a_engine_destroy(engine);
             delete engine;
             voicegroup_free(vg);

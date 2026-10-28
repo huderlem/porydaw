@@ -1370,7 +1370,14 @@ QByteArray VoicegroupSource::renderPreview() const
 bool VoicegroupSource::applyScalarsToToneData(int slot, ToneData *td) const
 {
     const VgVoice *v = voiceAt(slot);
-    if (!v || !td || td->type != vgMacroVoiceType(v->macro))
+    if (!v || !td)
+        return false;
+    // A compressed voice whose DPCM .bin isn't built (or is older than its
+    // source) loads its uncompressed source instead, and the loader clears
+    // the CMP bit as the real mixer would mix nothing otherwise: that voice
+    // is still this slot's.
+    const uint8_t expected = vgMacroVoiceType(v->macro);
+    if (td->type != expected && td->type != (expected & ~VOICE_TYPE_CMP))
         return false;
     if (v->macro == VgMacro::Keysplit || v->macro == VgMacro::KeysplitAll)
         return true; // no scalar fields; any change is structural

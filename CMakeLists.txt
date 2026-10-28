@@ -38,13 +38,21 @@ if(PORYDAW_SCRIPTING)
     find_package(Qt6 REQUIRED COMPONENTS Qml)
 endif()
 
-# ---- poryaaaa engine core (MIT, statically linked) ----
+# ---- poryaaaa engine core (statically linked) ----
+# MIT, except m4a_psg (MPL 2.0, from mGBA) and m4a_resampler (LGPL 2.1, from
+# blip_buf); see external/poryaaaa/THIRD_PARTY_LICENSES.md. The sequencer,
+# song parser and cry player (m4a_sequencer/m4a_song/m4a_cry) are not built:
+# porydaw drives the engine's MIDI-style entry points from its own timeline.
 set(PORYAAAA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/poryaaaa)
 add_library(poryaaaa_engine STATIC
     ${PORYAAAA_DIR}/plugin/m4a_engine.c
     ${PORYAAAA_DIR}/plugin/m4a_channel.c
     ${PORYAAAA_DIR}/plugin/m4a_tables.c
-    ${PORYAAAA_DIR}/plugin/m4a_reverb.c
+    ${PORYAAAA_DIR}/plugin/m4a_mixer.c
+    ${PORYAAAA_DIR}/plugin/m4a_hq_mixer.c
+    ${PORYAAAA_DIR}/plugin/m4a_resampler.c
+    ${PORYAAAA_DIR}/plugin/m4a_gba.c
+    ${PORYAAAA_DIR}/plugin/m4a_psg.c
     ${PORYAAAA_DIR}/plugin/voicegroup_loader.c
 )
 target_include_directories(poryaaaa_engine PUBLIC ${PORYAAAA_DIR}/plugin)

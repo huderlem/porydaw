@@ -32,8 +32,22 @@ struct SongSettings {
     uint8_t maxPcmChannels = 5;  // pokeemerald m4aSoundInit default
     uint8_t trackBudget = 16;    // song's music player track count (SongDocument)
     float pcmMixRate = 13379.0f; // GBA-accurate DirectSound mix rate
-    bool analogFilter = false;   // GBA analog output low-pass (SPEC §7)
+    bool hqMixer = false;        // ipatix's HQ mixer instead of the stock one (SPEC §7)
 };
+
+// Push a SongSettings onto an engine: the song's volume and reverb, the
+// polyphony cap, the mixer and the PCM rate. The HQ flag goes first so a
+// rate the HQ mixer lacks (7884 Hz) snaps as the engine documents. The rate
+// reprograms the PCM ring, so the engine must be stopped (device stopped or
+// offline).
+inline void applySongSettings(M4AEngine *engine, const SongSettings &settings)
+{
+    m4a_engine_set_song_volume(engine, settings.songVolume);
+    m4a_reverb_set_amount(&engine->reverb, settings.reverb);
+    engine->maxPcmChannels = settings.maxPcmChannels;
+    m4a_engine_set_hq_mixer(engine, settings.hqMixer);
+    m4a_engine_set_pcm_freq_mode(engine, m4a_pcm_freq_mode_from_hz(double(settings.pcmMixRate)));
+}
 
 // Mute bits for the tracks a song's music player never starts: MPlayStart
 // stops at min(song tracks, player tracks), so tracks at or beyond the

@@ -12,6 +12,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -213,19 +214,23 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
             rate == kGbaDefaultRate ? tr("%1 Hz (GBA default)").arg(rate) : tr("%1 Hz").arg(rate);
         m_mixRate->addItem(label, rate);
     }
-    m_mixRate->addItem(tr("Host rate (clean, no GBA resampling)"), 0);
     m_mixRate->setToolTip(tr("The GBA's DirectSound mixing rate (m4aSoundInit "
-                             "frequency). 13379 Hz makes high notes alias the way "
-                             "they do in-game; the host rate mixes cleanly at the "
-                             "audio device's rate."));
+                             "frequency). 13379 Hz is what the games use, so high "
+                             "notes sound the way they do in-game; a higher rate is "
+                             "for projects that change it. The HQ mixer has no "
+                             "%1 Hz.")
+                              .arg(kGbaMixRateHqUnsupported));
     engineForm->addRow(tr("PCM &mix rate:"), m_mixRate);
 
-    m_analogFilter = new QCheckBox(tr("GBA analog output filter (low-pass)"), this);
-    m_analogFilter->setObjectName(QStringLiteral("settingsAnalogFilter"));
-    m_analogFilter->setToolTip(tr("Emulates the rolloff of the GBA's analog output "
-                                  "circuit (mGBA's low-pass filter). On sounds like "
-                                  "hardware; off is the raw mixer output."));
-    engineForm->addRow(QString(), m_analogFilter);
+    m_hqMixer = new QCheckBox(tr("HQ mixer (ipatix)"), this);
+    m_hqMixer->setObjectName(QStringLiteral("settingsHqMixer"));
+    m_hqMixer->setToolTip(tr("Mixes the PCM (DirectSound) channels the way ipatix's "
+                             "High-Quality Audio Mixer does, for projects that have "
+                             "installed it: chords no longer wrap or pick up 8-bit "
+                             "rounding noise per channel. Off is the games' stock "
+                             "mixer. The PSG channels and timing are the same "
+                             "either way."));
+    engineForm->addRow(QString(), m_hqMixer);
 
     auto *defaultsButton = new QPushButton(tr("Restore Defaults"), this);
     defaultsButton->setObjectName(QStringLiteral("settingsAudioRestoreDefaults"));
@@ -263,7 +268,8 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
-    connect(m_analogFilter, &QCheckBox::toggled, this, &AudioSettingsPage::emitEngineSettings);
+    connect(m_hqMixer, &QCheckBox::toggled, this, &AudioSettingsPage::updateMixRateItems);
+    connect(m_hqMixer, &QCheckBox::toggled, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_bufferSize, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitDeviceConfig);
     if (m_exclusive) {
@@ -326,7 +332,7 @@ EngineSettings AudioSettingsPage::engineSettings() const
     EngineSettings s;
     s.maxPcmChannels = m_polyphony->value();
     s.pcmMixRate = float(m_mixRate->currentData().toInt());
-    s.analogFilter = m_analogFilter->isChecked();
+    s.hqMixer = m_hqMixer->isChecked();
     return s;
 }
 
@@ -337,16 +343,33 @@ void AudioSettingsPage::setEngineSettings(const EngineSettings &settings)
     const bool wasLoading = m_loading;
     m_loading = true;
     m_polyphony->setValue(settings.maxPcmChannels);
+    // The mixer first: it decides which rates are selectable.
+    m_hqMixer->setChecked(settings.hqMixer);
     const int rate = int(settings.pcmMixRate + 0.5f);
     int idx = m_mixRate->findData(rate);
-    if (idx < 0) { // hand-edited QSettings value: keep it selectable
-        m_mixRate->addItem(tr("%1 Hz (custom)").arg(rate), rate);
-        idx = m_mixRate->count() - 1;
-    }
+    if (idx < 0) // not one of m4aSoundInit's rates: the engine would snap it
+        idx = m_mixRate->findData(kGbaDefaultRate);
     m_mixRate->setCurrentIndex(idx);
-    m_analogFilter->setChecked(settings.analogFilter);
+    updateMixRateItems();
     m_loading = wasLoading;
     emitEngineSettings();
+}
+
+void AudioSettingsPage::updateMixRateItems()
+{
+    auto *model = qobject_cast<QStandardItemModel *>(m_mixRate->model());
+    const int idx = m_mixRate->findData(kGbaMixRateHqUnsupported);
+    if (!model || idx < 0)
+        return;
+    const bool hq = m_hqMixer->isChecked();
+    model->item(idx)->setEnabled(!hq);
+    m_mixRate->setItemText(idx,
+                           hq ? tr("%1 Hz (not with the HQ mixer)").arg(kGbaMixRateHqUnsupported)
+                              : tr("%1 Hz").arg(kGbaMixRateHqUnsupported));
+    // The engine snaps this rate to the default under the HQ mixer; show the
+    // rate that will actually play rather than a greyed-out selection.
+    if (hq && m_mixRate->currentIndex() == idx)
+        m_mixRate->setCurrentIndex(m_mixRate->findData(kGbaDefaultRate));
 }
 
 // Only a real change reports: the owner restarts the audio device on every

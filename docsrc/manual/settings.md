@@ -10,8 +10,10 @@ puts the window away. The window reopens on the section you used last. -->
 <!-- TODO: Output level (porydaw's own listening level, 0–200%,
 double-click resets to 100%; never saved with the song, never in exported
 WAVs — see [Playing Songs](playback.md)). GBA engine: PCM polyphony, PCM
-mix rate, analog output filter — the global accuracy knobs, contrast with
-the per-song [Song Settings](song-settings.md). Metronome: Volume (0–100%,
+mix rate (one of m4aSoundInit's rates, 13379 Hz is the games'), HQ mixer
+(ipatix) — on for projects that installed ipatix's High-Quality Audio
+Mixer; it has no 7884 Hz, which snaps to 13379 — the global accuracy
+knobs, contrast with the per-song [Song Settings](song-settings.md). Metronome: Volume (0–100%,
 double-click resets to 70%) and Count-in when recording (Off / 1 bar /
 2 bars) — see [MIDI Keyboard](midi-keyboard.md#metronome-and-count-in);
 in punch mode the same setting is the pre-roll (the song plays that many

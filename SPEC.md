@@ -42,7 +42,7 @@ in the UI, not fights against a general-purpose DAW's assumptions.
 | Song source of truth | **The `.mid` file is canonical** | porydaw edits `sound/songs/midi/*.mid` in place, constrained to the mid2agb-compatible subset. Saving *is* exporting. Perfect interop: the same file opens in any DAW; porydaw can never corrupt a build. |
 | Project write-back depth | **All song-related files** *(revised 2026-07-05; originally "songs only" with copy-paste snippets)* | porydaw writes `.mid` files, the song's `midi.cfg` line, and the registration files (`song_table.inc`, `songs.h`, `ld_script.ld`, `charmap.txt`, `src/debug.c`) directly — inserting or correcting only the song's own lines, byte-conservative for everything else (§6.3). Voicegroup `.inc` files: the editor rewrites only the edited voice lines, preserving every other byte (§5.3). Nothing outside this set is ever modified. |
 | Repo shape | **New repo; poryaaaa as git submodule** | porydaw is its own CMake project consuming poryaaaa's engine sources (`ENGINE_SOURCES` set). Fixes the engine needs (see §9) are upstreamed to poryaaaa so the CLAP plugin benefits too. |
-| Synth | **poryaaaa engine core, statically linked** | `plugin/m4a_engine.{h,c}` + `m4a_channel.c` + `m4a_tables.c` + `m4a_reverb.c` + `voicegroup_loader.c` — a self-contained C11 library with no CLAP/GUI dependency, already proven embeddable by `cmd/poryaaaa_render.c`. |
+| Synth | **poryaaaa engine core, statically linked** | `plugin/m4a_engine.{h,c}` + `m4a_channel.c` + `m4a_tables.c` + the mixers (`m4a_mixer.c`, `m4a_hq_mixer.c`), the GBA output model (`m4a_gba.c`, `m4a_psg.c`, `m4a_resampler.c`) + `voicegroup_loader.c` — a self-contained C11 library with no CLAP/GUI dependency, already proven embeddable by `cmd/poryaaaa_render.c`. |
 
 ## 3. Architecture
 
@@ -670,7 +670,8 @@ open.
   timeline (after mid2agb simulation), drive engine event calls + `m4a_engine_process`
   from the audio callback, honor loop markers with configurable loop behavior.
 - GBA-accuracy knobs surfaced in app settings, defaulted to hardware-accurate:
-  PCM mix rate (13379 Hz default), analog filter, polyphony (`maxChans`), reverb.
+  PCM mix rate (13379 Hz default), HQ mixer (ipatix, off by default), polyphony
+  (`maxChans`), reverb.
 - **Offline WAV export** reuses the same timeline against a faster-than-realtime
   render loop (loop count, fadeout — feature parity with `poryaaaa_render`).
 

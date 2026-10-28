@@ -5,6 +5,7 @@
 // Usage:
 //   porydaw_render_cli <projectRoot> <voicegroup> <file.mid> <out.wav>
 //       [--seconds N] [--sample-rate HZ] [--song-volume V] [--reverb R] [--no-loop]
+//       [--hq-mixer]
 
 #include <QString>
 #include <cstdint>
@@ -80,7 +81,7 @@ int main(int argc, char *argv[])
         fprintf(stderr,
                 "Usage: %s <projectRoot> <voicegroup> <file.mid> <out.wav> "
                 "[--seconds N] [--sample-rate HZ] [--song-volume V] [--reverb R] "
-                "[--no-loop]\n",
+                "[--no-loop] [--hq-mixer]\n",
                 argv[0]);
         return 1;
     }
@@ -93,6 +94,7 @@ int main(int argc, char *argv[])
     int songVolume = 127;
     int reverb = 0;
     bool loop = true;
+    bool hqMixer = false; // ipatix's HQ mixer (poryaaaa_render --hq-mixer)
 
     for (int i = 5; i < argc; i++) {
         if (!strcmp(argv[i], "--seconds") && i + 1 < argc)
@@ -105,6 +107,8 @@ int main(int argc, char *argv[])
             reverb = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-loop"))
             loop = false;
+        else if (!strcmp(argv[i], "--hq-mixer"))
+            hqMixer = true;
         else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             return 1;
@@ -133,7 +137,8 @@ int main(int argc, char *argv[])
     m4a_engine_set_song_volume(&engine, uint8_t(songVolume));
     m4a_reverb_set_amount(&engine.reverb, uint8_t(reverb));
     engine.maxPcmChannels = 5;
-    m4a_engine_set_pcm_mix_rate(&engine, 13379.0f);
+    m4a_engine_set_hq_mixer(&engine, hqMixer);
+    m4a_engine_set_pcm_freq_mode(&engine, M4A_PCM_FREQ_MODE_DEFAULT);
 
     const uint64_t totalSamples = uint64_t(seconds * sampleRate + 0.5);
     std::vector<float> outL(totalSamples), outR(totalSamples);

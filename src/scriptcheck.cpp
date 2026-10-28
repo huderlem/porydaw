@@ -2618,8 +2618,8 @@ void runEngineSettingsChecks(const Check &check, scripting::ScriptHost &host, Ma
 
     check(runc("porydaw.audio.engine.maxPcmChannels").toInt() == before.maxPcmChannels &&
               runc("porydaw.audio.engine.pcmMixRate").toFloat() == before.pcmMixRate &&
-              runc("porydaw.audio.engine.analogFilter") ==
-                  (before.analogFilter ? QStringLiteral("true") : QStringLiteral("false")),
+              runc("porydaw.audio.engine.hqMixer") ==
+                  (before.hqMixer ? QStringLiteral("true") : QStringLiteral("false")),
           "audio.engine does not mirror the Settings window's engine settings");
     check(runc("porydaw.audio.engineLimits().mixRates.indexOf(13379) >= 0 && "
                "porydaw.audio.engineLimits().mixRates.indexOf(0) < 0 && "
@@ -2628,26 +2628,29 @@ void runEngineSettingsChecks(const Check &check, scripting::ScriptHost &host, Ma
 
     // A partial write: the page, QSettings and the event all follow.
     runc("var engLog = []; var engFn = function (e) { engLog.push(e.maxPcmChannels + '/' + "
-         "e.pcmMixRate + '/' + e.analogFilter); }; porydaw.audio.on('engine', engFn)");
+         "e.pcmMixRate + '/' + e.hqMixer); }; porydaw.audio.on('engine', engFn)");
     const int poly = before.maxPcmChannels == 3 ? 4 : 3;
+    const int rate = before.pcmMixRate == 21024.0f ? 15768 : 21024;
     check(host.evalConsole(QStringLiteral("porydaw.audio.setEngine({maxPcmChannels: %1, "
-                                          "analogFilter: %2})")
+                                          "hqMixer: %2})")
                                .arg(poly)
-                               .arg(before.analogFilter ? "false" : "true")) ==
+                               .arg(before.hqMixer ? "false" : "true")) ==
                   QStringLiteral("undefined") &&
               page.engineSettings().maxPcmChannels == poly &&
-              page.engineSettings().analogFilter != before.analogFilter &&
+              page.engineSettings().hqMixer != before.hqMixer &&
               page.engineSettings().pcmMixRate == before.pcmMixRate &&
               runc("porydaw.audio.engine.maxPcmChannels").toInt() == poly,
           "audio.setEngine did not reach the Settings page (or touched an omitted knob)");
     check(QSettings().value(QStringLiteral("engine/maxPcmChannels")).toInt() == poly,
           "audio.setEngine did not persist");
     // A second write before the timer fires: one event, the settled value.
-    runc("porydaw.audio.setEngine({pcmMixRate: 0})");
-    check(page.engineSettings().pcmMixRate == 0.0f, "audio.setEngine({pcmMixRate: 0}) refused");
+    runc(
+        QStringLiteral("porydaw.audio.setEngine({pcmMixRate: %1})").arg(rate).toUtf8().constData());
+    check(page.engineSettings().pcmMixRate == float(rate),
+          "audio.setEngine({pcmMixRate: <listed>}) refused");
     settle();
     check(runc("engLog.join(' ')") ==
-              QStringLiteral("%1/0/%2").arg(poly).arg(before.analogFilter ? "false" : "true"),
+              QStringLiteral("%1/%2/%3").arg(poly).arg(rate).arg(before.hqMixer ? "false" : "true"),
           "audio.engine did not fire exactly once with the settled settings");
 
     // Refusals leave everything as it was.
@@ -2661,9 +2664,12 @@ void runEngineSettingsChecks(const Check &check, scripting::ScriptHost &host, Ma
     check(runc("porydaw.audio.setEngine({pcmMixRate: 12345})").isNull() &&
               errorLogged("pcmMixRate must be"),
           "audio.setEngine accepted an unlisted mix rate");
-    check(runc("porydaw.audio.setEngine({analogFilter: 1})").isNull() &&
-              errorLogged("analogFilter must be"),
-          "audio.setEngine accepted a non-boolean analogFilter");
+    // The retired "0 = host rate" value is unlisted too.
+    check(runc("porydaw.audio.setEngine({pcmMixRate: 0})").isNull() &&
+              errorLogged("pcmMixRate must be"),
+          "audio.setEngine accepted the retired host-rate value");
+    check(runc("porydaw.audio.setEngine({hqMixer: 1})").isNull() && errorLogged("hqMixer must be"),
+          "audio.setEngine accepted a non-boolean hqMixer");
     check(runc("porydaw.audio.setEngine({polyphony: 3})").isNull() &&
               errorLogged("unknown key 'polyphony'"),
           "audio.setEngine accepted an unknown key");
@@ -2687,7 +2693,7 @@ void runEngineSettingsChecks(const Check &check, scripting::ScriptHost &host, Ma
               runc("engLog[1]") == QStringLiteral("%1/%2/%3")
                                        .arg(before.maxPcmChannels)
                                        .arg(double(before.pcmMixRate))
-                                       .arg(before.analogFilter ? "true" : "false"),
+                                       .arg(before.hqMixer ? "true" : "false"),
           "a Settings-page change did not fire audio.engine");
     runc("porydaw.audio.off('engine', engFn)");
 }

@@ -241,9 +241,9 @@ Every `on()` returns a function that unsubscribes the listener.
 | `channels()` | The current state of the m4a engine's channel pools |
 | `on("frame", fn(frame))` | Callback invoked for every audio frame, with `{peak: [l, r], rms: [l, r], frames, sampleRate, playing}`. `peak`/`rms`. `frames` is how many there were. |
 | `render(path, {sampleRate?, loopCount?, fadeout?, tail?})` | Renders the active song to a WAV file the same way `File → Export WAV` does. |
-| `engine` | The current global m4a engine settings. `{maxPcmChannels, pcmMixRate, analogFilter}` |
+| `engine` | The current global m4a engine settings. `{maxPcmChannels, pcmMixRate, hqMixer}` |
 | `engineLimits()` | `{maxPcmChannels, mixRates}`. The m4a polyphony ceiling and the selectable sample rates |
-| `setEngine({maxPcmChannels?, pcmMixRate?, analogFilter?})` | Partial update the m4a engine settings |
+| `setEngine({maxPcmChannels?, pcmMixRate?, hqMixer?})` | Partial update the m4a engine settings. `pcmMixRate` is one of `engineLimits().mixRates`; `hqMixer` selects ipatix's HQ mixer |
 | `on("engine", fn(settings))` | Callback invoked when any of the m4a engine settings are changed |
 
 See these example plugins for reference: [`plugins/examples/vu-meter`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/vu-meter), [`plugins/examples/spectrum`](https://github.com/huderlem/porydaw/blob/main/plugins/examples/spectrum),

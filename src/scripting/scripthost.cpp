@@ -1356,7 +1356,7 @@ QVariantMap engineSettingsMap(const EngineSettings &settings)
 {
     return {{QStringLiteral("maxPcmChannels"), settings.maxPcmChannels},
             {QStringLiteral("pcmMixRate"), double(settings.pcmMixRate)},
-            {QStringLiteral("analogFilter"), settings.analogFilter}};
+            {QStringLiteral("hqMixer"), settings.hqMixer}};
 }
 
 QString ScriptHost::evalConsole(const QString &code)

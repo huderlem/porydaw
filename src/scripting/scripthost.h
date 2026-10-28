@@ -154,7 +154,7 @@ struct HostBindings {
     std::function<bool(SongSession &session, int slot, const VgVoice &voice, QString *error)>
         editVoice;
     // The GBA engine settings (Settings → Audio: PCM polyphony, mix rate,
-    // analog filter), read and written through porydaw.audio.engine /
+    // HQ mixer), read and written through porydaw.audio.engine /
     // setEngine. The write goes through the Settings window's page so the
     // page, QSettings and the audio device all follow; false with *error
     // set when the window can't take it. Absent: reads give the defaults,
@@ -169,7 +169,7 @@ struct HostBindings {
     MidiInput *midi = nullptr;
 };
 
-// {maxPcmChannels, pcmMixRate, analogFilter}: porydaw.audio.engine and the
+// {maxPcmChannels, pcmMixRate, hqMixer}: porydaw.audio.engine and the
 // audio.engine event payload.
 QVariantMap engineSettingsMap(const EngineSettings &settings);
 

@@ -472,7 +472,7 @@
             // render(path, {sampleRate?, loopCount?, fadeout?, tail?}) → {path, seconds}
             render: function (path, opts) { return plain(audio.render(String(path), opts || {})); },
             // The GBA engine settings (Settings → Audio):
-            // {maxPcmChannels, pcmMixRate, analogFilter}; setEngine takes a
+            // {maxPcmChannels, pcmMixRate, hqMixer}; setEngine takes a
             // partial object. engineLimits() → {maxPcmChannels, mixRates}.
             get engine() { return plain(audio.engine()); },
             engineLimits: function () { return plain(audio.engineLimits()); },

@@ -359,10 +359,10 @@ class AudioApi : public ApiObject
     // failure. The path must be writable by porydaw.io's rules.
     Q_INVOKABLE QVariant render(const QString &path, const QVariantMap &opts);
     // The GBA engine settings (Settings → Audio), user-global:
-    // {maxPcmChannels, pcmMixRate, analogFilter}.
+    // {maxPcmChannels, pcmMixRate, hqMixer}.
     Q_INVOKABLE QVariantMap engine() const;
     // {maxPcmChannels: the polyphony ceiling, mixRates: the selectable
-    // DirectSound rates (0 = the host rate)}.
+    // DirectSound rates}.
     Q_INVOKABLE QVariantMap engineLimits() const;
     // Partial update of engine(); unknown keys and out-of-range values
     // throw. Persists, updates the Settings window and restarts the audio

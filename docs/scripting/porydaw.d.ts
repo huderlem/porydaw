@@ -319,10 +319,10 @@ declare namespace porydaw {
     interface EngineSettings {
         /** PCM (DirectSound) polyphony, 1..engineLimits().maxPcmChannels. */
         maxPcmChannels: number;
-        /** DirectSound mix rate in Hz: 0 = the host rate, else one of engineLimits().mixRates. */
+        /** DirectSound mix rate in Hz, one of engineLimits().mixRates (13379 is the games'). */
         pcmMixRate: number;
-        /** The GBA analog output low-pass. */
-        analogFilter: boolean;
+        /** ipatix's HQ mixer in place of the stock PCM mixer (7884 Hz snaps to 13379 while on). */
+        hqMixer: boolean;
     }
     namespace audio {
         const sampleRate: number;

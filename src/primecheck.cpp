@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <vector>
 
 #include "core/miditimeline.h"
 #include "core/smf.h"
@@ -207,9 +208,13 @@ struct StereoPeak {
 
 StereoPeak renderPeaks(M4AEngine *engine)
 {
-    constexpr uint32_t kFrames = 512;
-    float bufL[kFrames], bufR[kFrames];
-    m4a_engine_process(engine, bufL, bufR, int(kFrames));
+    // A note keyed now first sounds a few GBA frames later: it starts at
+    // the next SoundMain, is mixed into the DMA ring, and the ring drains
+    // through the FIFO (up to ~31 ms measured). Render well past that
+    // (4096 frames, ~85 ms at 48 kHz) to see it.
+    constexpr uint32_t kFrames = 4096;
+    std::vector<float> bufL(kFrames), bufR(kFrames);
+    m4a_engine_process(engine, bufL.data(), bufR.data(), int(kFrames));
     StereoPeak peak;
     for (uint32_t i = 0; i < kFrames; i++) {
         peak.l = std::max(peak.l, std::fabs(bufL[i]));

@@ -1059,8 +1059,12 @@ int runVgCheck(const QString &projectRoot, const QString &songLabel)
                 expectComp("voice loads its DPCM .bin", t[0].type == VOICE_CRY && t[0].wav &&
                                                             t[0].wav->type == 1 &&
                                                             t[0].wav->size == 64);
+                // The uncompressed source stands in for the unbuilt .bin, and
+                // the loader drops the CMP bit with it: SoundMainRAM mixes
+                // nothing for a CMP voice on uncompressed data, so the voice
+                // plays as a plain reversed sample.
                 expectComp("reverse voice falls back to the unbuilt cry's source",
-                           t[1].type == VOICE_CRY_REVERSE && t[1].wav && t[1].wav->type == 0 &&
+                           t[1].type == VOICE_DIRECTSOUND_ALT && t[1].wav && t[1].wav->type == 0 &&
                                t[1].wav->size == 8);
                 expectComp("cry_custom keeps its arguments", t[2].type == VOICE_CRY &&
                                                                  t[2].key == 72 &&

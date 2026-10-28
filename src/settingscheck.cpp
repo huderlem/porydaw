@@ -11,6 +11,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTreeWidget>
@@ -215,10 +216,10 @@ int runSettingsCheck(const QString &shotPath)
         auto *output = dialog->findChild<QSlider *>(QStringLiteral("settingsOutputLevel"));
         auto *polyphony = dialog->findChild<QSpinBox *>(QStringLiteral("settingsPcmPolyphony"));
         auto *mixRate = dialog->findChild<QComboBox *>(QStringLiteral("settingsPcmMixRate"));
-        auto *analog = dialog->findChild<QCheckBox *>(QStringLiteral("settingsAnalogFilter"));
+        auto *hq = dialog->findChild<QCheckBox *>(QStringLiteral("settingsHqMixer"));
         auto *defaults =
             dialog->findChild<QPushButton *>(QStringLiteral("settingsAudioRestoreDefaults"));
-        if (check(output && polyphony && mixRate && analog && defaults,
+        if (check(output && polyphony && mixRate && hq && defaults,
                   "Audio page controls not found")) {
             check(output->value() == AudioSettingsPage::kOutputLevelDefault &&
                       window.audio().outputGain() == 1.0f,
@@ -231,16 +232,35 @@ int runSettingsCheck(const QString &shotPath)
             polyphony->setValue(3);
             check(QSettings().value(QStringLiteral("engine/maxPcmChannels")).toInt() == 3,
                   "PCM polyphony was not persisted as it changed");
-            mixRate->setCurrentIndex(mixRate->findData(0));
-            check(QSettings().value(QStringLiteral("engine/pcmMixRate")).toDouble() == 0.0,
+            mixRate->setCurrentIndex(mixRate->findData(21024));
+            check(QSettings().value(QStringLiteral("engine/pcmMixRate")).toDouble() == 21024.0,
                   "PCM mix rate was not persisted as it changed");
-            analog->setChecked(true);
-            check(QSettings().value(QStringLiteral("engine/analogFilter")).toBool(),
-                  "analog filter was not persisted as it changed");
+            check(mixRate->findData(0) < 0, "the retired host-rate item is still offered");
+            hq->setChecked(true);
+            check(QSettings().value(QStringLiteral("engine/hqMixer")).toBool(),
+                  "HQ mixer was not persisted as it changed");
             check(dialog->audioPage()->engineSettings().maxPcmChannels == 3 &&
-                      dialog->audioPage()->engineSettings().pcmMixRate == 0.0f &&
-                      dialog->audioPage()->engineSettings().analogFilter,
+                      dialog->audioPage()->engineSettings().pcmMixRate == 21024.0f &&
+                      dialog->audioPage()->engineSettings().hqMixer,
                   "Audio page does not report what its controls show");
+            // The HQ mixer has no 7884 Hz: the item greys out, and choosing
+            // it anyway lands on the GBA default (what the engine would play).
+            {
+                auto *model = qobject_cast<QStandardItemModel *>(mixRate->model());
+                const int idx7884 = mixRate->findData(kGbaMixRateHqUnsupported);
+                check(model && idx7884 >= 0 && !model->item(idx7884)->isEnabled(),
+                      "7884 Hz stayed selectable under the HQ mixer");
+                hq->setChecked(false);
+                check(model && idx7884 >= 0 && model->item(idx7884)->isEnabled(),
+                      "7884 Hz did not come back without the HQ mixer");
+                mixRate->setCurrentIndex(idx7884);
+                hq->setChecked(true);
+                check(mixRate->currentData().toInt() == 13379 &&
+                          dialog->audioPage()->engineSettings().pcmMixRate == 13379.0f &&
+                          QSettings().value(QStringLiteral("engine/pcmMixRate")).toDouble() ==
+                              13379.0,
+                      "HQ mixer over 7884 Hz did not snap the rate to 13379");
+            }
 
             defaults->click();
             const EngineSettings factory;
@@ -249,13 +269,13 @@ int runSettingsCheck(const QString &shotPath)
                   "Restore Defaults did not reset the output level");
             check(polyphony->value() == factory.maxPcmChannels &&
                       mixRate->currentData().toInt() == int(factory.pcmMixRate) &&
-                      analog->isChecked() == factory.analogFilter,
+                      hq->isChecked() == factory.hqMixer,
                   "Restore Defaults did not reset the engine knobs");
             check(QSettings().value(QStringLiteral("engine/maxPcmChannels")).toInt() ==
                           factory.maxPcmChannels &&
                       QSettings().value(QStringLiteral("engine/pcmMixRate")).toDouble() ==
                           double(factory.pcmMixRate) &&
-                      !QSettings().value(QStringLiteral("engine/analogFilter")).toBool(),
+                      !QSettings().value(QStringLiteral("engine/hqMixer")).toBool(),
                   "Restore Defaults did not persist the factory engine settings");
             // Restore Defaults on factory knobs is a no-op: it must not
             // report (the owner restarts the audio device on every report).

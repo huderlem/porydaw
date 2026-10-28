@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
+- Updated the audio engine (poryaaaa) to its accuracy overhaul: playback and exported WAVs now match the game running in mGBA, including the GBA's PCM DMA timing, the PSG channels and the output stage.
+- Added `Settings -> Audio -> HQ mixer (ipatix)` to play PCM channels through ipatix's High-Quality Audio Mixer, for projects that have installed it. Off by default (the games' stock mixer).
+   - The HQ mixer has no 7884 Hz mix rate; that choice snaps to 13379 Hz while it is on.
+   - Plugins read and set it through `porydaw.audio.engine.hqMixer`.
+
+## Changed
+- Removed the `GBA analog output filter` and the `Host rate` PCM mix rate options from `Settings -> Audio`: the engine now models the GBA's output stage itself, and the PCM rate is always one of the game's `m4aSoundInit` rates. A saved host-rate setting falls back to 13379 Hz.
 - Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.

@@ -67,6 +67,9 @@ class AudioSettingsPage : public QWidget
     void emitEngineSettings();
     void emitDeviceConfig();
     void updateDefaultLabel();
+    // The HQ mixer has no 7884 Hz: that rate greys out while it is on, and
+    // a selection sitting on it moves to the GBA default.
+    void updateMixRateItems();
 
     QSlider *m_outputSlider = nullptr;
     QLabel *m_outputValue = nullptr;
@@ -75,7 +78,7 @@ class AudioSettingsPage : public QWidget
     QComboBox *m_countIn = nullptr;
     QSpinBox *m_polyphony = nullptr;
     QComboBox *m_mixRate = nullptr;
-    QCheckBox *m_analogFilter = nullptr;
+    QCheckBox *m_hqMixer = nullptr;
     QComboBox *m_bufferSize = nullptr;
     QCheckBox *m_exclusive = nullptr; // null off Windows
     QLabel *m_deviceStatus = nullptr;

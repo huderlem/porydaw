@@ -15,9 +15,17 @@ namespace {
 
 const QString kKeyPolyphony = QStringLiteral("engine/maxPcmChannels");
 const QString kKeyMixRate = QStringLiteral("engine/pcmMixRate");
-const QString kKeyAnalogFilter = QStringLiteral("engine/analogFilter");
+const QString kKeyHqMixer = QStringLiteral("engine/hqMixer");
 
 } // namespace
+
+bool isGbaMixRate(int rate)
+{
+    for (int r : kGbaMixRates)
+        if (r == rate)
+            return true;
+    return false;
+}
 
 EngineSettings EngineSettings::load()
 {
@@ -26,10 +34,16 @@ EngineSettings EngineSettings::load()
     EngineSettings s;
     s.maxPcmChannels =
         qBound(1, qs.value(kKeyPolyphony, defaults.maxPcmChannels).toInt(), int(MAX_PCM_CHANNELS));
-    s.pcmMixRate = qs.value(kKeyMixRate, double(defaults.pcmMixRate)).toFloat();
-    if (s.pcmMixRate < 0.0f)
-        s.pcmMixRate = defaults.pcmMixRate;
-    s.analogFilter = qs.value(kKeyAnalogFilter, defaults.analogFilter).toBool();
+    // Only m4aSoundInit's rates exist now: a hand-edited value, or the old
+    // "0 = host rate" choice that predates the GBA hardware model, falls back
+    // to the game's rate.
+    const int rate = qs.value(kKeyMixRate, double(defaults.pcmMixRate)).toInt();
+    s.hqMixer = qs.value(kKeyHqMixer, defaults.hqMixer).toBool();
+    // ... and the HQ mixer has no 7884 Hz: hold the rate the engine will
+    // actually play, so the Settings page and porydaw.audio.engine agree.
+    s.pcmMixRate = isGbaMixRate(rate) && !(s.hqMixer && rate == kGbaMixRateHqUnsupported)
+                       ? float(rate)
+                       : defaults.pcmMixRate;
     return s;
 }
 
@@ -38,5 +52,5 @@ void EngineSettings::save() const
     QSettings qs;
     qs.setValue(kKeyPolyphony, maxPcmChannels);
     qs.setValue(kKeyMixRate, double(pcmMixRate));
-    qs.setValue(kKeyAnalogFilter, analogFilter);
+    qs.setValue(kKeyHqMixer, hqMixer);
 }

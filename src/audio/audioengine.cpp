@@ -311,15 +311,11 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_settings = settings;
 
     // Fresh engine state for the new song (safe here: device is stopped, and
-    // init/set_pcm_mix_rate may allocate).
+    // init/set_pcm_freq_mode reprogram the PCM ring).
     m4a_engine_destroy(m_engine.get());
     m4a_engine_init(m_engine.get(), float(m_sampleRate));
     m4a_engine_set_voicegroup(m_engine.get(), m_voicegroup ? m_voicegroup->voices : nullptr);
-    m4a_engine_set_song_volume(m_engine.get(), m_settings.songVolume);
-    m4a_reverb_set_amount(&m_engine->reverb, m_settings.reverb);
-    m_engine->maxPcmChannels = m_settings.maxPcmChannels;
-    m_engine->analogFilter = m_settings.analogFilter;
-    m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
+    applySongSettings(m_engine.get(), m_settings);
     // Latch the song's initial controller state and prime each track's voice
     // so auditioned notes (previewNote) sound as they would in the song
     // before playback has ever dispatched the track's events. Playback
@@ -469,14 +465,10 @@ void AudioEngine::updateSettings(const SongSettings &settings)
 {
     if (m_deviceStarted)
         ma_device_stop(m_device);
-    const bool mixRateChanged = settings.pcmMixRate != m_settings.pcmMixRate;
     m_settings = settings;
-    m4a_engine_set_song_volume(m_engine.get(), m_settings.songVolume);
-    m4a_reverb_set_amount(&m_engine->reverb, m_settings.reverb);
-    m_engine->maxPcmChannels = m_settings.maxPcmChannels;
-    m_engine->analogFilter = m_settings.analogFilter;
-    if (mixRateChanged)
-        m4a_engine_set_pcm_mix_rate(m_engine.get(), m_settings.pcmMixRate);
+    // The mixer and rate setters are no-ops when unchanged, so a mid-song
+    // volume or polyphony edit never restarts the PCM ring.
+    applySongSettings(m_engine.get(), m_settings);
     resetPreviewEngine();
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -516,11 +508,7 @@ void AudioEngine::resetPreviewEngine()
     m4a_engine_destroy(m_previewEngine.get());
     m4a_engine_init(m_previewEngine.get(), float(m_sampleRate));
     m4a_engine_set_voicegroup(m_previewEngine.get(), previewVoices());
-    m4a_engine_set_song_volume(m_previewEngine.get(), m_settings.songVolume);
-    m4a_reverb_set_amount(&m_previewEngine->reverb, m_settings.reverb);
-    m_previewEngine->maxPcmChannels = m_settings.maxPcmChannels;
-    m_previewEngine->analogFilter = m_settings.analogFilter;
-    m4a_engine_set_pcm_mix_rate(m_previewEngine.get(), m_settings.pcmMixRate);
+    applySongSettings(m_previewEngine.get(), m_settings);
     m_previewVoiceKey = -1;
     // The reinit destroyed every channel, so all audition slots retire.
     m_audition.reset();

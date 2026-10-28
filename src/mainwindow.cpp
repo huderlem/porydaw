@@ -3597,7 +3597,7 @@ SongSettings MainWindow::songSettingsFor(const SongSession &session) const
     settings.maxPcmChannels = uint8_t(m_engineSettings.maxPcmChannels);
     settings.trackBudget = uint8_t(session.doc.trackBudget());
     settings.pcmMixRate = m_engineSettings.pcmMixRate;
-    settings.analogFilter = m_engineSettings.analogFilter;
+    settings.hqMixer = m_engineSettings.hqMixer;
     return settings;
 }
 
@@ -7050,13 +7050,13 @@ bool MainWindow::runSelfTest(const QString &projectRoot, const QString &songLabe
     }
 
     // App settings: the global engine knobs (SPEC §7) re-applied mid-playback
-    // through updateSettings — polyphony clamp, mix-rate rebuild (reverb delay
-    // line resize), analog filter — must keep the transport running.
+    // through updateSettings — polyphony clamp, mix-rate reprogram (PCM ring
+    // restart), mixer swap — must keep the transport running.
     {
         SongSettings tweaked = songSettingsFor(*tab);
         tweaked.maxPcmChannels = 8;
         tweaked.pcmMixRate = 21024.0f;
-        tweaked.analogFilter = !tweaked.analogFilter;
+        tweaked.hqMixer = !tweaked.hqMixer;
         m_audio.updateSettings(tweaked);
         const uint64_t before = m_audio.playheadSamples();
         QTimer::singleShot(300, &loop, &QEventLoop::quit);
