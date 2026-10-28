@@ -696,6 +696,7 @@ class AudioEngine
     std::unique_ptr<M4AEngine> m_liveEngine;
     void resetLiveEngine(uint64_t pos);
     void syncLiveEngine(uint64_t pos);
+    void applyLiveEngineSettings();
     // Sample Editor audition slots (PLAN.md §4), played on the audition
     // instance's track 1 (previewVoice owns track 0).
     static constexpr int kAuditionTrack = 1;
@@ -906,8 +907,19 @@ class AudioEngine
     uint32_t m_appliedRefreshVoices = 0;
     uint32_t m_appliedPolyReset = 0;
     TimelinePlayer m_player;
-    // Metronome (audio thread): this callback's clicks, mixed after the tap.
+    // Metronome (audio thread): this callback's clicks, mixed after the tap,
+    // through a delay of the main engine's latency (engineLatencySamples)
+    // so a click lands with the song position it marks, not a frame and a
+    // half ahead of it. The delay line holds interleaved stereo; the
+    // scratch takes a piece of the callback's clicks before the delay.
     ClickVoice m_click;
+    std::unique_ptr<float[]> m_clickDelay;
+    uint32_t m_clickDelayLen = 0; // frames
+    uint32_t m_clickDelayPos = 0;
+    static constexpr uint32_t kClickScratchFrames = 8192;
+    std::unique_ptr<float[]> m_clickScratch;
+    // Silences the ringing clicks and the ones still in the delay line.
+    void cutClicks();
     static constexpr uint32_t kMaxClicksPerCallback = 64;
     ClickVoice::Trigger m_clickQueue[kMaxClicksPerCallback];
     uint32_t m_clickQueueCount = 0;

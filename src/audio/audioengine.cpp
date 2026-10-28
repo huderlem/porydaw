@@ -99,6 +99,12 @@ bool AudioEngine::init(QString *error)
     }
     m_sampleRate = double(m_device->sampleRate);
     m_click.setSampleRate(m_sampleRate);
+    m_clickDelayLen = uint32_t(engineLatencySamples());
+    m_clickDelay = std::make_unique<float[]>(size_t(std::max<uint32_t>(m_clickDelayLen, 1)) * 2);
+    std::fill(m_clickDelay.get(),
+              m_clickDelay.get() + size_t(std::max<uint32_t>(m_clickDelayLen, 1)) * 2, 0.0f);
+    m_clickDelayPos = 0;
+    m_clickScratch = std::make_unique<float[]>(size_t(kClickScratchFrames) * 2);
 
     m_bufCapacity = 8192;
     m_bufL = std::make_unique<float[]>(m_bufCapacity);
@@ -345,7 +351,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     dropPunchMask();
 
     // No transition will run cutAllSound for this stop: cut the click too.
-    m_click.cut();
+    cutClicks();
     m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -418,9 +424,12 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     m_playhead.store(pos);
     // Release sounding notes: their note-offs may have moved or vanished in
     // the rebuilt timeline. Envelopes fade naturally, so brief edits during
-    // playback don't hard-cut the audio.
-    for (int track = 0; track < MAX_TRACKS; track++)
+    // playback don't hard-cut the audio. The live engine's too: the table
+    // and held keys clearTimedPreviews forgets would never get a note-off.
+    for (int track = 0; track < MAX_TRACKS; track++) {
         m4a_engine_all_notes_off(m_engine.get(), track);
+        m4a_engine_all_notes_off(m_liveEngine.get(), track);
+    }
     clearTimedPreviews();
     // Re-latch controller state from the rebuilt timeline: the edit may have
     // deleted or moved the events behind the engine's current bend/CC values
@@ -459,11 +468,13 @@ void AudioEngine::applyPendingSeek()
     if (!m_timeline)
         return;
 
-    for (int track = 0; track < MAX_TRACKS; track++)
+    for (int track = 0; track < MAX_TRACKS; track++) {
         m4a_engine_all_notes_off(m_engine.get(), track);
+        m4a_engine_all_notes_off(m_liveEngine.get(), track); // as updateTimeline
+    }
     const uint64_t from = m_player.position();
     clearTimedPreviews();
-    m_click.cut();
+    cutClicks();
     m_player.seek(samplePos, m_timeline);
     captureBoundary(from, samplePos);
     // A seek inside a punch take is another pass of it, still masked; once
@@ -485,9 +496,21 @@ void AudioEngine::updateSettings(const SongSettings &settings)
     // volume or polyphony edit never restarts the PCM ring.
     applySongSettings(m_engine.get(), m_settings);
     resetPreviewEngine();
-    resetLiveEngine(m_playhead.load());
+    // The live engine takes the settings in place (unchanged setters are
+    // no-ops): a reinit would cut the keyboard's held notes and drop the
+    // lanes it moved, which the main engine keeps here.
+    applyLiveEngineSettings();
     if (m_deviceStarted)
         ma_device_start(m_device);
+}
+
+// The live engine's copy of the song settings. Its mixer is always the
+// vanilla one (live mode has no HQ path), but its rate follows the rate the
+// main engine actually plays: under the HQ mixer 7884 Hz snaps to 13379.
+void AudioEngine::applyLiveEngineSettings()
+{
+    applySongSettings(m_liveEngine.get(), m_settings);
+    m4a_engine_set_pcm_freq_mode(m_liveEngine.get(), m_engine->pcmFreqMode);
 }
 
 void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
@@ -542,7 +565,7 @@ void AudioEngine::resetLiveEngine(uint64_t pos)
     m4a_engine_init(m_liveEngine.get(), float(m_sampleRate));
     m4a_engine_set_live_mode(m_liveEngine.get(), true);
     m4a_engine_set_voicegroup(m_liveEngine.get(), previewVoices());
-    applySongSettings(m_liveEngine.get(), m_settings);
+    applyLiveEngineSettings();
     // The reinit destroyed every channel: nothing timed or held survives.
     m_timedActiveCount = 0;
     m_previewTrack = -1;
@@ -641,7 +664,7 @@ void AudioEngine::unloadSong()
     resetPreviewEngine();
     resetLiveEngine(0);
     clearTimedPreviews();
-    m_click.cut(); // the skipped transition would have cut it too
+    cutClicks(); // the skipped transition would have cut it too
     m_clickQueueCount = 0;
     m_transport.store(static_cast<int>(Transport::Stopped));
     m_appliedTransport = static_cast<int>(Transport::Stopped);
@@ -934,11 +957,18 @@ void AudioEngine::queueClicks(const MidiTimeline *tl, uint64_t from, uint64_t to
 // clicks are kept: process() resets the queue before scheduling, so a
 // transition at the callback's start queues none, while the auto-stop
 // inside the chunk loop keeps the clicks it rendered up to the stop.
+void AudioEngine::cutClicks()
+{
+    m_click.cut();
+    if (m_clickDelay && m_clickDelayLen > 0)
+        std::fill(m_clickDelay.get(), m_clickDelay.get() + size_t(m_clickDelayLen) * 2, 0.0f);
+}
+
 void AudioEngine::cutAllSound()
 {
     m4a_engine_all_sound_off(m_engine.get());
     m4a_engine_all_sound_off(m_liveEngine.get());
-    m_click.cut();
+    cutClicks();
     m_timedActiveCount = 0;
     m_timedRead.store(m_timedWrite.load(std::memory_order_acquire), std::memory_order_release);
     forgetLiveNotes();
@@ -1874,7 +1904,37 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     m_tap.write(interleavedOut, frameCount);
     // The metronome goes in after the tap (M8): meters and plugins hear only
     // the song.
-    m_click.render(interleavedOut, frameCount, m_clickQueue, m_clickQueueCount, clickGain);
+    if (m_clickDelayLen > 0) {
+        // In pieces of the scratch: each piece renders its own triggers
+        // (sorted by frame, re-based to the piece), then goes through the
+        // delay line: out what went in m_clickDelayLen frames ago, in what
+        // this piece rendered.
+        float *scratch = m_clickScratch.get();
+        float *delay = m_clickDelay.get();
+        uint32_t trigger = 0;
+        for (uint32_t c0 = 0; c0 < frameCount; c0 += kClickScratchFrames) {
+            const uint32_t n = std::min(frameCount - c0, kClickScratchFrames);
+            uint32_t count = 0;
+            for (; trigger + count < m_clickQueueCount &&
+                   m_clickQueue[trigger + count].frame < c0 + n;
+                 count++)
+                m_clickQueue[trigger + count].frame -= c0;
+            std::fill(scratch, scratch + size_t(n) * 2, 0.0f);
+            m_click.render(scratch, n, m_clickQueue + trigger, count, clickGain);
+            trigger += count;
+            for (uint32_t i = 0; i < n; i++) {
+                float *slot = delay + size_t(m_clickDelayPos) * 2;
+                interleavedOut[(c0 + i) * 2] += slot[0];
+                interleavedOut[(c0 + i) * 2 + 1] += slot[1];
+                slot[0] = scratch[i * 2];
+                slot[1] = scratch[i * 2 + 1];
+                if (++m_clickDelayPos == m_clickDelayLen)
+                    m_clickDelayPos = 0;
+            }
+        }
+    } else {
+        m_click.render(interleavedOut, frameCount, m_clickQueue, m_clickQueueCount, clickGain);
+    }
     m_clickQueueCount = 0;
 
     // A take's segment ends at every loop wrap this callback rendered.

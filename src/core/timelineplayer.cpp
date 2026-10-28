@@ -247,8 +247,7 @@ void TimelinePlayer::cutMaskedTrack(M4AEngine *engine, const NoteMask &mask)
         // is not this engine's: the song's note ends here.
         m4a_engine_note_off(engine, uint8_t(track), uint8_t(key));
         m_keyedOn[track][key] = false;
-        // Its gate-carried release has nothing left to release (and would
-        // cut a held key).
+        // Its gate-carried release has nothing left to release.
         for (int i = 0; i < m_pendingOffCount;) {
             if (m_pendingOffs[i].track == track && m_pendingOffs[i].key == key)
                 m_pendingOffs[i] = m_pendingOffs[--m_pendingOffCount];
@@ -327,6 +326,8 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
             // wrap, so the loop start's own events then all play on them.
             if (latch) {
                 chaseTouched(engine, timeline, m_pos, latch->track, latch->lanes);
+                if (m_mirror)
+                    chaseTouched(m_mirror, timeline, m_pos, latch->track, latch->lanes);
                 *latch = LaneLatch();
                 latch = nullptr;
             }

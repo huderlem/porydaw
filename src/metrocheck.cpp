@@ -355,16 +355,20 @@ void checkEngine()
             return;
         }
         const ClickGrid &grid = tl->clickGrid;
-        // Expected output frames over three passes.
+        // Expected output frames over three passes: each click lands the
+        // main engine's latency after its timeline position, as the song it
+        // marks does (docs/live-latency/PLAN.md).
+        const uint64_t delay = engine.engineLatencySamples();
         const uint64_t ls = tl->loopStartSample, le = tl->loopEndSample, len = le - ls;
         std::vector<std::pair<uint64_t, bool>> expected;
         for (uint64_t t = 0; t < loopEndTick; t += 24)
-            expected.push_back({grid.sampleAt(t), t % 96 == 0});
+            expected.push_back({grid.sampleAt(t) + delay, t % 96 == 0});
         for (int pass = 1; pass <= 2; pass++) {
             for (uint64_t t = 48; t < loopEndTick; t += 24)
-                expected.push_back({le + (pass - 1) * len + (grid.sampleAt(t) - ls), t % 96 == 0});
+                expected.push_back(
+                    {le + (pass - 1) * len + (grid.sampleAt(t) - ls) + delay, t % 96 == 0});
         }
-        const uint64_t total = le + 2 * len;
+        const uint64_t total = le + 2 * len + delay;
 
         engine.holdDeviceForTest(true);
         engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
@@ -413,7 +417,7 @@ void checkEngine()
         engine.setMetronomeVolume(0.5f);
         engine.play();
         out.clear();
-        engine.pumpForTest(uint32_t(grid.sampleAt(1)), &out);
+        engine.pumpForTest(uint32_t(grid.sampleAt(1) + delay), &out);
         {
             const std::vector<Onset> o = findOnsets(out, 64, 400);
             const float want = ClickVoice::kAccentPeak * 0.5f;
@@ -423,11 +427,12 @@ void checkEngine()
         }
         engine.setMetronomeVolume(1.0f);
 
-        // Stop cuts a ringing click: stop 100 frames into the beat at tick 24.
+        // Stop cuts a ringing click: stop 100 frames into the beat at tick 24
+        // (as heard: the click comes out of the delay line then).
         engine.stop();
         engine.pumpForTest(512);
         engine.play();
-        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + delay + 100));
         engine.stop();
         out.clear();
         engine.pumpForTest(2048, &out);
@@ -438,7 +443,7 @@ void checkEngine()
         engine.stop();
         engine.pumpForTest(512);
         engine.play();
-        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + delay + 100));
         engine.seek(grid.sampleAt(26));
         out.clear();
         engine.pumpForTest(2048, &out);
@@ -449,7 +454,7 @@ void checkEngine()
         engine.stop();
         engine.pumpForTest(512);
         engine.play();
-        engine.pumpForTest(uint32_t(grid.sampleAt(24) + 100));
+        engine.pumpForTest(uint32_t(grid.sampleAt(24) + delay + 100));
         engine.setMetronomeEnabled(false);
         out.clear();
         engine.pumpForTest(uint32_t(grid.sampleAt(24 * 4) - grid.sampleAt(24)), &out);
@@ -511,7 +516,8 @@ void checkEngine()
         const uint64_t before = engine.clicksQueuedForTest();
         engine.play();
         const int passes = 40;
-        const uint64_t total = le + uint64_t(passes - 1) * len;
+        const uint64_t delay = engine.engineLatencySamples(); // the clicks' delay line
+        const uint64_t total = le + uint64_t(passes - 1) * len + delay;
         std::vector<float> out;
         engine.pumpForTest(uint32_t(total), &out, 8192);
         // Beats 0 and 960 in the first pass, then 960 every later pass.
@@ -532,7 +538,7 @@ void checkEngine()
                      (unsigned long long)want);
             } else {
                 for (size_t i = 0; i < onsets.size(); i++) {
-                    const uint64_t frame = i == 0 ? 0 : beat + (i - 1) * len;
+                    const uint64_t frame = delay + (i == 0 ? 0 : beat + (i - 1) * len);
                     if (onsets[i].frame != frame) {
                         fail("short loop: click %zu at frame %llu, expected %llu", i,
                              (unsigned long long)onsets[i].frame, (unsigned long long)frame);
@@ -561,9 +567,12 @@ void checkEngine()
         const uint64_t tail = tl->lengthSamples + uint64_t(3.0 * rate);
         constexpr uint64_t kRender = 8192, kCallback = kRender * 8;
         const uint64_t stopAt = (tail / kRender + 1) * kRender;
+        // Heard through the clicks' delay line; one delayed past the stop
+        // is cut with the song.
+        const uint64_t delay = engine.engineLatencySamples();
         std::vector<uint64_t> expected;
-        for (uint64_t t = 0; grid.sampleAt(t) < stopAt; t += 24)
-            expected.push_back(grid.sampleAt(t));
+        for (uint64_t t = 0; grid.sampleAt(t) + delay < stopAt; t += 24)
+            expected.push_back(grid.sampleAt(t) + delay);
         if (expected.empty() || expected.back() < stopAt - kCallback) {
             fail("auto-stop: no beat in the stopping callback; the case tests nothing");
         } else {
@@ -736,6 +745,7 @@ void checkCountInEngine()
              (unsigned long long)grid.sampleAt(cursorTick));
     const ClickGrid::CountIn ci = grid.countIn(cursorTick, 1);
     const uint64_t length = ci.lengthSamples;
+    const uint64_t delay = engine.engineLatencySamples(); // the clicks' delay line
 
     engine.holdDeviceForTest(true);
     engine.loadSong(tl.get(), &tvg.vg, SongSettings{});
@@ -772,10 +782,10 @@ void checkCountInEngine()
             for (size_t i = 0; i < n; i++) {
                 const bool accent =
                     onsets[i].peak > (ClickVoice::kAccentPeak + ClickVoice::kBeatPeak) / 2;
-                if (onsets[i].frame != want[i].sample || accent != want[i].accent)
+                if (onsets[i].frame != want[i].sample + delay || accent != want[i].accent)
                     fail("count-in click %zu at frame %llu accent %d, expected %llu accent %d", i,
                          (unsigned long long)onsets[i].frame, int(accent),
-                         (unsigned long long)want[i].sample, int(want[i].accent));
+                         (unsigned long long)(want[i].sample + delay), int(want[i].accent));
             }
         }
         std::vector<float> tap(size_t(engine.tap().capacity()) * 2);
@@ -792,9 +802,9 @@ void checkCountInEngine()
         engine.setMetronomeEnabled(true);
         engine.playWithCountIn(target, ci);
         std::vector<float> out;
-        engine.pumpForTest(uint32_t(length + (grid.sampleAt(168) - target)), &out);
+        engine.pumpForTest(uint32_t(length + (grid.sampleAt(168) - target) + delay), &out);
         const std::vector<Onset> onsets = findOnsets(out, 64, 400);
-        const uint64_t firstSong = length + (grid.sampleAt(144) - target);
+        const uint64_t firstSong = length + (grid.sampleAt(144) - target) + delay;
         if (onsets.size() < 2 || onsets.back().frame != firstSong) {
             fail("the song's first click is at frame %llu, expected %llu",
                  onsets.empty() ? 0ull : (unsigned long long)onsets.back().frame,
@@ -978,16 +988,19 @@ void checkCountInEdges()
         engine.setMetronomeEnabled(true);
         engine.playWithCountIn(target, ci);
         std::vector<float> out;
-        engine.pumpForTest(uint32_t(ci.lengthSamples + uint64_t(beat) + 200), &out);
+        engine.pumpForTest(
+            uint32_t(ci.lengthSamples + uint64_t(beat) + 200 + engine.engineLatencySamples()),
+            &out);
         const std::vector<Onset> onsets = findOnsets(out, 64, 400);
         if (onsets.size() != 6) {
             fail("tempo on the cursor: %zu clicks heard, expected 4 + 2", onsets.size());
         } else {
-            if (onsets[4].frame != ci.lengthSamples ||
+            const uint64_t firstSong = ci.lengthSamples + engine.engineLatencySamples();
+            if (onsets[4].frame != firstSong ||
                 onsets[4].peak < (ClickVoice::kAccentPeak + ClickVoice::kBeatPeak) / 2)
                 fail("tempo on the cursor: the song's first click at frame %llu, expected an "
                      "accent at %llu",
-                     (unsigned long long)onsets[4].frame, (unsigned long long)ci.lengthSamples);
+                     (unsigned long long)onsets[4].frame, (unsigned long long)firstSong);
             for (size_t i = 1; i < onsets.size(); i++) {
                 const double gap = double(onsets[i].frame - onsets[i - 1].frame);
                 if (std::fabs(gap - beat) > 2.0)

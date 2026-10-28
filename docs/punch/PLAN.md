@@ -334,7 +334,11 @@ build-nomidi, build-off: clean. clang-format 22 on touched files.
 
 #### Step 2 review fixes (2026-10-17, uncommitted)
 
-- **M1 — held key across punch-in.** The engine stops channels by
+- **M1 — held key across punch-in.** *Superseded 2026-10-28 by
+  docs/live-latency/PLAN.md: the keyboard's notes play on a separate live
+  engine, so the cut releases the song's note on every key, `NoteMask::held`
+  and `fillPunchHeld` are gone, and the keyboard's note on that key sounds
+  on untouched.* Originally: The engine stops channels by
   track+key, so the cut's `m4a_engine_note_off` also silenced the
   keyboard's own note on that key (held across in, or held at a Begin
   inside the window). `NoteMask::held` (128 bits) is filled before every

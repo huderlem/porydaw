@@ -46,10 +46,12 @@ live mode forces the vanilla mixer.
 
 ## porydaw
 
-- The preview engine (`m_previewEngine`) becomes the live engine: live
-  mode on, and *everything the user triggers by hand* plays on it — the
-  MIDI/virtual keyboard, timed previews (roll clicks, band sweeps), voice
-  auditions. The main engine plays the song only.
+- A third engine instance (`m_liveEngine`), in live mode, plays
+  *everything the user triggers by hand* — the MIDI/virtual keyboard and
+  the timed previews (roll clicks, band sweeps). The main engine plays the
+  song only; the preview engine keeps the Sample Editor and voicegroup-dock
+  auditions as before (they own fixed tracks there, which a live target
+  could collide with).
 - The live engine mirrors the song's track state: chase/primeVoices at the
   same points as the main engine, and `TimelinePlayer` dispatches every
   non-note event (CC, program, bend, XCMD, tempo) to a mirror engine as
@@ -58,6 +60,8 @@ live mode forces the vanilla mixer.
 - Live CC/bend/program moves go to both engines (the song's own notes on
   the live track still follow the knob, as the take records it).
 - The "Auto" recording offset gains the main engine's latency (1.5 VBlank
-  frames + the FIFO), so a take lands where the player heard the song.
+  frames, the mean of the measured 18–31 ms for PCM), so a take lands where
+  the player heard the song; the metronome's clicks are delayed by the same
+  amount so they stay with the song.
 - Polyphony: live notes no longer count against the song's PCM channels
   (meter, poly debugger); docs say so.

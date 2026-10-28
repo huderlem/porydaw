@@ -65,8 +65,7 @@ struct LaneLatch {
 // engine (docs/live-latency/PLAN.md), so a key it holds is not this
 // engine's and the song's note on it is released like any other. A song
 // note-off on the track for a key the player hasn't keyed on is dropped:
-// it belongs to a silenced (or released) note, and would otherwise
-// cut the keyboard's own note on that key. Plain data: the audio thread
+// it belongs to a silenced (or released) note. Plain data: the audio thread
 // keeps one; offline paths never pass one.
 struct NoteMask {
     int track = -1;
