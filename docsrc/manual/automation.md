@@ -17,9 +17,10 @@ always available at the top level. -->
 descriptions and typical ranges:
 - Volume, Pan
 - Instrument (program change)
-- MOD (vibrato depth) / MODT (vibrato type)
+- MOD (vibrato depth) / MODT (LFO type: 0 vibrato, 1 tremolo, 2 auto-pan)
 - BEND (pitch bend) / BENDR (bend range)
-- LFOS / LFODL (vibrato speed / delay)
+- LFOS / LFODL (vibrato speed / delay before it starts on each note)
+- TUNE (fine tune, c_v-centred like PAN)
 - Tempo (top-level lane)
 Flag which ones quantize on GBA hardware. -->
 
@@ -30,9 +31,9 @@ points; undoable like everything else. -->
 
 ## The value axis and zooming
 
-<!-- TODO: Gutter menu → Value range (auto-fit or fixed 0–16/32/64/127);
-display-only — data is never clipped; MOD auto-fits because its useful
-range is small. -->
+<!-- TODO: Gutter menu → Value range (auto-fit or fixed 0–16/32/64/127,
+plus 0–24 on BENDR and 0–2 on MODT); display-only — data is never clipped;
+MOD auto-fits because its useful range is small. -->
 
 ## Tempo changes
 

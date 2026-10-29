@@ -6,8 +6,10 @@
 // The m4a semantic layer (SPEC.md §4.2): MIDI events are presented in mid2agb
 // terms. CC numbers follow tools/mid2agb/agb.cpp exactly; whether a CC gets an
 // audible automation lane follows what the embedded poryaaaa engine renders
-// (m4a_engine_cc) — engine no-ops surface in the "other events" strip instead,
-// as do the XCMD CCs: played, but lane-less by design.
+// (m4a_engine_cc) — the engine's opt-in commands (PORTAMENTO, PWMC, PWMS:
+// no-ops unless a project installs the feature) and its no-ops surface in the
+// "other events" strip instead, as do the XCMD CCs: played, but lane-less by
+// design.
 
 // A drawable automation lane. Values are the lane identity used by the viewer;
 // CC-backed lanes exist per (track, cc), Bend/Tempo are dedicated event types.
@@ -17,6 +19,9 @@ enum class M4aLane {
     Pan,       // CC 10 -> PAN
     BendRange, // CC 20 -> BENDR
     LfoSpeed,  // CC 21 -> LFOS
+    LfoType,   // CC 22 -> MODT (LFO target: vibrato / tremolo / auto-pan)
+    Tune,      // CC 24 -> TUNE (fine tune, c_v-centred like PAN)
+    LfoDelay,  // CC 26 -> LFODL (ticks before the LFO starts on a note)
     PitchBend, // pitch-bend events -> BEND
     Tempo,     // tempo meta -> TEMPO (song-level lane)
 };
@@ -48,6 +53,9 @@ QString m4aLaneName(M4aLane lane);
 // value (PAN/TUNE as c_v±, bend as signed 14-bit, etc.).
 QString m4aFormatCcValue(uint8_t cc, uint8_t value);
 QString m4aFormatBend(int bend14);
+// A MODT value's meaning: "vibrato" (0), "tremolo" (1), "auto-pan" (2); any
+// other value disables the LFO ("off").
+const char *m4aModTypeName(uint8_t value);
 
 // Human label for an advanced/no-op CC event in the other-events strip,
 // e.g. "MEMACC op 17".

@@ -19,8 +19,11 @@ constexpr struct {
     {0x0A, 64},  // PAN (center)
     {0x14, 2},   // BENDR
     {0x15, 22},  // LFOS
+    {0x16, 0},   // MODT (vibrato)
     {0x17, 0},   // PWMC
+    {0x18, 64},  // TUNE (c_v 0)
     {0x19, 0},   // PWMS
+    {0x1A, 0},   // LFODL
 };
 
 } // namespace

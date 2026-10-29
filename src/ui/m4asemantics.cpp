@@ -21,20 +21,22 @@ M4aCcInfo m4aClassifyCc(uint8_t cc)
         return {M4aEventClass::AudibleLane, M4aLane::BendRange, "BENDR", "Bend range"};
     case 0x15:
         return {M4aEventClass::AudibleLane, M4aLane::LfoSpeed, "LFOS", "LFO speed"};
+    case 0x16:
+        return {M4aEventClass::AudibleLane, M4aLane::LfoType, "MODT", "LFO type"};
+    case 0x18:
+        return {M4aEventClass::AudibleLane, M4aLane::Tune, "TUNE", "Fine tune"};
+    case 0x1A:
+        return {M4aEventClass::AudibleLane, M4aLane::LfoDelay, "LFODL", "LFO delay"};
 
-    // Valid m4a commands the engine treats as opt-in or no-op -> advanced.
+    // Valid m4a commands the engine honours only when the project has the
+    // feature installed (m4a_engine.h portamentoEnabled / pwmEnabled; porydaw
+    // never enables them) -> advanced.
     case 0x05:
         return {M4aEventClass::Advanced, M4aLane::Mod, "PORTAMENTO", "Portamento"};
-    case 0x16:
-        return {M4aEventClass::Advanced, M4aLane::Mod, "MODT", "LFO type"};
     case 0x17:
         return {M4aEventClass::Advanced, M4aLane::Mod, "PWMC", "Pulse-width pattern"};
-    case 0x18:
-        return {M4aEventClass::Advanced, M4aLane::Mod, "TUNE", "Fine tune"};
     case 0x19:
         return {M4aEventClass::Advanced, M4aLane::Mod, "PWMS", "Pulse-width speed"};
-    case 0x1A:
-        return {M4aEventClass::Advanced, M4aLane::Mod, "LFODL", "LFO delay"};
 
     // MEMACC / label / XCMD / priority plumbing -> advanced.
     case 0x0C:
@@ -75,6 +77,12 @@ QString m4aLaneName(M4aLane lane)
         return QStringLiteral("Bend range");
     case M4aLane::LfoSpeed:
         return QStringLiteral("LFO speed");
+    case M4aLane::LfoType:
+        return QStringLiteral("LFO type");
+    case M4aLane::Tune:
+        return QStringLiteral("Fine tune");
+    case M4aLane::LfoDelay:
+        return QStringLiteral("LFO delay");
     case M4aLane::PitchBend:
         return QStringLiteral("Pitch bend");
     case M4aLane::Tempo:
@@ -91,8 +99,25 @@ QString m4aFormatCcValue(uint8_t cc, uint8_t value)
         return QStringLiteral("c_v%1%2")
             .arg(value >= 64 ? QStringLiteral("+") : QString())
             .arg(int(value) - 64);
+    case 0x16: // MODT: what the LFO moves (m4a_engine.c track_vol_pair /
+               // m4a_track_vol_pit_set); anything past 2 moves nothing.
+        return QLatin1String(m4aModTypeName(value));
     default:
         return QString::number(value);
+    }
+}
+
+const char *m4aModTypeName(uint8_t value)
+{
+    switch (value) {
+    case 0:
+        return "vibrato";
+    case 1:
+        return "tremolo";
+    case 2:
+        return "auto-pan";
+    default:
+        return "off";
     }
 }
 

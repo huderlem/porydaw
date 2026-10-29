@@ -5123,7 +5123,9 @@ class AutomationArea : public TimelineSurface
     {
         const int track = m_sv->selectedTrack();
         QMenu menu;
-        static constexpr uint8_t kAudibleCcs[] = {0x01, 0x07, 0x0A, 0x14, 0x15, LANE_CC_BEND};
+        static constexpr uint8_t kAudibleCcs[] = {
+            0x01, 0x07, 0x0A, 0x14, 0x15, 0x16, 0x18, 0x1A, LANE_CC_BEND,
+        };
         for (uint8_t cc : kAudibleCcs) {
             if (m_sv->model().findLane(track, cc) || m_hiddenLanes.contains(laneKey(track, cc)))
                 continue;
@@ -5234,6 +5236,7 @@ class AutomationArea : public TimelineSurface
             const int current = m_rowRanges.value(laneKey(track, cc), laneRangeDefault(cc));
             const std::pair<int, QString> options[] = {
                 {0, SongView::tr("Auto (fit to data)")},
+                {kModTypeAxis, QStringLiteral("0–2")},
                 {16, QStringLiteral("0–16")},
                 {kBendRangeAxis, QStringLiteral("0–24")},
                 {32, QStringLiteral("0–32")},
@@ -5241,8 +5244,11 @@ class AutomationArea : public TimelineSurface
                 {127, SongView::tr("0–127 (full)")},
             };
             for (const auto &opt : options) {
-                // 0–24 is BENDR's knob reach; no other lane offers it.
+                // 0–24 is BENDR's knob reach and 0–2 MODT's three types;
+                // no other lane offers them.
                 if (opt.first == kBendRangeAxis && cc != 0x14)
+                    continue;
+                if (opt.first == kModTypeAxis && cc != 0x16)
                     continue;
                 QAction *action = range->addAction(opt.second);
                 action->setCheckable(true);
@@ -5447,17 +5453,21 @@ class AutomationArea : public TimelineSurface
     // bottom stretch of 0..127 (vibrato past ~20 is cartoony), so it fits
     // to the data by default. BENDR is in semitones and a keyboard knob
     // reaches 0..24 (docs/midi-controls/PLAN.md D2), so that is its axis;
-    // a song's wider value still grows it. Everything else keeps the full
-    // axis.
+    // a song's wider value still grows it. MODT has three meaningful
+    // values (0 vibrato, 1 tremolo, 2 auto-pan), so it shows 0..2.
+    // Everything else keeps the full axis.
     static int laneRangeDefault(uint8_t cc)
     {
         if (cc == 0x01)
             return 0;
         if (cc == 0x14)
             return kBendRangeAxis;
+        if (cc == 0x16)
+            return kModTypeAxis;
         return 127;
     }
     static constexpr int kBendRangeAxis = 24;
+    static constexpr int kModTypeAxis = 2;
 
     // Auto-fit rung: the smallest of 16/32/64/127 that holds the lane's
     // data. Coarse rungs keep the scale from twitching while points are
@@ -5590,6 +5600,12 @@ class AutomationArea : public TimelineSurface
             maxShown = 63;
             offset = 64;
             label = SongView::tr("c_v value (0 = center):");
+        } else if (row.cc == 0x16) {
+            // MODT past 2 turns the LFO off (the engine moves nothing), and
+            // an imported song may well hold such a byte; the full range
+            // keeps that value typeable, and keeps an "off" point from being
+            // clamped into auto-pan by a dialog that opens above its max.
+            label = SongView::tr("LFO type (0 vibrato, 1 tremolo, 2 auto-pan, 3+ off):");
         }
         bool ok = false;
         const int shown = QInputDialog::getInt(this, rowTitle(row), label, *value - offset,
@@ -5776,7 +5792,12 @@ class AutomationArea : public TimelineSurface
         const int top = rowTop(ri) + 5;
         const int bottom = rowBottom(ri) - 1 - 4;
         const int y = std::clamp(yPos, top, bottom);
-        return minV + (bottom - y) * (maxV - minV) / std::max(1, bottom - top);
+        // Nearest value, not the floor: on a short axis (MODT's 0..2) the
+        // floor would give the top value only on its exact pixel row and
+        // hand the middle one half the row, out of step with where
+        // paintCurve draws the dots.
+        const int span = std::max(1, bottom - top);
+        return minV + ((bottom - y) * (maxV - minV) + span / 2) / span;
     }
 
     void updateDrag(qreal x, int y, bool fine, bool detent)

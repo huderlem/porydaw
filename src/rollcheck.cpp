@@ -2724,7 +2724,8 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         };
         auto tempoValueAtY = [&](int y) {
             const int yc = std::clamp(y, rowTopPad, rowBottom);
-            return (rowBottom - yc) * tempoMaxV() / (rowBottom - rowTopPad);
+            return ((rowBottom - yc) * tempoMaxV() + (rowBottom - rowTopPad) / 2) /
+                   (rowBottom - rowTopPad);
         };
         auto tempoValueY = [&](int v) {
             return rowBottom - v * (rowBottom - rowTopPad) / std::max(1, tempoMaxV());
@@ -3072,7 +3073,8 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         };
         auto tempoValueAtY = [&](int y) {
             const int yc = std::clamp(y, rowTopPad, rowBottom);
-            return (rowBottom - yc) * tempoMaxV() / (rowBottom - rowTopPad);
+            return ((rowBottom - yc) * tempoMaxV() + (rowBottom - rowTopPad) / 2) /
+                   (rowBottom - rowTopPad);
         };
         auto tempoValueY = [&](int v) {
             return rowBottom - v * (rowBottom - rowTopPad) / std::max(1, tempoMaxV());
@@ -3368,7 +3370,8 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         };
         auto tempoValueAtY = [&](int y) {
             const int yc = std::clamp(y, rowTopPad, rowBottom);
-            return (rowBottom - yc) * tempoMaxV() / (rowBottom - rowTopPad);
+            return ((rowBottom - yc) * tempoMaxV() + (rowBottom - rowTopPad) / 2) /
+                   (rowBottom - rowTopPad);
         };
         auto tempoValueY = [&](int v) {
             return rowBottom - v * (rowBottom - rowTopPad) / std::max(1, tempoMaxV());
@@ -3714,7 +3717,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             const int ccTop = ccRowTop + 5, ccBottom = ccRowTop + 48 - 1 - 4;
             auto ccValueAtY = [&](int y) {
                 const int yc = std::clamp(y, ccTop, ccBottom);
-                return (ccBottom - yc) * 127 / (ccBottom - ccTop);
+                return ((ccBottom - yc) * 127 + (ccBottom - ccTop) / 2) / (ccBottom - ccTop);
             };
             auto ccValueY = [&](int v) { return ccBottom - v * (ccBottom - ccTop) / 127; };
             const int tempoTopPad = 5, tempoBottom = 48 - 1 - 4;
@@ -4811,7 +4814,8 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         };
         auto tempoValueAtY = [&](int y) {
             const int yc = std::clamp(y, rowTopPad, rowBottom);
-            return (rowBottom - yc) * tempoMaxV() / (rowBottom - rowTopPad);
+            return ((rowBottom - yc) * tempoMaxV() + (rowBottom - rowTopPad) / 2) /
+                   (rowBottom - rowTopPad);
         };
         auto tempoValueY = [&](int v) {
             return rowBottom - v * (rowBottom - rowTopPad) / std::max(1, tempoMaxV());
@@ -4994,7 +4998,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
             const int top = panRowTop + 5, bottom = panRowTop + rowH - 1 - 4;
             auto panValueAtY = [&](int y) {
                 const int yc = std::clamp(y, top, bottom);
-                return (bottom - yc) * 127 / (bottom - top);
+                return ((bottom - yc) * 127 + (bottom - top) / 2) / (bottom - top);
             };
             auto panValueY = [&](int v) { return bottom - v * (bottom - top) / 127; };
             const int window = 127 * layout::fontPx(2.0 / 3.0) / rowH;
@@ -5371,7 +5375,7 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         const int ccTop = ccRowTop + 5, ccBottom = ccRowTop + 48 - 1 - 4;
         auto ccValueAtY = [&](int y) {
             const int yc = std::clamp(y, ccTop, ccBottom);
-            return (ccBottom - yc) * 127 / (ccBottom - ccTop);
+            return ((ccBottom - yc) * 127 + (ccBottom - ccTop) / 2) / (ccBottom - ccTop);
         };
         auto ccValueY = [&](int v) { return ccBottom - v * (ccBottom - ccTop) / 127; };
 

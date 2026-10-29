@@ -300,8 +300,9 @@ QSet<int> usedPrograms(const SmfFile &smf)
 
 QStringList usedExtensions(const SmfFile &smf)
 {
-    // The opt-in commands of the poryaaaa engine (kCcDefaults in
-    // core/timelineplayer.cpp): everything else mid2agb maps is stock m4a.
+    // The opt-in commands of the poryaaaa engine (m4a_engine.h
+    // portamentoEnabled / pwmEnabled): everything else mid2agb maps is
+    // stock m4a.
     static constexpr struct {
         uint8_t cc;
         const char *name;

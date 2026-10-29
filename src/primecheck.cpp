@@ -73,7 +73,7 @@ SmfFile buildPrimeSong()
     SmfFile smf;
     smf.format = 1;
     smf.division = kDivision;
-    smf.tracks.resize(4);
+    smf.tracks.resize(5);
 
     SmfTrack &conductor = smf.tracks[0];
     conductor.events.push_back(metaEvent(0, 0x51, QByteArray("\x07\xA1\x20", 3)));
@@ -104,6 +104,16 @@ SmfFile buildPrimeSong()
     t2.events.push_back(channelEvent(0, 0x92, 64, 100));
     t2.events.push_back(channelEvent(24, 0x82, 64, 0));
     t2.endTick = 192;
+
+    // Engine track 3: the lanes the engine gained with its accuracy overhaul
+    // — TUNE (c_v +6), MODT (tremolo) and LFODL — late only, so a chase
+    // before them must restore the track-init values. On a track of their
+    // own so the audition comparisons on tracks 0-2 hear no tremolo.
+    SmfTrack &t3 = smf.tracks[4];
+    t3.events.push_back(channelEvent(kLaterTick, 0xB3, 0x18, 70));
+    t3.events.push_back(channelEvent(kLaterTick, 0xB3, 0x16, 1));
+    t3.events.push_back(channelEvent(kLaterTick, 0xB3, 0x1A, 9));
+    t3.endTick = 192;
 
     return smf;
 }
@@ -253,7 +263,7 @@ int runPrimeCheck()
 
     const SmfFile smf = buildPrimeSong();
     const auto timeline = MidiTimeline::build(smf, kSampleRate);
-    if (!timeline || timeline->usedTrackCount != 3) {
+    if (!timeline || timeline->usedTrackCount != 4) {
         std::fprintf(stderr, "primecheck: synthesized song built wrong\n");
         return 1;
     }
@@ -296,6 +306,33 @@ int runPrimeCheck()
         m4a_engine_note_on(&engine, 1, 60, 127);
         if (!rendersAudibly(&engine)) {
             std::fprintf(stderr, "primecheck: FAIL: primed track 1 audition was silent\n");
+            failures++;
+        }
+        m4a_engine_destroy(&engine);
+    }
+
+    // TUNE / MODT / LFODL: chase dispatches a song's values past their
+    // events and puts the engine's track-init values back before them (a
+    // seek backwards must not leave a stale fine tune or LFO type latched).
+    {
+        M4AEngine engine;
+        m4a_engine_init(&engine, float(kSampleRate));
+        m4a_engine_set_voicegroup(&engine, vg.voices);
+        const M4ATrack &t3 = engine.tracks[3];
+        TimelinePlayer::chase(&engine, timeline.get(), (kLaterTick + 4) * kSamplesPerTick);
+        if (t3.tune != 6 || t3.modT != 1 || t3.lfoDelay != 9) {
+            std::fprintf(stderr,
+                         "primecheck: FAIL: late chase did not dispatch TUNE/MODT/LFODL "
+                         "(tune %d, modT %d, lfoDelay %d)\n",
+                         int(t3.tune), int(t3.modT), int(t3.lfoDelay));
+            failures++;
+        }
+        TimelinePlayer::chase(&engine, timeline.get(), 4 * kSamplesPerTick);
+        if (t3.tune != 0 || t3.modT != 0 || t3.lfoDelay != 0) {
+            std::fprintf(stderr,
+                         "primecheck: FAIL: early chase left TUNE/MODT/LFODL latched "
+                         "(tune %d, modT %d, lfoDelay %d)\n",
+                         int(t3.tune), int(t3.modT), int(t3.lfoDelay));
             failures++;
         }
         m4a_engine_destroy(&engine);
@@ -399,7 +436,9 @@ int runPrimeCheck()
         expect(lanes(2) == poked, "an empty mask moved something");
         expect(TimelinePlayer::ccDefault(0x07) == 127 && TimelinePlayer::ccDefault(0x0A) == 64 &&
                    TimelinePlayer::ccDefault(0x14) == 2 && TimelinePlayer::ccDefault(0x15) == 22 &&
-                   TimelinePlayer::ccDefault(0x01) == 0 && TimelinePlayer::ccDefault(0x03) == -1,
+                   TimelinePlayer::ccDefault(0x16) == 0 && TimelinePlayer::ccDefault(0x18) == 64 &&
+                   TimelinePlayer::ccDefault(0x1A) == 0 && TimelinePlayer::ccDefault(0x01) == 0 &&
+                   TimelinePlayer::ccDefault(0x03) == -1,
                "ccDefault does not match the engine's track-init values");
         m4a_engine_destroy(&engine);
     }

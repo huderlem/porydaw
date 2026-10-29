@@ -1414,8 +1414,8 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
                       QStringLiteral("bend range, LFO speed and voice") &&
                   text({DOC_CC_VOICE}) == QStringLiteral("voice"),
               "take text: the recorded lanes are not named and ordered as their rows");
-        check(text({0x18}) == QStringLiteral("CC 24") &&
-                  text({DOC_CC_VOICE, 0x18, 0x07}) == QStringLiteral("volume, CC 24 and voice"),
+        check(text({0x1B}) == QStringLiteral("CC 27") &&
+                  text({DOC_CC_VOICE, 0x1B, 0x07}) == QStringLiteral("volume, CC 27 and voice"),
               "take text: a lane with no name vanished from the list");
     }
     if (!check(openProjectDir(projectRoot, /*interactive=*/false), "the project failed to open"))

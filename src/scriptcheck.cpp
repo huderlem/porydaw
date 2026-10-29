@@ -731,7 +731,8 @@ void runEditChecks(const Check &check, scripting::ScriptHost &host, SongSession 
     // song.CC names every first-class lane (mid2agb's audible CCs + the
     // pseudo-CCs) so scripts don't hard-code controller numbers.
     check(run("var C = porydaw.song.CC; C.MOD === 1 && C.VOLUME === 7 && C.PAN === 10 && "
-              "C.BEND_RANGE === 20 && C.LFO_SPEED === 21 && C.BEND === 0xFF && "
+              "C.BEND_RANGE === 20 && C.LFO_SPEED === 21 && C.LFO_TYPE === 22 && "
+              "C.TUNE === 24 && C.LFO_DELAY === 26 && C.BEND === 0xFF && "
               "C.TEMPO === 0xFE && C.VOICE === 0xFD") == QStringLiteral("true"),
           "song.CC does not name every first-class lane");
 

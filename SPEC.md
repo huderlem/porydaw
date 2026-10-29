@@ -133,10 +133,10 @@ mapping (from `tools/mid2agb/agb.cpp`):
 |---|---|---|
 | Program change | `VOICE n` | Instrument picker showing the actual voicegroup entry (name, type, ADSR) |
 | CC 1 | `MOD` (LFO depth) | "Modulation" lane |
-| CC 5 | `PORTAMENTO` (ext) | "Portamento" lane (gated on engine profile) |
+| CC 5 | `PORTAMENTO` (ext) | Advanced view only (engine opt-in, never enabled) |
 | CC 7 / CC 10 | `VOL` / `PAN` | Volume / Pan lanes |
 | CC 12–17, 33, 39 | `MEMACC` ops, loop label, `PRIO` | Advanced view only |
-| CC 23 / 25 | `PWMC` / `PWMS` (ext) | Pulse-width lanes (gated on engine profile) |
+| CC 23 / 25 | `PWMC` / `PWMS` (ext) | Advanced view only (engine opt-in, never enabled) |
 | CC 24 | `TUNE` | Fine-tune lane |
 | CC 20 | `BENDR` | Bend-range lane |
 | CC 21 / 22 / 26 | `LFOS` / `MODT` / `LFODL` | LFO speed / type / delay lanes |
@@ -147,10 +147,13 @@ mapping (from `tools/mid2agb/agb.cpp`):
 
 Dedicated automation lanes are offered only for parameters the embedded poryaaaa
 engine actually renders — porydaw targets the engine as it exists, not the full m4a
-command set. CCs the engine currently treats as no-ops (e.g. `TUNE`, `MODT`,
-`LFODL`) get no audible lane; they are still preserved
-byte-for-byte on round-trip and visible in the advanced/"other events" view. If
-poryaaaa gains support for one later, porydaw simply enables its lane.
+command set. Today that is `MOD`, `VOL`, `PAN`, `BENDR`, `LFOS`, `MODT`, `TUNE`,
+`LFODL` and `BEND`. CCs the engine honours only as opt-in extensions (`PORTAMENTO`,
+`PWMC`, `PWMS`, which porydaw never enables) or treats as no-ops get no audible
+lane; they are still preserved byte-for-byte on round-trip and visible in the
+advanced/"other events" view. If poryaaaa gains support for one later, porydaw
+simply enables its lane (as it did for `MODT` / `TUNE` / `LFODL` with the engine's
+accuracy overhaul).
 
 Pseudo-echo `XCMD`s are the exception in the other direction: played, but
 lane-less. CC 30 selects the command and CC 29/31 fires it, and mid2agb pairs
