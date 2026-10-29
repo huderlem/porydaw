@@ -548,7 +548,7 @@ QVariant AudioApi::cpu() const
     const AudioEngine *audio = m_host.bindings().audio;
     if (!audio || !audio->songLoaded())
         return jsNull();
-    const AudioEngine::CpuSnapshot snap = audio->cpuSnapshot();
+    AudioEngine::CpuSnapshot snap = audio->cpuSnapshot();
     if (!snap.valid)
         return jsNull();
     const double vblank = double(snap.vblankCycles);
@@ -558,6 +558,9 @@ QVariant AudioApi::cpu() const
     const bool playing = audio->transport() == Transport::Playing;
     const auto last = [&](int term) { return playing ? QVariant(snap.last[term]) : jsNull(); };
     const int32_t peak = snap.peak[AudioEngine::CpuTotal];
+    // As the dock: no peak the song did not play.
+    const auto &peakShown = m_host.bindings().cpuPeakShown;
+    snap.peakValid = snap.peakValid && (!peakShown || peakShown());
     const auto &budget = m_host.bindings().cpuBudgetPercent;
     return QVariantMap{
         {QStringLiteral("cycles"), last(AudioEngine::CpuTotal)},

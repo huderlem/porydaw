@@ -31,7 +31,9 @@ breakdown bar: sequencer, CGB and mixer from the left; its first three
 quarters are the VBlank window up to the 100% line, the tinted last quarter
 is the rest of the frame (compressed) up to the red frame end; the amber line
 is the budget, the triangle under the bar the peak. Reset while stopped
-clears the peak until the song plays again. The legend's percentages are of
+clears the peak until the song plays again, and so does a change of mix rate,
+mixer or voicegroup (a voice edit that reloads it) while stopped; nothing is
+shown as a peak before the song has played. The legend's percentages are of
 the VBlank window.
 The line under it names the engine settings it was estimated for (mix rate,
 PCM channels, stock or HQ mixer). Changing Settings → Audio moves it live. -->
@@ -76,5 +78,14 @@ a real GBA may differ by a few percent. -->
 <!-- TODO: Only the sound driver: not the game's own VBlank handler or main
 loop. Drifts for hacks with a modified mixer, a changed WAITCNT, samples
 moved to RAM, or an engine other than the stock one / ipatix's HQ mixer. The
-HQ mixer's stack depth is not checked. Keyboard notes and auditions are not
-counted. -->
+HQ mixer decodes compressed and reversed samples onto the stack and skips or
+copies differently by the stack's depth at VBlank: porydaw models the test
+ROM's stack pointer (0x03007DD0); a game whose VBlank stack sits elsewhere can
+cost differently there. Keyboard notes and auditions are not counted. -->
+
+## For plugin authors
+
+<!-- TODO: porydaw.audio.cpu() gives the same numbers as the CPU dock
+(cycles, percent, peak, the three parts, budget); porydaw.audio.cpuProfile()
+gives the profile strip's frames ({tick, cycles, percent}) and its max. Both
+null when there is nothing to show; see the scripting reference. -->

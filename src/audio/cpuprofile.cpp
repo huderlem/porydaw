@@ -165,7 +165,6 @@ void CpuProfiler::cancel()
     join();
     m_cancel.reset();
     m_token++;
-    m_busy = false;
 }
 
 void CpuProfiler::start(std::unique_ptr<MidiTimeline> timeline, const LoadedVoiceGroup *voicegroup,
@@ -175,7 +174,6 @@ void CpuProfiler::start(std::unique_ptr<MidiTimeline> timeline, const LoadedVoic
     if (!timeline)
         return;
     m_cancel = std::make_shared<std::atomic<bool>>(false);
-    m_busy = true;
     m_jobsStarted++;
     const uint64_t token = m_token;
     std::shared_ptr<std::atomic<bool>> flag = m_cancel;
@@ -194,7 +192,6 @@ void CpuProfiler::start(std::unique_ptr<MidiTimeline> timeline, const LoadedVoic
                     return; // superseded meanwhile
                 join();
                 m_cancel.reset();
-                m_busy = false;
                 emit finished(profile, generation);
             },
             Qt::QueuedConnection);

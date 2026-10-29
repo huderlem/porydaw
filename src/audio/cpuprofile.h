@@ -82,7 +82,6 @@ class CpuProfiler : public QObject
     // Cancels the job in flight and waits for its thread (a GBA frame's
     // render at most): after it returns nothing reads the voicegroup.
     void cancel();
-    bool busy() const { return m_busy; }
     // Jobs started, ever (harness).
     uint64_t jobsStarted() const { return m_jobsStarted; }
 
@@ -95,6 +94,5 @@ class CpuProfiler : public QObject
     std::thread m_thread;
     std::shared_ptr<std::atomic<bool>> m_cancel;
     uint64_t m_token = 0; // the job whose result is still wanted
-    bool m_busy = false;
     uint64_t m_jobsStarted = 0;
 };

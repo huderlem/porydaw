@@ -315,7 +315,9 @@ declare namespace porydaw {
         cycles: number | null;
         /** cycles as a percent of the VBlank window (vblankCycles = 100), unrounded; null unless playing. */
         percent: number | null;
-        /** The most expensive frame's cycles since playback started from stop (or Reset); null before one. */
+        /** The most expensive frame's cycles since playback started from stop (or Reset); null when the
+         *  dock shows none: before the song has played, or after a Reset or a mix-rate, mixer or
+         *  voicegroup change while stopped. */
         peak: number | null;
         /** peak as a percent of the VBlank window, unrounded; null before a peak. */
         peakPercent: number | null;

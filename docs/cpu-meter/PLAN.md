@@ -110,8 +110,11 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   (`m_liveEngine`, live mode mixes piecewise) and the preview engine
   publish nothing; live mode marks the cost invalid.
 - **D6 Scripting (CONFIRMED).** `porydaw.audio.cpu()` → `{cycles, percent,
-  peak, sequencer, psg, mixer, budget, vblankCycles, frameCycles}` or
-  null, beside `channels()`. Step 6.
+  peak, peakPercent, sequencer, cgb, mixer, estimated, playing,
+  budgetPercent, vblankCycles, frameCycles}` or null, beside `channels()`.
+  Step 6. (The shape changed during implementation: `psg` became `cgb`,
+  `budget` `budgetPercent`, and `peakPercent`, `estimated`, `playing` were
+  added; step 7 added `cpuProfile()`.)
 - **D7 Reference (CONFIRMED).** mGBA 0.10.5 is the reference, as for every
   other constant in the model (not hardware). mGBA's ROM prefetch model is
   not hardware-perfect; hardware may differ by a few percent. Say so in

@@ -674,6 +674,10 @@ class MainWindow : public QMainWindow
     // Pushes the session's profile (and whether one is being made for it)
     // into its view.
     void showCpuProfile(SongSession &session);
+    // m_cpuPeakArmed, arming it first if the song is playing.
+    bool cpuPeakShown();
+    // A change that clears the engine's peak: unarmed unless playing.
+    void disarmCpuPeak();
     // Saves the session's song AND its dirty voicegroup — the two are one
     // document to the user. The voicegroup goes first, so a failed write
     // leaves the session dirty. false = nothing was marked clean. A no-op
@@ -952,9 +956,13 @@ class MainWindow : public QMainWindow
     QTimer *m_cpuProfileTimer = nullptr;        // debounces edits
     SongSession *m_cpuProfileSession = nullptr; // the in-flight job's session
     uint64_t m_cpuProfileGeneration = 0;
-    // The CPU dock's Reset while not playing: the peak shows "--" (rather
-    // than the idle frames' cost) until the song plays again.
-    bool m_cpuPeakCleared = false;
+    // Whether the engine's CPU peak is one the song played (D8): set once the
+    // song is seen playing, cleared by a song load or unload, and while not
+    // playing by the dock's Reset and by the changes that make the engine
+    // clear its peak (mix rate, mixer, voicegroup: its idle SoundMains would
+    // otherwise refill it with a peak nothing played). Unarmed, the status
+    // bar, the dock and porydaw.audio.cpu() show no peak.
+    bool m_cpuPeakArmed = false;
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
     QTimer *m_engineApplyTimer = nullptr; // coalesces Settings → engine restarts

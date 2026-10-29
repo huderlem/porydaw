@@ -242,7 +242,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_cpuBudget->setSingleStep(5);
     m_cpuBudget->setKeyboardTracking(false);
     m_cpuBudget->setToolTip(
-        tr("The share of the GBA's VBlank window (%1 cycles = 100%) the sound driver may use "
+        tr("The share of the GBA's VBlank window (%L1 cycles = 100%) the sound driver may use "
            "before the status bar's CPU readout turns amber. Up to %2%, the whole frame: a "
            "sound driver running longer than that makes the game skip a frame of audio, and "
            "the readout turns red.")

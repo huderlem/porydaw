@@ -570,6 +570,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             return true;
         };
         bindings.cpuBudgetPercent = [this] { return m_cpuBudgetPercent; };
+        bindings.cpuPeakShown = [this] { return cpuPeakShown(); };
         bindings.cpuProfile = [this]() -> std::shared_ptr<const CpuProfile> {
             // Only a profile of the song as it stands.
             if (!m_active || m_active->cpuProfileStale)
@@ -1390,7 +1391,7 @@ void MainWindow::buildUi()
         m_audio.resetCpuPeak();
         // Not playing, the engine's next peak would be an idle frame's: show
         // none until the song plays again (D8).
-        m_cpuPeakCleared = m_audio.transport() != Transport::Playing;
+        disarmCpuPeak();
         updatePolyStatus();
         updateCpuPanel();
     });
@@ -2016,6 +2017,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
     if (!session) {
         if (m_audioOk)
             m_audio.unloadSong();
+        m_cpuPeakArmed = false;
 #ifdef PORYDAW_SCRIPTING
         // After the engine let go of the old song, so a song.activated
         // handler that plays sees a consistent engine/session pair.
@@ -2076,6 +2078,7 @@ void MainWindow::activateSession(SongSession *session, bool force)
 void MainWindow::attachEngine(SongSession &session)
 {
     m_audio.loadSong(session.timeline.get(), session.voicegroup, songSettingsFor(session));
+    m_cpuPeakArmed = false; // a fresh engine: nothing played yet
     // loadSong resets the engine's masks; the view remembers the tab's.
     m_audio.setMuteMask(session.view->muteMask());
     m_audio.setSoloMask(session.view->soloMask());
@@ -2547,6 +2550,7 @@ SongSession *MainWindow::populateSession(
     if (session == m_active) {
         m_vgBrowser->setVoicegroup(nullptr);
         m_audio.unloadSong();
+        m_cpuPeakArmed = false;
     }
     // Another song: the old one's profile goes with it.
     releaseCpuProfileJob(*session);
@@ -3142,6 +3146,7 @@ void MainWindow::onDocumentChanged(SongSession &session)
             if (active) {
                 m_vgBrowser->setVoicegroup(nullptr);
                 m_audio.updateVoicegroup(vg);
+                disarmCpuPeak();
             }
             releaseCpuProfileJob(session);
             if (session.voicegroup)
@@ -3769,6 +3774,7 @@ void MainWindow::buildSettingsDialog()
     connect(m_engineApplyTimer, &QTimer::timeout, this, [this] {
         if (m_audioOk && m_active && m_audio.songLoaded())
             m_audio.updateSettings(songSettingsFor(*m_active));
+        disarmCpuPeak(); // the engine cleared its peak on a rate or mixer change
         // The mix rate, polyphony and mixer are the profile's too.
         for (const auto &session : m_sessions)
             session->cpuProfileStale = true;
@@ -5540,6 +5546,9 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
     // reload below, so later loads (a -G switch back, a save's reload)
     // hear it too.
     syncDraftVoicegroupFile(session);
+    // The profile job reads this voicegroup: stop it before the edit
+    // rewrites a tone (or swaps the group) under it; it is rescheduled below.
+    releaseCpuProfileJob(session);
     if (structural) {
         reloadVoicegroupPreview(session, slot);
     } else {
@@ -5673,6 +5682,7 @@ void MainWindow::swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int 
         m_vgBrowser->setVoicegroup(nullptr);
         if (m_audioOk)
             m_audio.updateVoicegroup(vg);
+        disarmCpuPeak();
     }
     releaseCpuProfileJob(session);
     if (session.voicegroup)
@@ -5944,13 +5954,12 @@ void MainWindow::updatePolyStatus()
         if (!status.cpuPlaying) {
             status.cpu.valid = false;
             std::fill(std::begin(status.cpu.last), std::end(status.cpu.last), 0);
-            // A Reset while not playing: no peak until the song plays.
-            if (m_cpuPeakCleared) {
-                status.cpu.peakValid = false;
-                std::fill(std::begin(status.cpu.peak), std::end(status.cpu.peak), 0);
-            }
-        } else {
-            m_cpuPeakCleared = false;
+        }
+        // No peak until the song has played (D8): before the first play,
+        // after a Reset while stopped, or after a change that cleared it.
+        if (!cpuPeakShown()) {
+            status.cpu.peakValid = false;
+            std::fill(std::begin(status.cpu.peak), std::end(status.cpu.peak), 0);
         }
         status.cpuBudget = m_cpuBudgetPercent;
         status.mixRate = int(m_engineSettings.pcmMixRate + 0.5f);
@@ -6004,6 +6013,19 @@ void MainWindow::updatePolyStatus()
     m_polyMeter->show();
 }
 
+bool MainWindow::cpuPeakShown()
+{
+    if (m_audioOk && m_audio.transport() == Transport::Playing)
+        m_cpuPeakArmed = true;
+    return m_cpuPeakArmed;
+}
+
+void MainWindow::disarmCpuPeak()
+{
+    if (!m_audioOk || m_audio.transport() != Transport::Playing)
+        m_cpuPeakArmed = false;
+}
+
 int MainWindow::cpuLevel(int32_t total, int budgetPercent)
 {
     return CpuPanel::level(total, budgetPercent);
@@ -6052,14 +6074,15 @@ QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
         lines << (status.cpuPlaying ? tr("No reading yet.") : tr("Shown while the song plays."));
     }
     if (cpu.peakValid)
-        lines << tr("Peak since playback started: %1, %2")
+        lines << tr("Peak since playback started: %1, %2 (a change of mix rate, mixer or "
+                    "voicegroup starts it over)")
                      .arg(cycles(cpu.peak[AudioEngine::CpuTotal]),
                           percent(cpu.peak[AudioEngine::CpuTotal]));
     lines << tr("Budget: %1% of the VBlank window (%2), set in Settings → Audio")
                  .arg(status.cpuBudget)
                  .arg(cycles(int32_t(int64_t(status.cpuBudget) * cpu.vblankCycles / 100)));
     lines << tr("VBlank window: %1 = 100%").arg(cycles(cpu.vblankCycles));
-    lines << tr("Frame ceiling: %1 = %2; past it the next frame's sound is skipped")
+    lines << tr("Frame end: %1 = %2; past it the next frame's sound is skipped")
                  .arg(cycles(cpu.frameCycles), percent(cpu.frameCycles));
     lines << tr("%1 Hz mix rate, %2 PCM channels, %3")
                  .arg(status.mixRate)

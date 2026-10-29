@@ -31,6 +31,7 @@
 #include <QLineEdit>
 #include <QLinearGradient>
 #include <QListWidget>
+#include <QLocale>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMouseEvent>
@@ -9678,7 +9679,7 @@ QString SongView::cpuProfileToolTip(qreal x) const
             const CpuProfileFrame &peak = profile->frames[profile->maxIndex];
             text += QLatin1Char('\n') + tr("Peak: %1% (%2 cycles) at bar %3")
                                             .arg(percentOf(peak.total))
-                                            .arg(peak.total)
+                                            .arg(QLocale().toString(peak.total))
                                             .arg(barBeat(double(peak.tick)));
         }
         return text;
@@ -9687,15 +9688,13 @@ QString SongView::cpuProfileToolTip(qreal x) const
         return QString();
     const double tick = tickAtContentX(x - kGutterW);
     const CpuProfileFrame *frame = profile->frameAtTick(tick);
+    const QLocale locale; // cycles grouped as the status bar and dock show them
     if (!frame)
         return QString();
     return tr("CPU %1% (%2 cycles) at bar %3\nSequencer %4 · CGB %5 · Mixer %6")
-        .arg(percentOf(frame->total))
-        .arg(frame->total)
-        .arg(barBeat(tick))
-        .arg(frame->sequencer)
-        .arg(frame->cgb)
-        .arg(frame->mixer);
+        .arg(percentOf(frame->total), locale.toString(frame->total), barBeat(tick),
+             locale.toString(frame->sequencer), locale.toString(frame->cgb),
+             locale.toString(frame->mixer));
 }
 
 bool SongView::automationLanesVisible() const

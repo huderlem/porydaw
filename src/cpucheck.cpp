@@ -1,6 +1,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QDockWidget>
+#include <QElapsedTimer>
 #include <QImage>
 #include <QLabel>
 #include <QMenu>
@@ -9,6 +10,7 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -330,6 +332,14 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
               m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
           "stopped, the CPU dock shows a reading, a colour or a bar");
 
+    // 2b. Before the song has ever played the engine's idle SoundMains have
+    // a peak, but nothing played it: none is shown (D8).
+    check(m_audio.cpuSnapshot().peakValid, "the idle engine has no peak (precondition)");
+    check(m_cpuPanel->peakText() == QStringLiteral("--") &&
+              m_cpuPanel->markRect(CpuPanel::MarkPeak).isEmpty() &&
+              !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
+          "before the first play the CPU readout shows the idle frames' peak");
+
     // 3. Play two seconds: every frame's cost, the peak monotone.
     m_audio.play();
     int32_t peak = 0;
@@ -503,9 +513,9 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(tip.contains(QStringLiteral("(estimated)")),
               "the tooltip does not mark the estimated sequencer term");
         check(tip.contains(QStringLiteral("VBlank window")) &&
-                  tip.contains(QStringLiteral("Frame ceiling")) &&
+                  tip.contains(QStringLiteral("Frame end")) &&
                   tip.contains(QStringLiteral("Budget")) && tip.contains(QStringLiteral("Peak")),
-              "the tooltip lacks the budget, VBlank, frame-ceiling or peak line");
+              "the tooltip lacks the budget, VBlank, frame-end or peak line");
         check(tip.contains(QStringLiteral("%1 Hz").arg(int(m_engineSettings.pcmMixRate + 0.5f))) &&
                   tip.contains(QStringLiteral("stock mixer")),
               "the tooltip does not say the mix rate and mixer in use");
@@ -763,6 +773,38 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     updateCpuPanel();
     check(percentValue(m_cpuPanel->peakText()) > 0,
           "playing after a Reset while stopped shows no peak");
+
+    // The Settings page's engine change applies after its 200 ms debounce.
+    const auto settleEngineApply = [this] {
+        QElapsedTimer clock;
+        clock.start();
+        while ((m_engineApplyTimer->isActive() || clock.elapsed() < 50) && clock.elapsed() < 3000)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    };
+    // 11d. Stopped, a mix-rate change clears the engine's peak and its idle
+    // frames refill it: no peak shown until the song plays again.
+    m_audio.stop();
+    m_audio.pumpForTest(chunk, nullptr, chunk);
+    {
+        updatePolyStatus();
+        updateCpuPanel();
+        check(percentValue(m_cpuPanel->peakText()) > 0,
+              "stopped after playing, the dock lost the peak (precondition)");
+        EngineSettings faster = m_engineSettings;
+        const EngineSettings before = faster;
+        faster.pcmMixRate = 21024.0f;
+        page->setEngineSettings(faster);
+        settleEngineApply();
+        for (int i = 0; i < 4; i++)
+            m_audio.pumpForTest(chunk, nullptr, chunk);
+        updatePolyStatus();
+        updateCpuPanel();
+        check(m_audio.cpuSnapshot().peakValid && m_cpuPanel->peakText() == QStringLiteral("--") &&
+                  !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
+              "a mix-rate change while stopped shows the idle frames' peak");
+        page->setEngineSettings(before);
+        settleEngineApply();
+    }
 
     m_audio.stop();
     m_audio.pumpForTest(chunk, nullptr, chunk);

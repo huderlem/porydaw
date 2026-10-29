@@ -165,6 +165,11 @@ struct HostBindings {
     // Settings → Audio → CPU budget, percent of the VBlank window
     // (porydaw.audio.cpu().budgetPercent). Absent: 100.
     std::function<int()> cpuBudgetPercent;
+    // Whether the CPU dock shows a peak (porydaw.audio.cpu().peak): none
+    // before the song has played, after a Reset while stopped, or after a
+    // change that cleared it while stopped. Absent: whenever the engine
+    // has one.
+    std::function<bool()> cpuPeakShown;
     // The active song's offline CPU profile (porydaw.audio.cpuProfile(),
     // docs/cpu-meter/PLAN.md D3): null with no song, the strip hidden, or
     // none of the song as it stands yet. Absent: always null.

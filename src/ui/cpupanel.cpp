@@ -373,7 +373,8 @@ CpuPanel::CpuPanel(QWidget *parent) : QWidget(parent)
     readout->addLayout(peakHeader);
     m_peak = new QLabel(QStringLiteral("--"), m_readoutBox);
     m_peak->setToolTip(tr("The most expensive frame since the song last started playing from "
-                          "stop, or since Reset.") +
+                          "stop, or since Reset. A change of mix rate, mixer or voicegroup "
+                          "(a voice edit that reloads it) starts it over.") +
                        QLatin1Char('\n') + vblankHelp);
     readout->addWidget(m_peak);
     m_peakCycles = new QLabel(QStringLiteral("--"), m_readoutBox);

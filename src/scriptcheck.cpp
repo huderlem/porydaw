@@ -50,6 +50,7 @@
 #include "scripting/scriptwidgets.h"
 #include "songsession.h"
 #include "ui/audiosettingspage.h"
+#include "ui/cpupanel.h"
 #include "ui/enginesettings.h"
 #include "ui/keyboardshortcutspage.h"
 #include "ui/keymap.h"
@@ -1358,6 +1359,27 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
               },
               2000),
           "audio.cpu() when stopped is not nulls with the peak kept");
+    // The dock's Reset while stopped: no peak in cpu() either, as the dock
+    // shows none, until the song plays again.
+    QDockWidget *cpuDock = window.findChild<QDockWidget *>(QStringLiteral("cpuDock"));
+    CpuPanel *panel = window.findChild<CpuPanel *>();
+    if (cpuDock && panel) {
+        // Its Reset is live only once the dock shows a loaded song.
+        const bool dockWasShown = cpuDock->isVisible();
+        cpuDock->show();
+        QApplication::processEvents();
+        panel->clickReset();
+        if (!dockWasShown)
+            cpuDock->hide();
+        QApplication::processEvents();
+        QThread::msleep(100);
+        check(host.evalConsole(QStringLiteral("var c = porydaw.audio.cpu(); c !== null && "
+                                              "c.peak === null && c.peakPercent === null")) ==
+                  QStringLiteral("true"),
+              "audio.cpu() kept a peak after the dock's Reset while stopped");
+    } else {
+        check(false, "the CPU dock's panel is missing");
+    }
     // A stop then play restarts the beat sequence (the first beat fires
     // again).
     const int beatsBefore = counter("beats");
@@ -4005,6 +4027,17 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
         runEditChecks(check, host, *m_active, messages, haveExamples);
         // Transport through the bindings.
         if (m_audioOk) {
+            // Before the song has played, cpu() has no peak (the idle
+            // driver's frames are not one), as the dock shows none.
+            check(waitFor(
+                      [&] {
+                          return host.evalConsole(
+                                     QStringLiteral("var c = porydaw.audio.cpu(); c !== null && "
+                                                    "c.peak === null && c.peakPercent === null")) ==
+                                 QStringLiteral("true");
+                      },
+                      2000),
+                  "audio.cpu() has a peak before the song ever played");
             host.evalConsole(QStringLiteral("porydaw.transport.on('state', function (e) { "
                                             "porydaw.storage.set('tstate', e.state); })"));
             host.evalConsole(QStringLiteral("porydaw.transport.play()"));
