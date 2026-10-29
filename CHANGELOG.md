@@ -14,8 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Playing from a MIDI keyboard (or the virtual keyboard) and clicking notes in the roll now respond in a few milliseconds instead of one to two GBA frames. They play through a separate low-latency engine instance that follows the song's track state, while the song itself keeps the game's exact timing.
    - Live notes no longer share the song's PCM channels (and no longer show in the polyphony meter).
    - The `Auto` recording offset now includes the engine's own latency, so a take lands where you heard the song.
-- Added a GBA CPU readout to the status bar, beside the PCM and CGB channel counts. While the song plays, `CPU` shows how much of the GBA's VBlank time the sound driver (`m4aSoundMain`) would take each frame, estimated from the same engine that plays the song, so you can see what more PCM channels or a higher mix rate cost. Hover it for the cycle counts, the peak since playback started, and the split between the sequencer, the PSG channels and the mixer.
-   - It turns amber above the `CPU budget` set in `Settings -> Audio` (100% of the VBlank window by default), and red past a whole frame, where the game would skip a frame of sound.
+- Added a GBA CPU readout to the status bar, beside the PCM and CGB channel counts. While the song plays, `CPU` shows how much of the GBA's VBlank time the sound driver (`m4aSoundMain`) would take each frame, estimated from the same engine that plays the song, so you can see what more PCM channels or a higher mix rate cost. Hover it for the cycle counts, the peak since playback started, and the split between the sequencer, the CGB channels and the mixer.
+   - It turns amber above the `CPU budget` set in `Settings -> Audio` (100% of the VBlank window by default), and red at or past a whole frame, where the game would skip a frame of sound.
 
 ## Changed
 - Note edits, undo/redo and other song changes no longer stop and restart the audio device. They were stalling the UI for tens of milliseconds per edit on Windows, badly so in WASAPI exclusive mode.

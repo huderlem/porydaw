@@ -2,7 +2,9 @@
 
 #include "smf.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 #include <algorithm>
 #include <map>
 
@@ -164,6 +166,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::vector<RawEvent> rawEvents;
     std::vector<TempoChange> tempos;
     std::vector<TimeSigPoint> timeSigs;
+    std::vector<TimeSigPoint> seqTimeSigs; // the first chunk's (meterMarks)
     std::vector<RawOther> rawOthers;
     std::vector<bool> trackHasChannelEvents(numTracks, false);
     std::vector<QString> trackNames(numTracks);
@@ -256,6 +259,10 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                     }
                 } else if (metaType == 0x58 && blob.size() >= 2) {
                     timeSigs.push_back({tick, uint8_t(blob[0]), uint8_t(blob[1])});
+                    // mid2agb reads its bar marks from the first chunk only
+                    // (ReadSeqEvents): the CPU estimate's meters follow it.
+                    if (t == 0)
+                        seqTimeSigs.push_back(timeSigs.back());
                 } else if (metaType == 0x20 && blob.size() >= 1) {
                     // Channel Prefix: scoping handled by `prefix` above.
                 } else if (metaType == 0x03 && prefix.channel >= 0 && !smfMetaIsMarker(sev)) {
@@ -397,8 +404,10 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                      [](const TimeSigPoint &a, const TimeSigPoint &b) { return a.tick < b.tick; });
     timeline->timeSigs = std::move(timeSigs);
 
-    // The CPU estimate's meters (meterMarks): the segments' ticks with the
-    // raw denominator mid2agb divides by.
+    // The CPU estimate's meters (meterMarks): the first chunk's signatures
+    // (as mid2agb reads them), with the raw denominator it divides by.
+    std::stable_sort(seqTimeSigs.begin(), seqTimeSigs.end(),
+                     [](const TimeSigPoint &a, const TimeSigPoint &b) { return a.tick < b.tick; });
     {
         const uint32_t tpb = std::max<uint32_t>(tpqn, 1);
         auto &marks = timeline->meterMarks;
@@ -410,7 +419,7 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
                                            beatTicks * num, num, denomPow2};
         };
         marks.push_back(markAt(0, 4, 2));
-        for (const TimeSigPoint &ts : timeline->timeSigs) {
+        for (const TimeSigPoint &ts : seqTimeSigs) {
             const MidiTimeline::MeterMark mark = markAt(ts.tick, ts.numerator, ts.denomPow2);
             if (ts.tick == marks.back().tick)
                 marks.back() = mark;

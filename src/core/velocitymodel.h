@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <optional>
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 // How a track's velocities reach the hardware. A note's stored MIDI velocity
 // is continuous (1-127) on DirectSound voices, but the CGB channels have only

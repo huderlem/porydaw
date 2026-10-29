@@ -26,7 +26,9 @@
 #include "ui/songviewmodel.h"
 #include "ui/timelinesurface.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "voicegroup_loader.h"
+}
 
 class EventListView;
 class QKeyEvent;

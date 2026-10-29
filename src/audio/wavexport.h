@@ -7,7 +7,9 @@
 #include "audio/audioengine.h"
 #include "core/miditimeline.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "voicegroup_loader.h"
+}
 
 // Offline WAV export (SPEC §7): renders a timeline through a private
 // M4AEngine faster than realtime and writes 16-bit stereo PCM. Length

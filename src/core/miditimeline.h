@@ -119,11 +119,11 @@ class MidiTimeline
     ClickGrid clickGrid;
 
     // The meters as the song engine's CPU estimate hears them (audio
-    // thread): one per meter change, the 4/4 default at tick 0 first, like
-    // timeSigSegments(), with each change's sample position. TimelinePlayer
-    // declares them to the engine's MIDI-path sequencer estimate
-    // (m4a_engine_cost_time_signature), whose WholeNoteMark period is
-    // mid2agb's clocksPerBar().
+    // thread): one per meter change in the first chunk (mid2agb reads time
+    // signatures from there only), the 4/4 default at tick 0 first, with
+    // each change's sample position. TimelinePlayer declares them to the
+    // engine's MIDI-path sequencer estimate, whose bar marks are
+    // clocksPerBar() engine ticks apart.
     struct MeterMark {
         uint64_t samplePos;
         uint64_t tick;
@@ -132,13 +132,17 @@ class MidiTimeline
         uint8_t denomPow2;
     };
     std::vector<MeterMark> meterMarks;
-    // mid2agb's time-signature value (96 * numerator * clocks-per-beat
-    // factor / denominator, the factor 2 under -X), clamped to the 16 bits
-    // mid2agb accepts.
-    uint32_t clocksPerBar(const MeterMark &mark) const
+    // A meter's bar in ENGINE ticks: 96 * numerator / denominator. porydaw
+    // drives the engine at 24 ticks per quarter whatever the song's clocks
+    // (it passes the plain BPM), so under -X, where mid2agb's bar is
+    // 192 * numerator / denominator of its 48-per-beat clocks, the bar is
+    // still this many engine ticks. (Under -X the engine's tick and LFO rate
+    // then run at half the game's: a mismatch that predates the CPU meter
+    // and is out of its scope.) Clamped to the 16 bits mid2agb accepts.
+    static uint32_t clocksPerBar(const MeterMark &mark)
     {
-        const uint64_t clocks = (uint64_t(96) * mark.numerator * (extendedClocks ? 2 : 1)) >>
-                                std::min<int>(mark.denomPow2, 31);
+        const uint64_t clocks =
+            (uint64_t(96) * mark.numerator) >> std::min<int>(mark.denomPow2, 31);
         return uint32_t(std::min<uint64_t>(clocks, 0xFFFF));
     }
 

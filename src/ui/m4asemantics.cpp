@@ -3,7 +3,9 @@
 #include <QObject>
 #include <algorithm>
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 M4aCcInfo m4aClassifyCc(uint8_t cc)
 {

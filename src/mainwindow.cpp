@@ -5840,7 +5840,7 @@ QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
         lines << tr("  Sequencer: %1%2")
                      .arg(cycles(cpu.last[AudioEngine::CpuSequencer]),
                           cpu.estimated ? tr(" (estimated)") : QString());
-        lines << tr("  PSG: %1").arg(cycles(cpu.last[AudioEngine::CpuPsg]));
+        lines << tr("  CGB: %1").arg(cycles(cpu.last[AudioEngine::CpuCgb]));
         lines << tr("  Mixer: %1").arg(cycles(cpu.last[AudioEngine::CpuMixer]));
     } else {
         lines << (status.cpuPlaying ? tr("No reading yet.") : tr("Shown while the song plays."));

@@ -7,32 +7,46 @@
 #include <QTemporaryDir>
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
+#include <memory>
+#include <vector>
 
-#include "core/m4a.h"
+#include "core/miditimeline.h"
+#include "core/timelineplayer.h"
 #include "mainwindow.h"
 #include "songsession.h"
 #include "ui/audiosettingspage.h"
 #include "ui/settingsdialog.h"
 #include "ui/theme/themeruntime.h"
 
+extern "C" {
+#include "m4a_engine.h"
+}
+
 // --cpucheck <projectRoot> <songLabel>: the GBA CPU readout
 // (docs/cpu-meter/PLAN.md step 5), with the song open and the audio device
 // parked so the callback runs only when pumped. QSettings is redirected
-// into a temp dir first.
+// into a temp dir first. The song must loop, with its loop start inside
+// its first bars (mus_abandoned_ship: 4/4, loop start at tick 36).
 //
-// Covers: AudioEngine::cpuSnapshot is invalid right after a song loads and
-// valid within a few callbacks, its total always the sum of its three
-// terms, and the sequencer term marked estimated (porydaw drives the engine
-// with MIDI events); while the song plays, the peak never decreases and
-// never sits under the last frame; a play from stop resets it (D8), and so
-// does resetCpuPeak; the status bar's CPU item is shown with the meter and
-// reads a nonzero percent while playing and "--" stopped; a budget under
-// the reading turns it amber (the cpu_meter_warn_text role, through the
-// cpuLevel property its style sheet matches), one over it plain again;
-// stopping leaves no colour behind; the tooltip names the three terms,
-// marks the estimate, and never mentions sound effects (D4). cpuLevel's
-// thresholds are unit-tested, the red frame ceiling included (no stock
-// configuration reaches it).
+// Covers: cpuLevel's thresholds (the red frame ceiling included: no stock
+// configuration reaches it) and the engine-tick bar lengths;
+// AudioEngine::cpuSnapshot invalid right after a song loads, valid within a
+// few callbacks, its total always the sum of its three terms, the sequencer
+// term marked estimated; while the song plays the peak never decreases and
+// never sits under the last frame; a pause and resume, and a seek while
+// playing, keep it, a play from stop resets it (D8), resetCpuPeak lowers
+// it. The status bar's CPU item: shown with the meter, a nonzero percent
+// while playing, "--" stopped; amber (cpu_meter_warn_text, through the
+// cpuLevel property its style sheet matches) under a budget below the
+// reading, plain above it, no colour left after a stop; the tooltip names
+// the three terms, marks the estimate, never mentions sound effects (D4).
+// The song as declared to the engine's sequencer estimate: started with
+// exactly its note tracks, continued (no start-of-song work) on a resume
+// and a seek, the meter's bar length and phase after a mid-bar seek, kept
+// across a timeline swap, the loop start's meter saved when the start lies
+// before it in the same bar and when it lies past it, and restored by the
+// GOTO at the wrap. Rendering with the hooks on and off is byte-identical.
 
 namespace {
 
@@ -50,11 +64,41 @@ bool check(bool ok, const char *what)
 bool sumsUp(const AudioEngine::CpuSnapshot &s)
 {
     return s.last[AudioEngine::CpuTotal] == s.last[AudioEngine::CpuSequencer] +
-                                                s.last[AudioEngine::CpuPsg] +
+                                                s.last[AudioEngine::CpuCgb] +
                                                 s.last[AudioEngine::CpuMixer] &&
            (!s.peakValid || s.peak[AudioEngine::CpuTotal] == s.peak[AudioEngine::CpuSequencer] +
-                                                                 s.peak[AudioEngine::CpuPsg] +
+                                                                 s.peak[AudioEngine::CpuCgb] +
                                                                  s.peak[AudioEngine::CpuMixer]);
+}
+
+// A meter's bar in engine ticks (24 per quarter), worked out here rather
+// than through MidiTimeline::clocksPerBar: 4/4 is 96, 3/4 72, 6/8 72.
+int expectedBar(int numerator, int denomPow2)
+{
+    const int quarterTicks = 24;
+    const int beatTicks = quarterTicks * 4 / (1 << denomPow2);
+    return numerator * beatTicks;
+}
+
+// Where the coming engine tick lies in the estimate's bar (-1: no marks).
+int estPhase(const M4ASeqEstimate &est)
+{
+    if (!est.barLen)
+        return -1;
+    const uint32_t c = est.clock + est.tickInFrame;
+    if (c >= est.barStart)
+        return int((c - est.barStart) % est.barLen);
+    const uint32_t ahead = (est.barStart - c) % est.barLen;
+    return ahead ? int(est.barLen - ahead) : 0;
+}
+
+// Two phases within `slack` engine ticks of each other, around the bar.
+bool samePhase(int a, int b, int bar, int slack)
+{
+    if (a < 0 || b < 0 || bar <= 0)
+        return false;
+    const int d = ((a - b) % bar + bar) % bar;
+    return d <= slack || d >= bar - slack;
 }
 
 } // namespace
@@ -69,6 +113,16 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
               cpuLevel(280650, 335) == 1 && cpuLevel(M4A_FRAME_CYCLES - 1, 335) == 1 &&
               cpuLevel(M4A_FRAME_CYCLES, 335) == 2 && cpuLevel(M4A_FRAME_CYCLES, 10) == 2,
           "cpuLevel's budget and frame-ceiling thresholds");
+    // The estimate counts engine ticks, 24 per quarter whatever the song's
+    // clocks (-X included): the bar of a meter.
+    {
+        const auto bar = [](uint8_t num, uint8_t den) {
+            return MidiTimeline::clocksPerBar(MidiTimeline::MeterMark{0, 0, 0, num, den});
+        };
+        check(bar(4, 2) == 96 && bar(3, 2) == 72 && bar(6, 3) == 72 && bar(2, 1) == 96 &&
+                  bar(5, 2) == 120 && bar(4, 2) == uint32_t(expectedBar(4, 2)),
+              "clocksPerBar is not 96 * numerator / denominator engine ticks");
+    }
 
     if (!m_audioOk) {
         std::printf("cpucheck: SKIP (no audio device)\n");
@@ -83,12 +137,41 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         return false;
     // A callback shorter than a GBA frame (~16.7 ms) runs at most one
     // SoundMain, so the `last` read after each is every frame's cost.
-    const uint32_t chunk = uint32_t(m_audio.sampleRate() / 100.0);
+    const double rate = m_audio.sampleRate();
+    const uint32_t chunk = uint32_t(rate / 100.0);
     AudioSettingsPage *page = m_settingsDialog->audioPage();
+    const MidiTimeline *timeline = m_audio.timeline();
+    const M4ASeqEstimate &est = m_audio.engineForTest()->seqEst;
     const auto cpuText = [this] { return m_cpuValueLabel->text(); };
     const auto cpuLevelProp = [this] { return m_cpuValueLabel->property("cpuLevel").toString(); };
     const auto textColour = [this] {
         return m_cpuValueLabel->palette().color(QPalette::WindowText);
+    };
+    const auto peakNow = [this] { return m_audio.cpuSnapshot().peak[AudioEngine::CpuTotal]; };
+    const auto pumpSeconds = [&](double seconds) {
+        m_audio.pumpForTest(uint32_t(seconds * rate), nullptr, chunk);
+    };
+    if (!check(timeline->hasLoop() && !timeline->meterMarks.empty(),
+               "the fixture song has no loop or no meter"))
+        return false;
+
+    // The independent expectation of the song's meters: each first-chunk
+    // meter mark's bar in engine ticks, and the meter at a tick.
+    const auto meterIndexAt = [&](uint64_t tick) {
+        size_t i = 0;
+        while (i + 1 < timeline->meterMarks.size() && timeline->meterMarks[i + 1].tick <= tick)
+            i++;
+        return i;
+    };
+    const auto barAt = [&](uint64_t tick) {
+        const MidiTimeline::MeterMark &m = timeline->meterMarks[meterIndexAt(tick)];
+        return expectedBar(m.numerator, m.denomPow2);
+    };
+    // Engine ticks past the bar line at a song tick.
+    const auto phaseAt = [&](uint64_t tick) {
+        const MidiTimeline::MeterMark &m = timeline->meterMarks[meterIndexAt(tick)];
+        const uint64_t smfBar = m.barTicks;
+        return int((tick - m.tick) % smfBar * 24 / timeline->ticksPerBeat) % barAt(tick);
     };
 
     // 1. A fresh song engine publishes nothing until it has costed a frame.
@@ -102,7 +185,7 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
             calls++;
         }
         check(s.valid, "the CPU cost did not become valid within 16 callbacks");
-        check(sumsUp(s), "total != sequencer + PSG + mixer (stopped)");
+        check(sumsUp(s), "total != sequencer + CGB + mixer (stopped)");
         check(s.vblankCycles == 83776 && s.frameCycles == 280896,
               "the snapshot's VBlank and frame budgets");
     }
@@ -120,7 +203,7 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     int32_t peak = 0;
     int32_t firstPeak = 0;
     bool monotone = true, aboveLast = true, sums = true, estimated = true, valid = true;
-    const int calls = int(2.0 * m_audio.sampleRate() / chunk);
+    const int calls = int(2.0 * rate / chunk);
     for (int i = 0; i < calls; i++) {
         m_audio.pumpForTest(chunk, nullptr, chunk);
         const AudioEngine::CpuSnapshot s = m_audio.cpuSnapshot();
@@ -138,31 +221,32 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
             firstPeak = peak;
     }
     check(valid, "the CPU cost went invalid while playing");
-    check(sums, "total != sequencer + PSG + mixer (playing)");
+    check(sums, "total != sequencer + CGB + mixer (playing)");
     check(estimated, "the sequencer term was not marked estimated");
     check(monotone, "the peak decreased while playing");
     check(aboveLast, "the peak sat under the last frame");
     check(peak > firstPeak, "the peak never rose over two seconds of the song");
 
-    // The song is declared to the engine's sequencer estimate (the host
-    // contract): started with its note tracks, its meter's bar marks, its
-    // loop start once passed.
-    const MidiTimeline *timeline = m_audio.timeline();
-    const M4ASeqEstimate &est = m_audio.engineForTest()->seqEst;
+    // The song as declared: exactly the tracks with notes (up to the BGM
+    // player's 10), the meter's bar, the loop start saved once passed.
     {
-        uint16_t noteTracks = 0;
-        for (int t = 0; t < 16; t++)
-            if (timeline->tracks[t].noteCount > 0)
-                noteTracks |= uint16_t(1u << t);
+        uint16_t expectedTracks = 0;
+        int counted = 0;
+        for (int t = 0; t < 16 && counted < 10; t++) {
+            if (timeline->tracks[t].noteCount > 0) {
+                expectedTracks |= uint16_t(1u << t);
+                counted++;
+            }
+        }
         check(est.songDeclared && est.playing,
               "playing, the song was not declared to the estimate");
-        check(est.declared == noteTracks || est.declared == (noteTracks & est.exist),
-              "the estimate's song tracks are not the tracks with notes");
-        check(!timeline->meterMarks.empty() &&
-                  est.barLen == timeline->clocksPerBar(timeline->meterMarks.front()),
-              "the estimate's bar length is not the song's meter");
-        if (timeline->hasLoop() && timeline->loopStartSample < m_audio.playheadSamples())
-            check(est.loopSaved, "the loop start was passed but not declared");
+        check(est.declared == expectedTracks && est.exist == expectedTracks,
+              "the estimate's song tracks are not exactly the tracks with notes");
+        const uint64_t tickNow = uint64_t(timeline->tickForSample(m_audio.playheadSamples()));
+        check(est.barLen == barAt(tickNow), "the estimate's bar length is not the song's meter");
+        check(est.loopSaved && est.loopBarLen == barAt(timeline->loopStartTick) &&
+                  est.loopBarPhase == phaseAt(timeline->loopStartTick),
+              "the loop start was passed but its meter not saved");
     }
 
     updatePolyStatus();
@@ -181,9 +265,9 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     {
         const QString tip = m_cpuValueLabel->toolTip();
         check(tip == m_cpuCaption->toolTip(), "the caption and the value carry different tooltips");
-        check(tip.contains(QStringLiteral("Sequencer")) && tip.contains(QStringLiteral("PSG")) &&
-                  tip.contains(QStringLiteral("Mixer")),
-              "the tooltip does not name the three terms");
+        check(tip.contains(QStringLiteral("Sequencer")) && tip.contains(QStringLiteral("CGB")) &&
+                  tip.contains(QStringLiteral("Mixer")) && !tip.contains(QStringLiteral("PSG")),
+              "the tooltip does not name the three terms (CGB, as the status bar does)");
         check(tip.contains(QStringLiteral("(estimated)")),
               "the tooltip does not mark the estimated sequencer term");
         check(tip.contains(QStringLiteral("VBlank window")) &&
@@ -219,51 +303,133 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, percent / 2));
         updatePolyStatus();
         check(cpuLevelProp() == QStringLiteral("warn"), "the CPU item did not turn amber again");
+        page->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);
     }
 
-    // 5b. A seek into the middle of a bar restarts the song there with no
-    // bar marks until the meter's next bar line, where they resume.
+    // 6. Pause and resume: the peak stays (D8), the song continues (no
+    // start-of-song work: no START init pending).
     {
-        const MidiTimeline::MeterMark &meter = timeline->meterMarks.front();
-        const uint64_t barTick = meter.tick + 2 * meter.barTicks;
-        if (timeline->meterMarks.size() == 1 ||
-            timeline->meterMarks[1].tick > barTick + meter.barTicks) {
-            m_audio.seek(timeline->sampleForTick(barTick + meter.barTicks / 2));
+        const int32_t before = peakNow();
+        m_audio.pause();
+        pumpSeconds(0.1);
+        check(!est.songDeclared, "a pause did not stop the estimate's song");
+        m_audio.play();
+        m_audio.pumpForTest(chunk, nullptr, chunk);
+        check(est.songDeclared && est.playing && est.startPending == 0 &&
+                  (est.firstNote & est.declared) == est.declared,
+              "a resume did not continue the song (or charged its START init)");
+        pumpSeconds(0.2);
+        check(peakNow() >= before, "pause and resume reset the peak");
+    }
+
+    // 7. A seek into the middle of a bar while playing: the peak stays, the
+    // song continues there with its meter in phase, and a timeline swap
+    // (an edit) keeps that phase.
+    {
+        const MidiTimeline::MeterMark &last = timeline->meterMarks.back();
+        // Two bars into the last meter: no meter change inside the bar.
+        const uint64_t barTick = last.tick + 2 * last.barTicks;
+        const uint64_t seekTick = barTick + last.barTicks / 2;
+        const int32_t before = peakNow();
+        m_audio.seek(timeline->sampleForTick(seekTick));
+        m_audio.pumpForTest(chunk, nullptr, chunk);
+        check(est.songDeclared && est.startPending == 0 &&
+                  (est.firstNote & est.declared) == est.declared,
+              "a seek while playing did not continue the song (or charged its START init)");
+        check(est.barLen == barAt(seekTick) &&
+                  samePhase(estPhase(est), phaseAt(seekTick), barAt(seekTick), 2),
+              "a mid-bar seek did not declare the meter in phase");
+        std::printf("cpucheck: mid-bar seek to tick %llu: bar %d, phase %d (expected %d)\n",
+                    (unsigned long long)seekTick, int(est.barLen), estPhase(est),
+                    phaseAt(seekTick));
+        const int phaseBefore = estPhase(est);
+        m_audio.updateTimeline(timeline, nullptr);
+        check(est.barLen == barAt(seekTick) && estPhase(est) == phaseBefore,
+              "a timeline swap lost the meter or its phase");
+        pumpSeconds(0.2);
+        check(peakNow() >= before, "a seek while playing reset the peak");
+    }
+
+    // 8. The loop start's meter. (a) A mid-bar start before the loop start,
+    // in its bar: the label saves the real meter; (b) a start past the loop
+    // start: its meter is declared anyway; and the GOTO restores it.
+    const int loopBar = barAt(timeline->loopStartTick);
+    const int loopPhase = phaseAt(timeline->loopStartTick);
+    const auto loopSavedRight = [&] {
+        return est.loopSaved && est.loopBarLen == loopBar && est.loopBarPhase == loopPhase;
+    };
+    {
+        const uint64_t barTicks =
+            timeline->meterMarks[meterIndexAt(timeline->loopStartTick)].barTicks;
+        const uint64_t halfBeat = std::max<uint32_t>(1, timeline->ticksPerBeat / 2);
+        if (check(timeline->loopStartTick > halfBeat,
+                  "the fixture's loop start is too early for a start before it")) {
+            uint64_t startTick = timeline->loopStartTick - halfBeat;
+            if (phaseAt(startTick) == 0 && startTick > 0)
+                startTick--; // mid-bar, whatever the loop start's place
+            m_audio.stop();
             m_audio.pumpForTest(chunk, nullptr, chunk);
-            check(est.songDeclared && est.barLen == 0,
-                  "a mid-bar seek did not hold off the bar marks");
-            const uint64_t barLine = timeline->sampleForTick(barTick + meter.barTicks);
-            while (m_audio.playheadSamples() <= barLine)
+            m_audio.seek(timeline->sampleForTick(startTick));
+            m_audio.play();
+            m_audio.pumpForTest(chunk, nullptr, chunk);
+            check(est.songDeclared && !est.loopSaved && est.barLen == barAt(startTick) &&
+                      samePhase(estPhase(est), phaseAt(startTick), barAt(startTick), 2),
+                  "(a) a mid-bar start before the loop start did not declare its meter in phase");
+            while (m_audio.playheadSamples() <= timeline->loopStartSample + chunk)
                 m_audio.pumpForTest(chunk, nullptr, chunk);
-            check(est.barLen == timeline->clocksPerBar(meter),
-                  "the bar marks did not resume at the next bar line");
+            check(loopSavedRight(), "(a) the loop start did not save its real meter");
+        }
+        // (b) Past the loop start, inside the loop, mid-bar.
+        const uint64_t pastTick = timeline->loopStartTick + barTicks + barTicks / 3;
+        if (check(timeline->sampleForTick(pastTick) < timeline->loopEndSample,
+                  "the fixture's loop is too short to start inside it")) {
+            m_audio.seek(timeline->sampleForTick(pastTick));
+            m_audio.pumpForTest(chunk, nullptr, chunk);
+            check(loopSavedRight(), "(b) a start past the loop start did not declare its meter");
+            // The wrap: approach the loop end in small steps, catch the jump.
+            m_audio.seek(timeline->loopEndSample - uint64_t(0.2 * rate));
+            m_audio.pumpForTest(chunk, nullptr, chunk);
+            check(loopSavedRight(), "(b) a seek near the loop end lost the loop start's meter");
+            uint64_t prev = m_audio.playheadSamples();
+            bool wrapped = false;
+            for (int i = 0; i < 4000 && !wrapped; i++) {
+                m_audio.pumpForTest(64, nullptr, 64);
+                wrapped = m_audio.playheadSamples() < prev;
+                prev = m_audio.playheadSamples();
+            }
+            const int sinceWrap = int((prev - timeline->loopStartSample) * 24.0 *
+                                      (timeline->tempoMap.front().bpm / 60.0) / rate) +
+                                  1;
+            check(wrapped && est.barLen == loopBar &&
+                      samePhase(estPhase(est), loopPhase, loopBar, sinceWrap + 1),
+                  "the GOTO did not restore the loop start's meter and phase");
+            std::printf("cpucheck: loop start bar %d phase %d; after the wrap bar %d phase %d\n",
+                        loopBar, loopPhase, int(est.barLen), estPhase(est));
         }
     }
 
-    // 6. Stop: no reading and no colour left behind.
+    // 9. Stop: no reading and no colour left behind.
     m_audio.stop();
     m_audio.pumpForTest(chunk, nullptr, chunk);
     updatePolyStatus();
     check(cpuText() == QStringLiteral("--") && cpuLevelProp().isEmpty() && textColour() == plain,
           "stopped, the CPU item kept a reading or a colour");
     check(!est.songDeclared && !est.playing, "stopping did not end the estimate's song");
-    page->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);
 
-    // 7. Play from stop: the peak restarts (D8). A tenth of a second of the
-    // song's start sits under the two seconds above.
+    // 10. Play from stop: the peak restarts (D8). A tenth of a second of the
+    // song's start sits under the seconds above.
+    peak = peakNow();
     m_audio.play();
-    int32_t maxLast = 0, laterMin = INT32_MAX;
+    int32_t maxLast = 0;
     bool restartedAbove = true;
-    const int startCalls = std::max(4, int(0.1 * m_audio.sampleRate() / chunk));
+    const int startCalls = std::max(4, int(0.1 * rate / chunk));
     for (int i = 0; i < startCalls; i++) {
         m_audio.pumpForTest(chunk, nullptr, chunk);
         const AudioEngine::CpuSnapshot s = m_audio.cpuSnapshot();
         maxLast = std::max(maxLast, s.last[AudioEngine::CpuTotal]);
-        if (i > 0) {
-            laterMin = std::min(laterMin, s.last[AudioEngine::CpuTotal]);
+        if (i > 0)
             restartedAbove =
                 restartedAbove && s.peak[AudioEngine::CpuTotal] >= s.last[AudioEngine::CpuTotal];
-        }
     }
     {
         const AudioEngine::CpuSnapshot s = m_audio.cpuSnapshot();
@@ -271,12 +437,17 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
               "play from stop did not restart the peak at the new playback's frames");
         check(s.peak[AudioEngine::CpuTotal] < peak,
               "after play from stop the peak still holds the earlier playback's maximum");
+        // A start leaves each track's implicit VOL to its first note; a
+        // continuation marks them all done.
+        check(est.songDeclared && (est.firstNote & est.declared) != est.declared,
+              "play from stop continued the song instead of starting it");
     }
 
-    // 8. resetCpuPeak: the peak restarts at the next frame.
-    m_audio.pumpForTest(uint32_t(2.0 * m_audio.sampleRate()), nullptr, chunk);
+    // 11. resetCpuPeak: the peak restarts at the next frame, lower than the
+    // two seconds' before it.
+    pumpSeconds(2.0);
     {
-        const int32_t before = m_audio.cpuSnapshot().peak[AudioEngine::CpuTotal];
+        const int32_t before = peakNow();
         m_audio.resetCpuPeak();
         int32_t sinceMax = 0;
         bool above = true;
@@ -287,14 +458,53 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
             if (i > 0)
                 above = above && s.peak[AudioEngine::CpuTotal] >= s.last[AudioEngine::CpuTotal];
         }
-        const int32_t after = m_audio.cpuSnapshot().peak[AudioEngine::CpuTotal];
+        const int32_t after = peakNow();
         check(after <= sinceMax && above, "resetCpuPeak did not restart the peak");
+        check(after < before, "resetCpuPeak did not lower the peak");
         std::printf("cpucheck: peak %d before resetCpuPeak, %d after\n", before, after);
     }
 
     m_audio.stop();
     m_audio.pumpForTest(chunk, nullptr, chunk);
     m_audio.holdDeviceForTest(false);
+
+    // 12. The hooks only count: the same span rendered with them on and off
+    // is byte-identical (from the start, then across the loop wrap).
+    {
+        const LoadedVoiceGroup *vg = m_audio.voicegroup();
+        const SongSettings settings = songSettingsFor(*m_active);
+        std::vector<float> out[2];
+        for (int k = 0; k < 2; k++) {
+            const auto owned = std::make_unique<M4AEngine>();
+            M4AEngine &engine = *owned;
+            m4a_engine_init(&engine, float(rate));
+            m4a_engine_set_voicegroup(&engine, vg ? const_cast<ToneData *>(vg->voices) : nullptr);
+            applySongSettings(&engine, settings);
+            const auto ownedPlayer = std::make_unique<TimelinePlayer>();
+            TimelinePlayer &player = *ownedPlayer;
+            player.setCostHooks(k == 0);
+            TimelinePlayer::chase(&engine, timeline, 0);
+            player.costSongStart(&engine, timeline, false);
+            std::vector<float> l(512), r(512);
+            const auto render = [&](double seconds) {
+                for (uint32_t done = 0; done < uint32_t(seconds * rate); done += 512) {
+                    player.render(&engine, timeline, l.data(), r.data(), 512, true, 0);
+                    out[k].insert(out[k].end(), l.begin(), l.end());
+                    out[k].insert(out[k].end(), r.begin(), r.end());
+                }
+            };
+            render(2.0);
+            const uint64_t pos = timeline->loopEndSample - uint64_t(rate);
+            player.seek(pos, timeline);
+            TimelinePlayer::chase(&engine, timeline, pos);
+            player.costSongStart(&engine, timeline, true);
+            render(2.0);
+            m4a_engine_destroy(&engine);
+        }
+        check(out[0].size() == out[1].size() &&
+                  std::memcmp(out[0].data(), out[1].data(), out[0].size() * sizeof(float)) == 0,
+              "rendering with the cost hooks on differs from rendering with them off");
+    }
     return g_failures == 0;
 }
 

@@ -20,7 +20,9 @@
 #include "ui/polyphonypanel.h"
 #include "ui/typography.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 // --polycheck: polyphony-overflow debugger check, fully self-contained (no
 // project needed). Stage A synthesizes a song that forces every overflow kind

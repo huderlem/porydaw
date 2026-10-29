@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 // The Sample Editor audition-slot protocol (docs/sample-editor/PLAN.md §4):
 // audition an unregistered, in-memory sample through the real engine, with

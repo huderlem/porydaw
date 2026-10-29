@@ -18,7 +18,9 @@
 #include <algorithm>
 #include <cstdlib>
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 namespace {
 

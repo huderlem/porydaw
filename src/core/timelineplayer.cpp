@@ -242,11 +242,42 @@ void TimelinePlayer::seekCostMarks(const MidiTimeline *timeline)
                                              return p < m.samplePos;
                                          }) -
                         marks.begin());
-    m_costPhaseSample = UINT64_MAX;
     m_costLoopStartPassed = timeline->hasLoop() && m_pos >= timeline->loopStartSample;
 }
 
-void TimelinePlayer::costSongStart(M4AEngine *engine, const MidiTimeline *timeline)
+const MidiTimeline::MeterMark *TimelinePlayer::meterAt(const MidiTimeline *timeline,
+                                                       uint64_t samplePos,
+                                                       uint32_t *engineTicksIntoBar)
+{
+    *engineTicksIntoBar = 0;
+    const auto &marks = timeline->meterMarks;
+    const size_t after = size_t(std::upper_bound(marks.begin(), marks.end(), samplePos,
+                                                 [](uint64_t p, const MidiTimeline::MeterMark &m) {
+                                                     return p < m.samplePos;
+                                                 }) -
+                                marks.begin());
+    if (after == 0)
+        return nullptr; // no meters (a timeline not from build())
+    const MidiTimeline::MeterMark &meter = marks[after - 1];
+    if (meter.barTicks == 0 || timeline->tempoMap.empty() || samplePos <= meter.samplePos)
+        return &meter;
+    const double tick = timeline->tickForSample(samplePos);
+    const double bars = std::max(0.0, (tick - double(meter.tick)) / double(meter.barTicks));
+    const uint64_t lastLine = meter.tick + uint64_t(std::floor(bars)) * meter.barTicks;
+    const auto near = [&](uint64_t line) {
+        const uint64_t at = timeline->sampleForTick(line);
+        return (at > samplePos ? at - samplePos : samplePos - at) <= 1;
+    };
+    if (near(lastLine) || near(lastLine + meter.barTicks))
+        return &meter; // on a bar line, give or take the tick/sample rounding
+    const uint32_t bar = MidiTimeline::clocksPerBar(meter);
+    const double into =
+        (tick - double(lastLine)) * 24.0 / double(std::max<uint32_t>(timeline->ticksPerBeat, 1));
+    *engineTicksIntoBar = bar ? uint32_t(std::lround(std::max(into, 0.0))) % bar : 0;
+    return &meter;
+}
+
+void TimelinePlayer::costSongStart(M4AEngine *engine, const MidiTimeline *timeline, bool continuing)
 {
     if (!m_costHooks || !timeline)
         return;
@@ -256,32 +287,32 @@ void TimelinePlayer::costSongStart(M4AEngine *engine, const MidiTimeline *timeli
     for (int track = 0; track < 16; track++)
         if (timeline->tracks[track].noteCount > 0)
             trackMask |= 1u << track;
-    m4a_engine_cost_song_start(engine, trackMask, M4A_PLAYER_BGM);
+    if (continuing)
+        m4a_engine_cost_song_continue(engine, trackMask, M4A_PLAYER_BGM);
+    else
+        m4a_engine_cost_song_start(engine, trackMask, M4A_PLAYER_BGM);
 
     seekCostMarks(timeline);
     // Unlike a seek, a start passes over this position's own hooks: a meter
     // or the loop start right here are declared as its events.
-    const auto &marks = timeline->meterMarks;
     m_costLoopStartPassed = timeline->hasLoop() && m_pos > timeline->loopStartSample;
-    if (m_costMark == 0)
-        return; // no meters (a timeline not from build())
-    const MidiTimeline::MeterMark &meter = marks[m_costMark - 1];
-    if (meter.samplePos == m_pos) {
-        m_costMark--;
+    uint32_t into = 0;
+    const MidiTimeline::MeterMark *meter = meterAt(timeline, m_pos, &into);
+    if (!meter)
         return;
+    if (meter->samplePos == m_pos)
+        m_costMark--; // the meter's own position: it declares itself
+    else
+        m4a_engine_cost_time_signature_phase(engine, MidiTimeline::clocksPerBar(*meter), into);
+    // Past the loop start, its '[' never runs this pass: the meter it had,
+    // for the GOTO to restore.
+    if (m_costLoopStartPassed) {
+        uint32_t loopInto = 0;
+        if (const MidiTimeline::MeterMark *loopMeter =
+                meterAt(timeline, timeline->loopStartSample, &loopInto))
+            m4a_engine_cost_loop_start_meter(engine, MidiTimeline::clocksPerBar(*loopMeter),
+                                             loopInto);
     }
-    // Mid-bar: no bar marks until the meter's next bar line, where it is
-    // declared again, so the marks fall where the song's bars do.
-    m4a_engine_cost_time_signature(engine, 0);
-    if (timeline->tempoMap.empty() || meter.barTicks == 0)
-        return;
-    const double tick = timeline->tickForSample(m_pos);
-    const double barsIn = std::ceil((tick - double(meter.tick)) / double(meter.barTicks));
-    const uint64_t barLine = meter.tick + uint64_t(std::max(barsIn, 0.0)) * meter.barTicks;
-    if (m_costMark < marks.size() && barLine >= marks[m_costMark].tick)
-        return; // the next meter change comes first and declares itself
-    m_costPhaseSample = std::max(timeline->sampleForTick(barLine), m_pos);
-    m_costPhaseClocks = timeline->clocksPerBar(meter);
 }
 
 void TimelinePlayer::dispatchCostMarks(M4AEngine *engine, const MidiTimeline *timeline)
@@ -292,13 +323,8 @@ void TimelinePlayer::dispatchCostMarks(M4AEngine *engine, const MidiTimeline *ti
     // the meter in force there for the GOTO to restore.
     const auto &marks = timeline->meterMarks;
     while (m_costMark < marks.size() && marks[m_costMark].samplePos <= m_pos) {
-        m4a_engine_cost_time_signature(engine, timeline->clocksPerBar(marks[m_costMark]));
+        m4a_engine_cost_time_signature(engine, MidiTimeline::clocksPerBar(marks[m_costMark]));
         m_costMark++;
-        m_costPhaseSample = UINT64_MAX;
-    }
-    if (m_costPhaseSample <= m_pos) {
-        m4a_engine_cost_time_signature(engine, m_costPhaseClocks);
-        m_costPhaseSample = UINT64_MAX;
     }
     if (!m_costLoopStartPassed && timeline->hasLoop() && m_pos >= timeline->loopStartSample) {
         m4a_engine_cost_loop_point(engine, false);
@@ -310,9 +336,9 @@ uint64_t TimelinePlayer::nextCostMark(const MidiTimeline *timeline) const
 {
     if (!m_costHooks)
         return UINT64_MAX;
-    uint64_t next = m_costPhaseSample;
+    uint64_t next = UINT64_MAX;
     if (m_costMark < timeline->meterMarks.size())
-        next = std::min(next, timeline->meterMarks[m_costMark].samplePos);
+        next = timeline->meterMarks[m_costMark].samplePos;
     if (!m_costLoopStartPassed && timeline->hasLoop())
         next = std::min(next, timeline->loopStartSample);
     return next;

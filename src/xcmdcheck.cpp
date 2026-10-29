@@ -12,7 +12,9 @@
 #include "core/smf.h"
 #include "core/timelineplayer.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 // --xcmdcheck: pseudo-echo XCMD playback check, fully self-contained (no
 // project needed). mid2agb turns a CC 0x1E (select) + CC 0x1D/0x1F (fire)

@@ -14,9 +14,13 @@
 #include "audio/auditionslots.h"
 #include "audio/metronome.h"
 #include "core/captureevent.h"
-#include "core/m4a.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
+
+extern "C" {
+#include "m4a_engine.h"
+#include "voicegroup_loader.h"
+}
 
 struct ma_device;
 struct ma_context;
@@ -560,14 +564,18 @@ class AudioEngine
     // cycles of m4aSoundMain per frame, as the engine's cost model counts
     // them (poryaaaa M4AFrameCost). `last` is the latest SoundMain, `peak`
     // the most expensive since playback last started from stop (D8) or
-    // resetCpuPeak(). Each holds {sequencer, PSG (CgbSound), mixer, total}
-    // cycles, total being the sum. valid is false until the engine has
-    // costed a full frame (and again after a mix rate, mixer or song
-    // change); the sequencer term is an estimate when `estimated`. Only the
+    // resetCpuPeak(); a pause, a resume and a seek keep it, while a change
+    // of mix rate, mixer, song or voicegroup (a voice edit swaps the
+    // engine's voicegroup) starts a new one, as the engine clears its cost
+    // on those. Each holds {sequencer, CGB (CgbSound), mixer, total} cycles,
+    // total being the sum. valid is false until the engine has costed a
+    // full frame (and again after those changes); the sequencer term is an
+    // estimate when `estimated`. Only the
     // song engine is costed (D5): keyboard notes and auditions are not.
     // Published by the audio callback through a seqlock; the UI reads a
-    // consistent copy without blocking it.
-    enum CpuTerm { CpuSequencer = 0, CpuPsg = 1, CpuMixer = 2, CpuTotal = 3 };
+    // consistent copy without blocking it (UI thread only: under contention
+    // it returns the last one it read).
+    enum CpuTerm { CpuSequencer = 0, CpuCgb = 1, CpuMixer = 2, CpuTotal = 3 };
     struct CpuSnapshot {
         bool valid = false;
         bool estimated = false; // the sequencer term is the MIDI-path estimate
@@ -999,9 +1007,21 @@ class AudioEngine
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;
     uint32_t m_appliedPolyReset = 0;
-    // Audio thread: the song (re)starts at the next render; declare it to
-    // the engine's CPU estimate there (TimelinePlayer::costSongStart).
-    bool m_costStartPending = false;
+    // Audio thread (or the UI thread with the device stopped): the song
+    // (re)starts at the next render; declare it to the engine's CPU
+    // estimate there (TimelinePlayer::costSongStart). A start from stop
+    // wins over a continuation (a resume, a seek while playing, a
+    // voicegroup swap) raised in the same callback.
+    enum class CostStart : uint8_t { None, Continue, Start };
+    CostStart m_costStart = CostStart::None;
+    void requestCostContinue()
+    {
+        if (m_costStart == CostStart::None)
+            m_costStart = CostStart::Continue;
+    }
+    // The last consistent CPU snapshot (UI thread): what cpuSnapshot()
+    // returns when the callback keeps the seqlock busy past its retries.
+    mutable CpuSnapshot m_lastCpuSnapshot;
     TimelinePlayer m_player;
     // Metronome (audio thread): this callback's clicks, mixed after the tap,
     // through a delay of the main engine's latency (engineLatencySamples)

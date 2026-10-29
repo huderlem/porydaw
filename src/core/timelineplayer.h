@@ -4,7 +4,9 @@
 
 #include "core/miditimeline.h"
 
-#include "core/m4a.h"
+extern "C" {
+#include "m4a_engine.h"
+}
 
 // The lanes a MIDI keyboard moved live on one track
 // (docs/midi-controls/PLAN.md §3.2): its pitch bend, any CC lane, and its
@@ -105,7 +107,6 @@ class TimelinePlayer
         m_cursor = 0;
         clearKeyedOn();
         m_costMark = 0;
-        m_costPhaseSample = UINT64_MAX;
         m_costLoopStartPassed = false;
     }
 
@@ -213,11 +214,14 @@ class TimelinePlayer
     // calls none of them: offline renders and other engines are untouched.
     void setCostHooks(bool on) { m_costHooks = on; }
 
-    // The song starts playing here (from stop, from a pause, or after a
-    // seek moved it): declares it to the engine's estimate with the tracks
-    // that have notes anywhere in the song, and arms the meter in force so
-    // its bar marks keep the song's phase. A no-op without cost hooks.
-    void costSongStart(M4AEngine *engine, const MidiTimeline *timeline);
+    // The song starts playing here: declares it to the engine's estimate
+    // with the tracks that have notes anywhere in the song, as a fresh start
+    // (play from stop: m4a_engine_cost_song_start) or as a continuation
+    // (a resume, a seek while playing: m4a_engine_cost_song_continue, no
+    // start-of-song work); then the meter in force with its phase here, and
+    // the loop start's meter when the position lies past it. A no-op
+    // without cost hooks.
+    void costSongStart(M4AEngine *engine, const MidiTimeline *timeline, bool continuing);
 
     // A position at or past the loop end (a start or seek there, or the
     // last render ending exactly on it) wraps before the next render plays
@@ -249,6 +253,16 @@ class TimelinePlayer
     // timeline swap, is not a new pass over that position's hooks).
     void seekCostMarks(const MidiTimeline *timeline);
 
+  public:
+    // The meter in force at a position (the last of timeline->meterMarks at
+    // or before it; null without marks) and how far into its bar the
+    // position lies, in engine ticks (24 per quarter), 0 within a sample of
+    // a bar line (a start snapped to one). For the cost hooks and their
+    // harness.
+    static const MidiTimeline::MeterMark *meterAt(const MidiTimeline *timeline, uint64_t samplePos,
+                                                  uint32_t *engineTicksIntoBar);
+
+  private:
     void clearKeyedOn()
     {
         for (auto &track : m_keyedOn)
@@ -261,10 +275,6 @@ class TimelinePlayer
     bool m_costHooks = false;
     // The next meter mark due (index into timeline->meterMarks).
     size_t m_costMark = 0;
-    // A meter re-declared at the next bar line after a mid-bar start, so the
-    // estimate's bar marks fall where the song's do (UINT64_MAX: none).
-    uint64_t m_costPhaseSample = UINT64_MAX;
-    uint32_t m_costPhaseClocks = 0;
     // This pass has gone through the loop start (its '[' was declared, or
     // the pass started after it).
     bool m_costLoopStartPassed = false;
