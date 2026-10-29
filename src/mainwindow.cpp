@@ -572,8 +572,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         bindings.cpuBudgetPercent = [this] { return m_cpuBudgetPercent; };
         bindings.cpuPeakShown = [this] { return cpuPeakShown(); };
         bindings.cpuProfile = [this]() -> std::shared_ptr<const CpuProfile> {
-            // Only a profile of the song as it stands.
-            if (!m_active || m_active->cpuProfileStale)
+            // Only a profile of the song as it stands, and only while the
+            // strip is shown (hidden, a kept profile is not reported).
+            if (!m_active || m_active->cpuProfileStale || !m_cpuProfileAction ||
+                !m_cpuProfileAction->isChecked())
                 return nullptr;
             return m_active->cpuProfile;
         };
@@ -1534,7 +1536,7 @@ void MainWindow::buildUi()
     });
 
     // The CPU profile strip under the ruler (docs/cpu-meter/PLAN.md D3):
-    // app-wide, persisted, shown by default. Hidden, no profile is made.
+    // app-wide, persisted, hidden by default. Hidden, no profile is made.
     m_cpuProfiler = new CpuProfiler(this);
     m_cpuProfileTimer = new QTimer(this);
     m_cpuProfileTimer->setSingleShot(true);
@@ -1552,7 +1554,7 @@ void MainWindow::buildUi()
     m_cpuProfileAction = viewMenu->addAction(tr("CPU &Profile"));
     m_cpuProfileAction->setCheckable(true);
     m_cpuProfileAction->setObjectName(QStringLiteral("viewCpuProfileAction"));
-    m_cpuProfileAction->setChecked(QSettings().value(kCpuProfileKey, true).toBool());
+    m_cpuProfileAction->setChecked(QSettings().value(kCpuProfileKey, false).toBool());
     connect(m_cpuProfileAction, &QAction::toggled, this, [this](bool on) {
         QSettings().setValue(kCpuProfileKey, on);
         if (!on) {

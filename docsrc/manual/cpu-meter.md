@@ -40,7 +40,8 @@ PCM channels, stock or HQ mixer). Changing Settings → Audio moves it live. -->
 
 ## The profile strip
 
-<!-- TODO: The thin "CPU" strip under the ruler: the whole song's cost per
+<!-- TODO: The thin "CPU" strip under the ruler (hidden until turned on with
+View → CPU Profile; the choice is remembered): the whole song's cost per
 frame without playing it, from a quick render of the song in the background
 (a looping song once through to its loop end; any other to its end plus the
 3 s release tail playback plays) with the same engine settings. Colour per

@@ -17,6 +17,9 @@
 #include "audio/cpuprofile.h"
 #include "core/miditimeline.h"
 #include "mainwindow.h"
+#ifdef PORYDAW_SCRIPTING
+#include "scripting/scripthost.h"
+#endif
 #include "songsession.h"
 #include "ui/audiosettingspage.h"
 #include "ui/settingsdialog.h"
@@ -34,9 +37,11 @@ extern "C" {
 // song open and the audio device parked. QSettings is redirected into a
 // temp dir first. The song must loop (mus_abandoned_ship).
 //
-// Covers: the strip is on by default (View → CPU Profile checked) and sits
-// directly under the ruler; opening the song starts a profile, "profiling"
-// meanwhile, done within a time bound; one frame per GBA frame of the song
+// Covers: with no stored setting the strip is off (View → CPU Profile
+// unchecked): opening the song lays out no strip, makes no profile and the
+// script binding (porydaw.audio.cpuProfile()) reports none; turning it on
+// shows the strip directly under the ruler and starts exactly one profile,
+// "profiling" meanwhile, done within a time bound; one frame per GBA frame of the song
 // once through (to the loop end), each frame's total the sum of its three
 // terms, ticks in order inside the span, the max the frames' max; playing
 // the song through once, every frame the readout reports is at most the
@@ -87,9 +92,11 @@ bool mentionsEffects(const QString &s)
 
 bool MainWindow::runCpuProfileCheck(const QString &projectRoot, const QString &songLabel)
 {
+    check(!QSettings().contains(QStringLiteral("cpuProfileStrip")),
+          "the fresh settings store already holds cpuProfileStrip");
     check(m_cpuProfileAction && m_cpuProfileAction->isCheckable() &&
-              m_cpuProfileAction->isChecked(),
-          "View → CPU Profile is missing or not on by default");
+              !m_cpuProfileAction->isChecked(),
+          "View → CPU Profile is missing or not off by default");
     if (!m_audioOk) {
         std::printf("cpuprofilecheck: SKIP (no audio device)\n");
         return true;
@@ -109,20 +116,41 @@ bool MainWindow::runCpuProfileCheck(const QString &projectRoot, const QString &s
     if (!check(strip && ruler, "the CPU profile strip or the ruler is missing"))
         return false;
     QCoreApplication::processEvents();
-    check(view.cpuProfileVisible() && strip->isVisible(), "the strip is not shown by default");
+    // Off by default: no strip, no profile job, nothing for a plugin.
+    check(!view.cpuProfileVisible() && !strip->isVisible(), "the strip is shown by default");
+    check(!QSettings().contains(QStringLiteral("cpuProfileStrip")),
+          "opening a song stored the CPU Profile setting");
+    waitFor([] { return false; }, 800);
+    check(m_cpuProfiler->jobsStarted() == jobsBeforeLoad && !view.cpuProfiling() &&
+              !session.cpuProfile,
+          "opening the song with the strip off made a profile");
+#ifdef PORYDAW_SCRIPTING
+    check(m_scriptHost && m_scriptHost->bindings().cpuProfile &&
+              !m_scriptHost->bindings().cpuProfile(),
+          "porydaw.audio.cpuProfile() is not null with the strip off");
+#endif
+    m_cpuProfileAction->trigger();
+    QCoreApplication::processEvents();
+    check(view.cpuProfileVisible() && strip->isVisible() &&
+              QSettings().value(QStringLiteral("cpuProfileStrip"), false).toBool(),
+          "turning View → CPU Profile on did not show the strip, or did not persist");
     check(strip->mapTo(&view, QPoint(0, 0)).y() ==
               ruler->mapTo(&view, QPoint(0, 0)).y() + ruler->height(),
           "the strip does not sit directly under the ruler");
-    check(view.cpuProfiling(), "the view does not show profiling after the song opened");
+    check(view.cpuProfiling(), "the view does not show profiling after the strip was turned on");
 
     const auto ready = [&] { return session.cpuProfile && !session.cpuProfileStale; };
     QElapsedTimer clock;
     clock.start();
-    if (!check(waitFor(ready, 20000), "no profile within 20 s of opening the song"))
+    if (!check(waitFor(ready, 20000), "no profile within 20 s of turning the strip on"))
         return false;
     const qint64 firstMs = clock.elapsed();
     check(m_cpuProfiler->jobsStarted() == jobsBeforeLoad + 1,
-          "opening the song started more or fewer than one profile");
+          "turning the strip on started more or fewer than one profile");
+#ifdef PORYDAW_SCRIPTING
+    check(m_scriptHost && m_scriptHost->bindings().cpuProfile() == session.cpuProfile,
+          "porydaw.audio.cpuProfile() does not report the finished profile");
+#endif
     check(!view.cpuProfiling() && view.cpuProfile() == session.cpuProfile.get(),
           "the finished profile is not the view's, or the view still shows profiling");
 
@@ -412,8 +440,15 @@ bool MainWindow::runCpuProfileCheck(const QString &projectRoot, const QString &s
               "the toggle did not hide the strip");
         check(layoutUnder(ruler), "with the strip hidden, the roll or headers are not under the "
                                   "ruler");
-        check(!QSettings().value(QStringLiteral("cpuProfileStrip"), true).toBool(),
+        check(QSettings().contains(QStringLiteral("cpuProfileStrip")) &&
+                  !QSettings().value(QStringLiteral("cpuProfileStrip"), true).toBool(),
               "hiding the strip did not persist");
+#ifdef PORYDAW_SCRIPTING
+        // The kept (still fresh) profile is not reported while hidden.
+        check(m_scriptHost && session.cpuProfile && !session.cpuProfileStale &&
+                  !m_scriptHost->bindings().cpuProfile(),
+              "porydaw.audio.cpuProfile() is not null with the strip hidden");
+#endif
         const uint64_t jobs = m_cpuProfiler->jobsStarted();
         const uint32_t beat = timeline->ticksPerBeat;
         session.doc.addNote(0, beat * 2, 67, beat, 100);

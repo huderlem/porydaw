@@ -517,7 +517,7 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   Stacked when narrow, readout beside the breakdown when wide. Fed from the status
   bar's reading at the same cadence; nothing CPU-related is in the Polyphony dock.
   Plugins read the same numbers through `porydaw.audio.cpu()`.
-- **CPU profile strip** (View → CPU Profile, shown by default, app-wide and
+- **CPU profile strip** (View → CPU Profile, hidden by default, app-wide and
   persisted; D3 of docs/cpu-meter/PLAN.md): a thin band directly under the time
   ruler — its own widget, so none of the ruler's hit zones move — part of the header:
   the playhead and its triangle start below it. A background render of the active song

@@ -1322,8 +1322,17 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
               "c.peak >= c.cycles && c.estimated === true && c.budgetPercent === 100 && "
               "c.vblankCycles === 83776 && c.frameCycles === 280896")) == QStringLiteral("true"),
           "audio.cpu() while playing lacks a key or its numbers do not add up");
-    // porydaw.audio.cpuProfile(): the song's offline profile once made, a
-    // real Array of frames, its max their max, percent of the VBlank window.
+    // porydaw.audio.cpuProfile(): null while the strip is off (its default
+    // on a fresh settings store); once View → CPU Profile is on, the song's
+    // offline profile once made, a real Array of frames, its max their max,
+    // percent of the VBlank window.
+    auto *cpuProfileAction = window.findChild<QAction *>(QStringLiteral("viewCpuProfileAction"));
+    check(cpuProfileAction && !cpuProfileAction->isChecked() &&
+              host.evalConsole(QStringLiteral("porydaw.audio.cpuProfile() === null")) ==
+                  QStringLiteral("true"),
+          "the CPU profile strip is on by default, or audio.cpuProfile() is not null while off");
+    if (cpuProfileAction)
+        cpuProfileAction->setChecked(true);
     check(waitFor(
               [&] {
                   return host.evalConsole(QStringLiteral("porydaw.audio.cpuProfile() !== null")) ==

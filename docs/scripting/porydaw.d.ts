@@ -374,7 +374,7 @@ declare namespace porydaw {
         function channels(): { pcm: ChannelState[]; cgb: ChannelState[]; maxPcm: number; activePcm: number; activeCgb: number } | null;
         /** The sound driver's estimated GBA CPU cost per frame (the CPU dock); null with no song. */
         function cpu(): CpuCost | null;
-        /** The song's offline CPU profile (the strip under the ruler); null with no song, the strip hidden, or while it is remade. */
+        /** The song's offline CPU profile (the strip under the ruler); null with no song, the strip hidden (its default), or while it is remade. */
         function cpuProfile(): CpuProfile | null;
         /** Renders the active song to a WAV file (blocks; refused inside a transaction). */
         function render(path: string, opts?: { sampleRate?: number; loopCount?: number; fadeout?: number; tail?: number }): { path: string; seconds: number };

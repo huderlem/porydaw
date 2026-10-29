@@ -9295,6 +9295,7 @@ SongView::SongView(QWidget *parent) : QWidget(parent)
     m_ruler = new TimeRuler(this);
     vbox->addWidget(m_ruler);
     m_cpuStrip = new CpuProfileStrip(this);
+    m_cpuStrip->hide(); // View → CPU Profile is off by default
     vbox->addWidget(m_cpuStrip);
 
     // Roll (with headers) above, automation lanes below, split by a
