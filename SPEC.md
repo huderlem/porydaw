@@ -484,7 +484,13 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   stays where the user put it; app-wide, persisted), position, tempo display, master
   volume, and a **polyphony meter** fed by the engine's overflow-debug counters
   showing DirectSound channel usage against the project's `maxChans` (dropped/stolen
-  notes flash a warning — the #1 mystery for newcomers).
+  notes flash a warning — the #1 mystery for newcomers), and beside its counts a
+  **`CPU n%` readout** (docs/cpu-meter/PLAN.md): the song engine's estimated GBA CPU
+  time of `m4aSoundMain` per frame, in percent of the VBlank window (83776 cycles =
+  100 %), "--" unless the song plays; amber above the CPU budget (Settings → Audio,
+  default 100 %), red at the whole frame (280896 cycles); its tooltip has the cycles,
+  the sequencer / CGB / mixer split, the peak, the budget and frame lines and the
+  engine configuration.
 - **Polyphony dock** (View → Polyphony Debugger, hidden by default): the full
   overflow debugger, mirroring the poryaaaa plugin's Polyphony tab. A live
   channel-usage grid (real PCM/CGB channels plus the shadow pool of lost sounds), a
@@ -496,6 +502,16 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   log where each event carries its bar:beat song position — double-click jumps the
   edit cursor/playhead there and selects the losing track and the lost note in the
   roll; live preview notes read "live" instead.
+- **CPU dock** (View → CPU, hidden by default; the Polyphony dock's sibling, placement
+  and visibility saved with the window layout): the CPU readout in full. The current
+  frame and the peak since playback last started from stop in large type with their
+  cycles, a Reset for the peak, a breakdown bar spanning one whole GBA frame (the
+  sequencer — marked "(estimated)" when it is the MIDI-path estimate — CGB and mixer
+  terms stacked from the left, with the VBlank, budget, peak and frame-ceiling marks),
+  the three terms' cycles and share, and the engine configuration it was costed for.
+  Stacked when narrow, readout beside the breakdown when wide. Fed from the status
+  bar's reading at the same cadence; nothing CPU-related is in the Polyphony dock.
+  Plugins read the same numbers through `porydaw.audio.cpu()`.
 - **Song Settings dialog:** the `midi.cfg` flags presented as friendly controls
   (voicegroup dropdown, reverb slider, master volume, priority, exact-gate toggle).
 - **MIDI event list** (View → MIDI Event List; swaps in for the piano roll):
@@ -674,7 +690,18 @@ open.
   from the audio callback, honor loop markers with configurable loop behavior.
 - GBA-accuracy knobs surfaced in app settings, defaulted to hardware-accurate:
   PCM mix rate (13379 Hz default), HQ mixer (ipatix, off by default), polyphony
-  (`maxChans`), reverb.
+  (`maxChans`), reverb, and the CPU budget (percent of the VBlank window the CPU
+  readout warns above, 100 % by default).
+- **CPU cost model** (docs/cpu-meter/PLAN.md): poryaaaa counts the cycles `m4aSoundMain`
+  would take on the GBA for every frame the song engine runs, from per-path constants
+  measured against mGBA 0.10.5 running the real m4a engine (vanilla and ipatix HQ
+  mixers): the sequencer term (MPlayMain — estimated from the MIDI events porydaw
+  plays, since there are no song bytes), the CGB term (CgbSound) and the mixer term
+  (SoundMainRAM, the dominant one, by channel path, mix rate and mixer). The engine
+  publishes the last frame's cost and the peak; the audio callback copies them out
+  through a seqlock for the UI. Only the song engine is costed: the live and preview
+  engines, the game's own load, modified mixers, WAITCNT changes and samples in RAM
+  are outside the model.
 - **Offline WAV export** reuses the same timeline against a faster-than-realtime
   render loop (loop count, fadeout — feature parity with `poryaaaa_render`).
 

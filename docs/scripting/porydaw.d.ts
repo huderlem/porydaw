@@ -309,6 +309,30 @@ declare namespace porydaw {
         sampleRate: number;
         playing: boolean;
     }
+    /** porydaw.audio.cpu(): m4aSoundMain's estimated GBA CPU cycles per frame. */
+    interface CpuCost {
+        /** The last frame's cycles: sequencer + cgb + mixer. */
+        cycles: number;
+        /** cycles as a percent of the VBlank window (vblankCycles = 100), unrounded. */
+        percent: number;
+        /** The most expensive frame since playback started from stop (or Reset); null before one. */
+        peak: number | null;
+        peakPercent: number | null;
+        sequencer: number;
+        cgb: number;
+        mixer: number;
+        /** The sequencer part is estimated from the MIDI events. */
+        estimated: boolean;
+        /** Whether the song is playing; stopped, the numbers are the idle driver's. */
+        playing: boolean;
+        /** Settings → Audio → CPU budget, percent of the VBlank window. */
+        budgetPercent: number;
+        /** The VBlank window, 83776 cycles (100 %). */
+        vblankCycles: number;
+        /** The whole frame, 280896 cycles: past it the next frame's sound is skipped. */
+        frameCycles: number;
+    }
+
     interface ChannelState {
         on: boolean;
         releasing: boolean;
@@ -332,6 +356,8 @@ declare namespace porydaw {
         function pcm(): Float32Array;
         function spectrum(bins?: number): Float32Array;
         function channels(): { pcm: ChannelState[]; cgb: ChannelState[]; maxPcm: number; activePcm: number; activeCgb: number } | null;
+        /** The sound driver's estimated GBA CPU cost per frame (the CPU dock); null with no song. */
+        function cpu(): CpuCost | null;
         /** Renders the active song to a WAV file (blocks; refused inside a transaction). */
         function render(path: string, opts?: { sampleRate?: number; loopCount?: number; fadeout?: number; tail?: number }): { path: string; seconds: number };
         const engine: EngineSettings;

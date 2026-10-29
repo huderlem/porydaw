@@ -78,11 +78,15 @@ QString trackHeaderStyleSheet(const Theme &theme)
     return QStringLiteral("QWidget#trackHeaderPanel{background-color:%1;color:%2;"
                           "border-color:%3;}"
                           "QLabel#polyphonyPcmValue,QLabel#polyphonyCgbValue,"
-                          "QLabel#polyphonyLostValue,QLabel#polyphonyCpuValue{"
+                          "QLabel#polyphonyLostValue,QLabel#polyphonyCpuValue,"
+                          "QLabel#cpuPanelPercent{"
                           "background-color:%4;color:%5;}"
-                          // The CPU readout over its budget, and at the frame ceiling.
-                          "QLabel#polyphonyCpuValue[cpuLevel=\"warn\"]{color:%6;}"
-                          "QLabel#polyphonyCpuValue[cpuLevel=\"over\"]{color:%7;}")
+                          // The CPU readouts (status bar, CPU dock) over their
+                          // budget, and at the frame ceiling.
+                          "QLabel#polyphonyCpuValue[cpuLevel=\"warn\"],"
+                          "QLabel#cpuPanelPercent[cpuLevel=\"warn\"]{color:%6;}"
+                          "QLabel#polyphonyCpuValue[cpuLevel=\"over\"],"
+                          "QLabel#cpuPanelPercent[cpuLevel=\"over\"]{color:%7;}")
         .arg(colorName(theme, Role::track_header_panel_background))
         .arg(colorName(theme, Role::track_header_panel_text))
         .arg(colorName(theme, Role::track_header_panel_outline))

@@ -1,5 +1,9 @@
+#include <QAction>
 #include <QApplication>
+#include <QDockWidget>
+#include <QImage>
 #include <QLabel>
+#include <QMenu>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
@@ -16,6 +20,7 @@
 #include "mainwindow.h"
 #include "songsession.h"
 #include "ui/audiosettingspage.h"
+#include "ui/cpupanel.h"
 #include "ui/settingsdialog.h"
 #include "ui/theme/themeruntime.h"
 
@@ -47,6 +52,13 @@ extern "C" {
 // across a timeline swap, the loop start's meter saved when the start lies
 // before it in the same bar and when it lies past it, and restored by the
 // GOTO at the wrap. Rendering with the hooks on and off is byte-identical.
+// The CPU dock (step 6): hidden by default, View → CPU shows it and the
+// saved window state brings it back; "--" with no song and stopped; while
+// playing its percent is the status bar's, its peak at least the current,
+// its breakdown bar's segments proportional to the three terms and adding
+// up to the total; the budget mark follows the budget and the readout its
+// colour; Reset lowers the peak; narrow and wide layouts do not overlap;
+// no label or tooltip mentions sound effects (D4).
 
 namespace {
 
@@ -101,6 +113,53 @@ bool samePhase(int a, int b, int bar, int slack)
     return d <= slack || d >= bar - slack;
 }
 
+// "37%" -> 37; anything else -> -1.
+int percentValue(const QString &text)
+{
+    static const QRegularExpression re(QStringLiteral("^([0-9]+)%$"));
+    const QRegularExpressionMatch m = re.match(text);
+    return m.hasMatch() ? m.captured(1).toInt() : -1;
+}
+
+bool mentionsEffects(const QStringList &strings)
+{
+    for (const QString &s : strings) {
+        const QString lower = s.toLower();
+        if (lower.contains(QStringLiteral("effect")) || lower.contains(QStringLiteral("cry")) ||
+            lower.contains(QStringLiteral("sfx")))
+            return true;
+    }
+    return false;
+}
+
+// The breakdown bar against the panel's reading: each segment's width the
+// term's share of the frame-wide track (within a pixel of rounding), laid
+// end to end from the track's left, the three adding up to the total's.
+bool barMatchesReading(const CpuPanel &panel)
+{
+    const AudioEngine::CpuSnapshot &cpu = panel.reading().cpu;
+    const int width = panel.barTrackWidth();
+    if (width <= 0 || cpu.frameCycles <= 0)
+        return false;
+    const QRect first = panel.segmentRect(AudioEngine::CpuSequencer);
+    const int left =
+        panel.vblankMarkX() -
+        int((int64_t(cpu.vblankCycles) * width + cpu.frameCycles / 2) / cpu.frameCycles);
+    if (first.left() != left)
+        return false;
+    int edge = left, sum = 0;
+    for (int term = 0; term < 3; term++) {
+        const QRect r = panel.segmentRect(term);
+        const double expected = double(cpu.last[term]) * width / cpu.frameCycles;
+        if (r.left() != edge || std::abs(r.width() - expected) > 1.0)
+            return false;
+        edge = r.left() + r.width();
+        sum += r.width();
+    }
+    const double totalWidth = double(cpu.last[AudioEngine::CpuTotal]) * width / cpu.frameCycles;
+    return std::abs(sum - totalWidth) <= 1.0;
+}
+
 } // namespace
 
 bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabel)
@@ -122,6 +181,43 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(bar(4, 2) == 96 && bar(3, 2) == 72 && bar(6, 3) == 72 && bar(2, 1) == 96 &&
                   bar(5, 2) == 120 && bar(4, 2) == uint32_t(expectedBar(4, 2)),
               "clocksPerBar is not 96 * numerator / denominator engine ticks");
+    }
+
+    // The CPU dock: hidden at first, a View-menu toggle, restored with the
+    // saved window state.
+    {
+        QCoreApplication::processEvents();
+        QAction *toggle = m_cpuDock->toggleViewAction();
+        check(!m_cpuDock->isVisible(), "the CPU dock is shown by default");
+        check(m_cpuDock->objectName() == QStringLiteral("cpuDock") &&
+                  m_cpuDock->windowTitle() == QStringLiteral("CPU"),
+              "the CPU dock's name or title");
+        bool inViewMenu = false;
+        for (QObject *owner : toggle->associatedObjects()) {
+            const auto *menu = qobject_cast<QMenu *>(owner);
+            inViewMenu = inViewMenu ||
+                         (menu && menu->title().remove(QLatin1Char('&')) == QStringLiteral("View"));
+        }
+        check(inViewMenu && toggle->text().remove(QLatin1Char('&')) == QStringLiteral("CPU"),
+              "the View menu has no CPU entry");
+        toggle->trigger();
+        QCoreApplication::processEvents();
+        check(m_cpuDock->isVisible() && toggle->isChecked(), "View → CPU did not show the dock");
+        const QByteArray shown = saveState();
+        toggle->trigger();
+        QCoreApplication::processEvents();
+        check(!m_cpuDock->isVisible(), "View → CPU did not hide the dock again");
+        restoreState(shown);
+        QCoreApplication::processEvents();
+        check(m_cpuDock->isVisible(), "the saved window state did not restore the CPU dock");
+        updatePolyStatus();
+        updateCpuPanel();
+        check(m_cpuPanel->percentText() == QStringLiteral("--") &&
+                  m_cpuPanel->peakText() == QStringLiteral("--") &&
+                  m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
+              "with no song the CPU dock shows a reading");
+        check(!mentionsEffects(m_cpuPanel->visibleStrings()),
+              "the CPU dock mentions sound effects with no song (D4)");
     }
 
     if (!m_audioOk) {
@@ -197,6 +293,10 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
           "the CPU item is not shown in the status bar with a song loaded");
     check(cpuText() == QStringLiteral("--") && cpuLevelProp().isEmpty(),
           "stopped, the CPU item shows a reading or a colour");
+    updateCpuPanel();
+    check(m_cpuPanel->percentText() == QStringLiteral("--") && m_cpuPanel->levelName().isEmpty() &&
+              m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
+          "stopped, the CPU dock shows a reading, a colour or a bar");
 
     // 3. Play two seconds: every frame's cost, the peak monotone.
     m_audio.play();
@@ -260,6 +360,76 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     std::printf("cpucheck: playing reads %s (last %d cycles, peak %d cycles)\n",
                 qUtf8Printable(cpuText()), playing.last[AudioEngine::CpuTotal], peak);
 
+    // The dock while playing: the status bar's percent, a peak at least the
+    // current, the bar proportional to the three terms.
+    updateCpuPanel();
+    {
+        const CpuPanel &panel = *m_cpuPanel;
+        const AudioEngine::CpuSnapshot &shown = panel.reading().cpu;
+        check(panel.percentText() == cpuText() && percentValue(panel.percentText()) > 0,
+              "playing, the CPU dock's percent is not the status bar's");
+        check(shown.peakValid &&
+                  shown.peak[AudioEngine::CpuTotal] >= shown.last[AudioEngine::CpuTotal] &&
+                  percentValue(panel.peakText()) >= percentValue(panel.percentText()),
+              "the CPU dock's peak is under its current reading");
+        check(!panel.cyclesText().isEmpty() && panel.cyclesText() != QStringLiteral("--") &&
+                  !panel.peakCyclesText().isEmpty() &&
+                  panel.peakCyclesText() != QStringLiteral("--"),
+              "the CPU dock does not show the cycles");
+        check(barMatchesReading(panel) && panel.segmentRect(AudioEngine::CpuMixer).width() > 0,
+              "the CPU dock's bar is not proportional to the sequencer, CGB and mixer terms");
+        check(panel.budgetMarkX() == panel.vblankMarkX() &&
+                  panel.ceilingMarkX() > panel.vblankMarkX(),
+              "at the default budget the budget mark is not the VBlank window's end");
+        const QStringList strings = panel.visibleStrings();
+        check(strings.contains(QStringLiteral("Sequencer (estimated)")) &&
+                  strings.contains(QStringLiteral("CGB")) &&
+                  strings.contains(QStringLiteral("Mixer")),
+              "the CPU dock does not name the three terms or mark the estimate");
+        check(!mentionsEffects(strings), "the CPU dock mentions sound effects (D4)");
+        std::printf("cpucheck: dock reads %s, peak %s; segments %d/%d/%d px of %d\n",
+                    qUtf8Printable(panel.percentText()), qUtf8Printable(panel.peakText()),
+                    panel.segmentRect(0).width(), panel.segmentRect(1).width(),
+                    panel.segmentRect(2).width(), panel.barTrackWidth());
+
+        // Both layouts, on a standalone panel holding the same reading.
+        CpuPanel loose;
+        loose.setReading(panel.reading());
+        loose.resize(240, 900);
+        loose.show();
+        QCoreApplication::processEvents();
+        check(!loose.wideLayoutActive() &&
+                  loose.breakdownSectionRect().top() >= loose.readoutSectionRect().bottom() &&
+                  !loose.breakdownSectionRect().intersects(loose.readoutSectionRect()),
+              "narrow: the breakdown does not sit below the readout");
+        check(barMatchesReading(loose) && loose.barTrackWidth() > 100,
+              "narrow: the breakdown bar does not fit the reading");
+        check(loose.hScrollRange() == 0, "narrow: the CPU dock's content is wider than the dock");
+        const int narrowBar = loose.barTrackWidth();
+        loose.resize(820, 500);
+        QCoreApplication::processEvents();
+        check(loose.wideLayoutActive() &&
+                  loose.breakdownSectionRect().left() >= loose.readoutSectionRect().right() &&
+                  !loose.breakdownSectionRect().intersects(loose.readoutSectionRect()),
+              "wide: the breakdown does not sit right of the readout");
+        check(barMatchesReading(loose) && loose.barTrackWidth() > narrowBar &&
+                  loose.breakdownSectionRect().contains(loose.barRect()),
+              "wide: the breakdown bar does not fit the reading or its section");
+        QImage image(loose.size(), QImage::Format_ARGB32_Premultiplied);
+        image.fill(Qt::white);
+        loose.render(&image);
+        check(!image.isNull(), "the CPU dock does not render");
+        if (const QByteArray shot = qgetenv("PORYDAW_CPUCHECK_SHOT"); !shot.isEmpty()) {
+            image.save(QString::fromLocal8Bit(shot) + QStringLiteral("-wide.png"));
+            loose.resize(240, 640);
+            QCoreApplication::processEvents();
+            QImage narrow(loose.size(), QImage::Format_ARGB32_Premultiplied);
+            narrow.fill(Qt::white);
+            loose.render(&narrow);
+            narrow.save(QString::fromLocal8Bit(shot) + QStringLiteral("-narrow.png"));
+        }
+    }
+
     // 4. The tooltip: the three terms, the estimate, both budget lines, and
     // nothing about sound effects (D4).
     {
@@ -296,10 +466,21 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         updatePolyStatus();
         check(cpuLevelProp() == QStringLiteral("warn") && textColour() == amber && amber != plain,
               "a budget under the reading did not turn the CPU item amber");
+        const int vblankX = m_cpuPanel->vblankMarkX();
+        updateCpuPanel();
+        check(m_cpuPanel->budgetMarkX() < vblankX &&
+                  m_cpuPanel->levelName() == QStringLiteral("warn") &&
+                  m_cpuPanel->percentColor() == amber,
+              "a budget under the reading did not move the dock's budget mark or turn it amber");
         page->setCpuBudget(AudioSettingsPage::kCpuBudgetMax);
         updatePolyStatus();
         check(cpuLevelProp().isEmpty() && textColour() == plain,
               "a budget over the reading did not return the CPU item to plain");
+        updateCpuPanel();
+        check(m_cpuPanel->budgetMarkX() > m_cpuPanel->vblankMarkX() &&
+                  m_cpuPanel->budgetMarkX() <= m_cpuPanel->ceilingMarkX() &&
+                  m_cpuPanel->levelName().isEmpty() && m_cpuPanel->percentColor() == plain,
+              "a budget over the reading did not move the dock's budget mark or clear its colour");
         page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, percent / 2));
         updatePolyStatus();
         check(cpuLevelProp() == QStringLiteral("warn"), "the CPU item did not turn amber again");
@@ -414,6 +595,13 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     updatePolyStatus();
     check(cpuText() == QStringLiteral("--") && cpuLevelProp().isEmpty() && textColour() == plain,
           "stopped, the CPU item kept a reading or a colour");
+    updateCpuPanel();
+    check(m_cpuPanel->percentText() == QStringLiteral("--") && m_cpuPanel->levelName().isEmpty() &&
+              m_cpuPanel->segmentRect(AudioEngine::CpuSequencer).isEmpty() &&
+              m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
+          "stopped, the CPU dock kept a reading, a colour or a bar");
+    check(!mentionsEffects(m_cpuPanel->visibleStrings()),
+          "stopped, the CPU dock mentions sound effects (D4)");
     check(!est.songDeclared && !est.playing, "stopping did not end the estimate's song");
 
     // 10. Play from stop: the peak restarts (D8). A tenth of a second of the
@@ -462,6 +650,31 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(after <= sinceMax && above, "resetCpuPeak did not restart the peak");
         check(after < before, "resetCpuPeak did not lower the peak");
         std::printf("cpucheck: peak %d before resetCpuPeak, %d after\n", before, after);
+    }
+
+    // 11b. The dock's Reset: the same, through the button, and the dock
+    // shows the lower peak.
+    pumpSeconds(2.0);
+    {
+        updatePolyStatus();
+        updateCpuPanel();
+        const int32_t before = m_cpuPanel->reading().cpu.peak[AudioEngine::CpuTotal];
+        const int beforePercent = percentValue(m_cpuPanel->peakText());
+        m_cpuPanel->clickReset();
+        for (int i = 0; i < 4; i++)
+            m_audio.pumpForTest(chunk, nullptr, chunk);
+        updatePolyStatus();
+        updateCpuPanel();
+        const AudioEngine::CpuSnapshot &shown = m_cpuPanel->reading().cpu;
+        check(shown.peakValid && shown.peak[AudioEngine::CpuTotal] < before &&
+                  percentValue(m_cpuPanel->peakText()) <= beforePercent &&
+                  m_cpuPanel->peakText() ==
+                      QStringLiteral("%1%").arg(std::lround(
+                          double(shown.peak[AudioEngine::CpuTotal]) * 100.0 / M4A_VBLANK_CYCLES)),
+              "the CPU dock's Reset did not lower the peak it shows");
+        std::printf("cpucheck: dock peak %s (%d cycles) after Reset, %d before\n",
+                    qUtf8Printable(m_cpuPanel->peakText()), shown.peak[AudioEngine::CpuTotal],
+                    before);
     }
 
     m_audio.stop();

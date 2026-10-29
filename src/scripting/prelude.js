@@ -471,6 +471,10 @@
             pcm: function () { return new Float32Array(audio.pcm()); },
             spectrum: function (bins) { return new Float32Array(audio.spectrum(bins || 64)); },
             channels: function () { return plain(audio.channels()); },
+            // The sound driver's estimated GBA CPU cost per frame, or null:
+            // {cycles, percent, peak, peakPercent, sequencer, cgb, mixer,
+            // estimated, playing, budgetPercent, vblankCycles, frameCycles}.
+            cpu: function () { return plain(audio.cpu()); },
             // render(path, {sampleRate?, loopCount?, fadeout?, tail?}) → {path, seconds}
             render: function (path, opts) { return plain(audio.render(String(path), opts || {})); },
             // The GBA engine settings (Settings → Audio):

@@ -542,6 +542,33 @@ QVariant AudioApi::channels() const
                        {QStringLiteral("activeCgb"), audio->activeCgbChannels()}};
 }
 
+QVariant AudioApi::cpu() const
+{
+    const AudioEngine *audio = m_host.bindings().audio;
+    if (!audio || !audio->songLoaded())
+        return jsNull();
+    const AudioEngine::CpuSnapshot snap = audio->cpuSnapshot();
+    if (!snap.valid)
+        return jsNull();
+    const double vblank = double(snap.vblankCycles);
+    const auto percent = [vblank](int32_t cycles) { return double(cycles) * 100.0 / vblank; };
+    const int32_t peak = snap.peak[AudioEngine::CpuTotal];
+    const auto &budget = m_host.bindings().cpuBudgetPercent;
+    return QVariantMap{
+        {QStringLiteral("cycles"), snap.last[AudioEngine::CpuTotal]},
+        {QStringLiteral("percent"), percent(snap.last[AudioEngine::CpuTotal])},
+        {QStringLiteral("peak"), snap.peakValid ? QVariant(peak) : jsNull()},
+        {QStringLiteral("peakPercent"), snap.peakValid ? QVariant(percent(peak)) : jsNull()},
+        {QStringLiteral("sequencer"), snap.last[AudioEngine::CpuSequencer]},
+        {QStringLiteral("cgb"), snap.last[AudioEngine::CpuCgb]},
+        {QStringLiteral("mixer"), snap.last[AudioEngine::CpuMixer]},
+        {QStringLiteral("estimated"), snap.estimated},
+        {QStringLiteral("playing"), audio->transport() == Transport::Playing},
+        {QStringLiteral("budgetPercent"), budget ? budget() : 100},
+        {QStringLiteral("vblankCycles"), snap.vblankCycles},
+        {QStringLiteral("frameCycles"), snap.frameCycles}};
+}
+
 QVariant AudioApi::render(const QString &path, const QVariantMap &opts)
 {
     QString error;

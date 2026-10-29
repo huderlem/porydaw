@@ -1301,6 +1301,26 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
     check(host.evalConsole(QStringLiteral("porydaw.audio.channels().pcm.length > 0")) ==
               QStringLiteral("true"),
           "audio.channels() has no pcm pool");
+    // porydaw.audio.cpu() while playing: the documented keys, the total
+    // the sum of the terms, percent of the VBlank window.
+    check(waitFor(
+              [&] {
+                  return host.evalConsole(QStringLiteral(
+                             "var c = porydaw.audio.cpu(); c !== null && c.playing")) ==
+                         QStringLiteral("true");
+              },
+              3000),
+          "audio.cpu() gave no reading while the song played");
+    check(host.evalConsole(QStringLiteral(
+              "var c = porydaw.audio.cpu(); "
+              "['cycles', 'percent', 'peak', 'peakPercent', 'sequencer', 'cgb', 'mixer', "
+              "'estimated', 'playing', 'budgetPercent', 'vblankCycles', 'frameCycles']"
+              ".every(function (k) { return k in c; }) && "
+              "c.cycles > 0 && c.cycles === c.sequencer + c.cgb + c.mixer && "
+              "Math.abs(c.percent - c.cycles * 100 / c.vblankCycles) < 1e-9 && "
+              "c.peak >= c.cycles && c.estimated === true && c.budgetPercent === 100 && "
+              "c.vblankCycles === 83776 && c.frameCycles === 280896")) == QStringLiteral("true"),
+          "audio.cpu() while playing lacks a key or its numbers do not add up");
     check(host.evalConsole(QStringLiteral("porydaw.audio.peak.length === 2 && "
                                           "porydaw.audio.rms.length === 2")) ==
               QStringLiteral("true"),
@@ -3860,6 +3880,11 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
 
     runPanelChecks(check, host, *this, messages, m_pluginPanelsMenu);
     runMidiChecks(check, host, *this, messages, pluginsDir);
+
+    // porydaw.audio.cpu() with no song: null.
+    check(host.evalConsole(QStringLiteral("porydaw.audio.cpu() === null")) ==
+              QStringLiteral("true"),
+          "audio.cpu() is not null with no song loaded");
 
     // --- song half ---
     if (!projectRoot.isEmpty()) {

@@ -37,6 +37,7 @@ class QTimer;
 class QWidget;
 class QUndoGroup;
 class PolyphonyPanel;
+class CpuPanel;
 class NewSongWizard;
 class SmfFile;
 class SongListPanel;
@@ -848,6 +849,9 @@ class MainWindow : public QMainWindow
     QDockWidget *m_vgDock = nullptr;
     PolyphonyPanel *m_polyPanel = nullptr;
     QDockWidget *m_polyDock = nullptr;
+    // The CPU dock (docs/cpu-meter/PLAN.md D2), fed by uiTick while shown.
+    CpuPanel *m_cpuPanel = nullptr;
+    QDockWidget *m_cpuDock = nullptr;
     QToolBar *m_transportToolbar = nullptr;
     std::unique_ptr<QSettings> m_themeSettings;
     std::unique_ptr<themes::ThemeController> m_themeController;
@@ -958,6 +962,9 @@ class MainWindow : public QMainWindow
     };
     // The CPU readout's text and tooltip for a status (updatePolyStatus).
     QString cpuToolTip(const PolyStatusSnapshot &status) const;
+    // Hands the status bar's last reading (updatePolyStatus) to the CPU
+    // dock; no engine read of its own.
+    void updateCpuPanel();
     QString m_lastTimeText;
     std::optional<PolyStatusSnapshot> m_lastPolyStatus;
 #ifdef PORYDAW_SCRIPTING

@@ -61,6 +61,7 @@ nav:
       - Importing MIDI Files: manual/midi-import.md
       - Song Settings: manual/song-settings.md
       - Polyphony & GBA Sound Limits: manual/polyphony.md
+      - The GBA CPU Meter: manual/cpu-meter.md
       - The MIDI Event List: manual/event-list.md
       - Exporting Audio: manual/export-audio.md
       - Sharing Songs with Song Bundles: manual/song-bundles.md

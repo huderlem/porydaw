@@ -354,6 +354,12 @@ class AudioApi : public ApiObject
     Q_INVOKABLE QByteArray spectrum(int bins) const;
     // {pcm: [{on, releasing, track, key}], cgb: [...], maxPcm, activePcm, activeCgb}.
     Q_INVOKABLE QVariant channels() const;
+    // The song engine's estimated GBA CPU cost of m4aSoundMain
+    // (docs/cpu-meter/PLAN.md D6): {cycles, percent, peak, peakPercent,
+    // sequencer, cgb, mixer, estimated, playing, budgetPercent,
+    // vblankCycles, frameCycles}, percent of the VBlank window; null with
+    // no song or no costed frame.
+    Q_INVOKABLE QVariant cpu() const;
     // Renders the active song to a WAV file (the Export WAV path). opts:
     // {sampleRate, loopCount, fadeout, tail} → {path, seconds}; throws on
     // failure. The path must be writable by porydaw.io's rules.

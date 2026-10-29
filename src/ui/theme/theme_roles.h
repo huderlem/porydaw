@@ -142,6 +142,10 @@ enum class Role {
     // ceiling (red), on the polyphony value background.
     cpu_meter_warn_text,
     cpu_meter_over_text,
+    // The CPU dock's breakdown bar: the sequencer, CGB and mixer segments.
+    cpu_meter_sequencer_fill,
+    cpu_meter_cgb_fill,
+    cpu_meter_mixer_fill,
 
     // Polyphony debugger channel cells, event-log severities, and drop flash.
     polyphony_cell_free_background,

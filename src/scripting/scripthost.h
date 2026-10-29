@@ -161,6 +161,9 @@ struct HostBindings {
     // writes are refused.
     std::function<EngineSettings()> engineSettings;
     std::function<bool(const EngineSettings &settings, QString *error)> setEngineSettings;
+    // Settings → Audio → CPU budget, percent of the VBlank window
+    // (porydaw.audio.cpu().budgetPercent). Absent: 100.
+    std::function<int()> cpuBudgetPercent;
     const AudioEngine *audio = nullptr;
     const DecompProject *project = nullptr;
     // porydaw.midi (docs/midi-input/PLAN.md step 6): the ports and the

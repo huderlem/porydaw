@@ -92,6 +92,7 @@
 #include "ui/audiosettingspage.h"
 #include "ui/bundleimportdialog.h"
 #include "ui/companionwidget.h"
+#include "ui/cpupanel.h"
 #include "ui/keymap.h"
 #include "ui/layout.h"
 #include "ui/midisettingspage.h"
@@ -562,6 +563,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             m_settingsDialog->audioPage()->setEngineSettings(settings);
             return true;
         };
+        bindings.cpuBudgetPercent = [this] { return m_cpuBudgetPercent; };
         bindings.createVoicegroup = [this](const QString &name, const QString &copyFromArg,
                                            QString *error) {
             return createVoicegroupNamed(name, copyFromArg, error);
@@ -1350,6 +1352,30 @@ void MainWindow::buildUi()
     polyDockAction->setText(tr("&Polyphony Debugger"));
     polyDockAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
     viewMenu->addAction(polyDockAction);
+
+    // The CPU dock (docs/cpu-meter/PLAN.md D2), the Polyphony dock's
+    // sibling: hidden by default, closable, a View-menu toggle, placement
+    // and visibility restored with the saved window state. uiTick feeds it
+    // the status bar's reading while it is shown.
+    m_cpuDock = new QDockWidget(tr("CPU"), this);
+    m_cpuDock->setObjectName(QStringLiteral("cpuDock"));
+    m_cpuDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
+    m_cpuPanel = new CpuPanel(m_cpuDock);
+    connect(m_cpuPanel, &CpuPanel::resetRequested, this, [this] {
+        if (m_audioOk)
+            m_audio.resetCpuPeak();
+    });
+    connect(m_cpuDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (visible)
+            updateCpuPanel();
+    });
+    m_cpuDock->setWidget(m_cpuPanel);
+    addDockWidget(Qt::RightDockWidgetArea, m_cpuDock);
+    m_cpuDock->hide();
+    QAction *cpuDockAction = m_cpuDock->toggleViewAction();
+    cpuDockAction->setText(tr("CP&U"));
+    cpuDockAction->setObjectName(QStringLiteral("viewCpuDockAction"));
+    viewMenu->addAction(cpuDockAction);
 
 #ifdef PORYDAW_SCRIPTING
     // Script Console dock (SPEC §6.1): plugin log/errors + a REPL. Hidden
@@ -5818,9 +5844,27 @@ void MainWindow::updatePolyStatus()
 
 int MainWindow::cpuLevel(int32_t total, int budgetPercent)
 {
-    if (total >= M4A_FRAME_CYCLES)
-        return 2;
-    return int64_t(total) * 100 > int64_t(budgetPercent) * M4A_VBLANK_CYCLES ? 1 : 0;
+    return CpuPanel::level(total, budgetPercent);
+}
+
+void MainWindow::updateCpuPanel()
+{
+    if (!m_cpuPanel)
+        return;
+    CpuPanel::Reading reading;
+    if (m_lastPolyStatus && m_lastPolyStatus->loaded) {
+        const PolyStatusSnapshot &status = *m_lastPolyStatus;
+        reading.loaded = true;
+        reading.playing = status.cpuPlaying;
+        reading.cpu = status.cpu;
+        reading.budgetPercent = status.cpuBudget;
+        reading.mixRate = status.mixRate;
+        reading.maxPcm = status.maxPcm;
+        reading.hqMixer = status.hqMixer;
+    } else {
+        reading.budgetPercent = m_cpuBudgetPercent;
+    }
+    m_cpuPanel->setReading(reading);
 }
 
 QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
@@ -5875,6 +5919,8 @@ void MainWindow::uiTick()
         m_audio.polySnapshot(&snap);
         m_polyPanel->updateSnapshot(snap);
     }
+    if (m_cpuDock->isVisible())
+        updateCpuPanel();
     // Safety net for transport transitions no handler observed (the engine
     // stopping on its own while the playhead timer is idle): cheap no-op
     // setEnabled calls at the status cadence.
