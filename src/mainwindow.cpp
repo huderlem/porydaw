@@ -697,6 +697,13 @@ MainWindow::~MainWindow()
     // the half-destroyed session list.
     if (m_tabs)
         disconnect(m_tabs, nullptr, this, nullptr);
+    // Likewise a session's document and undo stack: a dirty stack emits
+    // cleanChanged from its destructor, into a slot that walks the session
+    // list mid-destruction.
+    for (const auto &session : m_sessions) {
+        disconnect(&session->doc, nullptr, this, nullptr);
+        disconnect(session->doc.undoStack(), nullptr, this, nullptr);
+    }
     if (m_uiTimer)
         m_uiTimer->stop();
     if (m_playheadTimer)
