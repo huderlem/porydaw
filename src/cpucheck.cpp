@@ -132,32 +132,64 @@ bool mentionsEffects(const QStringList &strings)
     return false;
 }
 
-// The breakdown bar against the panel's reading: each segment's width the
-// term's share of the frame-wide track (within a pixel of rounding), laid
-// end to end from the track's left, the three adding up to the total's.
+// Where the bar should put `cycles`, worked out here in floating point:
+// the VBlank window over the first three quarters of the track, linear,
+// the rest of the frame over the last quarter.
+int expectedX(const QRect &track, const AudioEngine::CpuSnapshot &cpu, int64_t cycles)
+{
+    const double w = track.width();
+    const double w0 = std::lround(0.75 * w);
+    const double c = std::clamp<double>(double(cycles), 0.0, cpu.frameCycles);
+    const double x = c <= cpu.vblankCycles ? c * w0 / cpu.vblankCycles
+                                           : w0 + (c - cpu.vblankCycles) * (w - w0) /
+                                                      (cpu.frameCycles - cpu.vblankCycles);
+    return track.left() + int(std::lround(x));
+}
+
+// The breakdown bar against the panel's reading: every segment edge at
+// expectedX of its cumulative cycles, the segments end to end from the
+// track's left, the three adding up to the total's width; the VBlank
+// boundary at three quarters of the track and the frame end at its end.
 bool barMatchesReading(const CpuPanel &panel)
 {
     const AudioEngine::CpuSnapshot &cpu = panel.reading().cpu;
-    const int width = panel.barTrackWidth();
-    if (width <= 0 || cpu.frameCycles <= 0)
+    const QRect track = panel.barTrackRect();
+    if (track.width() <= 0 || cpu.frameCycles <= cpu.vblankCycles)
         return false;
-    const QRect first = panel.segmentRect(AudioEngine::CpuSequencer);
-    const int left =
-        panel.vblankMarkX() -
-        int((int64_t(cpu.vblankCycles) * width + cpu.frameCycles / 2) / cpu.frameCycles);
-    if (first.left() != left)
+    if (panel.vblankMarkX() != expectedX(track, cpu, cpu.vblankCycles) ||
+        panel.vblankMarkX() - track.left() != int(std::lround(0.75 * track.width())) ||
+        panel.ceilingMarkX() != track.left() + track.width())
         return false;
-    int edge = left, sum = 0;
+    int64_t cumulative = 0;
+    int edge = track.left(), sum = 0;
     for (int term = 0; term < 3; term++) {
         const QRect r = panel.segmentRect(term);
-        const double expected = double(cpu.last[term]) * width / cpu.frameCycles;
-        if (r.left() != edge || std::abs(r.width() - expected) > 1.0)
+        cumulative += cpu.last[term];
+        if (r.left() != edge || r.left() + r.width() != expectedX(track, cpu, cumulative))
             return false;
         edge = r.left() + r.width();
         sum += r.width();
     }
-    const double totalWidth = double(cpu.last[AudioEngine::CpuTotal]) * width / cpu.frameCycles;
-    return std::abs(sum - totalWidth) <= 1.0;
+    return sum == expectedX(track, cpu, cpu.last[AudioEngine::CpuTotal]) - track.left();
+}
+
+// The bar's captions clear of each other, inside the bar, and the bar
+// clear of the term rows under it.
+bool captionsClear(const CpuPanel &panel)
+{
+    const QList<QRect> captions = panel.captionRects();
+    const QRect bar = panel.barRect();
+    const QRect barLocal(QPoint(0, 0), bar.size());
+    if (captions.size() < 2)
+        return false;
+    for (int i = 0; i < captions.size(); i++) {
+        if (!barLocal.contains(captions[i]))
+            return false;
+        for (int j = i + 1; j < captions.size(); j++)
+            if (captions[i].intersects(captions[j]))
+                return false;
+    }
+    return !bar.intersects(panel.legendRect());
 }
 
 } // namespace
@@ -381,6 +413,32 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(panel.budgetMarkX() == panel.vblankMarkX() &&
                   panel.ceilingMarkX() > panel.vblankMarkX(),
               "at the default budget the budget mark is not the VBlank window's end");
+        // The marks: each its own shape and place; the VBlank boundary
+        // stays visible over the budget line it coincides with at 100%.
+        {
+            const QRect vb = panel.markRect(CpuPanel::MarkVblank);
+            const QRect bu = panel.markRect(CpuPanel::MarkBudget);
+            const QRect pk = panel.markRect(CpuPanel::MarkPeak);
+            const QRect ce = panel.markRect(CpuPanel::MarkCeiling);
+            const QRect track = panel.barTrackRect();
+            check(!vb.isEmpty() && !bu.isEmpty() && !pk.isEmpty() && !ce.isEmpty(),
+                  "a mark of the CPU bar is not drawn");
+            check(pk.top() > track.bottom() && !pk.intersects(vb) && !pk.intersects(bu) &&
+                      pk.size() != vb.size() && vb.size() != bu.size() && ce.left() > vb.right(),
+                  "the CPU bar's peak, VBlank and budget marks share a shape or place");
+            check(panel.markColor(CpuPanel::MarkVblank) != panel.markColor(CpuPanel::MarkBudget) &&
+                      panel.markColor(CpuPanel::MarkCeiling) !=
+                          panel.markColor(CpuPanel::MarkBudget) &&
+                      panel.markColor(CpuPanel::MarkCeiling) !=
+                          panel.markColor(CpuPanel::MarkVblank),
+                  "the CPU bar's marks share a colour");
+            const QImage bar = panel.barImage();
+            const QPoint probe(panel.vblankMarkX(), track.center().y());
+            check(bar.rect().contains(probe) &&
+                      QColor(bar.pixel(probe)).rgb() == panel.markColor(CpuPanel::MarkVblank).rgb(),
+                  "at a 100% budget the VBlank boundary is hidden under the budget line");
+            check(captionsClear(panel), "the CPU bar's captions overlap");
+        }
         const QStringList strings = panel.visibleStrings();
         check(strings.contains(QStringLiteral("Sequencer (estimated)")) &&
                   strings.contains(QStringLiteral("CGB")) &&
@@ -405,6 +463,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(barMatchesReading(loose) && loose.barTrackWidth() > 100,
               "narrow: the breakdown bar does not fit the reading");
         check(loose.hScrollRange() == 0, "narrow: the CPU dock's content is wider than the dock");
+        check(captionsClear(loose) && !loose.marksText().contains(QStringLiteral("VBlank")),
+              "narrow: the bar's captions overlap or the marks line is not the short one");
         const int narrowBar = loose.barTrackWidth();
         loose.resize(820, 500);
         QCoreApplication::processEvents();
@@ -415,6 +475,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(barMatchesReading(loose) && loose.barTrackWidth() > narrowBar &&
                   loose.breakdownSectionRect().contains(loose.barRect()),
               "wide: the breakdown bar does not fit the reading or its section");
+        check(captionsClear(loose) && loose.marksText().contains(QStringLiteral("VBlank window")),
+              "wide: the bar's captions overlap or the marks line is not the full one");
         QImage image(loose.size(), QImage::Format_ARGB32_Premultiplied);
         image.fill(Qt::white);
         loose.render(&image);
@@ -676,6 +738,31 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                     qUtf8Printable(m_cpuPanel->peakText()), shown.peak[AudioEngine::CpuTotal],
                     before);
     }
+
+    // 11c. Stopped, the dock keeps the last playback's peak; a Reset then
+    // shows none (not the idle frames' cost) until the song plays again.
+    m_audio.stop();
+    m_audio.pumpForTest(chunk, nullptr, chunk);
+    updatePolyStatus();
+    updateCpuPanel();
+    check(percentValue(m_cpuPanel->peakText()) > 0 &&
+              m_cpuPanel->percentText() == QStringLiteral("--"),
+          "stopped, the CPU dock does not keep the last playback's peak");
+    m_cpuPanel->clickReset();
+    for (int i = 0; i < 4; i++)
+        m_audio.pumpForTest(chunk, nullptr, chunk);
+    updatePolyStatus();
+    updateCpuPanel();
+    check(m_cpuPanel->peakText() == QStringLiteral("--") &&
+              m_cpuPanel->markRect(CpuPanel::MarkPeak).isEmpty() &&
+              !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
+          "a Reset while stopped shows the idle frames' cost as the peak");
+    m_audio.play();
+    pumpSeconds(0.3);
+    updatePolyStatus();
+    updateCpuPanel();
+    check(percentValue(m_cpuPanel->peakText()) > 0,
+          "playing after a Reset while stopped shows no peak");
 
     m_audio.stop();
     m_audio.pumpForTest(chunk, nullptr, chunk);

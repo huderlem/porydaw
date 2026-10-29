@@ -1362,8 +1362,14 @@ void MainWindow::buildUi()
     m_cpuDock->setFeatures(QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetClosable);
     m_cpuPanel = new CpuPanel(m_cpuDock);
     connect(m_cpuPanel, &CpuPanel::resetRequested, this, [this] {
-        if (m_audioOk)
-            m_audio.resetCpuPeak();
+        if (!m_audioOk)
+            return;
+        m_audio.resetCpuPeak();
+        // Not playing, the engine's next peak would be an idle frame's: show
+        // none until the song plays again (D8).
+        m_cpuPeakCleared = m_audio.transport() != Transport::Playing;
+        updatePolyStatus();
+        updateCpuPanel();
     });
     connect(m_cpuDock, &QDockWidget::visibilityChanged, this, [this](bool visible) {
         if (visible)
@@ -5789,6 +5795,13 @@ void MainWindow::updatePolyStatus()
         if (!status.cpuPlaying) {
             status.cpu.valid = false;
             std::fill(std::begin(status.cpu.last), std::end(status.cpu.last), 0);
+            // A Reset while not playing: no peak until the song plays.
+            if (m_cpuPeakCleared) {
+                status.cpu.peakValid = false;
+                std::fill(std::begin(status.cpu.peak), std::end(status.cpu.peak), 0);
+            }
+        } else {
+            m_cpuPeakCleared = false;
         }
         status.cpuBudget = m_cpuBudgetPercent;
         status.mixRate = int(m_engineSettings.pcmMixRate + 0.5f);

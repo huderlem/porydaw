@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QImage>
+#include <QList>
 #include <QRect>
 #include <QStringList>
 #include <QWidget>
@@ -68,6 +70,14 @@ class CpuPanel : public QWidget
     bool wideLayoutActive() const;
     QRect readoutSectionRect() const;
     QRect breakdownSectionRect() const;
+    enum Mark { MarkVblank, MarkBudget, MarkPeak, MarkCeiling };
+    QRect markRect(Mark mark) const; // in the bar's coordinates; empty when not drawn
+    QColor markColor(Mark mark) const;
+    QList<QRect> captionRects() const; // the bar's painted captions, bar coordinates
+    QRect barTrackRect() const;        // the track, bar coordinates
+    QImage barImage() const;           // the bar as painted
+    QRect legendRect() const;          // the term rows, content coordinates
+    QString marksText() const;
     int hScrollRange() const; // >0 when the content is wider than the dock
     QRect barRect() const;    // the bar widget in the panel's content coordinates
     // Every label's text and tooltip, the bar's tooltip and the button's.
@@ -103,6 +113,7 @@ class CpuPanel : public QWidget
     QLabel *m_termName[3] = {};
     QLabel *m_termCycles[3] = {};
     QLabel *m_termPercent[3] = {};
+    QWidget *m_termsBox = nullptr;
     QLabel *m_marks = nullptr;
     QLabel *m_config = nullptr;
 

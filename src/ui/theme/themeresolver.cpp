@@ -552,10 +552,11 @@ Theme derive(const QColor &primary, const QColor &accent)
         severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
     theme.color(Role::cpu_meter_over_text) =
         severityText(QColor::fromRgb(0xDB, 0x58, 0x58), itemBackground);
-    // The CPU dock's breakdown segments are fixed identities like the cells.
-    theme.color(Role::cpu_meter_sequencer_fill) = QColor::fromRgb(0x29, 0x61, 0xBF);
-    theme.color(Role::cpu_meter_cgb_fill) = QColor::fromRgb(0x26, 0x8C, 0x38);
-    theme.color(Role::cpu_meter_mixer_fill) = QColor::fromRgb(0x8A, 0x4F, 0xC4);
+    // The CPU dock's breakdown segments are fixed identities like the cells,
+    // apart from their colours (teal, pink, purple).
+    theme.color(Role::cpu_meter_sequencer_fill) = QColor::fromRgb(0x1A, 0x9C, 0x8C);
+    theme.color(Role::cpu_meter_cgb_fill) = QColor::fromRgb(0xC4, 0x4F, 0x8E);
+    theme.color(Role::cpu_meter_mixer_fill) = QColor::fromRgb(0x7A, 0x55, 0xC9);
 
     // SongView roles are direct assignments rather than an override bundle. Each
     // paint element is visible here beside the color policy that supplies it.

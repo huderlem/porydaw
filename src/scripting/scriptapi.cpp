@@ -552,18 +552,23 @@ QVariant AudioApi::cpu() const
         return jsNull();
     const double vblank = double(snap.vblankCycles);
     const auto percent = [vblank](int32_t cycles) { return double(cycles) * 100.0 / vblank; };
+    // As the CPU dock: the last frame only while the song plays (stopped
+    // or paused, the engine's frames are the idle driver's).
+    const bool playing = audio->transport() == Transport::Playing;
+    const auto last = [&](int term) { return playing ? QVariant(snap.last[term]) : jsNull(); };
     const int32_t peak = snap.peak[AudioEngine::CpuTotal];
     const auto &budget = m_host.bindings().cpuBudgetPercent;
     return QVariantMap{
-        {QStringLiteral("cycles"), snap.last[AudioEngine::CpuTotal]},
-        {QStringLiteral("percent"), percent(snap.last[AudioEngine::CpuTotal])},
+        {QStringLiteral("cycles"), last(AudioEngine::CpuTotal)},
+        {QStringLiteral("percent"),
+         playing ? QVariant(percent(snap.last[AudioEngine::CpuTotal])) : jsNull()},
         {QStringLiteral("peak"), snap.peakValid ? QVariant(peak) : jsNull()},
         {QStringLiteral("peakPercent"), snap.peakValid ? QVariant(percent(peak)) : jsNull()},
-        {QStringLiteral("sequencer"), snap.last[AudioEngine::CpuSequencer]},
-        {QStringLiteral("cgb"), snap.last[AudioEngine::CpuCgb]},
-        {QStringLiteral("mixer"), snap.last[AudioEngine::CpuMixer]},
+        {QStringLiteral("sequencer"), last(AudioEngine::CpuSequencer)},
+        {QStringLiteral("cgb"), last(AudioEngine::CpuCgb)},
+        {QStringLiteral("mixer"), last(AudioEngine::CpuMixer)},
         {QStringLiteral("estimated"), snap.estimated},
-        {QStringLiteral("playing"), audio->transport() == Transport::Playing},
+        {QStringLiteral("playing"), playing},
         {QStringLiteral("budgetPercent"), budget ? budget() : 100},
         {QStringLiteral("vblankCycles"), snap.vblankCycles},
         {QStringLiteral("frameCycles"), snap.frameCycles}};

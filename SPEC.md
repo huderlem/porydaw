@@ -505,10 +505,13 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
 - **CPU dock** (View → CPU, hidden by default; the Polyphony dock's sibling, placement
   and visibility saved with the window layout): the CPU readout in full. The current
   frame and the peak since playback last started from stop in large type with their
-  cycles, a Reset for the peak, a breakdown bar spanning one whole GBA frame (the
-  sequencer — marked "(estimated)" when it is the MIDI-path estimate — CGB and mixer
-  terms stacked from the left, with the VBlank, budget, peak and frame-ceiling marks),
-  the three terms' cycles and share, and the engine configuration it was costed for.
+  cycles, a Reset for the peak (a Reset while not playing shows no peak until the
+  song plays), a breakdown bar (the sequencer — marked "(estimated)" when it is the
+  MIDI-path estimate — CGB and mixer terms stacked from the left over a two-zone
+  scale: the VBlank window linear across the first three quarters, the rest of the
+  frame compressed and tinted in the last quarter up to the red frame end; the
+  budget an amber line, the VBlank boundary drawn over it, the peak a triangle under
+  the bar), the three terms' cycles and share of the VBlank window, and the engine configuration it was costed for.
   Stacked when narrow, readout beside the breakdown when wide. Fed from the status
   bar's reading at the same cadence; nothing CPU-related is in the Polyphony dock.
   Plugins read the same numbers through `porydaw.audio.cpu()`.

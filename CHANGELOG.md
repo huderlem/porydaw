@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - The `Auto` recording offset now includes the engine's own latency, so a take lands where you heard the song.
 - Added a GBA CPU readout to the status bar, beside the PCM and CGB channel counts. While the song plays, `CPU` shows how much of the GBA's VBlank time the sound driver (`m4aSoundMain`) would take each frame, estimated from the same engine that plays the song, so you can see what more PCM channels or a higher mix rate cost. Hover it for the cycle counts, the peak since playback started, and the split between the sequencer, the CGB channels and the mixer.
    - It turns amber above the `CPU budget` set in `Settings -> Audio` (100% of the VBlank window by default), and red at or past a whole frame, where the game would skip a frame of sound.
-   - The new `CPU` dock (`View -> CPU`) shows it in full: the current frame and the peak since playback started, their cycle counts, a bar of the sequencer, CGB and mixer parts across one GBA frame with the budget and frame-ceiling marks, and the engine settings it is estimated for. `Reset` starts the peak over.
+   - The new `CPU` dock (`View -> CPU`) shows it in full: the current frame and the peak since playback started, their cycle counts, a bar of the sequencer, CGB and mixer parts against the VBlank window and the rest of the frame, with your budget and the peak marked, and the engine settings it is estimated for. `Reset` starts the peak over.
    - Plugins read the same numbers through `porydaw.audio.cpu()`.
 
 ## Changed

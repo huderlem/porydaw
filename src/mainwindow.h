@@ -925,6 +925,9 @@ class MainWindow : public QMainWindow
     QLabel *m_cpuValueLabel = nullptr;
     // Settings → Audio → CPU budget, percent of the VBlank window (D1).
     int m_cpuBudgetPercent = 100;
+    // The CPU dock's Reset while not playing: the peak shows "--" (rather
+    // than the idle frames' cost) until the song plays again.
+    bool m_cpuPeakCleared = false;
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
     QTimer *m_engineApplyTimer = nullptr; // coalesces Settings → engine restarts

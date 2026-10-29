@@ -311,19 +311,23 @@ declare namespace porydaw {
     }
     /** porydaw.audio.cpu(): m4aSoundMain's estimated GBA CPU cycles per frame. */
     interface CpuCost {
-        /** The last frame's cycles: sequencer + cgb + mixer. */
-        cycles: number;
-        /** cycles as a percent of the VBlank window (vblankCycles = 100), unrounded. */
-        percent: number;
-        /** The most expensive frame since playback started from stop (or Reset); null before one. */
+        /** The last frame's cycles (sequencer + cgb + mixer); null unless playing. */
+        cycles: number | null;
+        /** cycles as a percent of the VBlank window (vblankCycles = 100), unrounded; null unless playing. */
+        percent: number | null;
+        /** The most expensive frame's cycles since playback started from stop (or Reset); null before one. */
         peak: number | null;
+        /** peak as a percent of the VBlank window, unrounded; null before a peak. */
         peakPercent: number | null;
-        sequencer: number;
-        cgb: number;
-        mixer: number;
+        /** The last frame's MPlayMain cycles (estimated from the MIDI events); null unless playing. */
+        sequencer: number | null;
+        /** The last frame's CgbSound cycles; null unless playing. */
+        cgb: number | null;
+        /** The last frame's PCM mixer cycles; null unless playing. */
+        mixer: number | null;
         /** The sequencer part is estimated from the MIDI events. */
         estimated: boolean;
-        /** Whether the song is playing; stopped, the numbers are the idle driver's. */
+        /** Whether the song is playing. */
         playing: boolean;
         /** Settings → Audio → CPU budget, percent of the VBlank window. */
         budgetPercent: number;

@@ -357,8 +357,9 @@ class AudioApi : public ApiObject
     // The song engine's estimated GBA CPU cost of m4aSoundMain
     // (docs/cpu-meter/PLAN.md D6): {cycles, percent, peak, peakPercent,
     // sequencer, cgb, mixer, estimated, playing, budgetPercent,
-    // vblankCycles, frameCycles}, percent of the VBlank window; null with
-    // no song or no costed frame.
+    // vblankCycles, frameCycles}, percent of the VBlank window; the last
+    // frame's fields are null unless the song plays; null with no song or
+    // no costed frame.
     Q_INVOKABLE QVariant cpu() const;
     // Renders the active song to a WAV file (the Export WAV path). opts:
     // {sampleRate, loopCount, fadeout, tail} → {path, seconds}; throws on

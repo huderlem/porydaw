@@ -27,8 +27,12 @@ is your judgement, porydaw cannot know the game's own load. -->
 
 <!-- TODO: View → CPU. Current frame and peak (since playback last started
 from stop) in large type with their cycles; Reset starts the peak over. The
-breakdown bar spans one whole frame: sequencer, CGB and mixer from the left,
-the VBlank line, the amber budget line, the peak tick, the red frame end.
+breakdown bar: sequencer, CGB and mixer from the left; its first three
+quarters are the VBlank window up to the 100% line, the tinted last quarter
+is the rest of the frame (compressed) up to the red frame end; the amber line
+is the budget, the triangle under the bar the peak. Reset while stopped
+clears the peak until the song plays again. The legend's percentages are of
+the VBlank window.
 The line under it names the engine settings it was estimated for (mix rate,
 PCM channels, stock or HQ mixer). Changing Settings → Audio moves it live. -->
 

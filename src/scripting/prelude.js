@@ -473,7 +473,8 @@
             channels: function () { return plain(audio.channels()); },
             // The sound driver's estimated GBA CPU cost per frame, or null:
             // {cycles, percent, peak, peakPercent, sequencer, cgb, mixer,
-            // estimated, playing, budgetPercent, vblankCycles, frameCycles}.
+            // estimated, playing, budgetPercent, vblankCycles, frameCycles};
+            // cycles, percent and the three parts are null unless playing.
             cpu: function () { return plain(audio.cpu()); },
             // render(path, {sampleRate?, loopCount?, fadeout?, tail?}) → {path, seconds}
             render: function (path, opts) { return plain(audio.render(String(path), opts || {})); },

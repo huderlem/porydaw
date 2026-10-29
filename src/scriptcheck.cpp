@@ -1326,6 +1326,18 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
               QStringLiteral("true"),
           "audio.peak/rms are not stereo pairs");
     host.evalConsole(QStringLiteral("porydaw.transport.stop()"));
+    // Stopped, cpu() keeps the peak but has no last frame (the dock's "--").
+    check(waitFor(
+              [&] {
+                  return host.evalConsole(QStringLiteral(
+                             "var c = porydaw.audio.cpu(); c !== null && !c.playing && "
+                             "c.cycles === null && c.percent === null && c.sequencer === null && "
+                             "c.cgb === null && c.mixer === null && c.peak > 0 && "
+                             "c.peakPercent > 0 && c.vblankCycles === 83776")) ==
+                         QStringLiteral("true");
+              },
+              2000),
+          "audio.cpu() when stopped is not nulls with the peak kept");
     // A stop then play restarts the beat sequence (the first beat fires
     // again).
     const int beatsBefore = counter("beats");
