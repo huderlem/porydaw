@@ -41,9 +41,7 @@
 #include "ui/sf2zonepicker.h"
 #include "ui/waveformview.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // --samplecheck <scratchDir> [corpusRoot]: Sample Editor check, phases 1-6.
 // Phase 1: builds fully-fresh fake decomp projects under scratchDir — a

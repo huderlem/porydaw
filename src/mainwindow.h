@@ -132,6 +132,16 @@ class MainWindow : public QMainWindow
     // redirected.
     bool runPolyGateCheck();
 
+    // The CPU readout's colour for a frame of `total` cycles against a
+    // budget in percent of the VBlank window (D1): 0 normal, 1 over the
+    // budget (amber), 2 at the frame ceiling (red).
+    static int cpuLevel(int32_t total, int budgetPercent);
+    // CPU readout check (--cpucheck; cpucheck.cpp): the song engine's
+    // published cost, the status-bar item, its colours against the budget
+    // and its tooltip, while the song plays through the parked device.
+    // QSettings must be redirected.
+    bool runCpuCheck(const QString &projectRoot, const QString &songLabel);
+
     // Opens a song bundle (a .porysong file, or a folder holding a
     // porysong.json) in a read-only tab — with or without a project open
     // (docs/song-bundle/PLAN.md §3.6). A bundle that is already open is
@@ -906,6 +916,11 @@ class MainWindow : public QMainWindow
     QLabel *m_polyLostSeparator = nullptr;
     QLabel *m_polyLostCaption = nullptr;
     QLabel *m_polyLostLabel = nullptr;
+    // The CPU readout (docs/cpu-meter/PLAN.md D2), beside the counts.
+    QLabel *m_cpuCaption = nullptr;
+    QLabel *m_cpuValueLabel = nullptr;
+    // Settings → Audio → CPU budget, percent of the VBlank window (D1).
+    int m_cpuBudgetPercent = 100;
     QTimer *m_uiTimer = nullptr;
     QTimer *m_playheadTimer = nullptr;
     QTimer *m_engineApplyTimer = nullptr; // coalesces Settings → engine restarts
@@ -918,14 +933,31 @@ class MainWindow : public QMainWindow
         int maxPcm = 0;
         int activeCgb = 0;
         uint64_t lostTotal = 0;
+        // The CPU readout: a reading only while the song plays and the
+        // engine has costed a frame; the tooltip's context besides.
+        bool cpuPlaying = false;
+        AudioEngine::CpuSnapshot cpu;
+        int cpuBudget = 0;
+        int mixRate = 0;
+        bool hqMixer = false;
 
         bool operator==(const PolyStatusSnapshot &other) const
         {
+            const auto sameCpu = [](const AudioEngine::CpuSnapshot &a,
+                                    const AudioEngine::CpuSnapshot &b) {
+                return a.valid == b.valid && a.estimated == b.estimated &&
+                       a.peakValid == b.peakValid && std::equal(a.last, a.last + 4, b.last) &&
+                       std::equal(a.peak, a.peak + 4, b.peak);
+            };
             return loaded == other.loaded && activePcm == other.activePcm &&
                    maxPcm == other.maxPcm && activeCgb == other.activeCgb &&
-                   lostTotal == other.lostTotal;
+                   lostTotal == other.lostTotal && cpuPlaying == other.cpuPlaying &&
+                   sameCpu(cpu, other.cpu) && cpuBudget == other.cpuBudget &&
+                   mixRate == other.mixRate && hqMixer == other.hqMixer;
         }
     };
+    // The CPU readout's text and tooltip for a status (updatePolyStatus).
+    QString cpuToolTip(const PolyStatusSnapshot &status) const;
     QString m_lastTimeText;
     std::optional<PolyStatusSnapshot> m_lastPolyStatus;
 #ifdef PORYDAW_SCRIPTING

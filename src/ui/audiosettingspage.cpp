@@ -18,9 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 
 namespace {
 
@@ -232,6 +230,24 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
                              "either way."));
     engineForm->addRow(QString(), m_hqMixer);
 
+    // Not an engine knob: what the status bar's CPU readout measures
+    // against. Changing it never touches the engine.
+    m_cpuBudget = new QSpinBox(this);
+    m_cpuBudget->setObjectName(QStringLiteral("settingsCpuBudget"));
+    m_cpuBudget->setRange(kCpuBudgetMin, kCpuBudgetMax);
+    m_cpuBudget->setValue(kCpuBudgetDefault);
+    m_cpuBudget->setSuffix(tr("%"));
+    m_cpuBudget->setSingleStep(5);
+    m_cpuBudget->setKeyboardTracking(false);
+    m_cpuBudget->setToolTip(
+        tr("The share of the GBA's VBlank window (%1 cycles = 100%) the sound driver may use "
+           "before the status bar's CPU readout turns amber. Up to %2%, the whole frame: a "
+           "sound driver running longer than that makes the game skip a frame of audio, and "
+           "the readout turns red.")
+            .arg(M4A_VBLANK_CYCLES)
+            .arg(kCpuBudgetMax));
+    engineForm->addRow(tr("CPU &budget:"), m_cpuBudget);
+
     auto *defaultsButton = new QPushButton(tr("Restore Defaults"), this);
     defaultsButton->setObjectName(QStringLiteral("settingsAudioRestoreDefaults"));
     // The only push button in the window would otherwise become its default
@@ -265,6 +281,10 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         if (!m_loading)
             emit countInBarsChanged(countInBars());
     });
+    connect(m_cpuBudget, &QSpinBox::valueChanged, this, [this](int percent) {
+        if (!m_loading)
+            emit cpuBudgetChanged(percent);
+    });
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
             &AudioSettingsPage::emitEngineSettings);
@@ -281,6 +301,7 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         setOutputLevel(kOutputLevelDefault);
         setMetronomeVolume(kMetronomeVolumeDefault);
         setCountInBars(kCountInBarsDefault);
+        setCpuBudget(kCpuBudgetDefault);
         setEngineSettings(EngineSettings());
         setDeviceConfig(AudioDeviceConfig());
     });
@@ -325,6 +346,16 @@ int AudioSettingsPage::countInBars() const
 void AudioSettingsPage::setCountInBars(int bars)
 {
     m_countIn->setCurrentIndex(m_countIn->findData(std::clamp(bars, 0, kCountInBarsMax)));
+}
+
+int AudioSettingsPage::cpuBudget() const
+{
+    return m_cpuBudget->value();
+}
+
+void AudioSettingsPage::setCpuBudget(int percent)
+{
+    m_cpuBudget->setValue(std::clamp(percent, int(kCpuBudgetMin), int(kCpuBudgetMax)));
 }
 
 EngineSettings AudioSettingsPage::engineSettings() const
@@ -441,3 +472,6 @@ void AudioSettingsPage::updateDefaultLabel()
                  ? tr("Default (%1 ms)").arg(AudioDeviceConfig::kExclusiveDefaultPeriodMs)
                  : tr("Default (about 10 ms)"));
 }
+
+static_assert(AudioSettingsPage::kCpuBudgetMax == M4A_FRAME_CYCLES * 100 / M4A_VBLANK_CYCLES,
+              "the CPU budget's ceiling is the whole frame");

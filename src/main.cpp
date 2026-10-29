@@ -137,6 +137,10 @@ int runRecordCheck(const QString &projectRoot, const QString &songLabel);
 // itself; a voice edit writes the voicegroup preview under .porydaw/:
 // scratch copy only.
 int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel);
+// cpucheck.cpp; GBA CPU readout check (docs/cpu-meter/PLAN.md step 5): the
+// song engine's published cost and the status bar's CPU item, the song
+// playing through the parked audio device. Redirects QSettings itself.
+int runCpuCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -252,6 +256,9 @@ int main(int argc, char *argv[])
     const int vkeyCheck = args.indexOf(QStringLiteral("--vkeycheck"));
     if (vkeyCheck >= 0 && vkeyCheck + 2 < args.size())
         return runVirtualKeyboardCheck(args[vkeyCheck + 1], args[vkeyCheck + 2]);
+    const int cpuCheck = args.indexOf(QStringLiteral("--cpucheck"));
+    if (cpuCheck >= 0 && cpuCheck + 2 < args.size())
+        return runCpuCheck(args[cpuCheck + 1], args[cpuCheck + 2]);
     const int recCheck = args.indexOf(QStringLiteral("--reccheck"));
     if (recCheck >= 0 && recCheck + 2 < args.size())
         return runRecordCheck(args[recCheck + 1], args[recCheck + 2]);

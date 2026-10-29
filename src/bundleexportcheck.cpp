@@ -19,9 +19,7 @@
 #include "project/songbundle.h"
 #include "project/voicegroupsource.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // The export sections of --bundlecheck (docs/song-bundle/PLAN.md Phase 1),
 // run by runBundleCheck against scratch projects built here:

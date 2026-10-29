@@ -546,6 +546,12 @@ Theme derive(const QColor &primary, const QColor &accent)
     theme.color(Role::polyphony_log_stolen_text) =
         severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
     theme.color(Role::polyphony_flash_background) = QColor::fromRgb(0xD9, 0x26, 0x26);
+    // The CPU readout's thresholds share the log's severity inks, on the
+    // value field's surface.
+    theme.color(Role::cpu_meter_warn_text) =
+        severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
+    theme.color(Role::cpu_meter_over_text) =
+        severityText(QColor::fromRgb(0xDB, 0x58, 0x58), itemBackground);
 
     // SongView roles are direct assignments rather than an override bundle. Each
     // paint element is visible here beside the color policy that supplies it.

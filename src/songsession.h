@@ -19,9 +19,7 @@ class QAbstractButton;
 #include "project/voicegroupsource.h"
 #include "ui/songview.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // One open song tab. Each tab is a complete, independent editing session:
 // its own document (with its own undo stack — voicegroup edits ride it too),

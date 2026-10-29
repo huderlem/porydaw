@@ -217,10 +217,34 @@ int runSettingsCheck(const QString &shotPath)
         auto *polyphony = dialog->findChild<QSpinBox *>(QStringLiteral("settingsPcmPolyphony"));
         auto *mixRate = dialog->findChild<QComboBox *>(QStringLiteral("settingsPcmMixRate"));
         auto *hq = dialog->findChild<QCheckBox *>(QStringLiteral("settingsHqMixer"));
+        auto *cpuBudget = dialog->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
         auto *defaults =
             dialog->findChild<QPushButton *>(QStringLiteral("settingsAudioRestoreDefaults"));
-        if (check(output && polyphony && mixRate && hq && defaults,
+        if (check(output && polyphony && mixRate && hq && cpuBudget && defaults,
                   "Audio page controls not found")) {
+            // The CPU budget (docs/cpu-meter/PLAN.md D1): percent of the
+            // VBlank window, 10 to the whole frame (335), default 100. It
+            // reports, persists, and never restarts the engine.
+            check(cpuBudget->value() == AudioSettingsPage::kCpuBudgetDefault &&
+                      cpuBudget->value() == 100 && cpuBudget->minimum() == 10 &&
+                      cpuBudget->maximum() == 335,
+                  "CPU budget's default or range is not 100 within 10..335");
+            {
+                int engineReports = 0;
+                const auto connection =
+                    QObject::connect(dialog, &SettingsDialog::engineSettingsChanged, dialog,
+                                     [&engineReports](const EngineSettings &) { ++engineReports; });
+                cpuBudget->setValue(80);
+                QObject::disconnect(connection);
+                check(QSettings().value(QStringLiteral("engine/cpuBudgetPercent")).toInt() == 80 &&
+                          dialog->audioPage()->cpuBudget() == 80,
+                      "CPU budget was not persisted as it changed");
+                check(engineReports == 0, "changing the CPU budget reported engine settings");
+                dialog->audioPage()->setCpuBudget(1000);
+                check(cpuBudget->value() == 335, "CPU budget was not clamped to the frame");
+                cpuBudget->setValue(80);
+            }
+
             check(output->value() == AudioSettingsPage::kOutputLevelDefault &&
                       window.audio().outputGain() == 1.0f,
                   "output level did not start at unity");
@@ -271,6 +295,10 @@ int runSettingsCheck(const QString &shotPath)
                       mixRate->currentData().toInt() == int(factory.pcmMixRate) &&
                       hq->isChecked() == factory.hqMixer,
                   "Restore Defaults did not reset the engine knobs");
+            check(cpuBudget->value() == AudioSettingsPage::kCpuBudgetDefault &&
+                      QSettings().value(QStringLiteral("engine/cpuBudgetPercent")).toInt() ==
+                          AudioSettingsPage::kCpuBudgetDefault,
+                  "Restore Defaults did not reset and persist the CPU budget");
             check(QSettings().value(QStringLiteral("engine/maxPcmChannels")).toInt() ==
                           factory.maxPcmChannels &&
                       QSettings().value(QStringLiteral("engine/pcmMixRate")).toDouble() ==
@@ -298,7 +326,9 @@ int runSettingsCheck(const QString &shotPath)
             QApplication::processEvents();
             check(polyphony->value() == 3 && output->value() == 150,
                   "Enter in the polyphony spinbox triggered Restore Defaults");
-            // Leaves polyphony 3 behind for the relaunch check.
+            cpuBudget->setValue(120);
+            // Leaves polyphony 3 and a 120 % CPU budget behind for the
+            // relaunch check.
         }
 
         // 5. Appearance page: the font choice lands and persists.
@@ -327,6 +357,9 @@ int runSettingsCheck(const QString &shotPath)
         auto *polyphony = dialog->findChild<QSpinBox *>(QStringLiteral("settingsPcmPolyphony"));
         check(polyphony && polyphony->value() == 3,
               "relaunch did not load the persisted PCM polyphony into the Audio page");
+        auto *cpuBudget = dialog->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
+        check(cpuBudget && cpuBudget->value() == 120,
+              "relaunch did not load the persisted CPU budget into the Audio page");
         check(dialog->currentPage() == SettingsDialog::Page::Audio,
               "relaunch did not remember the last section");
     }

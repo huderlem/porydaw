@@ -9,9 +9,7 @@
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 
 // --smfcheck: SMF parse-validation + note-pairing check, fully self-contained
 // (no project needed). Covers the hostile-MIDI hardening properties:

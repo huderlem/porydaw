@@ -4,9 +4,7 @@
 
 #include "core/miditimeline.h"
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 
 // The lanes a MIDI keyboard moved live on one track
 // (docs/midi-controls/PLAN.md §3.2): its pitch bend, any CC lane, and its
@@ -106,6 +104,9 @@ class TimelinePlayer
         m_pos = 0;
         m_cursor = 0;
         clearKeyedOn();
+        m_costMark = 0;
+        m_costPhaseSample = UINT64_MAX;
+        m_costLoopStartPassed = false;
     }
 
     // A note-off rescheduled past a loop wrap (gate-carry), tracked in both
@@ -203,6 +204,21 @@ class TimelinePlayer
     // track's voice and controllers as they stand in the song. Null: none.
     void setMirror(M4AEngine *mirror) { m_mirror = mirror; }
 
+    // The song engine's CPU estimate (docs/cpu-meter/PLAN.md; poryaaaa's
+    // "MIDI-path sequencer estimate"): with this on, render() also declares
+    // the song's structure to the engine as it plays, through the
+    // m4a_engine_cost_* hooks: every meter change (meterMarks) and the loop
+    // start ('[') as events of their tick, and the loop end's GOTO at each
+    // wrap, before the loop start's events. Off (the default) the player
+    // calls none of them: offline renders and other engines are untouched.
+    void setCostHooks(bool on) { m_costHooks = on; }
+
+    // The song starts playing here (from stop, from a pause, or after a
+    // seek moved it): declares it to the engine's estimate with the tracks
+    // that have notes anywhere in the song, and arms the meter in force so
+    // its bar marks keep the song's phase. A no-op without cost hooks.
+    void costSongStart(M4AEngine *engine, const MidiTimeline *timeline);
+
     // A position at or past the loop end (a start or seek there, or the
     // last render ending exactly on it) wraps before the next render plays
     // a sample: does that wrap now, exactly as render() would first, so a
@@ -222,6 +238,17 @@ class TimelinePlayer
 
     void wrapNotes(M4AEngine *engine, const MidiTimeline *timeline);
 
+    // The cost hooks due at the position (meter marks, the loop start),
+    // before that position's events; see setCostHooks.
+    void dispatchCostMarks(M4AEngine *engine, const MidiTimeline *timeline);
+    // The next position a cost hook is due at (UINT64_MAX: none), so a
+    // render stops there like at an event.
+    uint64_t nextCostMark(const MidiTimeline *timeline) const;
+    // Re-arms the cost cursors for a jump to the position: hooks strictly
+    // after it are still due, none at it (a seek within playback, or a
+    // timeline swap, is not a new pass over that position's hooks).
+    void seekCostMarks(const MidiTimeline *timeline);
+
     void clearKeyedOn()
     {
         for (auto &track : m_keyedOn)
@@ -231,6 +258,16 @@ class TimelinePlayer
     }
 
     M4AEngine *m_mirror = nullptr;
+    bool m_costHooks = false;
+    // The next meter mark due (index into timeline->meterMarks).
+    size_t m_costMark = 0;
+    // A meter re-declared at the next bar line after a mid-bar start, so the
+    // estimate's bar marks fall where the song's do (UINT64_MAX: none).
+    uint64_t m_costPhaseSample = UINT64_MAX;
+    uint32_t m_costPhaseClocks = 0;
+    // This pass has gone through the loop start (its '[' was declared, or
+    // the pass started after it).
+    bool m_costLoopStartPassed = false;
     uint64_t m_pos = 0;
     size_t m_cursor = 0;
     uint32_t m_wraps = 0;

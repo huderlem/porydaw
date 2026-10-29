@@ -32,6 +32,13 @@ class AudioSettingsPage : public QWidget
     // pre-roll (docs/punch/PLAN.md P4).
     static constexpr int kCountInBarsMax = 2;
     static constexpr int kCountInBarsDefault = 1;
+    // The CPU budget (docs/cpu-meter/PLAN.md D1): the status bar's CPU
+    // readout turns amber above this percent of the VBlank window. Up to the
+    // whole frame (M4A_FRAME_CYCLES is 335 % of M4A_VBLANK_CYCLES), past
+    // which the readout is red regardless.
+    static constexpr int kCpuBudgetMin = 10;
+    static constexpr int kCpuBudgetMax = 335;
+    static constexpr int kCpuBudgetDefault = 100;
 
     AudioSettingsPage(int outputLevel, const EngineSettings &engine, QWidget *parent = nullptr);
 
@@ -42,6 +49,7 @@ class AudioSettingsPage : public QWidget
     AudioDeviceConfig deviceConfig() const;
     int metronomeVolume() const;
     int countInBars() const;
+    int cpuBudget() const;
     EngineSettings engineSettings() const;
 
     // Programmatic loads (startup, Restore Defaults) go through these and
@@ -50,6 +58,7 @@ class AudioSettingsPage : public QWidget
     void setOutputLevel(int percent);
     void setMetronomeVolume(int percent);
     void setCountInBars(int bars);
+    void setCpuBudget(int percent);
     void setEngineSettings(const EngineSettings &settings);
     void setDeviceConfig(const AudioDeviceConfig &config);
     // What the device actually opened with, and why it differs from the
@@ -60,6 +69,7 @@ class AudioSettingsPage : public QWidget
     void outputLevelChanged(int percent);
     void metronomeVolumeChanged(int percent);
     void countInBarsChanged(int bars);
+    void cpuBudgetChanged(int percent);
     void engineSettingsChanged(const EngineSettings &settings);
     void deviceConfigChanged(const AudioDeviceConfig &config);
 
@@ -79,6 +89,7 @@ class AudioSettingsPage : public QWidget
     QSpinBox *m_polyphony = nullptr;
     QComboBox *m_mixRate = nullptr;
     QCheckBox *m_hqMixer = nullptr;
+    QSpinBox *m_cpuBudget = nullptr;
     QComboBox *m_bufferSize = nullptr;
     QCheckBox *m_exclusive = nullptr; // null off Windows
     QLabel *m_deviceStatus = nullptr;

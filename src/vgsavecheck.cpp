@@ -32,9 +32,7 @@
 #include "project/songregistry.h"
 #include "ui/voicegroupbrowser.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // --vgsavecheck <projectRoot> <song>: unified song+voicegroup undo/save
 // check. Song and voicegroup edits share one undo stack and one save, so

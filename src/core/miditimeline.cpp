@@ -2,9 +2,7 @@
 
 #include "smf.h"
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 #include <algorithm>
 #include <map>
 
@@ -398,6 +396,28 @@ std::unique_ptr<MidiTimeline> MidiTimeline::build(const SmfFile &smf, double sam
     std::stable_sort(timeSigs.begin(), timeSigs.end(),
                      [](const TimeSigPoint &a, const TimeSigPoint &b) { return a.tick < b.tick; });
     timeline->timeSigs = std::move(timeSigs);
+
+    // The CPU estimate's meters (meterMarks): the segments' ticks with the
+    // raw denominator mid2agb divides by.
+    {
+        const uint32_t tpb = std::max<uint32_t>(tpqn, 1);
+        auto &marks = timeline->meterMarks;
+        const auto markAt = [&](uint64_t tick, uint8_t numerator, uint8_t denomPow2) {
+            const uint8_t num = numerator ? numerator : 4;
+            const uint64_t beatTicks =
+                std::max<uint64_t>((uint64_t(tpb) * 4) >> std::min<int>(denomPow2, 63), 1);
+            return MidiTimeline::MeterMark{tickToSample(tick, tempos, tpqn, sampleRate), tick,
+                                           beatTicks * num, num, denomPow2};
+        };
+        marks.push_back(markAt(0, 4, 2));
+        for (const TimeSigPoint &ts : timeline->timeSigs) {
+            const MidiTimeline::MeterMark mark = markAt(ts.tick, ts.numerator, ts.denomPow2);
+            if (ts.tick == marks.back().tick)
+                marks.back() = mark;
+            else
+                marks.push_back(mark);
+        }
+    }
 
     std::vector<ClickGrid::Tempo> clickTempos;
     clickTempos.reserve(tempos.size());

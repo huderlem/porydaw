@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -116,6 +117,30 @@ class MidiTimeline
     // The metronome's beat lines in samples (audio thread; built with the
     // timeline from tempoMap's changes and timeSigSegments()).
     ClickGrid clickGrid;
+
+    // The meters as the song engine's CPU estimate hears them (audio
+    // thread): one per meter change, the 4/4 default at tick 0 first, like
+    // timeSigSegments(), with each change's sample position. TimelinePlayer
+    // declares them to the engine's MIDI-path sequencer estimate
+    // (m4a_engine_cost_time_signature), whose WholeNoteMark period is
+    // mid2agb's clocksPerBar().
+    struct MeterMark {
+        uint64_t samplePos;
+        uint64_t tick;
+        uint64_t barTicks; // SMF ticks per bar
+        uint8_t numerator;
+        uint8_t denomPow2;
+    };
+    std::vector<MeterMark> meterMarks;
+    // mid2agb's time-signature value (96 * numerator * clocks-per-beat
+    // factor / denominator, the factor 2 under -X), clamped to the 16 bits
+    // mid2agb accepts.
+    uint32_t clocksPerBar(const MeterMark &mark) const
+    {
+        const uint64_t clocks = (uint64_t(96) * mark.numerator * (extendedClocks ? 2 : 1)) >>
+                                std::min<int>(mark.denomPow2, 31);
+        return uint32_t(std::min<uint64_t>(clocks, 0xFFFF));
+    }
 
     bool hasLoop() const
     {

@@ -10,9 +10,7 @@
 #include "core/smf.h"
 #include "core/timelineplayer.h"
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 
 // --primecheck: voice-priming check for note auditioning, fully self-contained
 // (no project needed). A freshly loaded engine has no instrument on any track

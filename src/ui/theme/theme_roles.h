@@ -138,6 +138,10 @@ enum class Role {
     track_header_panel_outline,
     polyphony_value_background,
     polyphony_value_text,
+    // The status bar's CPU readout over the budget (amber) and at the frame
+    // ceiling (red), on the polyphony value background.
+    cpu_meter_warn_text,
+    cpu_meter_over_text,
 
     // Polyphony debugger channel cells, event-log severities, and drop flash.
     polyphony_cell_free_background,

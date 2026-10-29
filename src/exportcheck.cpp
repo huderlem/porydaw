@@ -9,9 +9,7 @@
 #include "core/songdocument.h"
 #include "project/decompproject.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // --exportcheck <projectRoot> <song>: WAV export check. Renders the song
 // offline through the export path and verifies the RIFF header, the

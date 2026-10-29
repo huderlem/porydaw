@@ -7,9 +7,7 @@
 #include <functional>
 #include <optional>
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 #include "audio/auditionslots.h"
 #include "project/voicegroupsource.h"

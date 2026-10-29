@@ -122,6 +122,9 @@ bool AudioEngine::init(QString *error)
     m4a_engine_init(m_liveEngine.get(), float(m_sampleRate));
     m4a_engine_set_live_mode(m_liveEngine.get(), true);
     m_player.setMirror(m_liveEngine.get());
+    // The song engine's CPU estimate hears the song's structure (D5: the
+    // live and preview engines publish nothing).
+    m_player.setCostHooks(true);
 
     if (ma_device_start(m_device) != MA_SUCCESS) {
         if (error)
@@ -366,6 +369,8 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_soloMask.store(0);
     m_appliedMute = 0;
     m_player.reset();
+    m_costStartPending = false;
+    clearCpuCost();
     m_playhead.store(0);
     m_activePcm.store(0);
     m_activeCgb.store(0);
@@ -559,6 +564,9 @@ void AudioEngine::applyPendingSeek()
     cutClicks();
     m_player.seek(samplePos, m_timeline);
     captureBoundary(from, samplePos);
+    // A seek while playing restarts the song there for the CPU estimate.
+    if (m_appliedTransport == static_cast<int>(Transport::Playing))
+        m_costStartPending = true;
     // A seek inside a punch take is another pass of it, still masked; once
     // the take has ended it's ordinary playback.
     if (!capturing())
@@ -757,6 +765,10 @@ void AudioEngine::unloadSong()
     resetCountIn();
     m_captureBegun = 0;
     m_player.reset();
+    // The transition that would have stopped the song is skipped too.
+    m4a_engine_cost_song_stop(m_engine.get());
+    m_costStartPending = false;
+    clearCpuCost();
     m_playhead.store(0);
     if (m_deviceStarted)
         ma_device_start(m_device);
@@ -890,16 +902,26 @@ void AudioEngine::applyTransportTransition()
         cancelCountIn();
         m_player.reset();
         dropPunchMask(); // the take ended with it
+        m4a_engine_cost_song_stop(m_engine.get());
+        m_costStartPending = false;
         break;
     case Transport::Paused:
         cancelCountIn();
         dropPunchMask();
+        m4a_engine_cost_song_stop(m_engine.get());
+        m_costStartPending = false;
         break;
     case Transport::Playing:
         // No player reset here: the Stopped transition already rewound to 0,
         // and a seek() between stop and play deliberately moves the start.
-        if (m_appliedTransport == static_cast<int>(Transport::Stopped))
+        if (m_appliedTransport == static_cast<int>(Transport::Stopped)) {
             m4a_engine_reset_poly_stats(m_engine.get());
+            // The CPU peak is per playback from stop (D8).
+            m4a_engine_reset_frame_cost_max(m_engine.get());
+        }
+        // The song starts where the player stands, once a count-in (if any)
+        // has run: the render declares it.
+        m_costStartPending = true;
         break;
     }
     m_appliedTransport = t;
@@ -1953,6 +1975,10 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             const bool looping = m_loopEnabled.load();
             const uint64_t p0 = m_player.position();
             const uint32_t w0 = m_player.wrapCount();
+            if (m_costStartPending) {
+                m_costStartPending = false;
+                m_player.costSongStart(engine, tl);
+            }
             // The only latched render: every offline path passes none.
             m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
                             &m_liveLatch, &m_punchMask);
@@ -2050,4 +2076,77 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             live++;
     }
     m_activeLivePcm.store(live);
+    publishCpuCost();
+}
+
+// Audio thread (or the UI thread with the device parked): the seqlock's
+// write side. The engine's cost fields are plain struct writes made by
+// m4a_engine_process on this thread, so only this thread reads them.
+void AudioEngine::publishCpuCost()
+{
+    const M4AEngine *engine = m_engine.get();
+    const M4AFrameCost &last = engine->frameCost;
+    const M4AFrameCost &peak = engine->frameCostMax;
+    const uint32_t seq = m_cpuSeq.load(std::memory_order_relaxed);
+    m_cpuSeq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    const int32_t lastTerms[4] = {last.sequencer, last.cgb, last.mixer, last.total};
+    const int32_t peakTerms[4] = {peak.sequencer, peak.cgb, peak.mixer, peak.total};
+    for (int i = 0; i < 4; i++) {
+        m_cpuLast[i].store(lastTerms[i], std::memory_order_relaxed);
+        m_cpuPeak[i].store(peakTerms[i], std::memory_order_relaxed);
+    }
+    m_cpuFlags.store(uint8_t((last.valid ? kCpuValid : 0) |
+                             (last.sequencerEstimated ? kCpuEstimated : 0) |
+                             (peak.valid ? kCpuPeakValid : 0)),
+                     std::memory_order_relaxed);
+    m_cpuSeq.store(seq + 2, std::memory_order_release);
+}
+
+void AudioEngine::clearCpuCost()
+{
+    const uint32_t seq = m_cpuSeq.load(std::memory_order_relaxed);
+    m_cpuSeq.store(seq + 1, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    for (int i = 0; i < 4; i++) {
+        m_cpuLast[i].store(0, std::memory_order_relaxed);
+        m_cpuPeak[i].store(0, std::memory_order_relaxed);
+    }
+    m_cpuFlags.store(0, std::memory_order_relaxed);
+    m_cpuSeq.store(seq + 2, std::memory_order_release);
+}
+
+AudioEngine::CpuSnapshot AudioEngine::cpuSnapshot() const
+{
+    CpuSnapshot out;
+    // The read side: retry while the callback is mid-write. A callback
+    // publishes once per period, so a retry or two always lands; past a
+    // handful the snapshot reports nothing rather than spin.
+    for (int attempt = 0; attempt < 16; attempt++) {
+        const uint32_t seq = m_cpuSeq.load(std::memory_order_acquire);
+        if (seq & 1)
+            continue;
+        CpuSnapshot s;
+        for (int i = 0; i < 4; i++) {
+            s.last[i] = m_cpuLast[i].load(std::memory_order_relaxed);
+            s.peak[i] = m_cpuPeak[i].load(std::memory_order_relaxed);
+        }
+        const uint8_t flags = m_cpuFlags.load(std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (m_cpuSeq.load(std::memory_order_relaxed) != seq)
+            continue;
+        s.valid = flags & kCpuValid;
+        s.estimated = flags & kCpuEstimated;
+        s.peakValid = flags & kCpuPeakValid;
+        return s;
+    }
+    return out;
+}
+
+void AudioEngine::resetCpuPeak()
+{
+    // Only raises the engine's flag; the next SoundMain clears the peak on
+    // the audio thread.
+    if (m_engine)
+        m4a_engine_reset_frame_cost_max(m_engine.get());
 }

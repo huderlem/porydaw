@@ -8,8 +8,9 @@
 
 #include "core/timelineplayer.h"
 
+#include "core/m4a.h"
+
 extern "C" {
-#include "m4a_engine.h"
 #include "m4a_reverb.h"
 }
 

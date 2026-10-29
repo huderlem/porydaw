@@ -9,9 +9,7 @@
 #include "core/smf.h"
 #include "core/timelineplayer.h"
 
-extern "C" {
-#include "m4a_engine.h"
-}
+#include "core/m4a.h"
 
 // --loopcheck: loop-wrap playback check, fully self-contained (no project
 // needed). Synthesizes a looping song exercising every note/loop-boundary

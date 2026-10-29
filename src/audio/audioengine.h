@@ -14,13 +14,9 @@
 #include "audio/auditionslots.h"
 #include "audio/metronome.h"
 #include "core/captureevent.h"
+#include "core/m4a.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
-
-extern "C" {
-#include "m4a_engine.h"
-#include "voicegroup_loader.h"
-}
 
 struct ma_device;
 struct ma_context;
@@ -560,6 +556,31 @@ class AudioEngine
     };
     void polySnapshot(PolySnapshot *out) const;
 
+    // The song engine's estimated GBA CPU cost (docs/cpu-meter/PLAN.md):
+    // cycles of m4aSoundMain per frame, as the engine's cost model counts
+    // them (poryaaaa M4AFrameCost). `last` is the latest SoundMain, `peak`
+    // the most expensive since playback last started from stop (D8) or
+    // resetCpuPeak(). Each holds {sequencer, PSG (CgbSound), mixer, total}
+    // cycles, total being the sum. valid is false until the engine has
+    // costed a full frame (and again after a mix rate, mixer or song
+    // change); the sequencer term is an estimate when `estimated`. Only the
+    // song engine is costed (D5): keyboard notes and auditions are not.
+    // Published by the audio callback through a seqlock; the UI reads a
+    // consistent copy without blocking it.
+    enum CpuTerm { CpuSequencer = 0, CpuPsg = 1, CpuMixer = 2, CpuTotal = 3 };
+    struct CpuSnapshot {
+        bool valid = false;
+        bool estimated = false; // the sequencer term is the MIDI-path estimate
+        bool peakValid = false;
+        int32_t last[4] = {};
+        int32_t peak[4] = {};
+        int32_t vblankCycles = M4A_VBLANK_CYCLES; // 100 % (D1)
+        int32_t frameCycles = M4A_FRAME_CYCLES;   // the hard ceiling
+    };
+    CpuSnapshot cpuSnapshot() const;
+    // Hot, any thread: the peak restarts at the next frame.
+    void resetCpuPeak();
+
   private:
     static void dataCallback(ma_device *device, void *output, const void *input,
                              uint32_t frameCount);
@@ -837,6 +858,15 @@ class AudioEngine
     // Polyphony-overflow debug: desired invert state + reset command.
     std::atomic<bool> m_polyInvert{false};
     std::atomic<uint32_t> m_polyResetCmd{0};
+    // The CPU cost (cpuSnapshot), copied out of the song engine after each
+    // callback. m_cpuSeq is the seqlock: odd while the callback writes.
+    void publishCpuCost();
+    void clearCpuCost(); // UI thread, device stopped
+    std::atomic<uint32_t> m_cpuSeq{0};
+    std::atomic<int32_t> m_cpuLast[4] = {};
+    std::atomic<int32_t> m_cpuPeak[4] = {};
+    std::atomic<uint8_t> m_cpuFlags{0}; // kCpu* bits
+    static constexpr uint8_t kCpuValid = 1, kCpuEstimated = 2, kCpuPeakValid = 4;
     // MIDI keyboard live play (UI writes, audio thread reads).
     std::atomic<MidiInputRing *> m_midiRing{nullptr};
     std::atomic<int> m_liveTarget{-1};
@@ -969,6 +999,9 @@ class AudioEngine
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none
     uint32_t m_appliedRefreshVoices = 0;
     uint32_t m_appliedPolyReset = 0;
+    // Audio thread: the song (re)starts at the next render; declare it to
+    // the engine's CPU estimate there (TimelinePlayer::costSongStart).
+    bool m_costStartPending = false;
     TimelinePlayer m_player;
     // Metronome (audio thread): this callback's clicks, mixed after the tap,
     // through a delay of the main engine's latency (engineLatencySamples)

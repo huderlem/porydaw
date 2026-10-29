@@ -1,8 +1,13 @@
 #include "core/timelineplayer.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "core/mid2agbtables.h"
+
+extern "C" {
+#include "m4a_sequencer.h" // M4A_PLAYER_BGM
+}
 
 namespace {
 
@@ -226,6 +231,91 @@ void TimelinePlayer::seek(uint64_t pos, const MidiTimeline *timeline)
         std::lower_bound(timeline->events.begin(), timeline->events.end(), pos,
                          [](const TimelineEvent &e, uint64_t p) { return e.samplePos < p; }) -
         timeline->events.begin());
+    seekCostMarks(timeline);
+}
+
+void TimelinePlayer::seekCostMarks(const MidiTimeline *timeline)
+{
+    const auto &marks = timeline->meterMarks;
+    m_costMark = size_t(std::upper_bound(marks.begin(), marks.end(), m_pos,
+                                         [](uint64_t p, const MidiTimeline::MeterMark &m) {
+                                             return p < m.samplePos;
+                                         }) -
+                        marks.begin());
+    m_costPhaseSample = UINT64_MAX;
+    m_costLoopStartPassed = timeline->hasLoop() && m_pos >= timeline->loopStartSample;
+}
+
+void TimelinePlayer::costSongStart(M4AEngine *engine, const MidiTimeline *timeline)
+{
+    if (!m_costHooks || !timeline)
+        return;
+    // The tracks mid2agb emits: those with notes anywhere in the song (a
+    // track entering late exists in the game from the song's start).
+    uint32_t trackMask = 0;
+    for (int track = 0; track < 16; track++)
+        if (timeline->tracks[track].noteCount > 0)
+            trackMask |= 1u << track;
+    m4a_engine_cost_song_start(engine, trackMask, M4A_PLAYER_BGM);
+
+    seekCostMarks(timeline);
+    // Unlike a seek, a start passes over this position's own hooks: a meter
+    // or the loop start right here are declared as its events.
+    const auto &marks = timeline->meterMarks;
+    m_costLoopStartPassed = timeline->hasLoop() && m_pos > timeline->loopStartSample;
+    if (m_costMark == 0)
+        return; // no meters (a timeline not from build())
+    const MidiTimeline::MeterMark &meter = marks[m_costMark - 1];
+    if (meter.samplePos == m_pos) {
+        m_costMark--;
+        return;
+    }
+    // Mid-bar: no bar marks until the meter's next bar line, where it is
+    // declared again, so the marks fall where the song's bars do.
+    m4a_engine_cost_time_signature(engine, 0);
+    if (timeline->tempoMap.empty() || meter.barTicks == 0)
+        return;
+    const double tick = timeline->tickForSample(m_pos);
+    const double barsIn = std::ceil((tick - double(meter.tick)) / double(meter.barTicks));
+    const uint64_t barLine = meter.tick + uint64_t(std::max(barsIn, 0.0)) * meter.barTicks;
+    if (m_costMark < marks.size() && barLine >= marks[m_costMark].tick)
+        return; // the next meter change comes first and declares itself
+    m_costPhaseSample = std::max(timeline->sampleForTick(barLine), m_pos);
+    m_costPhaseClocks = timeline->clocksPerBar(meter);
+}
+
+void TimelinePlayer::dispatchCostMarks(M4AEngine *engine, const MidiTimeline *timeline)
+{
+    if (!m_costHooks)
+        return;
+    // A meter before the loop start's '[' at the same tick: the label keeps
+    // the meter in force there for the GOTO to restore.
+    const auto &marks = timeline->meterMarks;
+    while (m_costMark < marks.size() && marks[m_costMark].samplePos <= m_pos) {
+        m4a_engine_cost_time_signature(engine, timeline->clocksPerBar(marks[m_costMark]));
+        m_costMark++;
+        m_costPhaseSample = UINT64_MAX;
+    }
+    if (m_costPhaseSample <= m_pos) {
+        m4a_engine_cost_time_signature(engine, m_costPhaseClocks);
+        m_costPhaseSample = UINT64_MAX;
+    }
+    if (!m_costLoopStartPassed && timeline->hasLoop() && m_pos >= timeline->loopStartSample) {
+        m4a_engine_cost_loop_point(engine, false);
+        m_costLoopStartPassed = true;
+    }
+}
+
+uint64_t TimelinePlayer::nextCostMark(const MidiTimeline *timeline) const
+{
+    if (!m_costHooks)
+        return UINT64_MAX;
+    uint64_t next = m_costPhaseSample;
+    if (m_costMark < timeline->meterMarks.size())
+        next = std::min(next, timeline->meterMarks[m_costMark].samplePos);
+    if (!m_costLoopStartPassed && timeline->hasLoop())
+        next = std::min(next, timeline->loopStartSample);
+    return next;
 }
 
 void TimelinePlayer::settleWrap(M4AEngine *engine, const MidiTimeline *timeline, bool looping,
@@ -290,6 +380,7 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
                 mask->cut = true;
             }
         }
+        dispatchCostMarks(engine, timeline);
         while (m_cursor < timeline->events.size() &&
                timeline->events[m_cursor].samplePos <= m_pos) {
             const TimelineEvent &ev = timeline->events[m_cursor];
@@ -336,6 +427,13 @@ void TimelinePlayer::dispatchDue(M4AEngine *engine, const MidiTimeline *timeline
             }
             m_pos = timeline->loopStartSample;
             m_wraps++;
+            if (m_costHooks) {
+                // Every track's GOTO, before the loop start's events; the
+                // loop start's own hooks are not a new pass (the GOTO jumps
+                // past the label and restores the meter itself).
+                m4a_engine_cost_loop_point(engine, true);
+                seekCostMarks(timeline);
+            }
             m_cursor =
                 size_t(std::lower_bound(
                            timeline->events.begin(), timeline->events.end(), m_pos,
@@ -370,6 +468,7 @@ void TimelinePlayer::render(M4AEngine *engine, const MidiTimeline *timeline, flo
             next = std::min(next, timeline->loopEndSample);
         if (mask && mask->any() && m_pos < mask->inSample)
             next = std::min(next, mask->inSample);
+        next = std::min(next, nextCostMark(timeline));
 
         uint32_t n = frames - done;
         if (next != UINT64_MAX)

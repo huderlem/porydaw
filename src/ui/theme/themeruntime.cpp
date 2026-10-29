@@ -78,13 +78,18 @@ QString trackHeaderStyleSheet(const Theme &theme)
     return QStringLiteral("QWidget#trackHeaderPanel{background-color:%1;color:%2;"
                           "border-color:%3;}"
                           "QLabel#polyphonyPcmValue,QLabel#polyphonyCgbValue,"
-                          "QLabel#polyphonyLostValue{"
-                          "background-color:%4;color:%5;}")
+                          "QLabel#polyphonyLostValue,QLabel#polyphonyCpuValue{"
+                          "background-color:%4;color:%5;}"
+                          // The CPU readout over its budget, and at the frame ceiling.
+                          "QLabel#polyphonyCpuValue[cpuLevel=\"warn\"]{color:%6;}"
+                          "QLabel#polyphonyCpuValue[cpuLevel=\"over\"]{color:%7;}")
         .arg(colorName(theme, Role::track_header_panel_background))
         .arg(colorName(theme, Role::track_header_panel_text))
         .arg(colorName(theme, Role::track_header_panel_outline))
         .arg(colorName(theme, Role::polyphony_value_background))
-        .arg(colorName(theme, Role::polyphony_value_text));
+        .arg(colorName(theme, Role::polyphony_value_text))
+        .arg(colorName(theme, Role::cpu_meter_warn_text))
+        .arg(colorName(theme, Role::cpu_meter_over_text));
 }
 
 QString toolbarStyleSheet(const Theme &theme)

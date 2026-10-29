@@ -85,9 +85,11 @@ enum class PresetColor {
     /// Polyphony cell playing a lost sound in solo-overflow mode: a fixed
     /// identity blue.
     polyphony_shadow_cell,
-    /// Dropped-note rows in the polyphony event log.
+    /// Dropped-note rows in the polyphony event log, and the status bar's CPU
+    /// readout at the frame ceiling.
     polyphony_dropped_text,
-    /// Cut-off-note rows in the polyphony event log.
+    /// Cut-off-note rows in the polyphony event log, and the status bar's CPU
+    /// readout over its budget.
     polyphony_stolen_text,
     /// Overflow-table row flash on a fresh drop: a fixed identity red faded
     /// by the panel.
@@ -250,6 +252,10 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::outline,
     PresetColor::item_background,
     PresetColor::window_text,
+    // The CPU readout's amber and red: the event log's severity inks, which
+    // are authored for the same item surface.
+    PresetColor::polyphony_stolen_text,
+    PresetColor::polyphony_dropped_text,
 
     PresetColor::control_background,
     PresetColor::disabled_text,

@@ -10,9 +10,7 @@
 #include "project/songregistry.h"
 #include "project/voicegroupsource.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // --vgcheck <projectRoot> <song>: voicegroup edit/save/create check. Loads the
 // song's voicegroup source, edits one voice of each editable family, verifies

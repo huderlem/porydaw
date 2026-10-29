@@ -8,9 +8,7 @@
 #include <QStringList>
 #include <QVector>
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // The editable voice macros: the five basic families and their variants,
 // plus voice_keysplit (whose sub-voicegroup/table pair is swappable) and

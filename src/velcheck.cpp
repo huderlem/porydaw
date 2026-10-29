@@ -36,9 +36,7 @@
 #include "ui/velocityaxis.h"
 #include "ui/velocitygesturemodel.h"
 
-extern "C" {
-#include "voicegroup_loader.h"
-}
+#include "core/m4a.h"
 
 // --velmodelcheck: PSG velocity model check (self-contained, no project
 // needed). VelocityMap is the engine-behavior half of the velocity lane: it

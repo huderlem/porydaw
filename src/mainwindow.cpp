@@ -22,6 +22,7 @@
 #include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -215,6 +216,9 @@ const QString kOutputLevelKey = QStringLiteral("outputLevel");
 const QString kMetronomeKey = QStringLiteral("metronome");
 const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
 const QString kCountInBarsKey = QStringLiteral("countInBars");
+// The CPU readout's budget in percent of the VBlank window
+// (docs/cpu-meter/PLAN.md D1), app-wide like the engine knobs beside it.
+const QString kCpuBudgetKey = QStringLiteral("engine/cpuBudgetPercent");
 // Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
 // metronome.
 const QString kPunchKey = QStringLiteral("punch");
@@ -1536,6 +1540,14 @@ void MainWindow::buildUi()
     m_polyLostLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
     m_polyLostCaption = new QLabel(tr("notes lost"), m_polyMeter);
     m_polyLostCaption->setObjectName(QStringLiteral("polyphonyLostCaption"));
+    auto *cpuSeparator = new QLabel(QStringLiteral("·"), m_polyMeter);
+    m_cpuCaption = new QLabel(tr("CPU"), m_polyMeter);
+    m_cpuCaption->setObjectName(QStringLiteral("polyphonyCpuCaption"));
+    m_cpuValueLabel = new QLabel(m_polyMeter);
+    m_cpuValueLabel->setObjectName(QStringLiteral("polyphonyCpuValue"));
+    m_cpuValueLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_cpuValueLabel->setAttribute(Qt::WA_StyledBackground);
+    m_cpuValueLabel->setContentsMargins(fieldInset, 0, fieldInset, 0);
     m_polyLostSeparator->hide();
     m_polyLostLabel->hide();
     m_polyLostCaption->hide();
@@ -1544,6 +1556,9 @@ void MainWindow::buildUi()
     polyLayout->addWidget(separator);
     polyLayout->addWidget(cgbCaption);
     polyLayout->addWidget(m_cgbValueLabel);
+    polyLayout->addWidget(cpuSeparator);
+    polyLayout->addWidget(m_cpuCaption);
+    polyLayout->addWidget(m_cpuValueLabel);
     polyLayout->addWidget(m_polyLostSeparator);
     polyLayout->addWidget(m_polyLostLabel);
     polyLayout->addWidget(m_polyLostCaption);
@@ -1572,6 +1587,9 @@ void MainWindow::refreshDerivedFonts()
     m_cgbValueLabel->setFixedWidth(
         QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("4/4")) + 2 * fieldInset);
     m_polyLostLabel->setFont(valueFont);
+    m_cpuValueLabel->setFont(valueFont);
+    m_cpuValueLabel->setFixedWidth(
+        QFontMetrics(valueFont).horizontalAdvance(QStringLiteral("999%")) + 2 * fieldInset);
     updateDockTabFonts();
 }
 
@@ -3522,6 +3540,10 @@ void MainWindow::buildSettingsDialog()
         QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
         AudioSettingsPage::kCountInBarsMax);
     m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
+    m_cpuBudgetPercent =
+        std::clamp(QSettings().value(kCpuBudgetKey, AudioSettingsPage::kCpuBudgetDefault).toInt(),
+                   AudioSettingsPage::kCpuBudgetMin, AudioSettingsPage::kCpuBudgetMax);
+    m_settingsDialog->audioPage()->setCpuBudget(m_cpuBudgetPercent);
     {
         // Before init (the caller opens the device after this): the device
         // first opens with the user's buffering.
@@ -3545,6 +3567,14 @@ void MainWindow::buildSettingsDialog()
                 m_countInBars = bars;
                 if (m_persistSession)
                     QSettings().setValue(kCountInBarsKey, bars);
+            });
+    // Only the readout's colour depends on it: the next status tick
+    // recolours it.
+    connect(m_settingsDialog->audioPage(), &AudioSettingsPage::cpuBudgetChanged, this,
+            [this](int percent) {
+                m_cpuBudgetPercent = percent;
+                if (m_persistSession)
+                    QSettings().setValue(kCpuBudgetKey, percent);
             });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
@@ -5726,6 +5756,17 @@ void MainWindow::updatePolyStatus()
         status.maxPcm = m_audio.maxPcmChannels();
         status.activeCgb = m_audio.activeCgbChannels();
         status.lostTotal = m_audio.polyLostTotal();
+        status.cpuPlaying = m_audio.transport() == Transport::Playing;
+        status.cpu = m_audio.cpuSnapshot();
+        // Stopped or paused there is no reading: the idle frames' cost must
+        // not make every tick a change.
+        if (!status.cpuPlaying) {
+            status.cpu.valid = false;
+            std::fill(std::begin(status.cpu.last), std::end(status.cpu.last), 0);
+        }
+        status.cpuBudget = m_cpuBudgetPercent;
+        status.mixRate = int(m_engineSettings.pcmMixRate + 0.5f);
+        status.hqMixer = m_engineSettings.hqMixer;
     }
     if (m_lastPolyStatus && *m_lastPolyStatus == status)
         return;
@@ -5738,9 +5779,32 @@ void MainWindow::updatePolyStatus()
         m_polyLostSeparator->hide();
         m_polyLostLabel->hide();
         m_polyLostCaption->hide();
+        m_cpuValueLabel->clear();
         m_polyMeter->hide();
         return;
     }
+
+    // The CPU readout: percent of the VBlank window (D1), "--" with no
+    // reading (stopped, paused, or no full frame costed yet).
+    const bool cpuReading = status.cpuPlaying && status.cpu.valid;
+    const int32_t cpuTotal = status.cpu.last[AudioEngine::CpuTotal];
+    m_cpuValueLabel->setText(cpuReading
+                                 ? QStringLiteral("%1%").arg(std::lround(
+                                       double(cpuTotal) * 100.0 / double(status.cpu.vblankCycles)))
+                                 : QStringLiteral("--"));
+    const int level = cpuReading ? cpuLevel(cpuTotal, status.cpuBudget) : 0;
+    const QString levelName = level == 2   ? QStringLiteral("over")
+                              : level == 1 ? QStringLiteral("warn")
+                                           : QString();
+    if (m_cpuValueLabel->property("cpuLevel").toString() != levelName) {
+        m_cpuValueLabel->setProperty("cpuLevel", levelName);
+        // Property selectors are matched at polish time.
+        m_cpuValueLabel->style()->unpolish(m_cpuValueLabel);
+        m_cpuValueLabel->style()->polish(m_cpuValueLabel);
+    }
+    const QString cpuTip = cpuToolTip(status);
+    m_cpuCaption->setToolTip(cpuTip);
+    m_cpuValueLabel->setToolTip(cpuTip);
 
     m_pcmValueLabel->setText(QStringLiteral("%1/%2").arg(status.activePcm).arg(status.maxPcm));
     m_cgbValueLabel->setText(QStringLiteral("%1/4").arg(status.activeCgb));
@@ -5750,6 +5814,52 @@ void MainWindow::updatePolyStatus()
     m_polyLostLabel->setVisible(hasLost);
     m_polyLostCaption->setVisible(hasLost);
     m_polyMeter->show();
+}
+
+int MainWindow::cpuLevel(int32_t total, int budgetPercent)
+{
+    if (total >= M4A_FRAME_CYCLES)
+        return 2;
+    return int64_t(total) * 100 > int64_t(budgetPercent) * M4A_VBLANK_CYCLES ? 1 : 0;
+}
+
+QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
+{
+    const AudioEngine::CpuSnapshot &cpu = status.cpu;
+    const QLocale locale;
+    const auto cycles = [&](int32_t n) { return tr("%1 cycles").arg(locale.toString(n)); };
+    const auto percent = [&](int64_t n) {
+        return tr("%1%").arg(std::lround(double(n) * 100.0 / double(cpu.vblankCycles)));
+    };
+    QStringList lines;
+    lines << tr("Estimated GBA CPU time of the sound driver (m4aSoundMain) per frame");
+    if (status.cpuPlaying && cpu.valid) {
+        lines << tr("Last frame: %1, %2 of the VBlank window")
+                     .arg(cycles(cpu.last[AudioEngine::CpuTotal]),
+                          percent(cpu.last[AudioEngine::CpuTotal]));
+        lines << tr("  Sequencer: %1%2")
+                     .arg(cycles(cpu.last[AudioEngine::CpuSequencer]),
+                          cpu.estimated ? tr(" (estimated)") : QString());
+        lines << tr("  PSG: %1").arg(cycles(cpu.last[AudioEngine::CpuPsg]));
+        lines << tr("  Mixer: %1").arg(cycles(cpu.last[AudioEngine::CpuMixer]));
+    } else {
+        lines << (status.cpuPlaying ? tr("No reading yet.") : tr("Shown while the song plays."));
+    }
+    if (cpu.peakValid)
+        lines << tr("Peak since playback started: %1, %2")
+                     .arg(cycles(cpu.peak[AudioEngine::CpuTotal]),
+                          percent(cpu.peak[AudioEngine::CpuTotal]));
+    lines << tr("Budget: %1% of the VBlank window (%2), set in Settings → Audio")
+                 .arg(status.cpuBudget)
+                 .arg(cycles(int32_t(int64_t(status.cpuBudget) * cpu.vblankCycles / 100)));
+    lines << tr("VBlank window: %1 = 100%").arg(cycles(cpu.vblankCycles));
+    lines << tr("Frame ceiling: %1 = %2; past it the next frame's sound is skipped")
+                 .arg(cycles(cpu.frameCycles), percent(cpu.frameCycles));
+    lines << tr("%1 Hz mix rate, %2 PCM channels, %3")
+                 .arg(status.mixRate)
+                 .arg(status.maxPcm)
+                 .arg(status.hqMixer ? tr("HQ mixer") : tr("stock mixer"));
+    return lines.join(QLatin1Char('\n'));
 }
 
 void MainWindow::uiTick()
