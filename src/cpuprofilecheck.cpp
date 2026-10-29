@@ -48,7 +48,8 @@ extern "C" {
 // profile's max and the readout's peak matches it; the strip paints heat
 // over the song and chrome past its end, the max's column in the max's
 // colour; the budget (in cycles) moves the colours (amber one cycle under
-// the max, not at exactly the max) without a recompute; the hover text
+// the max, not at exactly the max; red strictly past the VBlank window
+// whatever the budget) without a recompute; the hover text
 // names the three terms and no sound effects
 // (D4), the gutter's too; a note added starts one recompute (two quick
 // edits debounce into one) and replaces the profile; a mix-rate change
@@ -348,14 +349,25 @@ bool MainWindow::runCpuProfileCheck(const QString &projectRoot, const QString &s
                   "over the budget the max's column is not amber");
             m_settingsDialog->audioPage()->setCpuBudget(peak.total);
             QCoreApplication::processEvents();
-            if (peak.total >= AudioSettingsPage::kCpuBudgetMin && peak.total < M4A_FRAME_CYCLES)
+            if (peak.total >= AudioSettingsPage::kCpuBudgetMin && peak.total <= M4A_VBLANK_CYCLES)
                 check(view.cpuBudgetCycles() == peak.total &&
                           view.cpuProfileColor(peak.total) !=
                               themes::color(themes::Role::cpu_profile_warn_fill),
                       "at a budget of exactly the max's cycles the max's column is amber");
-            check(view.cpuProfileColor(M4A_FRAME_CYCLES) ==
-                      themes::color(themes::Role::cpu_profile_over_fill),
-                  "a frame at the ceiling is not red");
+            // Red past the VBlank window, whatever the budget (D1, amended
+            // 2026-10-29); at it, a budget above it keeps the frame off red.
+            check(view.cpuProfileColor(M4A_VBLANK_CYCLES + 1) ==
+                          themes::color(themes::Role::cpu_profile_over_fill) &&
+                      view.cpuProfileColor(M4A_FRAME_CYCLES) ==
+                          themes::color(themes::Role::cpu_profile_over_fill),
+                  "a frame past the VBlank window is not red");
+            m_settingsDialog->audioPage()->setCpuBudget(AudioSettingsPage::kCpuBudgetMax);
+            QCoreApplication::processEvents();
+            check(view.cpuProfileColor(M4A_VBLANK_CYCLES) !=
+                          themes::color(themes::Role::cpu_profile_over_fill) &&
+                      view.cpuProfileColor(M4A_VBLANK_CYCLES + 1) ==
+                          themes::color(themes::Role::cpu_profile_over_fill),
+                  "under a budget past the VBlank window, the VBlank line is not where red starts");
             check(view.cpuProfileColor(0) == themes::color(themes::Role::cpu_profile_low_fill),
                   "an idle frame is not the ramp's neutral end");
             m_settingsDialog->audioPage()->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);

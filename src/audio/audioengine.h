@@ -586,11 +586,33 @@ class AudioEngine
         int32_t last[4] = {};
         int32_t peak[4] = {};
         int32_t vblankCycles = M4A_VBLANK_CYCLES; // 100 % (D1)
-        int32_t frameCycles = M4A_FRAME_CYCLES;   // the hard ceiling
+        int32_t frameCycles = M4A_FRAME_CYCLES;   // the whole frame, for scale
+        // Where the peak's frame played, in seconds of the song; -1 when
+        // unknown (the peak's frame ran while the song was not playing).
+        double peakAtSeconds = -1.0;
     };
     CpuSnapshot cpuSnapshot() const;
-    // Hot, any thread: the peak restarts at the next frame.
+    // Hot, any thread: the peak restarts at the next frame, and the
+    // history (cpuHistory) with it.
     void resetCpuPeak();
+
+    // The song engine's frames while the song played, one entry per
+    // SoundMain (poryaaaa's costHistory, drained after every render): each
+    // frame's {sequencer, CGB, mixer, total} cycles (CpuTerm order) and the
+    // song position it played at. Only playing frames are kept (not a
+    // count-in's, not stopped or paused ones); invalid frames are skipped.
+    // Cleared where the peak is (play from stop, resetCpuPeak, a change of
+    // mix rate, mixer, song or voicegroup), so a stop keeps the last run's.
+    struct CpuHistoryEntry {
+        int32_t terms[4] = {};
+        double seconds = 0.0;
+    };
+    // About ten seconds of frames (59.7275 per second).
+    static constexpr int kCpuHistoryFrames = 598;
+    // UI thread: the newest kCpuHistoryFrames entries since the last clear,
+    // oldest first. Returns a stamp that changes whenever an entry is added
+    // or the history is cleared.
+    uint64_t cpuHistory(std::vector<CpuHistoryEntry> &out) const;
 
   private:
     static void dataCallback(ma_device *device, void *output, const void *input,
@@ -877,7 +899,36 @@ class AudioEngine
     std::atomic<int32_t> m_cpuLast[4] = {};
     std::atomic<int32_t> m_cpuPeak[4] = {};
     std::atomic<uint8_t> m_cpuFlags{0}; // kCpu* bits
+    std::atomic<double> m_cpuPeakAt{-1.0};
     static constexpr uint8_t kCpuValid = 1, kCpuEstimated = 2, kCpuPeakValid = 4;
+    // The CPU history (cpuHistory): a single-producer ring the audio thread
+    // fills and the UI thread copies. m_cpuHistSpan packs the clear point
+    // (high 32 bits) and the count of entries ever written (low 32 bits),
+    // release-stored after the entries; a reader drops any entry the
+    // writer may have lapped while it copied.
+    static constexpr uint32_t kCpuHistCapacity = 1024; // a power of two
+    struct CpuHistSlot {
+        std::atomic<int32_t> terms[4] = {};
+        std::atomic<double> seconds{0.0};
+    };
+    std::unique_ptr<CpuHistSlot[]> m_cpuHist{new CpuHistSlot[kCpuHistCapacity]};
+    std::atomic<uint64_t> m_cpuHistSpan{0};
+    // Audio thread (or the UI thread with the device stopped): the engine's
+    // history read so far, the peak epoch it is in, and the peak since the
+    // epoch began (as the engine's frameCostMax: the first valid frame, then
+    // strictly larger totals) with the song position it played at.
+    uint32_t m_costSeqSeen = 0;
+    uint32_t m_costEpochSeen = 0;
+    int32_t m_costPeakSeen = -1;
+    double m_costPeakAt = -1.0;
+    // Audio thread, right after each render of the song engine (`frames`
+    // samples): copies its new history entries; `record` (the song played
+    // them) keeps them, placed by the GBA clock in the render's song span,
+    // p0 to p1 (across a loop wrap of `tl`, p0 to its loop end, then its
+    // loop start to p1).
+    void drainCostHistory(bool record, uint64_t p0, uint64_t p1, uint32_t frames,
+                          const MidiTimeline *tl);
+    void clearCostHistory(); // the device stopped: forget the engine's history
     // MIDI keyboard live play (UI writes, audio thread reads).
     std::atomic<MidiInputRing *> m_midiRing{nullptr};
     std::atomic<int> m_liveTarget{-1};

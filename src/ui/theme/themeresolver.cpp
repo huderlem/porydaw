@@ -546,17 +546,33 @@ Theme derive(const QColor &primary, const QColor &accent)
     theme.color(Role::polyphony_log_stolen_text) =
         severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
     theme.color(Role::polyphony_flash_background) = QColor::fromRgb(0xD9, 0x26, 0x26);
-    // The CPU readout's thresholds share the log's severity inks, on the
-    // value field's surface.
+    // The CPU readout's thresholds share the log's severity inks, readable
+    // on the value field's surface (status bar) and the window's (the CPU
+    // dock); within the budget, a green on the same terms.
     theme.color(Role::cpu_meter_warn_text) =
-        severityText(QColor::fromRgb(0xDB, 0x9B, 0x42), itemBackground);
+        domainInk(QColor::fromRgb(0xDB, 0x9B, 0x42), {itemBackground, windowBackground},
+                  kTextContrastThreshold);
     theme.color(Role::cpu_meter_over_text) =
-        severityText(QColor::fromRgb(0xDB, 0x58, 0x58), itemBackground);
+        domainInk(QColor::fromRgb(0xDB, 0x58, 0x58), {itemBackground, windowBackground},
+                  kTextContrastThreshold);
+    theme.color(Role::cpu_meter_ok_text) =
+        domainInk(QColor::fromRgb(0x4C, 0xB8, 0x6E), {itemBackground, windowBackground},
+                  kTextContrastThreshold);
     // The CPU dock's breakdown segments are fixed identities like the cells,
     // apart from their colours (teal, pink, purple).
     theme.color(Role::cpu_meter_sequencer_fill) = QColor::fromRgb(0x1A, 0x9C, 0x8C);
     theme.color(Role::cpu_meter_cgb_fill) = QColor::fromRgb(0xC4, 0x4F, 0x8E);
     theme.color(Role::cpu_meter_mixer_fill) = QColor::fromRgb(0x7A, 0x55, 0xC9);
+    // The CPU dock's meter track and history chart sit recessed like the
+    // indicators; the peak card is raised a step toward the controls; the
+    // history line under the budget is a fixed blue (never confused with
+    // the amber and red bands whatever the accent), kept visible on the
+    // track.
+    theme.color(Role::cpu_meter_track_background) = recessedBackground;
+    theme.color(Role::cpu_meter_card_background) =
+        mixColors(windowBackground, buttonBackground, 0.5);
+    theme.color(Role::cpu_meter_history_fill) =
+        domainInk(QColor::fromRgb(0x5B, 0x8D, 0xEF), {recessedBackground}, 3.0);
     // The CPU profile strip: a neutral between the chrome it sits on and
     // the muted text, then the cells' fixed amber and the flash red.
     theme.color(Role::cpu_profile_low_fill) = mixColors(chromeBackground, disabledText, 0.45);

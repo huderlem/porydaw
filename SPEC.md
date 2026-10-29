@@ -488,9 +488,11 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   **`CPU n%` readout** (docs/cpu-meter/PLAN.md): the song engine's estimated GBA CPU
   time of `m4aSoundMain` per frame, in percent of the VBlank window (83776 cycles =
   100 %), "--" unless the song plays; amber above the CPU budget (Settings → Audio,
-  in cycles per frame, default 60000 ≈ 72 %), red at the whole frame (280896
-  cycles); its tooltip has the cycles, the sequencer / CGB / mixer split, the peak,
-  the budget and frame lines and the engine configuration.
+  in cycles per frame, default 60000 ≈ 72 %), red past the VBlank window whatever
+  the budget (the whole frame, 280896 cycles = 335 %, is shown for scale only); its
+  tooltip has the cycles, the sequencer / CGB / mixer split, the peak and where in
+  the song it was, the budget, VBlank and whole-frame lines and the engine
+  configuration.
 - **Polyphony dock** (View → Polyphony Debugger, hidden by default): the full
   overflow debugger, mirroring the poryaaaa plugin's Polyphony tab. A live
   channel-usage grid (real PCM/CGB channels plus the shadow pool of lost sounds), a
@@ -503,20 +505,36 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   edit cursor/playhead there and selects the losing track and the lost note in the
   roll; live preview notes read "live" instead.
 - **CPU dock** (View → CPU, hidden by default; the Polyphony dock's sibling, placement
-  and visibility saved with the window layout): the CPU readout in full. The current
-  frame and the peak since playback last started from stop in large type with their
-  cycles, a Reset for the peak (no peak is shown before the song has played, nor
-  after a Reset or a change that makes the engine clear it — mix rate, mixer,
-  voicegroup or a voice edit that reloads it — while not playing, until the song
-  plays; `porydaw.audio.cpu()` follows the same rule), a breakdown bar (the sequencer — marked "(estimated)" when it is the
-  MIDI-path estimate — CGB and mixer terms stacked from the left over a two-zone
-  scale: the VBlank window linear across the first three quarters, the rest of the
-  frame compressed and tinted in the last quarter up to the red frame end; the
-  budget an amber line, the VBlank boundary drawn over it, the peak a triangle under
-  the bar), the three terms' cycles and share of the VBlank window, and the engine configuration it was costed for.
-  Stacked when narrow, readout beside the breakdown when wide. Fed from the status
-  bar's reading at the same cadence; nothing CPU-related is in the Polyphony dock.
-  Plugins read the same numbers through `porydaw.audio.cpu()`.
+  and visibility saved with the window layout): the CPU readout in full, one column
+  (redesigned 2026-10-29). A status pill (Within budget / Over budget / Past VBlank /
+  Stopped); the current frame's percent in large fixed-pitch type coloured by its
+  band, with its cycles and headroom (cycles under the budget; over it and what is
+  left in VBlank; past VBlank); a meter on one linear scale from 0 to 140 % of the
+  VBlank window (a faint amber band from the budget to the VBlank line, hatched red
+  past it; the mixer, sequencer and CGB terms of the current frame stacked from the
+  left, clamped at the scale's end with a chevron past it; the budget an amber line,
+  the VBlank end a red one drawn over it; the peak a dashed line with its percent
+  above; captions 0, Budget and its cycles ending at its line, VBlank end and 83,776
+  starting at its line, 140 % — never overlapping: a budget with no room beside its
+  line drops below the others); the last 10 seconds of playback frame by frame (a
+  filled line on the same scale, newest at the right, coloured by band, with the
+  VBlank and budget lines; "max n %, never over budget" or "over budget p % of the
+  time"; stopped, the last run stays dimmed until the next play from stop); a table
+  of the three terms (swatch, a proportional bar, cycles, share of the frame; the
+  sequencer marked "est." when it is the MIDI-path estimate); a card with the peak
+  since playback last started from stop ("Peak since Play", stopped "Peak in last
+  run"), its cycles and the song position it played at ("at m:ss.s", left out when
+  its frame did not play), and Reset peak (which also starts the history over); no
+  peak card or marker before the song has played, nor after a Reset or a change that
+  makes the engine clear the peak — mix rate, mixer, voicegroup or a voice edit that
+  reloads it — while not playing, until the song plays (`porydaw.audio.cpu()` follows
+  the same rule); a legend of the budget, VBlank and whole-frame lines with their
+  cycles and percent (the whole frame for scale only), and the engine configuration
+  it was costed for. Narrower than 400 px the legend's descriptions go under their
+  marks and Reset beside the card's title. Colours are theme roles (`cpu_meter_*`).
+  Fed from the status bar's reading at the same cadence plus the engine's history
+  copy; nothing CPU-related is in the Polyphony dock. Plugins read the same numbers
+  through `porydaw.audio.cpu()`.
 - **CPU profile strip** (View → CPU Profile, hidden by default, app-wide and
   persisted; D3 of docs/cpu-meter/PLAN.md): a thin band directly under the time
   ruler — its own widget, so none of the ruler's hit zones move — part of the header:
@@ -532,7 +550,7 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   job in flight), and on an engine-settings change; a budget change only recolours.
   Each device-pixel column shows the costliest frame in its span: a ramp from
   `cpu_profile_low_fill` toward `cpu_profile_warn_fill` up to the budget, amber above
-  it, `cpu_profile_over_fill` at the whole frame; chrome past the profiled span; the
+  it, `cpu_profile_over_fill` past the VBlank window; chrome past the profiled span; the
   shown profile dims while a new one is on its way ("CPU · profiling…" in the gutter).
   Hover gives the frame's percent, cycles, bar and the three terms (the gutter: the
   peak); right-click hides it. Hidden, nothing is rendered. Songs over 10 minutes are
@@ -716,7 +734,8 @@ open.
 - GBA-accuracy knobs surfaced in app settings, defaulted to hardware-accurate:
   PCM mix rate (13379 Hz default), HQ mixer (ipatix, off by default), polyphony
   (`maxChans`), reverb, and the CPU budget (GBA cycles per frame the CPU readout
-  warns above, 1000 to 280896, 60000 ≈ 72 % of the VBlank window by default, its
+  turns amber above — past the VBlank window it is red whatever the budget — 1000 to
+  280896, 60000 ≈ 72 % of the VBlank window by default, its
   percent shown beside it; QSettings `engine/cpuBudgetCycles`, a legacy
   `engine/cpuBudgetPercent` converted once on load and removed — except the old
   default 100, or an unreadable value, which just leaves the 60000 default).
@@ -726,8 +745,12 @@ open.
   mixers): the sequencer term (MPlayMain — estimated from the MIDI events porydaw
   plays, since there are no song bytes), the CGB term (CgbSound) and the mixer term
   (SoundMainRAM, the dominant one, by channel path, mix rate and mixer). The engine
-  publishes the last frame's cost and the peak; the audio callback copies them out
-  through a seqlock for the UI. Only the song engine is costed: the live and preview
+  publishes the last frame's cost and the peak, and every frame's cost in a short
+  ring (`costHistory`, with its CPU-clock stamp and peak epoch); the audio callback
+  copies the last frame and the peak out through a seqlock for the UI, and drains the
+  ring after each render into its own ten-second history of the frames the song
+  played (each with its song position; also where the peak played), which a stop
+  keeps and the peak's resets clear. Only the song engine is costed: the live and preview
   engines, the game's own load, modified mixers, WAITCNT changes and samples in RAM
   are outside the model.
 - **Offline WAV export** reuses the same timeline against a faster-than-realtime

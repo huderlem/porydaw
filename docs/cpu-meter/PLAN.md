@@ -95,6 +95,11 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   `engine/cpuBudgetCycles`, 1000..280896), default 60000 (≈ 72 %); amber
   when the frame's cycles exceed it; a stored `engine/cpuBudgetPercent`
   converts once on load.*
+  *2026-10-29: red = past VBlank (total > 83776 cycles, whatever the
+  budget); the whole frame (280896) is no longer a colour threshold, shown
+  for scale only (the dock's legend, the tooltip). Three bands: within the
+  budget, over it (amber, up to the VBlank window), past VBlank (red). The
+  status bar, the dock and the profile strip all follow `CpuPanel::level`.*
 - **D2 Where it shows (CONFIRMED: its own dock).** A new **CPU dock**,
   a sibling of the Polyphony dock (same View-menu placement, same
   show/hide persistence, SPEC §6.1 dock list): current and peak percent,
@@ -103,6 +108,17 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   item in the status-bar meter beside the PCM/PSG counts with the same
   tooltip, so it is visible without the dock. Nothing CPU-related goes into
   the Polyphony dock.
+  *2026-10-29: red = past VBlank; frame ceiling shown for scale only; dock
+  redesigned: hero, linear 0–140 % meter, 10 s history, breakdown table,
+  peak card, legend. One column: a status pill; the frame's percent large
+  with cycles and headroom; a linear meter 0..140 % of the VBlank window
+  (the two-zone bar is gone) with the budget, VBlank and peak lines; the
+  last 10 s of playback frame by frame (poryaaaa's new per-frame
+  `costHistory` ring drained by the audio callback into AudioEngine's
+  `cpuHistory`; kept through a stop, cleared with the peak); the three terms
+  with cycles and share of the frame; a peak card with the song position of
+  the peak (`CpuSnapshot::peakAtSeconds`) and Reset peak; a legend of the
+  budget, VBlank and whole-frame lines.*
 - **D3 Offline per-song profile (CONFIRMED).** A cycles-per-frame curve
   along the timeline (heat strip under the ruler), computed by a background
   render of the song through the same engine, so the user sees *which

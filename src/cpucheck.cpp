@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QLabel>
+#include <QLocale>
 #include <QMenu>
 #include <QRegularExpression>
 #include <QSettings>
@@ -12,6 +13,7 @@
 #include <QTemporaryDir>
 #include <QTimer>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -24,6 +26,7 @@
 #include "ui/audiosettingspage.h"
 #include "ui/cpupanel.h"
 #include "ui/settingsdialog.h"
+#include "ui/theme/themeresolver.h"
 #include "ui/theme/themeruntime.h"
 
 extern "C" {
@@ -36,8 +39,8 @@ extern "C" {
 // into a temp dir first. The song must loop, with its loop start inside
 // its first bars (mus_abandoned_ship: 4/4, loop start at tick 36).
 //
-// Covers: cpuLevel's thresholds (the red frame ceiling included: no stock
-// configuration reaches it) and the engine-tick bar lengths;
+// Covers: cpuLevel's thresholds (amber over the budget, red past the VBlank
+// window whatever the budget) and the engine-tick bar lengths;
 // AudioEngine::cpuSnapshot invalid right after a song loads, valid within a
 // few callbacks, its total always the sum of its three terms, the sequencer
 // term marked estimated; while the song plays the peak never decreases and
@@ -55,15 +58,19 @@ extern "C" {
 // across a timeline swap, the loop start's meter saved when the start lies
 // before it in the same bar and when it lies past it, and restored by the
 // GOTO at the wrap. Rendering with the hooks on and off is byte-identical.
-// The CPU dock (step 6): hidden by default, View → CPU shows it and the
-// saved window state brings it back; "--" with no song and stopped; while
-// playing its percent is the status bar's, its peak at least the current,
-// its breakdown bar's segments proportional to the three terms and adding
-// up to the total; the budget mark (in cycles: under the VBlank line at the
-// 60,000-cycle default, on it at a budget of the VBlank window) follows the
-// budget and the readout its
-// colour; Reset lowers the peak; narrow and wide layouts do not overlap;
-// no label or tooltip mentions sound effects (D4).
+// The CPU dock (step 6, redesigned 2026-10-29): on its own with synthetic
+// readings, every state's status pill, large percent and headroom line, the
+// linear 0..140 % meter (segments, budget and VBlank lines, the peak marker,
+// the clamp and chevron past the scale), its captions never overlapping at
+// any budget and width, the history's caption and dimming, the table, the
+// peak card (hidden with no peak, "at m:ss.s"), the legend, Reset. With the
+// song: hidden by default, View → CPU shows it and the saved window state
+// brings it back; while playing its percent is the status bar's, its meter
+// proportional to the three terms; the budget line follows the budget and
+// the readout its colour; AudioEngine's history fills a frame at a time with
+// monotonic song positions, survives a stop and is cleared by a play from
+// stop and resetCpuPeak; the peak's song position is a history frame's; Reset
+// lowers the peak; no label or tooltip mentions sound effects (D4).
 
 namespace {
 
@@ -137,84 +144,437 @@ bool mentionsEffects(const QStringList &strings)
     return false;
 }
 
-// Where the bar should put `cycles`, worked out here in floating point:
-// the VBlank window over the first three quarters of the track, linear,
-// the rest of the frame over the last quarter.
-int expectedX(const QRect &track, const AudioEngine::CpuSnapshot &cpu, int64_t cycles)
+// The meter's x for `cycles`, worked out here in floating point: one
+// linear scale from 0 to 140 % of the VBlank window across the track,
+// inset 4 px at both ends.
+int expectedX(const QRect &track, int64_t cycles)
 {
-    const double w = track.width();
-    const double w0 = std::lround(0.75 * w);
-    const double c = std::clamp<double>(double(cycles), 0.0, cpu.frameCycles);
-    const double x = c <= cpu.vblankCycles ? c * w0 / cpu.vblankCycles
-                                           : w0 + (c - cpu.vblankCycles) * (w - w0) /
-                                                      (cpu.frameCycles - cpu.vblankCycles);
-    return track.left() + int(std::lround(x));
+    const double scale = M4A_VBLANK_CYCLES * 1.4;
+    const double c = std::clamp<double>(double(cycles), 0.0, scale);
+    return track.left() + 4 + int(std::lround(c / scale * (track.width() - 8)));
 }
 
-// The breakdown bar against the panel's reading: every segment edge at
-// expectedX of its cumulative cycles, the segments end to end from the
-// track's left, the three adding up to the total's width; the VBlank
-// boundary at three quarters of the track and the frame end at its end.
-bool barMatchesReading(const CpuPanel &panel)
+// The meter against the panel's reading: mixer, sequencer and CGB end to
+// end from the scale's 0 in that order, every segment edge at expectedX of
+// its cumulative cycles, the three adding up to the total's width; the
+// budget and VBlank lines at theirs.
+bool meterMatchesReading(const CpuPanel &panel)
 {
     const AudioEngine::CpuSnapshot &cpu = panel.reading().cpu;
-    const QRect track = panel.barTrackRect();
-    if (track.width() <= 0 || cpu.frameCycles <= cpu.vblankCycles)
-        return false;
-    if (panel.vblankMarkX() != expectedX(track, cpu, cpu.vblankCycles) ||
-        panel.vblankMarkX() - track.left() != int(std::lround(0.75 * track.width())) ||
-        panel.ceilingMarkX() != track.left() + track.width())
+    const QRect track = panel.meterTrackRect();
+    if (track.width() <= 0 || panel.vblankMarkX() != expectedX(track, cpu.vblankCycles) ||
+        panel.budgetMarkX() != expectedX(track, panel.reading().budgetCycles))
         return false;
     int64_t cumulative = 0;
-    int edge = track.left(), sum = 0;
-    for (int term = 0; term < 3; term++) {
+    int edge = expectedX(track, 0), sum = 0;
+    for (const int term :
+         {int(AudioEngine::CpuMixer), int(AudioEngine::CpuSequencer), int(AudioEngine::CpuCgb)}) {
         const QRect r = panel.segmentRect(term);
         cumulative += cpu.last[term];
-        if (r.left() != edge || r.left() + r.width() != expectedX(track, cpu, cumulative))
+        if (r.left() != edge || r.left() + r.width() != expectedX(track, cumulative))
             return false;
         edge = r.left() + r.width();
         sum += r.width();
     }
-    return sum == expectedX(track, cpu, cpu.last[AudioEngine::CpuTotal]) - track.left();
+    return sum == expectedX(track, cpu.last[AudioEngine::CpuTotal]) - expectedX(track, 0);
 }
 
-// The bar's captions clear of each other, inside the bar, and the bar
-// clear of the term rows under it.
+// The meter's captions clear of each other and inside the meter; the
+// sections clear of each other.
 bool captionsClear(const CpuPanel &panel)
 {
-    const QList<QRect> captions = panel.captionRects();
-    const QRect bar = panel.barRect();
-    const QRect barLocal(QPoint(0, 0), bar.size());
+    const QList<CpuPanel::Caption> captions = panel.meterCaptions();
+    const QRect local(QPoint(0, 0), panel.meterRect().size());
     if (captions.size() < 2)
         return false;
     for (int i = 0; i < captions.size(); i++) {
-        if (!barLocal.contains(captions[i]))
+        if (!local.contains(captions[i].rect))
             return false;
         for (int j = i + 1; j < captions.size(); j++)
-            if (captions[i].intersects(captions[j]))
+            if (captions[i].rect.intersects(captions[j].rect))
                 return false;
     }
-    return !bar.intersects(panel.legendRect());
+    const QList<QRect> sections = panel.sectionRects();
+    for (int i = 0; i < sections.size(); i++)
+        for (int j = i + 1; j < sections.size(); j++)
+            if (sections[i].intersects(sections[j]))
+                return false;
+    return true;
+}
+
+bool hasCaption(const CpuPanel &panel, const QString &text)
+{
+    for (const CpuPanel::Caption &c : panel.meterCaptions())
+        if (c.text == text)
+            return true;
+    return false;
+}
+
+// A synthetic reading: `total` cycles split 20 % sequencer, 8 % CGB and the
+// rest mixer, the peak `peak` (none when 0), a history of `frames` frames
+// at `historyTotal`, `over` of them past the budget.
+CpuPanel::Reading syntheticReading(int32_t total, int32_t budget, bool playing, int32_t peak,
+                                   int frames = 0, int32_t historyTotal = 0, int over = 0)
+{
+    CpuPanel::Reading r;
+    r.loaded = true;
+    r.playing = playing;
+    r.budgetCycles = budget;
+    r.mixRate = 13379;
+    r.maxPcm = 5;
+    AudioEngine::CpuSnapshot &cpu = r.cpu;
+    cpu.valid = playing && total > 0;
+    cpu.estimated = true;
+    if (cpu.valid) {
+        cpu.last[AudioEngine::CpuSequencer] = total / 5;
+        cpu.last[AudioEngine::CpuCgb] = total * 2 / 25;
+        cpu.last[AudioEngine::CpuMixer] =
+            total - cpu.last[AudioEngine::CpuSequencer] - cpu.last[AudioEngine::CpuCgb];
+        cpu.last[AudioEngine::CpuTotal] = total;
+    }
+    if (peak > 0) {
+        cpu.peakValid = true;
+        cpu.peak[AudioEngine::CpuSequencer] = peak / 5;
+        cpu.peak[AudioEngine::CpuCgb] = peak * 2 / 25;
+        cpu.peak[AudioEngine::CpuMixer] =
+            peak - cpu.peak[AudioEngine::CpuSequencer] - cpu.peak[AudioEngine::CpuCgb];
+        cpu.peak[AudioEngine::CpuTotal] = peak;
+        cpu.peakAtSeconds = 72.34;
+    }
+    for (int i = 0; i < frames; i++) {
+        AudioEngine::CpuHistoryEntry e;
+        const int32_t t = i < over ? budget + 500 : historyTotal;
+        e.terms[AudioEngine::CpuMixer] = t;
+        e.terms[AudioEngine::CpuTotal] = t;
+        e.seconds = i / 59.7275;
+        r.history.push_back(e);
+    }
+    return r;
+}
+
+QString cyclesText(int64_t n)
+{
+    return QLocale().toString(qlonglong(n));
+}
+
+QString pct(int64_t cycles)
+{
+    return QStringLiteral("%1%").arg(std::lround(double(cycles) * 100.0 / M4A_VBLANK_CYCLES));
+}
+
+// The panel on its own, with synthetic readings: every state's strings, the
+// meter's geometry and captions, the history, the table, the peak card, the
+// legend, Reset.
+void checkPanelStandalone()
+{
+    const int32_t budget = AudioSettingsPage::kCpuBudgetDefault;
+    const QColor ok = themes::color(themes::Role::cpu_meter_ok_text);
+    const QColor amber = themes::color(themes::Role::cpu_meter_warn_text);
+    const QColor red = themes::color(themes::Role::cpu_meter_over_text);
+    const QColor plain = themes::color(themes::Role::window_text);
+
+    check(CpuPanel::songTime(0.0) == QStringLiteral("0:00.0") &&
+              CpuPanel::songTime(12.34) == QStringLiteral("0:12.3") &&
+              CpuPanel::songTime(59.96) == QStringLiteral("1:00.0") &&
+              CpuPanel::songTime(72.34) == QStringLiteral("1:12.3") &&
+              CpuPanel::songTime(605.0) == QStringLiteral("10:05.0"),
+          "CpuPanel::songTime is not m:ss.s");
+
+    CpuPanel panel;
+    int resets = 0;
+    QObject::connect(&panel, &CpuPanel::resetRequested, [&resets] { resets++; });
+    panel.resize(460, 1100);
+    panel.show();
+    QCoreApplication::processEvents();
+
+    // No song.
+    panel.setReading(CpuPanel::Reading());
+    check(panel.statusText() == QStringLiteral("No song") &&
+              panel.percentText() == QStringLiteral("—") && !panel.peakCardShown() &&
+              panel.segmentRect(AudioEngine::CpuMixer).isEmpty() && panel.configText().isEmpty(),
+          "standalone: with no song the dock shows a reading");
+
+    // Within budget.
+    const int32_t okTotal = 40000, okPeak = 50000;
+    panel.setReading(syntheticReading(okTotal, budget, true, okPeak, 300, 45000, 0));
+    QCoreApplication::processEvents();
+    check(panel.statusText() == QStringLiteral("Within budget") && panel.statusColor() == ok &&
+              panel.levelName().isEmpty(),
+          "standalone: within budget, the pill");
+    check(panel.percentText() == pct(okTotal) && panel.percentColor() == plain &&
+              panel.heroCaptionText() == QStringLiteral("of the VBlank window"),
+          "standalone: within budget, the large percent");
+    check(panel.headroomText() ==
+                  QStringLiteral("%1 under budget").arg(cyclesText(budget - okTotal)) &&
+              panel.detailText() ==
+                  QStringLiteral("%1 cycles · %2").arg(cyclesText(okTotal), panel.headroomText()),
+          "standalone: within budget, the headroom line");
+    check(meterMatchesReading(panel) && !panel.overflowShown(),
+          "standalone: the meter is not linear on 0..140% or the segments do not add up");
+    {
+        const QRect track = panel.meterTrackRect();
+        const int span = track.width() - 8;
+        check(std::abs((panel.vblankMarkX() - track.left() - 4) - int(std::lround(span / 1.4))) <=
+                  1,
+              "standalone: the VBlank line is not at 100/140 of the scale");
+        check(panel.budgetMarkX() < panel.vblankMarkX() && panel.budgetMarkX() > track.left(),
+              "standalone: the default budget is not left of the VBlank line");
+        check(panel.peakMarkX() == expectedX(track, okPeak) &&
+                  panel.peakLabelText() == QStringLiteral("Peak %1").arg(pct(okPeak)),
+              "standalone: the peak marker or its label");
+        check(
+            hasCaption(panel, QStringLiteral("Budget ") + cyclesText(budget)) &&
+                hasCaption(panel, QStringLiteral("VBlank end ") + cyclesText(M4A_VBLANK_CYCLES)) &&
+                hasCaption(panel, QStringLiteral("0")) && hasCaption(panel, QStringLiteral("140%")),
+            "standalone: the meter's captions at 460 px");
+        check(captionsClear(panel), "standalone: the meter's captions or the sections overlap");
+        // The VBlank line, opaque red across the track.
+        const QImage img = panel.meterImage();
+        const QPoint probe(panel.vblankMarkX(), track.center().y());
+        check(img.rect().contains(probe) && QColor(img.pixel(probe)).rgb() == red.rgb(),
+              "standalone: the VBlank line is not drawn red");
+        const QPoint budgetProbe(panel.budgetMarkX(), track.center().y());
+        check(QColor(img.pixel(budgetProbe)).rgb() == amber.rgb(),
+              "standalone: the budget line is not drawn amber");
+    }
+    check(panel.historyPoints() == 300 && !panel.historyDimmed() &&
+              panel.historyCaption() ==
+                  QStringLiteral("max %1, never over budget").arg(pct(45000)) &&
+              panel.historyOverlayText().isEmpty(),
+          "standalone: the history while playing, never over budget");
+    check(panel.historyYFor(0) > panel.historyYFor(M4A_VBLANK_CYCLES) &&
+              panel.historyYFor(int64_t(M4A_VBLANK_CYCLES * 1.4)) ==
+                  panel.historyYFor(int64_t(M4A_VBLANK_CYCLES * 2)),
+          "standalone: the history's scale is not 0..140% (clamped)");
+    {
+        const AudioEngine::CpuSnapshot &cpu = panel.reading().cpu;
+        bool rows = true;
+        for (int term = 0; term < 3; term++) {
+            rows = rows && panel.termCyclesText(term) == cyclesText(cpu.last[term]) &&
+                   panel.termShareText(term) ==
+                       QStringLiteral("%1%").arg(std::lround(cpu.last[term] * 100.0 / okTotal));
+        }
+        check(rows && panel.sequencerNoteText() == QStringLiteral("est.") &&
+                  panel.termBarFillWidth(AudioEngine::CpuMixer) >
+                      panel.termBarFillWidth(AudioEngine::CpuSequencer) &&
+                  panel.termBarFillWidth(AudioEngine::CpuSequencer) >
+                      panel.termBarFillWidth(AudioEngine::CpuCgb),
+              "standalone: the table's cycles, shares, bars or the estimate note");
+    }
+    check(panel.peakCardShown() && panel.peakTitleText() == QStringLiteral("Peak since Play") &&
+              panel.peakText() == pct(okPeak) && panel.peakColor() == plain &&
+              panel.peakDetailText() ==
+                  QStringLiteral("%1 cycles at 1:12.3").arg(cyclesText(okPeak)),
+          "standalone: the peak card while playing");
+    check(panel.legendTexts() ==
+                  QStringList({QStringLiteral("Budget"),
+                               QStringLiteral("recommended ceiling for audio"),
+                               QStringLiteral("%1 · %2").arg(cyclesText(budget), pct(budget)),
+                               QStringLiteral("VBlank"),
+                               QStringLiteral("past this, audio eats into the frame"),
+                               QStringLiteral("%1 · 100%").arg(cyclesText(M4A_VBLANK_CYCLES)),
+                               QStringLiteral("Frame"), QStringLiteral("whole frame, for scale"),
+                               QStringLiteral("%1 · 335%").arg(cyclesText(M4A_FRAME_CYCLES))}) &&
+              panel.configText() ==
+                  QStringLiteral("13379 Hz mix rate · 5 PCM channels · stock mixer"),
+          "standalone: the legend or the configuration line");
+
+    // Over budget, a quarter of the window over it.
+    const int32_t amberTotal = 70000;
+    panel.setReading(syntheticReading(amberTotal, budget, true, 75000, 400, 50000, 100));
+    check(panel.statusText() == QStringLiteral("Over budget") && panel.statusColor() == amber &&
+              panel.levelName() == QStringLiteral("warn") && panel.percentColor() == amber,
+          "standalone: over budget, the pill and the percent");
+    check(panel.headroomText() ==
+              QStringLiteral("%1 over budget, %2 left in VBlank")
+                  .arg(cyclesText(amberTotal - budget), cyclesText(M4A_VBLANK_CYCLES - amberTotal)),
+          "standalone: over budget, the headroom");
+    check(panel.historyCaption() ==
+              QStringLiteral("max %1, over budget 25% of the time").arg(pct(budget + 500)),
+          "standalone: the history's share over budget");
+    check(panel.peakColor() == amber, "standalone: an amber peak is not amber");
+    // The share never rounds to 0% with a frame over, nor to 100% with one
+    // under.
+    panel.setReading(syntheticReading(amberTotal, budget, true, 75000, 400, 50000, 1));
+    check(panel.historyCaption().endsWith(QStringLiteral("over budget 1% of the time")),
+          "standalone: one frame over in 400 does not read 1%");
+    panel.setReading(syntheticReading(amberTotal, budget, true, 75000, 400, 50000, 399));
+    check(panel.historyCaption().endsWith(QStringLiteral("over budget 99% of the time")),
+          "standalone: one frame under in 400 does not read 99%");
+    panel.setReading(syntheticReading(amberTotal, budget, true, 75000, 400, 50000, 400));
+    check(panel.historyCaption().endsWith(QStringLiteral("over budget 100% of the time")),
+          "standalone: every frame over does not read 100%");
+
+    // Past VBlank.
+    const int32_t redTotal = 90000;
+    panel.setReading(syntheticReading(redTotal, budget, true, 95000, 10, 90000, 10));
+    check(panel.statusText() == QStringLiteral("Past VBlank") && panel.statusColor() == red &&
+              panel.levelName() == QStringLiteral("over") && panel.percentColor() == red &&
+              panel.peakColor() == red,
+          "standalone: past VBlank, the pill, the percent or the peak");
+    check(panel.headroomText() ==
+              QStringLiteral("%1 cycles past VBlank").arg(cyclesText(redTotal - M4A_VBLANK_CYCLES)),
+          "standalone: past VBlank, the headroom");
+    check(meterMatchesReading(panel) && !panel.overflowShown(),
+          "standalone: past VBlank, the meter");
+
+    // Past the scale's end: the segments stop at it, with the chevron.
+    const int32_t overflow = int32_t(M4A_VBLANK_CYCLES * 1.5);
+    panel.setReading(syntheticReading(overflow, budget, true, overflow));
+    {
+        const QRect track = panel.meterTrackRect();
+        const QRect last = panel.segmentRect(AudioEngine::CpuCgb); // the rightmost
+        check(panel.overflowShown() && last.left() + last.width() == track.right() + 1 - 4 &&
+                  panel.peakMarkX() == last.left() + last.width() && meterMatchesReading(panel),
+              "standalone: past 140% the meter does not clamp at its end with the chevron");
+        check(panel.percentText() == pct(overflow), "standalone: past 140% the percent");
+    }
+
+    // Stopped: the last run's peak and history kept, dimmed.
+    panel.setReading(syntheticReading(0, budget, false, okPeak, 200, 45000, 0));
+    check(panel.statusText() == QStringLiteral("Stopped") &&
+              panel.percentText() == QStringLiteral("—") &&
+              panel.heroCaptionText() == QStringLiteral("not playing") &&
+              panel.detailText() ==
+                  QStringLiteral("Press Play to measure the sound driver frame by frame.") &&
+              panel.headroomText().isEmpty() && panel.levelName().isEmpty(),
+          "standalone: stopped, the status and the hero");
+    check(panel.segmentRect(AudioEngine::CpuMixer).isEmpty() &&
+              panel.termCyclesText(AudioEngine::CpuMixer) == QStringLiteral("—") &&
+              panel.termShareText(AudioEngine::CpuMixer) == QStringLiteral("—") &&
+              panel.termBarFillWidth(AudioEngine::CpuMixer) == 0,
+          "standalone: stopped, the meter or the table shows a frame");
+    check(panel.historyDimmed() && panel.historyPoints() == 200 &&
+              panel.historyCaption() == QStringLiteral("last run") &&
+              panel.historyOverlayText() == QStringLiteral("Last run shown dimmed"),
+          "standalone: stopped, the last run's history is not kept dimmed");
+    check(panel.peakCardShown() && panel.peakTitleText() == QStringLiteral("Peak in last run"),
+          "standalone: stopped, the peak card's title");
+    // A peak whose place is unknown.
+    {
+        CpuPanel::Reading r = syntheticReading(0, budget, false, okPeak);
+        r.cpu.peakAtSeconds = -1.0;
+        panel.setReading(r);
+        check(panel.peakDetailText() == QStringLiteral("%1 cycles").arg(cyclesText(okPeak)),
+              "standalone: a peak of unknown place says where");
+        check(panel.historyPoints() == 0 && !panel.historyDimmed() &&
+                  !panel.historyOverlayText().isEmpty(),
+              "standalone: no history, no hint");
+    }
+    // No peak (before the first play): no card.
+    panel.setReading(syntheticReading(0, budget, false, 0));
+    check(!panel.peakCardShown() && panel.peakText().isEmpty() && panel.peakMarkX() == -1 &&
+              panel.peakLabelText().isEmpty(),
+          "standalone: with no peak the card or the marker is shown");
+
+    // Reset → the signal.
+    panel.setReading(syntheticReading(okTotal, budget, true, okPeak));
+    panel.clickReset();
+    check(resets == 1, "standalone: Reset peak did not request a reset");
+
+    // The captions at awkward budgets and narrow widths: never overlapping.
+    for (const int width : {460, 300, 280}) {
+        panel.resize(width, 1100);
+        QCoreApplication::processEvents();
+        for (const int32_t b : {int32_t(1000), budget, int32_t(M4A_VBLANK_CYCLES - 2000),
+                                int32_t(M4A_VBLANK_CYCLES), int32_t(M4A_VBLANK_CYCLES + 6000),
+                                int32_t(M4A_VBLANK_CYCLES * 1.38), int32_t(M4A_FRAME_CYCLES)}) {
+            panel.setReading(syntheticReading(okTotal, b, true, okPeak, 50, 45000, 5));
+            QCoreApplication::processEvents();
+            const bool budgetShown = [&] {
+                for (const CpuPanel::Caption &c : panel.meterCaptions())
+                    if (c.text.startsWith(QStringLiteral("Budget ")))
+                        return true;
+                return false;
+            }();
+            char what[160];
+            std::snprintf(what, sizeof what,
+                          "standalone: at %d px and a budget of %d the captions overlap or the "
+                          "budget's is missing",
+                          width, int(b));
+            check(captionsClear(panel) && budgetShown && meterMatchesReading(panel), what);
+        }
+        check(panel.hScrollRange() == 0, "standalone: the dock's content is wider than the dock");
+    }
+    check(!mentionsEffects(panel.visibleStrings()),
+          "standalone: the CPU dock mentions sound effects (D4)");
+}
+
+// PORYDAW_CPUCHECK_SHOTS=<dir>: the dock in each state, light and dark, at
+// 460 and 300 px, as PNGs.
+void savePanelShots(const QString &dir)
+{
+    auto &app = static_cast<QApplication &>(*QCoreApplication::instance());
+    const int32_t budget = AudioSettingsPage::kCpuBudgetDefault;
+    const struct {
+        const char *name;
+        themes::Theme theme;
+    } looks[] = {{"light", themes::vanilla()},
+                 {"dark", themes::darkNeutralHigh()},
+                 {"immaterial", themes::immaterial()}};
+    const struct {
+        const char *name;
+        CpuPanel::Reading reading;
+    } states[] = {
+        {"ok", syntheticReading(40000, budget, true, 52000, 598, 42000, 0)},
+        {"amber", syntheticReading(70000, budget, true, 78000, 598, 52000, 150)},
+        {"red", syntheticReading(92000, budget, true, 99000, 598, 60000, 300)},
+        {"idle", syntheticReading(0, budget, false, 52000, 598, 42000, 0)},
+        {"bigbudget",
+         syntheticReading(70000, M4A_VBLANK_CYCLES + 9000, true, 78000, 598, 52000, 0)},
+    };
+    for (const auto &look : looks) {
+        themes::apply(app, look.theme);
+        for (const auto &state : states) {
+            // A wavy history, so the bands show.
+            CpuPanel::Reading r = state.reading;
+            for (size_t i = 0; i < r.history.size(); i++) {
+                const double t = double(i);
+                const double base = r.history[i].terms[AudioEngine::CpuTotal];
+                const double v =
+                    base * (1.0 + 0.12 * std::sin(t * 0.05) + 0.06 * std::sin(t * 0.31));
+                r.history[i].terms[AudioEngine::CpuTotal] = int32_t(v);
+            }
+            for (const int width : {460, 300}) {
+                CpuPanel panel;
+                panel.setReading(r);
+                panel.resize(width, 980);
+                panel.show();
+                QCoreApplication::processEvents();
+                QImage image(panel.size(), QImage::Format_ARGB32_Premultiplied);
+                image.fill(themes::color(themes::Role::window_background));
+                panel.render(&image);
+                image.save(QStringLiteral("%1/cpu-%2-%3-%4.png")
+                               .arg(dir, QLatin1String(look.name), QLatin1String(state.name))
+                               .arg(width));
+            }
+        }
+    }
 }
 
 } // namespace
 
 bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabel)
 {
-    // The thresholds (D1, budget in cycles since 2026-10-29): amber strictly
-    // above the budget, red from the whole frame on, whatever the budget.
+    // The thresholds (D1, amended 2026-10-29): amber strictly above the
+    // budget, red strictly past the VBlank window whatever the budget; the
+    // whole frame is no threshold.
     constexpr int32_t kDefaultBudget = AudioSettingsPage::kCpuBudgetDefault;
     check(kDefaultBudget == 60000 && CpuPanel::level(kDefaultBudget, kDefaultBudget) == 0 &&
-              CpuPanel::level(kDefaultBudget + 1, kDefaultBudget) == 1,
-          "CpuPanel::level is not amber at exactly the default budget + 1 cycle");
+              CpuPanel::level(kDefaultBudget + 1, kDefaultBudget) == 1 &&
+              CpuPanel::level(M4A_VBLANK_CYCLES, kDefaultBudget) == 1 &&
+              CpuPanel::level(M4A_VBLANK_CYCLES + 1, kDefaultBudget) == 2 &&
+              CpuPanel::level(M4A_FRAME_CYCLES, kDefaultBudget) == 2,
+          "CpuPanel::level at the budget, budget + 1, VBlank, VBlank + 1 and the frame");
     check(cpuLevel(0, kDefaultBudget) == 0 && cpuLevel(M4A_VBLANK_CYCLES, M4A_VBLANK_CYCLES) == 0 &&
-              cpuLevel(M4A_VBLANK_CYCLES + 1, M4A_VBLANK_CYCLES) == 1 &&
+              cpuLevel(M4A_VBLANK_CYCLES + 1, M4A_VBLANK_CYCLES) == 2 &&
               cpuLevel(41888, 41888) == 0 && cpuLevel(41889, 41888) == 1 &&
-              cpuLevel(M4A_FRAME_CYCLES - 1, AudioSettingsPage::kCpuBudgetMax) == 0 &&
-              cpuLevel(M4A_FRAME_CYCLES - 1, M4A_FRAME_CYCLES - 2) == 1 &&
-              cpuLevel(M4A_FRAME_CYCLES, AudioSettingsPage::kCpuBudgetMax) == 2 &&
+              cpuLevel(M4A_VBLANK_CYCLES, AudioSettingsPage::kCpuBudgetMax) == 0 &&
+              cpuLevel(M4A_VBLANK_CYCLES + 1, AudioSettingsPage::kCpuBudgetMax) == 2 &&
+              cpuLevel(M4A_FRAME_CYCLES - 1, M4A_FRAME_CYCLES - 2) == 2 &&
               cpuLevel(M4A_FRAME_CYCLES, AudioSettingsPage::kCpuBudgetMin) == 2,
-          "cpuLevel's budget and frame-ceiling thresholds");
+          "cpuLevel's budget and VBlank thresholds");
+    checkPanelStandalone();
     // The estimate counts engine ticks, 24 per quarter whatever the song's
     // clocks (-X included): the bar of a meter.
     {
@@ -255,9 +615,9 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(m_cpuDock->isVisible(), "the saved window state did not restore the CPU dock");
         updatePolyStatus();
         updateCpuPanel();
-        check(m_cpuPanel->percentText() == QStringLiteral("--") &&
-                  m_cpuPanel->peakText() == QStringLiteral("--") &&
-                  m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
+        check(m_cpuPanel->percentText() == QStringLiteral("—") && !m_cpuPanel->peakCardShown() &&
+                  m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty() &&
+                  m_cpuPanel->historyPoints() == 0,
               "with no song the CPU dock shows a reading");
         check(!mentionsEffects(m_cpuPanel->visibleStrings()),
               "the CPU dock mentions sound effects with no song (D4)");
@@ -337,17 +697,23 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     check(cpuText() == QStringLiteral("--") && cpuLevelProp().isEmpty(),
           "stopped, the CPU item shows a reading or a colour");
     updateCpuPanel();
-    check(m_cpuPanel->percentText() == QStringLiteral("--") && m_cpuPanel->levelName().isEmpty() &&
+    check(m_cpuPanel->percentText() == QStringLiteral("—") && m_cpuPanel->levelName().isEmpty() &&
+              m_cpuPanel->statusText() == QStringLiteral("Stopped") &&
               m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
           "stopped, the CPU dock shows a reading, a colour or a bar");
 
     // 2b. Before the song has ever played the engine's idle SoundMains have
     // a peak, but nothing played it: none is shown (D8).
     check(m_audio.cpuSnapshot().peakValid, "the idle engine has no peak (precondition)");
-    check(m_cpuPanel->peakText() == QStringLiteral("--") &&
-              m_cpuPanel->markRect(CpuPanel::MarkPeak).isEmpty() &&
+    check(!m_cpuPanel->peakCardShown() && m_cpuPanel->peakMarkX() == -1 &&
               !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
           "before the first play the CPU readout shows the idle frames' peak");
+    {
+        std::vector<AudioEngine::CpuHistoryEntry> history;
+        m_audio.cpuHistory(history);
+        check(history.empty() && m_cpuPanel->historyPoints() == 0,
+              "before the first play the history holds the idle frames");
+    }
 
     // 3. Play two seconds: every frame's cost, the peak monotone.
     m_audio.play();
@@ -377,6 +743,41 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     check(monotone, "the peak decreased while playing");
     check(aboveLast, "the peak sat under the last frame");
     check(peak > firstPeak, "the peak never rose over two seconds of the song");
+
+    // The history: a frame at a time (59.7275 a second) over the two
+    // seconds, in song order; the peak's place one of its frames'.
+    {
+        std::vector<AudioEngine::CpuHistoryEntry> history;
+        m_audio.cpuHistory(history);
+        const double expected = 2.0 * 59.7275;
+        bool monotone = true, sums = true;
+        for (size_t i = 0; i < history.size(); i++) {
+            const AudioEngine::CpuHistoryEntry &e = history[i];
+            monotone = monotone && e.seconds >= 0.0 && e.seconds <= 2.05 &&
+                       (i == 0 || e.seconds >= history[i - 1].seconds);
+            sums = sums && e.terms[AudioEngine::CpuTotal] == e.terms[AudioEngine::CpuSequencer] +
+                                                                 e.terms[AudioEngine::CpuCgb] +
+                                                                 e.terms[AudioEngine::CpuMixer];
+        }
+        std::printf("cpucheck: history %zu frames over 2 s (expected ~%.1f), %.3f..%.3f s\n",
+                    history.size(), expected, history.empty() ? 0.0 : history.front().seconds,
+                    history.empty() ? 0.0 : history.back().seconds);
+        check(std::abs(double(history.size()) - expected) <= 3.0,
+              "the history did not get one entry per frame over two seconds");
+        check(monotone && sums, "the history's positions are not in song order or its terms "
+                                "do not add up");
+        check(!history.empty() && history.back().seconds > 1.9,
+              "the history's last frame is not near the playhead");
+        const AudioEngine::CpuSnapshot s = m_audio.cpuSnapshot();
+        bool found = false;
+        for (const AudioEngine::CpuHistoryEntry &e : history)
+            found = found || (e.terms[AudioEngine::CpuTotal] == s.peak[AudioEngine::CpuTotal] &&
+                              e.seconds == s.peakAtSeconds);
+        check(s.peakAtSeconds >= 0.0 && found,
+              "the peak's song position is not the position of a history frame at the peak");
+        std::printf("cpucheck: peak %d cycles at %.3f s\n", s.peak[AudioEngine::CpuTotal],
+                    s.peakAtSeconds);
+    }
 
     // The song as declared: exactly the tracks with notes (up to the BGM
     // player's 10), the meter's bar, the loop start saved once passed.
@@ -423,18 +824,31 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                   shown.peak[AudioEngine::CpuTotal] >= shown.last[AudioEngine::CpuTotal] &&
                   percentValue(panel.peakText()) >= percentValue(panel.percentText()),
               "the CPU dock's peak is under its current reading");
-        check(!panel.cyclesText().isEmpty() && panel.cyclesText() != QStringLiteral("--") &&
-                  !panel.peakCyclesText().isEmpty() &&
-                  panel.peakCyclesText() != QStringLiteral("--"),
+        check(panel.detailText().startsWith(QLocale().toString(shown.last[AudioEngine::CpuTotal]) +
+                                            QStringLiteral(" cycles · ")) &&
+                  panel.peakDetailText().startsWith(
+                      QLocale().toString(shown.peak[AudioEngine::CpuTotal]) +
+                      QStringLiteral(" cycles")),
               "the CPU dock does not show the cycles");
-        check(barMatchesReading(panel) && panel.segmentRect(AudioEngine::CpuMixer).width() > 0,
-              "the CPU dock's bar is not proportional to the sequencer, CGB and mixer terms");
+        check(meterMatchesReading(panel) && panel.segmentRect(AudioEngine::CpuMixer).width() > 0,
+              "the CPU dock's meter is not proportional to the sequencer, CGB and mixer terms");
         check(panel.reading().budgetCycles == kDefaultBudget &&
-                  panel.budgetMarkX() > panel.barTrackRect().left() &&
-                  panel.budgetMarkX() < panel.vblankMarkX() &&
-                  panel.ceilingMarkX() > panel.vblankMarkX(),
-              "at the default budget the budget mark is not inside the VBlank window");
-        check(captionsClear(panel), "at the default budget the CPU bar's captions overlap");
+                  panel.budgetMarkX() > panel.meterTrackRect().left() &&
+                  panel.budgetMarkX() < panel.vblankMarkX(),
+              "at the default budget the budget line is not left of the VBlank line");
+        check(captionsClear(panel), "at the default budget the CPU meter's captions overlap");
+        const int lvl = CpuPanel::level(shown.last[AudioEngine::CpuTotal], kDefaultBudget);
+        const QString status = lvl == 2   ? QStringLiteral("Past VBlank")
+                               : lvl == 1 ? QStringLiteral("Over budget")
+                                          : QStringLiteral("Within budget");
+        check(panel.statusText() == status, "playing, the dock's status pill is not its level's");
+        check(panel.peakCardShown() && panel.peakTitleText() == QStringLiteral("Peak since Play") &&
+                  panel.peakDetailText().contains(QStringLiteral(" at 0:0")),
+              "playing, the peak card is hidden or does not say where the peak was");
+        check(panel.historyPoints() > 100 &&
+                  panel.historyCaption().startsWith(QStringLiteral("max ")) &&
+                  !panel.historyDimmed(),
+              "playing, the dock's history is not filled in");
     }
     // A budget of exactly the VBlank window puts its line on the VBlank
     // boundary.
@@ -444,33 +858,17 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     {
         const CpuPanel &panel = *m_cpuPanel;
         check(panel.budgetMarkX() == panel.vblankMarkX(),
-              "at a budget of the VBlank window the budget mark is not the window's end");
-        // The marks: each its own shape and place; the VBlank boundary
-        // stays visible over the budget line it coincides with here.
-        {
-            const QRect vb = panel.markRect(CpuPanel::MarkVblank);
-            const QRect bu = panel.markRect(CpuPanel::MarkBudget);
-            const QRect pk = panel.markRect(CpuPanel::MarkPeak);
-            const QRect ce = panel.markRect(CpuPanel::MarkCeiling);
-            const QRect track = panel.barTrackRect();
-            check(!vb.isEmpty() && !bu.isEmpty() && !pk.isEmpty() && !ce.isEmpty(),
-                  "a mark of the CPU bar is not drawn");
-            check(pk.top() > track.bottom() && !pk.intersects(vb) && !pk.intersects(bu) &&
-                      pk.size() != vb.size() && vb.size() != bu.size() && ce.left() > vb.right(),
-                  "the CPU bar's peak, VBlank and budget marks share a shape or place");
-            check(panel.markColor(CpuPanel::MarkVblank) != panel.markColor(CpuPanel::MarkBudget) &&
-                      panel.markColor(CpuPanel::MarkCeiling) !=
-                          panel.markColor(CpuPanel::MarkBudget) &&
-                      panel.markColor(CpuPanel::MarkCeiling) !=
-                          panel.markColor(CpuPanel::MarkVblank),
-                  "the CPU bar's marks share a colour");
-            const QImage bar = panel.barImage();
-            const QPoint probe(panel.vblankMarkX(), track.center().y());
-            check(bar.rect().contains(probe) &&
-                      QColor(bar.pixel(probe)).rgb() == panel.markColor(CpuPanel::MarkVblank).rgb(),
-                  "at a 100% budget the VBlank boundary is hidden under the budget line");
-            check(captionsClear(panel), "the CPU bar's captions overlap");
-        }
+              "at a budget of the VBlank window the budget line is not the window's end");
+        // The VBlank line stays visible over the budget line it coincides
+        // with here.
+        const QRect track = panel.meterTrackRect();
+        const QImage meter = panel.meterImage();
+        const QPoint probe(panel.vblankMarkX(), track.center().y());
+        check(meter.rect().contains(probe) &&
+                  QColor(meter.pixel(probe)).rgb() ==
+                      themes::color(themes::Role::cpu_meter_over_text).rgb(),
+              "at a 100% budget the VBlank line is hidden under the budget line");
+        check(captionsClear(panel), "at a 100% budget the CPU meter's captions overlap");
     }
     page->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);
     updatePolyStatus();
@@ -478,7 +876,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     {
         const CpuPanel &panel = *m_cpuPanel;
         const QStringList strings = panel.visibleStrings();
-        check(strings.contains(QStringLiteral("Sequencer (estimated)")) &&
+        check(strings.contains(QStringLiteral("Sequencer")) &&
+                  panel.sequencerNoteText() == QStringLiteral("est.") &&
                   strings.contains(QStringLiteral("CGB")) &&
                   strings.contains(QStringLiteral("Mixer")),
               "the CPU dock does not name the three terms or mark the estimate");
@@ -486,47 +885,26 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         std::printf("cpucheck: dock reads %s, peak %s; segments %d/%d/%d px of %d\n",
                     qUtf8Printable(panel.percentText()), qUtf8Printable(panel.peakText()),
                     panel.segmentRect(0).width(), panel.segmentRect(1).width(),
-                    panel.segmentRect(2).width(), panel.barTrackWidth());
+                    panel.segmentRect(2).width(), panel.meterTrackRect().width());
 
-        // Both layouts, on a standalone panel holding the same reading.
+        // The live reading at the reference width and a sliver dock.
         CpuPanel loose;
         loose.setReading(panel.reading());
-        loose.resize(240, 900);
-        loose.show();
-        QCoreApplication::processEvents();
-        check(!loose.wideLayoutActive() &&
-                  loose.breakdownSectionRect().top() >= loose.readoutSectionRect().bottom() &&
-                  !loose.breakdownSectionRect().intersects(loose.readoutSectionRect()),
-              "narrow: the breakdown does not sit below the readout");
-        check(barMatchesReading(loose) && loose.barTrackWidth() > 100,
-              "narrow: the breakdown bar does not fit the reading");
-        check(loose.hScrollRange() == 0, "narrow: the CPU dock's content is wider than the dock");
-        check(captionsClear(loose) && !loose.marksText().contains(QStringLiteral("VBlank")),
-              "narrow: the bar's captions overlap or the marks line is not the short one");
-        const int narrowBar = loose.barTrackWidth();
-        loose.resize(820, 500);
-        QCoreApplication::processEvents();
-        check(loose.wideLayoutActive() &&
-                  loose.breakdownSectionRect().left() >= loose.readoutSectionRect().right() &&
-                  !loose.breakdownSectionRect().intersects(loose.readoutSectionRect()),
-              "wide: the breakdown does not sit right of the readout");
-        check(barMatchesReading(loose) && loose.barTrackWidth() > narrowBar &&
-                  loose.breakdownSectionRect().contains(loose.barRect()),
-              "wide: the breakdown bar does not fit the reading or its section");
-        check(captionsClear(loose) && loose.marksText().contains(QStringLiteral("VBlank window")),
-              "wide: the bar's captions overlap or the marks line is not the full one");
-        QImage image(loose.size(), QImage::Format_ARGB32_Premultiplied);
-        image.fill(Qt::white);
-        loose.render(&image);
-        check(!image.isNull(), "the CPU dock does not render");
-        if (const QByteArray shot = qgetenv("PORYDAW_CPUCHECK_SHOT"); !shot.isEmpty()) {
-            image.save(QString::fromLocal8Bit(shot) + QStringLiteral("-wide.png"));
-            loose.resize(240, 640);
+        for (const int width : {460, 300}) {
+            loose.resize(width, 1000);
+            loose.show();
+            // The legend's relayout posts the scroll area's own.
             QCoreApplication::processEvents();
-            QImage narrow(loose.size(), QImage::Format_ARGB32_Premultiplied);
-            narrow.fill(Qt::white);
-            loose.render(&narrow);
-            narrow.save(QString::fromLocal8Bit(shot) + QStringLiteral("-narrow.png"));
+            QCoreApplication::processEvents();
+            check(meterMatchesReading(loose) && captionsClear(loose) && loose.hScrollRange() == 0,
+                  "the live reading's meter does not fit, its captions overlap or the dock "
+                  "scrolls sideways");
+        }
+        if (const QByteArray shot = qgetenv("PORYDAW_CPUCHECK_SHOT"); !shot.isEmpty()) {
+            QImage image(loose.size(), QImage::Format_ARGB32_Premultiplied);
+            image.fill(themes::color(themes::Role::window_background));
+            loose.render(&image);
+            image.save(QString::fromLocal8Bit(shot) + QStringLiteral("-live.png"));
         }
     }
 
@@ -541,9 +919,14 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         check(tip.contains(QStringLiteral("(estimated)")),
               "the tooltip does not mark the estimated sequencer term");
         check(tip.contains(QStringLiteral("VBlank window")) &&
-                  tip.contains(QStringLiteral("Frame end")) &&
-                  tip.contains(QStringLiteral("Budget")) && tip.contains(QStringLiteral("Peak")),
-              "the tooltip lacks the budget, VBlank, frame-end or peak line");
+                  tip.contains(QStringLiteral("red past it")) &&
+                  tip.contains(QStringLiteral("Whole frame")) &&
+                  tip.contains(QStringLiteral("for scale")) &&
+                  tip.contains(QStringLiteral("Budget")) && tip.contains(QStringLiteral("Peak")) &&
+                  !tip.contains(QStringLiteral("skipped")),
+              "the tooltip lacks the budget, VBlank, whole-frame or peak line");
+        check(tip.contains(QStringLiteral(" at 0:0")),
+              "the tooltip's peak line does not say where in the song it was");
         check(tip.contains(QStringLiteral("%1 Hz").arg(int(m_engineSettings.pcmMixRate + 0.5f))) &&
                   tip.contains(QStringLiteral("stock mixer")),
               "the tooltip does not say the mix rate and mixer in use");
@@ -556,10 +939,15 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     // 5. The budget: under the reading the item turns amber, over it plain.
     const QColor plain = themes::color(themes::Role::polyphony_value_text);
     const QColor amber = themes::color(themes::Role::cpu_meter_warn_text);
+    const QColor red = themes::color(themes::Role::cpu_meter_over_text);
     const int32_t total = m_lastPolyStatus ? m_lastPolyStatus->cpu.last[AudioEngine::CpuTotal] : 0;
-    check(total > kDefaultBudget ? cpuLevelProp() == QStringLiteral("warn") && textColour() == amber
-                                 : cpuLevelProp().isEmpty() && textColour() == plain,
-          "at the default budget the CPU item's colour does not follow the reading");
+    {
+        const int lvl = cpuLevel(total, kDefaultBudget);
+        check(lvl == 2   ? cpuLevelProp() == QStringLiteral("over") && textColour() == red
+              : lvl == 1 ? cpuLevelProp() == QStringLiteral("warn") && textColour() == amber
+                         : cpuLevelProp().isEmpty() && textColour() == plain,
+              "at the default budget the CPU item's colour is not its level's");
+    }
     if (check(total > 2 * AudioSettingsPage::kCpuBudgetMin,
               "the reading is too low to test the budget against")) {
         page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, total / 2));
@@ -580,9 +968,13 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
               "a budget over the reading did not return the CPU item to plain");
         updateCpuPanel();
         check(m_cpuPanel->budgetMarkX() > m_cpuPanel->vblankMarkX() &&
-                  m_cpuPanel->budgetMarkX() <= m_cpuPanel->ceilingMarkX() &&
-                  m_cpuPanel->levelName().isEmpty() && m_cpuPanel->percentColor() == plain,
-              "a budget over the reading did not move the dock's budget mark or clear its colour");
+                  m_cpuPanel->budgetMarkX() ==
+                      m_cpuPanel->meterXFor(int64_t(M4A_VBLANK_CYCLES * 1.4)) &&
+                  m_cpuPanel->levelName().isEmpty() &&
+                  m_cpuPanel->percentColor() == themes::color(themes::Role::window_text) &&
+                  captionsClear(*m_cpuPanel),
+              "a budget past the scale did not put the budget line at its end or clear the "
+              "colour");
         // The threshold in cycles: a budget of exactly the reading is not
         // over it, one cycle less is.
         page->setCpuBudget(total);
@@ -698,6 +1090,43 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                   "the GOTO did not restore the loop start's meter and phase");
             std::printf("cpucheck: loop start bar %d phase %d; after the wrap bar %d phase %d\n",
                         loopBar, loopPhase, int(est.barLen), estPhase(est));
+
+            // The history across a wrap inside one callback: the frames
+            // before it lie between the callback's start and the loop end,
+            // the ones after it between the loop start and the playhead,
+            // none in the song's intro.
+            const uint64_t from = timeline->loopEndSample - 2048;
+            m_audio.seek(from);
+            m_audio.pumpForTest(chunk, nullptr, chunk); // the seek lands
+            m_audio.seek(from);
+            std::vector<AudioEngine::CpuHistoryEntry> before;
+            const uint32_t headBefore = uint32_t(m_audio.cpuHistory(before));
+            m_audio.pumpForTest(4096, nullptr, 4096);
+            std::vector<AudioEngine::CpuHistoryEntry> after;
+            const uint32_t added = uint32_t(m_audio.cpuHistory(after)) - headBefore;
+            const double loopStartS = double(timeline->loopStartSample) / rate;
+            const double loopEndS = double(timeline->loopEndSample) / rate;
+            const double fromS = double(from) / rate;
+            const double nowS = double(m_audio.playheadSamples()) / rate;
+            int pre = 0, post = 0;
+            bool placed = added >= 3 && added <= after.size();
+            for (size_t k = after.size() - std::min<size_t>(added, after.size()); k < after.size();
+                 k++) {
+                const double s = after[k].seconds;
+                if (s >= fromS - 1e-6 && s <= loopEndS + 1e-6)
+                    pre++;
+                else if (s >= loopStartS - 1e-6 && s <= nowS + 1e-6)
+                    post++;
+                else
+                    placed = false;
+            }
+            check(m_audio.playheadSamples() < timeline->loopEndSample && placed && pre > 0 &&
+                      post > 0,
+                  "across a loop wrap the history placed a frame outside the loop's end and "
+                  "start");
+            std::printf("cpucheck: wrap in one callback: %u frames, %d before the loop end, %d "
+                        "after the loop start\n",
+                        added, pre, post);
         }
     }
 
@@ -708,10 +1137,28 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     check(cpuText() == QStringLiteral("--") && cpuLevelProp().isEmpty() && textColour() == plain,
           "stopped, the CPU item kept a reading or a colour");
     updateCpuPanel();
-    check(m_cpuPanel->percentText() == QStringLiteral("--") && m_cpuPanel->levelName().isEmpty() &&
+    check(m_cpuPanel->percentText() == QStringLiteral("—") && m_cpuPanel->levelName().isEmpty() &&
               m_cpuPanel->segmentRect(AudioEngine::CpuSequencer).isEmpty() &&
               m_cpuPanel->segmentRect(AudioEngine::CpuMixer).isEmpty(),
           "stopped, the CPU dock kept a reading, a colour or a bar");
+    // The last run's history stays, dimmed, through the stop.
+    std::vector<AudioEngine::CpuHistoryEntry> lastRun;
+    m_audio.cpuHistory(lastRun);
+    pumpSeconds(0.3);
+    {
+        std::vector<AudioEngine::CpuHistoryEntry> after;
+        m_audio.cpuHistory(after);
+        updatePolyStatus();
+        updateCpuPanel();
+        check(!lastRun.empty() && after.size() == lastRun.size() &&
+                  after.back().seconds == lastRun.back().seconds,
+              "a stop (and the idle frames after it) changed the history");
+        check(m_cpuPanel->historyDimmed() &&
+                  m_cpuPanel->historyCaption() == QStringLiteral("last run") &&
+                  m_cpuPanel->peakCardShown() &&
+                  m_cpuPanel->peakTitleText() == QStringLiteral("Peak in last run"),
+              "stopped, the dock does not show the last run dimmed with its peak");
+    }
     check(!mentionsEffects(m_cpuPanel->visibleStrings()),
           "stopped, the CPU dock mentions sound effects (D4)");
     check(!est.songDeclared && !est.playing, "stopping did not end the estimate's song");
@@ -741,6 +1188,12 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         // continuation marks them all done.
         check(est.songDeclared && (est.firstNote & est.declared) != est.declared,
               "play from stop continued the song instead of starting it");
+        std::vector<AudioEngine::CpuHistoryEntry> history;
+        m_audio.cpuHistory(history);
+        check(!history.empty() &&
+                  double(history.size()) <= double(startCalls * chunk) / rate * 59.7275 + 2.0 &&
+                  history.front().seconds < 0.05,
+              "play from stop did not start the history over");
     }
 
     // 11. resetCpuPeak: the peak restarts at the next frame, lower than the
@@ -761,6 +1214,9 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
         const int32_t after = peakNow();
         check(after <= sinceMax && above, "resetCpuPeak did not restart the peak");
         check(after < before, "resetCpuPeak did not lower the peak");
+        std::vector<AudioEngine::CpuHistoryEntry> history;
+        m_audio.cpuHistory(history);
+        check(history.size() <= 4, "resetCpuPeak did not start the history over");
         std::printf("cpucheck: peak %d before resetCpuPeak, %d after\n", before, after);
     }
 
@@ -796,17 +1252,17 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     updatePolyStatus();
     updateCpuPanel();
     check(percentValue(m_cpuPanel->peakText()) > 0 &&
-              m_cpuPanel->percentText() == QStringLiteral("--"),
+              m_cpuPanel->percentText() == QStringLiteral("—"),
           "stopped, the CPU dock does not keep the last playback's peak");
     m_cpuPanel->clickReset();
     for (int i = 0; i < 4; i++)
         m_audio.pumpForTest(chunk, nullptr, chunk);
     updatePolyStatus();
     updateCpuPanel();
-    check(m_cpuPanel->peakText() == QStringLiteral("--") &&
-              m_cpuPanel->markRect(CpuPanel::MarkPeak).isEmpty() &&
+    check(!m_cpuPanel->peakCardShown() && m_cpuPanel->peakMarkX() == -1 &&
               !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
           "a Reset while stopped shows the idle frames' cost as the peak");
+    check(m_cpuPanel->historyPoints() == 0, "a Reset while stopped kept the last run's history");
     m_audio.play();
     pumpSeconds(0.3);
     updatePolyStatus();
@@ -839,7 +1295,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
             m_audio.pumpForTest(chunk, nullptr, chunk);
         updatePolyStatus();
         updateCpuPanel();
-        check(m_audio.cpuSnapshot().peakValid && m_cpuPanel->peakText() == QStringLiteral("--") &&
+        check(m_audio.cpuSnapshot().peakValid && !m_cpuPanel->peakCardShown() &&
+                  m_cpuPanel->historyPoints() == 0 &&
                   !m_cpuValueLabel->toolTip().contains(QStringLiteral("Peak")),
               "a mix-rate change while stopped shows the idle frames' peak");
         page->setEngineSettings(before);
@@ -849,6 +1306,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     m_audio.stop();
     m_audio.pumpForTest(chunk, nullptr, chunk);
     m_audio.holdDeviceForTest(false);
+    if (const QByteArray dir = qgetenv("PORYDAW_CPUCHECK_SHOTS"); !dir.isEmpty())
+        savePanelShots(QString::fromLocal8Bit(dir));
 
     // 12. The hooks only count: the same span rendered with them on and off
     // is byte-identical (from the start, then across the loop wrap).

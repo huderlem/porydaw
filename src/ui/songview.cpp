@@ -9624,8 +9624,8 @@ void SongView::setCpuBudgetCycles(int32_t cycles)
 
 QColor SongView::cpuProfileColor(int32_t cycles) const
 {
-    // D1's thresholds, as the readout's (CpuPanel::level): red from the
-    // whole frame on, amber above the budget; under it a ramp from the
+    // D1's thresholds, as the readout's (CpuPanel::level): red past the
+    // VBlank window, amber above the budget; under it a ramp from the
     // neutral end toward the amber, so the hot bars warm up before they
     // cross it.
     switch (CpuPanel::level(cycles, m_cpuBudgetCycles)) {

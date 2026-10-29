@@ -244,9 +244,9 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_cpuBudget->setKeyboardTracking(false);
     const QString cpuBudgetTip =
         tr("How many GBA CPU cycles the sound driver (m4aSoundMain) may use per frame before "
-           "the status bar's CPU readout turns amber. The VBlank window is %L1 cycles; up to "
-           "%L2, the whole frame: a sound driver running longer than that makes the game skip "
-           "a frame of audio, and the readout turns red.")
+           "the CPU readout turns amber. The VBlank window is %L1 cycles: past it the readout "
+           "turns red whatever the budget, as the sound driver eats into the frame. Up to %L2, "
+           "the whole frame.")
             .arg(M4A_VBLANK_CYCLES)
             .arg(kCpuBudgetMax);
     m_cpuBudget->setToolTip(cpuBudgetTip);

@@ -137,7 +137,7 @@ class MainWindow : public QMainWindow
 
     // The CPU readout's colour for a frame of `total` cycles against a
     // budget in cycles (D1, amended 2026-10-29): 0 normal, 1 over the
-    // budget (amber), 2 at the frame ceiling (red).
+    // budget (amber), 2 past the VBlank window (red), whatever the budget.
     static int cpuLevel(int32_t total, int32_t budgetCycles);
     // Settings → Audio → CPU budget as stored (engine/cpuBudgetCycles),
     // clamped; converts a legacy engine/cpuBudgetPercent once (stores the
@@ -996,7 +996,7 @@ class MainWindow : public QMainWindow
                                     const AudioEngine::CpuSnapshot &b) {
                 return a.valid == b.valid && a.estimated == b.estimated &&
                        a.peakValid == b.peakValid && std::equal(a.last, a.last + 4, b.last) &&
-                       std::equal(a.peak, a.peak + 4, b.peak);
+                       std::equal(a.peak, a.peak + 4, b.peak) && a.peakAtSeconds == b.peakAtSeconds;
             };
             return loaded == other.loaded && activePcm == other.activePcm &&
                    maxPcm == other.maxPcm && activeCgb == other.activeCgb &&

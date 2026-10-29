@@ -138,17 +138,26 @@ enum class Role {
     track_header_panel_outline,
     polyphony_value_background,
     polyphony_value_text,
-    // The status bar's CPU readout over the budget (amber) and at the frame
-    // ceiling (red), on the polyphony value background.
+    // The CPU readouts (status bar, CPU dock) over the budget (amber) and
+    // past the VBlank window (red), on the polyphony value background and
+    // the dock's window background; within the budget (green: the dock's
+    // status pill and headroom).
     cpu_meter_warn_text,
     cpu_meter_over_text,
-    // The CPU dock's breakdown bar: the sequencer, CGB and mixer segments.
+    cpu_meter_ok_text,
+    // The CPU dock's meter, share bars and table swatches: the sequencer,
+    // CGB and mixer segments.
     cpu_meter_sequencer_fill,
     cpu_meter_cgb_fill,
     cpu_meter_mixer_fill,
+    // The CPU dock's recessed meter track and history chart surface, the
+    // raised peak card, and the history line under the budget.
+    cpu_meter_track_background,
+    cpu_meter_card_background,
+    cpu_meter_history_fill,
     // The CPU profile strip under the ruler: its ramp's neutral end (a
     // cheap frame), the amber over the budget (the ramp leans toward it
-    // below), the red at the frame ceiling.
+    // below), the red past the VBlank window.
     cpu_profile_low_fill,
     cpu_profile_warn_fill,
     cpu_profile_over_fill,

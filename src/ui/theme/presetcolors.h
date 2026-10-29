@@ -85,11 +85,9 @@ enum class PresetColor {
     /// Polyphony cell playing a lost sound in solo-overflow mode: a fixed
     /// identity blue.
     polyphony_shadow_cell,
-    /// Dropped-note rows in the polyphony event log, and the status bar's CPU
-    /// readout at the frame ceiling.
+    /// Dropped-note rows in the polyphony event log.
     polyphony_dropped_text,
-    /// Cut-off-note rows in the polyphony event log, and the status bar's CPU
-    /// readout over its budget.
+    /// Cut-off-note rows in the polyphony event log.
     polyphony_stolen_text,
     /// Overflow-table row flash on a fresh drop: a fixed identity red faded
     /// by the panel.
@@ -100,6 +98,15 @@ enum class PresetColor {
     cpu_sequencer_fill,
     cpu_cgb_fill,
     cpu_mixer_fill,
+    /// The CPU readouts (status bar, CPU dock): within the budget (green),
+    /// over it (amber), past the VBlank window (red), each 4.5:1 on both the
+    /// window and the item surface.
+    cpu_ok_text,
+    cpu_warn_text,
+    cpu_over_text,
+    /// The CPU dock's history line under the budget: a fixed-hue blue kept
+    /// 3:1 on the input surface the chart is drawn on.
+    cpu_history_line,
     /// The CPU profile strip's cheap end: a quiet neutral that still reads
     /// against the timeline chrome it sits on. Its amber and red are the
     /// Polyphony cells' fixed releasing amber and flash red.
@@ -120,7 +127,7 @@ enum class PresetColor {
 };
 
 inline constexpr auto presetColorCount = static_cast<std::size_t>(PresetColor::count);
-static_assert(presetColorCount == 40);
+static_assert(presetColorCount == 44);
 
 constexpr PresetColor presetColorFor(Role role);
 
@@ -262,14 +269,19 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::outline,
     PresetColor::item_background,
     PresetColor::window_text,
-    // The CPU readout's amber and red: the event log's severity inks, which
-    // are authored for the same item surface.
-    PresetColor::polyphony_stolen_text,
-    PresetColor::polyphony_dropped_text,
+    // The CPU readout's amber, red and green.
+    PresetColor::cpu_warn_text,
+    PresetColor::cpu_over_text,
+    PresetColor::cpu_ok_text,
     // The CPU dock's breakdown segments: fixed identities, like the cells.
     PresetColor::cpu_sequencer_fill,
     PresetColor::cpu_cgb_fill,
     PresetColor::cpu_mixer_fill,
+    // The CPU dock's recessed track and chart (the input surface), its
+    // raised peak card (the item surface), the history line.
+    PresetColor::input_background,
+    PresetColor::item_background,
+    PresetColor::cpu_history_line,
     // The CPU profile strip: its neutral end, then the fixed amber and red.
     PresetColor::cpu_profile_low,
     PresetColor::polyphony_releasing_cell,
@@ -367,6 +379,12 @@ constexpr PresetColors makeVanilla()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    // The CPU inks darken a little further than the log's: the dock shows
+    // them on the darker window surface (4.5:1 there).
+    colors.color(PresetColor::cpu_ok_text) = "#185529";
+    colors.color(PresetColor::cpu_warn_text) = "#664405";
+    colors.color(PresetColor::cpu_over_text) = "#8F2727";
+    colors.color(PresetColor::cpu_history_line) = "#2A5FB8";
     colors.color(PresetColor::cpu_profile_low) = "#8E9CA8";
     // The accent is too pale for a trace on the light item surface (the raw
     // selection cyan sat 1.16:1 there); this is the accent hue walked toward
@@ -426,6 +444,10 @@ constexpr PresetColors makeDarkNeutralHigh()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    colors.color(PresetColor::cpu_ok_text) = "#7DD89B";
+    colors.color(PresetColor::cpu_warn_text) = "#E2A854";
+    colors.color(PresetColor::cpu_over_text) = "#F09999";
+    colors.color(PresetColor::cpu_history_line) = "#7FA7F5";
     colors.color(PresetColor::cpu_profile_low) = "#56626E";
     // Matches the selection cyan the waveform always rendered here: 5.83:1 on
     // the item surface, so this preset keeps its look.
@@ -481,6 +503,10 @@ constexpr PresetColors makeImmaterial()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    colors.color(PresetColor::cpu_ok_text) = "#7DD89B";
+    colors.color(PresetColor::cpu_warn_text) = "#E2A854";
+    colors.color(PresetColor::cpu_over_text) = "#F09999";
+    colors.color(PresetColor::cpu_history_line) = "#7FA7F5";
     colors.color(PresetColor::cpu_profile_low) = "#4E5A68";
     // Matches the selection cyan the waveform always rendered here: 6.37:1 on
     // the item surface, so this preset keeps its look.

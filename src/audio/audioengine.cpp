@@ -1971,6 +1971,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             // The song holds at its start; the engine runs on for live play.
             n = uint32_t(std::min<uint64_t>(n, m_countIn.lengthSamples - m_countInPos));
             m4a_engine_process(engine, m_bufL.get(), m_bufR.get(), int(n));
+            drainCostHistory(false, 0, 0, n, tl);
             if (countInClicks)
                 queueCountInClicks(m_countInPos, m_countInPos + n, done, frameCount);
             m_countInPos += n;
@@ -1985,6 +1986,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
             // The only latched render: every offline path passes none.
             m_player.render(engine, tl, m_bufL.get(), m_bufR.get(), n, looping, m_appliedMute,
                             &m_liveLatch, &m_punchMask);
+            drainCostHistory(true, p0, m_player.position(), n, tl);
             if (metronomeOn)
                 scheduleClicks(tl, p0, m_player.position(), m_player.wrapCount() - w0, done,
                                frameCount);
@@ -1998,6 +2000,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
         } else {
             // Idle: keep processing so releases and reverb ring out.
             m4a_engine_process(engine, m_bufL.get(), m_bufR.get(), int(n));
+            drainCostHistory(false, 0, 0, n, tl);
         }
 
         // The audition instance is mixed on top so voice previews are heard
@@ -2103,7 +2106,119 @@ void AudioEngine::publishCpuCost()
                              (last.sequencerEstimated ? kCpuEstimated : 0) |
                              (peak.valid ? kCpuPeakValid : 0)),
                      std::memory_order_relaxed);
+    // The peak's place, when the history saw the engine's peak frame play.
+    m_cpuPeakAt.store(peak.valid && peak.total == m_costPeakSeen ? m_costPeakAt : -1.0,
+                      std::memory_order_relaxed);
     m_cpuSeq.store(seq + 2, std::memory_order_release);
+}
+
+void AudioEngine::drainCostHistory(bool record, uint64_t p0, uint64_t p1, uint32_t frames,
+                                   const MidiTimeline *tl)
+{
+    const M4AEngine *engine = m_engine.get();
+    const uint32_t seq = engine->costHistorySeq; // this thread writes it
+    uint32_t from = m_costSeqSeen;
+    if (seq - from > uint32_t(M4A_COST_HISTORY))
+        from = seq - uint32_t(M4A_COST_HISTORY); // older entries were overwritten
+    m_costSeqSeen = seq;
+    if (from == seq)
+        return;
+    uint64_t span = m_cpuHistSpan.load(std::memory_order_relaxed);
+    uint32_t base = uint32_t(span >> 32), head = uint32_t(span);
+    const auto toSeconds = [this](double samples) {
+        return m_sampleRate > 0.0 ? samples / m_sampleRate : 0.0;
+    };
+    for (uint32_t s = from; s != seq; s++) {
+        const uint32_t i = s & uint32_t(M4A_COST_HISTORY - 1);
+        const M4AFrameCost &c = engine->costHistory[i];
+        // A new epoch: the engine's peak restarted (play from stop, a
+        // Reset, a configuration change), and the history with it.
+        if (engine->costHistoryEpoch[i] != m_costEpochSeen) {
+            m_costEpochSeen = engine->costHistoryEpoch[i];
+            m_costPeakSeen = -1;
+            m_costPeakAt = -1.0;
+            base = head;
+        }
+        if (!c.valid)
+            continue;
+        // Where the frame played: back from the render's end by the GBA
+        // clock, inside the render's span. Across a loop wrap the span is
+        // p0 to the loop end, then the loop start to p1.
+        double pos = double(p1);
+        if (record) {
+            const double behind =
+                double(engine->gba.now - engine->costHistoryStamp[i]) * m_sampleRate / GBA_CPU_HZ;
+            const double elapsed = std::clamp(double(frames) - behind, 0.0, double(frames));
+            pos = double(p0) + elapsed;
+            if (p1 >= p0) {
+                pos = std::clamp(pos, double(p0), double(p1));
+            } else if (tl && tl->hasLoop()) {
+                const double loopEnd = double(tl->loopEndSample);
+                const double loopStart = double(tl->loopStartSample);
+                pos = pos < loopEnd
+                          ? std::clamp(pos, double(p0), loopEnd)
+                          : std::clamp(loopStart + (pos - loopEnd), loopStart, double(p1));
+            } else {
+                pos = double(p1);
+            }
+        }
+        if (c.total > m_costPeakSeen) {
+            m_costPeakSeen = c.total;
+            m_costPeakAt = record ? toSeconds(pos) : -1.0;
+        }
+        if (!record)
+            continue;
+        CpuHistSlot &slot = m_cpuHist[head & (kCpuHistCapacity - 1)];
+        const int32_t terms[4] = {c.sequencer, c.cgb, c.mixer, c.total};
+        for (int t = 0; t < 4; t++)
+            slot.terms[t].store(terms[t], std::memory_order_relaxed);
+        slot.seconds.store(toSeconds(pos), std::memory_order_relaxed);
+        head++;
+    }
+    const uint64_t next = (uint64_t(base) << 32) | head;
+    if (next != span)
+        m_cpuHistSpan.store(next, std::memory_order_release);
+}
+
+void AudioEngine::clearCostHistory()
+{
+    const M4AEngine *engine = m_engine.get();
+    m_costSeqSeen = engine ? engine->costHistorySeq : 0;
+    m_costEpochSeen = engine ? engine->costEpoch : 0;
+    m_costPeakSeen = -1;
+    m_costPeakAt = -1.0;
+    const uint32_t head = uint32_t(m_cpuHistSpan.load(std::memory_order_relaxed));
+    m_cpuHistSpan.store((uint64_t(head) << 32) | head, std::memory_order_release);
+}
+
+uint64_t AudioEngine::cpuHistory(std::vector<CpuHistoryEntry> &out) const
+{
+    out.clear();
+    const uint64_t span = m_cpuHistSpan.load(std::memory_order_acquire);
+    const uint32_t base = uint32_t(span >> 32), head = uint32_t(span);
+    const uint32_t count = std::min<uint32_t>(head - base, uint32_t(kCpuHistoryFrames));
+    out.resize(count);
+    for (uint32_t k = 0; k < count; k++) {
+        const CpuHistSlot &slot = m_cpuHist[(head - count + k) & (kCpuHistCapacity - 1)];
+        for (int t = 0; t < 4; t++)
+            out[k].terms[t] = slot.terms[t].load(std::memory_order_relaxed);
+        out[k].seconds = slot.seconds.load(std::memory_order_relaxed);
+    }
+    // Whatever the writer lapped while this copied is dropped; a clear
+    // meanwhile empties the copy (the next read has the new history).
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const uint64_t after = m_cpuHistSpan.load(std::memory_order_relaxed);
+    if ((after >> 32) != (span >> 32)) {
+        out.clear();
+        return after;
+    }
+    // The writer may also be part-way through a batch it has not published
+    // yet (up to one engine history's worth): count those as written too.
+    const uint32_t written = uint32_t(after) - head + uint32_t(M4A_COST_HISTORY);
+    const uint32_t room = kCpuHistCapacity - count;
+    if (written > room)
+        out.erase(out.begin(), out.begin() + std::min<uint32_t>(count, written - room));
+    return span;
 }
 
 void AudioEngine::clearCpuCost()
@@ -2116,8 +2231,10 @@ void AudioEngine::clearCpuCost()
         m_cpuPeak[i].store(0, std::memory_order_relaxed);
     }
     m_cpuFlags.store(0, std::memory_order_relaxed);
+    m_cpuPeakAt.store(-1.0, std::memory_order_relaxed);
     m_cpuSeq.store(seq + 2, std::memory_order_release);
     m_lastCpuSnapshot = CpuSnapshot();
+    clearCostHistory();
 }
 
 AudioEngine::CpuSnapshot AudioEngine::cpuSnapshot() const
@@ -2135,6 +2252,7 @@ AudioEngine::CpuSnapshot AudioEngine::cpuSnapshot() const
             s.peak[i] = m_cpuPeak[i].load(std::memory_order_relaxed);
         }
         const uint8_t flags = m_cpuFlags.load(std::memory_order_relaxed);
+        s.peakAtSeconds = m_cpuPeakAt.load(std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_acquire);
         if (m_cpuSeq.load(std::memory_order_relaxed) != seq)
             continue;

@@ -5962,6 +5962,7 @@ void MainWindow::updatePolyStatus()
         // after a Reset while stopped, or after a change that cleared it.
         if (!cpuPeakShown()) {
             status.cpu.peakValid = false;
+            status.cpu.peakAtSeconds = -1.0;
             std::fill(std::begin(status.cpu.peak), std::end(status.cpu.peak), 0);
         }
         status.cpuBudget = m_cpuBudgetCycles;
@@ -6070,6 +6071,11 @@ void MainWindow::updateCpuPanel()
         reading.mixRate = status.mixRate;
         reading.maxPcm = status.maxPcm;
         reading.hqMixer = status.hqMixer;
+        // The last ten seconds of playback; kept while stopped, until the
+        // next play from stop clears it with the peak, and hidden with the
+        // peak (a Reset or a Settings change while stopped).
+        if (status.cpuPlaying || cpuPeakShown())
+            m_audio.cpuHistory(reading.history);
     } else {
         reading.budgetCycles = m_cpuBudgetCycles;
     }
@@ -6099,14 +6105,19 @@ QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
         lines << (status.cpuPlaying ? tr("No reading yet.") : tr("Shown while the song plays."));
     }
     if (cpu.peakValid)
-        lines << tr("Peak since playback started: %1, %2 (a change of mix rate, mixer or "
+        lines << tr("Peak since playback started: %1, %2%3 (a change of mix rate, mixer or "
                     "voicegroup starts it over)")
                      .arg(cycles(cpu.peak[AudioEngine::CpuTotal]),
-                          percent(cpu.peak[AudioEngine::CpuTotal]));
-    lines << tr("Budget: %1, %2 of the VBlank window, set in Settings → Audio")
+                          percent(cpu.peak[AudioEngine::CpuTotal]),
+                          cpu.peakAtSeconds >= 0.0
+                              ? tr(" at %1").arg(CpuPanel::songTime(cpu.peakAtSeconds))
+                              : QString());
+    lines << tr("Budget: %1, %2 of the VBlank window, set in Settings → Audio; amber above it")
                  .arg(cycles(status.cpuBudget), percent(status.cpuBudget));
-    lines << tr("VBlank window: %1 = 100%").arg(cycles(cpu.vblankCycles));
-    lines << tr("Frame end: %1 = %2; past it the next frame's sound is skipped")
+    lines << tr("VBlank window: %1 = 100%; red past it, where the sound driver eats into the "
+                "frame")
+                 .arg(cycles(cpu.vblankCycles));
+    lines << tr("Whole frame: %1 = %2, for scale")
                  .arg(cycles(cpu.frameCycles), percent(cpu.frameCycles));
     lines << tr("%1 Hz mix rate, %2 PCM channels, %3")
                  .arg(status.mixRate)

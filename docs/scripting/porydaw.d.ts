@@ -337,7 +337,7 @@ declare namespace porydaw {
         budgetPercent: number;
         /** The VBlank window, 83776 cycles (100 %). */
         vblankCycles: number;
-        /** The whole frame, 280896 cycles: past it the next frame's sound is skipped. */
+        /** The whole frame, 280896 cycles, for scale (red is past vblankCycles). */
         frameCycles: number;
     }
 

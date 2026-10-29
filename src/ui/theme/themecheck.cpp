@@ -348,6 +348,33 @@ void checkDerivedThemes(Reporter &reporter)
                       "a dark derived CPU profile step is lost on the chrome");
     cpuProfileLegible(themes::derive(QColor("#F2F2F2"), QColor("#0055AA")),
                       "a light derived CPU profile step is lost on the chrome");
+    // The CPU dock: its status inks read on the window and on the status
+    // bar's value field, the history's line on the chart's recessed
+    // surface, and the track and the card stand apart from the window.
+    auto cpuDockLegible = [&](const themes::Theme &theme, const char *what) {
+        const auto window = theme.color(themes::Role::window_background);
+        const auto value = theme.color(themes::Role::polyphony_value_background);
+        const auto track = theme.color(themes::Role::cpu_meter_track_background);
+        bool inks = true;
+        for (const auto role : {themes::Role::cpu_meter_ok_text, themes::Role::cpu_meter_warn_text,
+                                themes::Role::cpu_meter_over_text})
+            inks = inks && themes::contrastRatio(theme.color(role), window) >= 4.5 &&
+                   themes::contrastRatio(theme.color(role), value) >= 4.5;
+        reporter.check(inks &&
+                           themes::contrastRatio(theme.color(themes::Role::cpu_meter_history_fill),
+                                                 track) >= 3.0 &&
+                           track != window &&
+                           theme.color(themes::Role::cpu_meter_card_background) != window,
+                       what);
+    };
+    cpuDockLegible(themes::vanilla(), "a Vanilla CPU dock ink or surface is unreadable");
+    cpuDockLegible(themes::darkNeutralHigh(),
+                   "a Dark Neutral High CPU dock ink or surface is unreadable");
+    cpuDockLegible(themes::immaterial(), "an Immaterial CPU dock ink or surface is unreadable");
+    cpuDockLegible(themes::derive(QColor("#2B2D31"), QColor("#66CCFF")),
+                   "a dark derived CPU dock ink or surface is unreadable");
+    cpuDockLegible(themes::derive(QColor("#F2F2F2"), QColor("#0055AA")),
+                   "a light derived CPU dock ink or surface is unreadable");
 }
 
 void checkThemeWorkflow(Reporter &reporter, QApplication &application)

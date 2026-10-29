@@ -13,9 +13,9 @@ live while the song plays and shows "--" when stopped. -->
 ## VBlank and the whole frame
 
 <!-- TODO: 100% is the VBlank window (83,776 cycles), the time the game counts
-on for its VBlank work, shared with the sound driver. The whole frame
-(280,896 cycles = 335%) is the hard ceiling: past it the game skips the next
-frame's sound, and the music stutters. Red means that. -->
+on for its VBlank work, shared with the sound driver. Past it the readout is
+red: the sound driver eats into the rest of the frame, whatever your budget.
+The whole frame (280,896 cycles = 335%) is shown for scale only. -->
 
 ## Your CPU budget
 
@@ -26,16 +26,23 @@ is your judgement, porydaw cannot know the game's own load. -->
 
 ## The CPU dock
 
-<!-- TODO: View → CPU. Current frame and peak (since playback last started
-from stop) in large type with their cycles; Reset starts the peak over. The
-breakdown bar: sequencer, CGB and mixer from the left; its first three
-quarters are the VBlank window up to the 100% line, the tinted last quarter
-is the rest of the frame (compressed) up to the red frame end; the amber line
-is the budget, the triangle under the bar the peak. Reset while stopped
-clears the peak until the song plays again, and so does a change of mix rate,
-mixer or voicegroup (a voice edit that reloads it) while stopped; nothing is
-shown as a peak before the song has played. The legend's percentages are of
-the VBlank window.
+<!-- TODO: View → CPU. At the top, whether this frame is Within budget, Over
+budget or Past VBlank (Stopped when not playing). The current frame's percent
+in large type, its cycles and its headroom: how far under the budget, or how
+far over it and how much is left in VBlank, or how far past VBlank. The meter:
+one scale from 0 to 140% of the VBlank window; mixer, sequencer and CGB
+stacked from the left; the amber line is your budget, the red line the end of
+VBlank (hatched past it), the dashed line the peak. "Last 10 seconds": every
+frame of the last ten seconds of playback, newest at the right; the caption
+gives the highest and how often it was over budget; after a stop the last run
+stays, dimmed, until you play again from the start of a run. "Where it goes":
+each part's cycles and share of the frame ("est." on the sequencer, see
+below). The peak card: the peak since Play, its cycles and where in the song it
+happened (m:ss.s); Reset peak starts the peak and the 10 seconds over. Reset
+while stopped clears the peak until the song plays again, and so does a change
+of mix rate, mixer or voicegroup (a voice edit that reloads it) while stopped;
+nothing is shown as a peak before the song has played. The legend at the
+bottom: Budget, VBlank and the whole frame (for scale), in cycles and percent.
 The line under it names the engine settings it was estimated for (mix rate,
 PCM channels, stock or HQ mixer). Changing Settings → Audio moves it live. -->
 
@@ -47,8 +54,8 @@ frame without playing it, from a quick render of the song in the background
 (a looping song once through to its loop end; any other to its end plus the
 3 s release tail playback plays) with the same engine settings. Colour per
 column = the most expensive frame there: a cool grey for cheap frames,
-warming as it nears the budget, amber above the budget, red at a whole
-frame. Hover a spot for its percent, cycles, bar and the three parts; hover
+warming as it nears the budget, amber above the budget, red past the VBlank
+window. Hover a spot for its percent, cycles, bar and the three parts; hover
 the "CPU" label for the song's peak. It dims ("profiling…") for a moment
 after an edit or a Settings → Audio change, then refreshes. Changing the
 budget recolours it at once. View → CPU Profile, or right-click → Hide CPU
