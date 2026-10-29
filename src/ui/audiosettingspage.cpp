@@ -238,17 +238,26 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     m_cpuBudget->setObjectName(QStringLiteral("settingsCpuBudget"));
     m_cpuBudget->setRange(kCpuBudgetMin, kCpuBudgetMax);
     m_cpuBudget->setValue(kCpuBudgetDefault);
-    m_cpuBudget->setSuffix(tr("%"));
-    m_cpuBudget->setSingleStep(5);
+    m_cpuBudget->setSuffix(tr(" cycles"));
+    m_cpuBudget->setSingleStep(kCpuBudgetStep);
+    m_cpuBudget->setGroupSeparatorShown(true);
     m_cpuBudget->setKeyboardTracking(false);
-    m_cpuBudget->setToolTip(
-        tr("The share of the GBA's VBlank window (%L1 cycles = 100%) the sound driver may use "
-           "before the status bar's CPU readout turns amber. Up to %2%, the whole frame: a "
-           "sound driver running longer than that makes the game skip a frame of audio, and "
-           "the readout turns red.")
+    const QString cpuBudgetTip =
+        tr("How many GBA CPU cycles the sound driver (m4aSoundMain) may use per frame before "
+           "the status bar's CPU readout turns amber. The VBlank window is %L1 cycles; up to "
+           "%L2, the whole frame: a sound driver running longer than that makes the game skip "
+           "a frame of audio, and the readout turns red.")
             .arg(M4A_VBLANK_CYCLES)
-            .arg(kCpuBudgetMax));
-    engineForm->addRow(tr("CPU &budget:"), m_cpuBudget);
+            .arg(kCpuBudgetMax);
+    m_cpuBudget->setToolTip(cpuBudgetTip);
+    m_cpuBudgetPercent = new QLabel(this);
+    m_cpuBudgetPercent->setObjectName(QStringLiteral("settingsCpuBudgetPercent"));
+    m_cpuBudgetPercent->setToolTip(cpuBudgetTip);
+    auto *cpuBudgetRow = new QHBoxLayout;
+    cpuBudgetRow->setContentsMargins(0, 0, 0, 0);
+    cpuBudgetRow->addWidget(m_cpuBudget);
+    cpuBudgetRow->addWidget(m_cpuBudgetPercent, 1);
+    engineForm->addRow(tr("CPU &budget:"), cpuBudgetRow);
 
     auto *defaultsButton = new QPushButton(tr("Restore Defaults"), this);
     defaultsButton->setObjectName(QStringLiteral("settingsAudioRestoreDefaults"));
@@ -283,9 +292,10 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
         if (!m_loading)
             emit countInBarsChanged(countInBars());
     });
-    connect(m_cpuBudget, &QSpinBox::valueChanged, this, [this](int percent) {
+    connect(m_cpuBudget, &QSpinBox::valueChanged, this, [this](int cycles) {
+        m_cpuBudgetPercent->setText(tr("%1% of the VBlank window").arg(cpuBudgetPercentOf(cycles)));
         if (!m_loading)
-            emit cpuBudgetChanged(percent);
+            emit cpuBudgetChanged(cycles);
     });
     connect(m_polyphony, &QSpinBox::valueChanged, this, &AudioSettingsPage::emitEngineSettings);
     connect(m_mixRate, &QComboBox::currentIndexChanged, this,
@@ -318,6 +328,8 @@ AudioSettingsPage::AudioSettingsPage(int outputLevel, const EngineSettings &engi
     // setValue is a no-op at the default, so seed the readout explicitly.
     m_outputValue->setText(tr("%1%").arg(m_outputSlider->value()));
     m_metronomeValue->setText(tr("%1%").arg(m_metronomeSlider->value()));
+    m_cpuBudgetPercent->setText(
+        tr("%1% of the VBlank window").arg(cpuBudgetPercentOf(m_cpuBudget->value())));
 }
 
 int AudioSettingsPage::outputLevel() const
@@ -355,9 +367,14 @@ int AudioSettingsPage::cpuBudget() const
     return m_cpuBudget->value();
 }
 
-void AudioSettingsPage::setCpuBudget(int percent)
+void AudioSettingsPage::setCpuBudget(int cycles)
 {
-    m_cpuBudget->setValue(std::clamp(percent, int(kCpuBudgetMin), int(kCpuBudgetMax)));
+    m_cpuBudget->setValue(std::clamp(cycles, int(kCpuBudgetMin), int(kCpuBudgetMax)));
+}
+
+int AudioSettingsPage::cpuBudgetPercentOf(int cycles)
+{
+    return int((int64_t(cycles) * 100 + M4A_VBLANK_CYCLES / 2) / M4A_VBLANK_CYCLES);
 }
 
 EngineSettings AudioSettingsPage::engineSettings() const
@@ -475,5 +492,5 @@ void AudioSettingsPage::updateDefaultLabel()
                  : tr("Default (about 10 ms)"));
 }
 
-static_assert(AudioSettingsPage::kCpuBudgetMax == M4A_FRAME_CYCLES * 100 / M4A_VBLANK_CYCLES,
+static_assert(AudioSettingsPage::kCpuBudgetMax == M4A_FRAME_CYCLES,
               "the CPU budget's ceiling is the whole frame");

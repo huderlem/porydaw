@@ -9614,11 +9614,11 @@ void SongView::setCpuProfile(std::shared_ptr<const CpuProfile> profile, bool pro
     m_cpuStrip->invalidateContent();
 }
 
-void SongView::setCpuBudgetPercent(int percent)
+void SongView::setCpuBudgetCycles(int32_t cycles)
 {
-    if (m_cpuBudgetPercent == percent)
+    if (m_cpuBudgetCycles == cycles)
         return;
-    m_cpuBudgetPercent = percent;
+    m_cpuBudgetCycles = cycles;
     m_cpuStrip->invalidateContent();
 }
 
@@ -9628,7 +9628,7 @@ QColor SongView::cpuProfileColor(int32_t cycles) const
     // whole frame on, amber above the budget; under it a ramp from the
     // neutral end toward the amber, so the hot bars warm up before they
     // cross it.
-    switch (CpuPanel::level(cycles, m_cpuBudgetPercent)) {
+    switch (CpuPanel::level(cycles, m_cpuBudgetCycles)) {
     case 2:
         return themes::color(themes::Role::cpu_profile_over_fill);
     case 1:
@@ -9636,7 +9636,7 @@ QColor SongView::cpuProfileColor(int32_t cycles) const
     default:
         break;
     }
-    const double budget = double(m_cpuBudgetPercent) * M4A_VBLANK_CYCLES / 100.0;
+    const double budget = double(m_cpuBudgetCycles);
     const double t =
         budget > 0.0 ? std::clamp(double(std::max(cycles, 0)) / budget, 0.0, 1.0) : 1.0;
     // Eased so the busy end (where songs sit) spreads further than the

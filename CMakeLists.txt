@@ -250,6 +250,7 @@ qt_add_library(porydaw_app STATIC
     src/ui/songsettingsdialog.cpp
     src/ui/songsettingsdialog.h
     src/ui/cpupanel.cpp
+    src/ui/cpubudget.h
     src/ui/cpupanel.h
     src/ui/polyphonypanel.cpp
     src/ui/polyphonypanel.h

@@ -16,6 +16,7 @@
 #include "project/songregistry.h"
 #include "project/voicegroupsource.h"
 #include "songsession.h"
+#include "ui/cpubudget.h"
 #include "ui/enginesettings.h"
 
 class QAction;
@@ -135,9 +136,15 @@ class MainWindow : public QMainWindow
     bool runPolyGateCheck();
 
     // The CPU readout's colour for a frame of `total` cycles against a
-    // budget in percent of the VBlank window (D1): 0 normal, 1 over the
+    // budget in cycles (D1, amended 2026-10-29): 0 normal, 1 over the
     // budget (amber), 2 at the frame ceiling (red).
-    static int cpuLevel(int32_t total, int budgetPercent);
+    static int cpuLevel(int32_t total, int32_t budgetCycles);
+    // Settings → Audio → CPU budget as stored (engine/cpuBudgetCycles),
+    // clamped; converts a legacy engine/cpuBudgetPercent once (stores the
+    // cycles, removes the old key; the old default 100 or an unreadable
+    // value is just removed). Read at startup; --settingscheck too.
+    static int32_t loadCpuBudgetCycles();
+    int32_t cpuBudgetCycles() const { return m_cpuBudgetCycles; }
     // CPU readout check (--cpucheck; cpucheck.cpp): the song engine's
     // published cost, the status-bar item, its colours against the budget
     // and its tooltip, while the song plays through the parked device.
@@ -948,8 +955,8 @@ class MainWindow : public QMainWindow
     // The CPU readout (docs/cpu-meter/PLAN.md D2), beside the counts.
     QLabel *m_cpuCaption = nullptr;
     QLabel *m_cpuValueLabel = nullptr;
-    // Settings → Audio → CPU budget, percent of the VBlank window (D1).
-    int m_cpuBudgetPercent = 100;
+    // Settings → Audio → CPU budget, in cycles per frame (D1).
+    int32_t m_cpuBudgetCycles = cpubudget::kDefault;
     // The CPU profile strip (View → CPU Profile) and its background render.
     QAction *m_cpuProfileAction = nullptr;
     CpuProfiler *m_cpuProfiler = nullptr;
@@ -979,7 +986,7 @@ class MainWindow : public QMainWindow
         // engine has costed a frame; the tooltip's context besides.
         bool cpuPlaying = false;
         AudioEngine::CpuSnapshot cpu;
-        int cpuBudget = 0;
+        int32_t cpuBudget = 0; // cycles
         int mixRate = 0;
         bool hqMixer = false;
 

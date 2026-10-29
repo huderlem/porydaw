@@ -488,9 +488,9 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   **`CPU n%` readout** (docs/cpu-meter/PLAN.md): the song engine's estimated GBA CPU
   time of `m4aSoundMain` per frame, in percent of the VBlank window (83776 cycles =
   100 %), "--" unless the song plays; amber above the CPU budget (Settings → Audio,
-  default 100 %), red at the whole frame (280896 cycles); its tooltip has the cycles,
-  the sequencer / CGB / mixer split, the peak, the budget and frame lines and the
-  engine configuration.
+  in cycles per frame, default 60000 ≈ 72 %), red at the whole frame (280896
+  cycles); its tooltip has the cycles, the sequencer / CGB / mixer split, the peak,
+  the budget and frame lines and the engine configuration.
 - **Polyphony dock** (View → Polyphony Debugger, hidden by default): the full
   overflow debugger, mirroring the poryaaaa plugin's Polyphony tab. A live
   channel-usage grid (real PCM/CGB channels plus the shadow pool of lost sounds), a
@@ -715,8 +715,11 @@ open.
   from the audio callback, honor loop markers with configurable loop behavior.
 - GBA-accuracy knobs surfaced in app settings, defaulted to hardware-accurate:
   PCM mix rate (13379 Hz default), HQ mixer (ipatix, off by default), polyphony
-  (`maxChans`), reverb, and the CPU budget (percent of the VBlank window the CPU
-  readout warns above, 100 % by default).
+  (`maxChans`), reverb, and the CPU budget (GBA cycles per frame the CPU readout
+  warns above, 1000 to 280896, 60000 ≈ 72 % of the VBlank window by default, its
+  percent shown beside it; QSettings `engine/cpuBudgetCycles`, a legacy
+  `engine/cpuBudgetPercent` converted once on load and removed — except the old
+  default 100, or an unreadable value, which just leaves the 60000 default).
 - **CPU cost model** (docs/cpu-meter/PLAN.md): poryaaaa counts the cycles `m4aSoundMain`
   would take on the GBA for every frame the song engine runs, from per-path constants
   measured against mGBA 0.10.5 running the real m4a engine (vanilla and ipatix HQ

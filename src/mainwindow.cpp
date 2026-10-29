@@ -218,9 +218,12 @@ const QString kOutputLevelKey = QStringLiteral("outputLevel");
 const QString kMetronomeKey = QStringLiteral("metronome");
 const QString kMetronomeVolumeKey = QStringLiteral("metronomeVolume");
 const QString kCountInBarsKey = QStringLiteral("countInBars");
-// The CPU readout's budget in percent of the VBlank window
-// (docs/cpu-meter/PLAN.md D1), app-wide like the engine knobs beside it.
-const QString kCpuBudgetKey = QStringLiteral("engine/cpuBudgetPercent");
+// The CPU readout's budget in GBA cycles per frame (docs/cpu-meter/PLAN.md
+// D1, amended 2026-10-29), app-wide like the engine knobs beside it. The
+// first release stored percent of the VBlank window under the legacy key;
+// loadCpuBudgetCycles converts it once.
+const QString kCpuBudgetKey = QStringLiteral("engine/cpuBudgetCycles");
+const QString kCpuBudgetLegacyPercentKey = QStringLiteral("engine/cpuBudgetPercent");
 // The CPU profile strip under the ruler (docs/cpu-meter/PLAN.md D3), on by
 // default: a thin band, it costs the roll little height.
 const QString kCpuProfileKey = QStringLiteral("cpuProfileStrip");
@@ -569,7 +572,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             m_settingsDialog->audioPage()->setEngineSettings(settings);
             return true;
         };
-        bindings.cpuBudgetPercent = [this] { return m_cpuBudgetPercent; };
+        bindings.cpuBudgetCycles = [this] { return m_cpuBudgetCycles; };
         bindings.cpuPeakShown = [this] { return cpuPeakShown(); };
         bindings.cpuProfile = [this]() -> std::shared_ptr<const CpuProfile> {
             // Only a profile of the song as it stands, and only while the
@@ -1810,7 +1813,7 @@ SongSession *MainWindow::createSession()
     s->view->setVelocityLaneVisible(m_velocityLaneAction->isChecked());
     s->view->setAutomationLanesVisible(m_automationLanesAction->isChecked());
     s->view->setCpuProfileVisible(m_cpuProfileAction->isChecked());
-    s->view->setCpuBudgetPercent(m_cpuBudgetPercent);
+    s->view->setCpuBudgetCycles(m_cpuBudgetCycles);
     connect(s->view, &SongView::cpuProfileVisibilityRequested, m_cpuProfileAction,
             &QAction::setChecked);
     connect(s->view, &SongView::muteMaskChanged, this, [this, s](uint32_t mask) {
@@ -3714,12 +3717,10 @@ void MainWindow::buildSettingsDialog()
         QSettings().value(kCountInBarsKey, AudioSettingsPage::kCountInBarsDefault).toInt(), 0,
         AudioSettingsPage::kCountInBarsMax);
     m_settingsDialog->audioPage()->setCountInBars(m_countInBars);
-    m_cpuBudgetPercent =
-        std::clamp(QSettings().value(kCpuBudgetKey, AudioSettingsPage::kCpuBudgetDefault).toInt(),
-                   AudioSettingsPage::kCpuBudgetMin, AudioSettingsPage::kCpuBudgetMax);
-    m_settingsDialog->audioPage()->setCpuBudget(m_cpuBudgetPercent);
+    m_cpuBudgetCycles = loadCpuBudgetCycles();
+    m_settingsDialog->audioPage()->setCpuBudget(m_cpuBudgetCycles);
     for (const auto &session : m_sessions)
-        session->view->setCpuBudgetPercent(m_cpuBudgetPercent);
+        session->view->setCpuBudgetCycles(m_cpuBudgetCycles);
     {
         // Before init (the caller opens the device after this): the device
         // first opens with the user's buffering.
@@ -3747,13 +3748,13 @@ void MainWindow::buildSettingsDialog()
     // Only the readout's colour depends on it: the next status tick
     // recolours it.
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::cpuBudgetChanged, this,
-            [this](int percent) {
-                m_cpuBudgetPercent = percent;
+            [this](int cycles) {
+                m_cpuBudgetCycles = cycles;
                 if (m_persistSession)
-                    QSettings().setValue(kCpuBudgetKey, percent);
+                    QSettings().setValue(kCpuBudgetKey, cycles);
                 // The profile strip's colours too (a repaint, no recompute).
                 for (const auto &session : m_sessions)
-                    session->view->setCpuBudgetPercent(percent);
+                    session->view->setCpuBudgetCycles(cycles);
             });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
@@ -5963,7 +5964,7 @@ void MainWindow::updatePolyStatus()
             status.cpu.peakValid = false;
             std::fill(std::begin(status.cpu.peak), std::end(status.cpu.peak), 0);
         }
-        status.cpuBudget = m_cpuBudgetPercent;
+        status.cpuBudget = m_cpuBudgetCycles;
         status.mixRate = int(m_engineSettings.pcmMixRate + 0.5f);
         status.hqMixer = m_engineSettings.hqMixer;
     }
@@ -6028,9 +6029,31 @@ void MainWindow::disarmCpuPeak()
         m_cpuPeakArmed = false;
 }
 
-int MainWindow::cpuLevel(int32_t total, int budgetPercent)
+int MainWindow::cpuLevel(int32_t total, int32_t budgetCycles)
 {
-    return CpuPanel::level(total, budgetPercent);
+    return CpuPanel::level(total, budgetCycles);
+}
+
+int32_t MainWindow::loadCpuBudgetCycles()
+{
+    QSettings settings;
+    if (!settings.contains(kCpuBudgetKey) && settings.contains(kCpuBudgetLegacyPercentKey)) {
+        // The one migration: percent of the VBlank window, rounded to the
+        // nearest cycle. 100 was the old default (and what its Restore
+        // Defaults wrote), so it means "at the default": the new default
+        // stands, nothing written. An unreadable value is dropped likewise.
+        bool ok = false;
+        const int64_t percent = settings.value(kCpuBudgetLegacyPercentKey).toInt(&ok);
+        if (ok && percent != 100) {
+            const int64_t cycles = (percent * M4A_VBLANK_CYCLES + 50) / 100;
+            settings.setValue(kCpuBudgetKey,
+                              int(std::clamp<int64_t>(cycles, AudioSettingsPage::kCpuBudgetMin,
+                                                      AudioSettingsPage::kCpuBudgetMax)));
+        }
+        settings.remove(kCpuBudgetLegacyPercentKey);
+    }
+    return std::clamp(settings.value(kCpuBudgetKey, AudioSettingsPage::kCpuBudgetDefault).toInt(),
+                      AudioSettingsPage::kCpuBudgetMin, AudioSettingsPage::kCpuBudgetMax);
 }
 
 void MainWindow::updateCpuPanel()
@@ -6043,12 +6066,12 @@ void MainWindow::updateCpuPanel()
         reading.loaded = true;
         reading.playing = status.cpuPlaying;
         reading.cpu = status.cpu;
-        reading.budgetPercent = status.cpuBudget;
+        reading.budgetCycles = status.cpuBudget;
         reading.mixRate = status.mixRate;
         reading.maxPcm = status.maxPcm;
         reading.hqMixer = status.hqMixer;
     } else {
-        reading.budgetPercent = m_cpuBudgetPercent;
+        reading.budgetCycles = m_cpuBudgetCycles;
     }
     m_cpuPanel->setReading(reading);
 }
@@ -6080,9 +6103,8 @@ QString MainWindow::cpuToolTip(const PolyStatusSnapshot &status) const
                     "voicegroup starts it over)")
                      .arg(cycles(cpu.peak[AudioEngine::CpuTotal]),
                           percent(cpu.peak[AudioEngine::CpuTotal]));
-    lines << tr("Budget: %1% of the VBlank window (%2), set in Settings → Audio")
-                 .arg(status.cpuBudget)
-                 .arg(cycles(int32_t(int64_t(status.cpuBudget) * cpu.vblankCycles / 100)));
+    lines << tr("Budget: %1, %2 of the VBlank window, set in Settings → Audio")
+                 .arg(cycles(status.cpuBudget), percent(status.cpuBudget));
     lines << tr("VBlank window: %1 = 100%").arg(cycles(cpu.vblankCycles));
     lines << tr("Frame end: %1 = %2; past it the next frame's sound is skipped")
                  .arg(cycles(cpu.frameCycles), percent(cpu.frameCycles));

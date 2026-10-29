@@ -331,7 +331,9 @@ declare namespace porydaw {
         estimated: boolean;
         /** Whether the song is playing. */
         playing: boolean;
-        /** Settings → Audio → CPU budget, percent of the VBlank window. */
+        /** Settings → Audio → CPU budget, in GBA cycles per frame (default 60000). */
+        budgetCycles: number;
+        /** budgetCycles as a whole percent of the VBlank window, rounded. */
         budgetPercent: number;
         /** The VBlank window, 83776 cycles (100 %). */
         vblankCycles: number;
@@ -345,7 +347,9 @@ declare namespace porydaw {
         frames: { tick: number; cycles: number; percent: number }[];
         maxCycles: number;
         maxPercent: number;
-        /** Settings → Audio → CPU budget, percent of the VBlank window. */
+        /** Settings → Audio → CPU budget, in GBA cycles per frame (default 60000). */
+        budgetCycles: number;
+        /** budgetCycles as a whole percent of the VBlank window, rounded. */
         budgetPercent: number;
     }
 

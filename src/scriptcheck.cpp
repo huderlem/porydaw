@@ -1315,13 +1315,23 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
     check(host.evalConsole(QStringLiteral(
               "var c = porydaw.audio.cpu(); "
               "['cycles', 'percent', 'peak', 'peakPercent', 'sequencer', 'cgb', 'mixer', "
-              "'estimated', 'playing', 'budgetPercent', 'vblankCycles', 'frameCycles']"
+              "'estimated', 'playing', 'budgetCycles', 'budgetPercent', 'vblankCycles', "
+              "'frameCycles']"
               ".every(function (k) { return k in c; }) && "
               "c.cycles > 0 && c.cycles === c.sequencer + c.cgb + c.mixer && "
               "Math.abs(c.percent - c.cycles * 100 / c.vblankCycles) < 1e-9 && "
-              "c.peak >= c.cycles && c.estimated === true && c.budgetPercent === 100 && "
+              "c.peak >= c.cycles && c.estimated === true && c.budgetCycles === 60000 && "
+              "c.budgetPercent === 72 && "
               "c.vblankCycles === 83776 && c.frameCycles === 280896")) == QStringLiteral("true"),
           "audio.cpu() while playing lacks a key or its numbers do not add up");
+    // The budget follows Settings → Audio in cycles, its percent derived
+    // (rounded to the nearest whole percent of the VBlank window).
+    window.settingsDialog()->audioPage()->setCpuBudget(41888);
+    check(host.evalConsole(QStringLiteral("var c = porydaw.audio.cpu(); "
+                                          "c.budgetCycles === 41888 && c.budgetPercent === 50")) ==
+              QStringLiteral("true"),
+          "audio.cpu() does not follow the Settings budget in cycles");
+    window.settingsDialog()->audioPage()->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);
     // porydaw.audio.cpuProfile(): null while the strip is off (its default
     // on a fresh settings store); once View → CPU Profile is on, the song's
     // offline profile once made, a real Array of frames, its max their max,
@@ -1349,7 +1359,7 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
               "p.maxCycles === Math.max.apply(null, p.frames.map(function (f) { return f.cycles; "
               "})) && "
               "Math.abs(p.maxPercent - p.maxCycles * 100 / 83776) < 1e-9 && "
-              "p.budgetPercent === 100")) == QStringLiteral("true"),
+              "p.budgetCycles === 60000 && p.budgetPercent === 72")) == QStringLiteral("true"),
           "audio.cpuProfile() is not a plain array of ordered frames with a matching max");
     check(host.evalConsole(QStringLiteral("porydaw.audio.peak.length === 2 && "
                                           "porydaw.audio.rms.length === 2")) ==

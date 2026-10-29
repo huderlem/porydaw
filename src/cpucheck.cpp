@@ -46,7 +46,8 @@ extern "C" {
 // it. The status bar's CPU item: shown with the meter, a nonzero percent
 // while playing, "--" stopped; amber (cpu_meter_warn_text, through the
 // cpuLevel property its style sheet matches) under a budget below the
-// reading, plain above it, no colour left after a stop; the tooltip names
+// reading, plain above it and at exactly the reading's cycles, no colour
+// left after a stop; the tooltip names
 // the three terms, marks the estimate, never mentions sound effects (D4).
 // The song as declared to the engine's sequencer estimate: started with
 // exactly its note tracks, continued (no start-of-song work) on a resume
@@ -58,7 +59,9 @@ extern "C" {
 // saved window state brings it back; "--" with no song and stopped; while
 // playing its percent is the status bar's, its peak at least the current,
 // its breakdown bar's segments proportional to the three terms and adding
-// up to the total; the budget mark follows the budget and the readout its
+// up to the total; the budget mark (in cycles: under the VBlank line at the
+// 60,000-cycle default, on it at a budget of the VBlank window) follows the
+// budget and the readout its
 // colour; Reset lowers the peak; narrow and wide layouts do not overlap;
 // no label or tooltip mentions sound effects (D4).
 
@@ -198,13 +201,19 @@ bool captionsClear(const CpuPanel &panel)
 
 bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabel)
 {
-    // The thresholds (D1): amber strictly above the budget, red from the
-    // whole frame on, whatever the budget.
-    check(cpuLevel(0, 100) == 0 && cpuLevel(M4A_VBLANK_CYCLES, 100) == 0 &&
-              cpuLevel(M4A_VBLANK_CYCLES + 1, 100) == 1 && cpuLevel(41888, 50) == 0 &&
-              cpuLevel(41889, 50) == 1 && cpuLevel(280649, 335) == 0 &&
-              cpuLevel(280650, 335) == 1 && cpuLevel(M4A_FRAME_CYCLES - 1, 335) == 1 &&
-              cpuLevel(M4A_FRAME_CYCLES, 335) == 2 && cpuLevel(M4A_FRAME_CYCLES, 10) == 2,
+    // The thresholds (D1, budget in cycles since 2026-10-29): amber strictly
+    // above the budget, red from the whole frame on, whatever the budget.
+    constexpr int32_t kDefaultBudget = AudioSettingsPage::kCpuBudgetDefault;
+    check(kDefaultBudget == 60000 && CpuPanel::level(kDefaultBudget, kDefaultBudget) == 0 &&
+              CpuPanel::level(kDefaultBudget + 1, kDefaultBudget) == 1,
+          "CpuPanel::level is not amber at exactly the default budget + 1 cycle");
+    check(cpuLevel(0, kDefaultBudget) == 0 && cpuLevel(M4A_VBLANK_CYCLES, M4A_VBLANK_CYCLES) == 0 &&
+              cpuLevel(M4A_VBLANK_CYCLES + 1, M4A_VBLANK_CYCLES) == 1 &&
+              cpuLevel(41888, 41888) == 0 && cpuLevel(41889, 41888) == 1 &&
+              cpuLevel(M4A_FRAME_CYCLES - 1, AudioSettingsPage::kCpuBudgetMax) == 0 &&
+              cpuLevel(M4A_FRAME_CYCLES - 1, M4A_FRAME_CYCLES - 2) == 1 &&
+              cpuLevel(M4A_FRAME_CYCLES, AudioSettingsPage::kCpuBudgetMax) == 2 &&
+              cpuLevel(M4A_FRAME_CYCLES, AudioSettingsPage::kCpuBudgetMin) == 2,
           "cpuLevel's budget and frame-ceiling thresholds");
     // The estimate counts engine ticks, 24 per quarter whatever the song's
     // clocks (-X included): the bar of a meter.
@@ -420,11 +429,24 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
               "the CPU dock does not show the cycles");
         check(barMatchesReading(panel) && panel.segmentRect(AudioEngine::CpuMixer).width() > 0,
               "the CPU dock's bar is not proportional to the sequencer, CGB and mixer terms");
-        check(panel.budgetMarkX() == panel.vblankMarkX() &&
+        check(panel.reading().budgetCycles == kDefaultBudget &&
+                  panel.budgetMarkX() > panel.barTrackRect().left() &&
+                  panel.budgetMarkX() < panel.vblankMarkX() &&
                   panel.ceilingMarkX() > panel.vblankMarkX(),
-              "at the default budget the budget mark is not the VBlank window's end");
+              "at the default budget the budget mark is not inside the VBlank window");
+        check(captionsClear(panel), "at the default budget the CPU bar's captions overlap");
+    }
+    // A budget of exactly the VBlank window puts its line on the VBlank
+    // boundary.
+    page->setCpuBudget(M4A_VBLANK_CYCLES);
+    updatePolyStatus();
+    updateCpuPanel();
+    {
+        const CpuPanel &panel = *m_cpuPanel;
+        check(panel.budgetMarkX() == panel.vblankMarkX(),
+              "at a budget of the VBlank window the budget mark is not the window's end");
         // The marks: each its own shape and place; the VBlank boundary
-        // stays visible over the budget line it coincides with at 100%.
+        // stays visible over the budget line it coincides with here.
         {
             const QRect vb = panel.markRect(CpuPanel::MarkVblank);
             const QRect bu = panel.markRect(CpuPanel::MarkBudget);
@@ -449,6 +471,12 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                   "at a 100% budget the VBlank boundary is hidden under the budget line");
             check(captionsClear(panel), "the CPU bar's captions overlap");
         }
+    }
+    page->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);
+    updatePolyStatus();
+    updateCpuPanel();
+    {
+        const CpuPanel &panel = *m_cpuPanel;
         const QStringList strings = panel.visibleStrings();
         check(strings.contains(QStringLiteral("Sequencer (estimated)")) &&
                   strings.contains(QStringLiteral("CGB")) &&
@@ -528,12 +556,14 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
     // 5. The budget: under the reading the item turns amber, over it plain.
     const QColor plain = themes::color(themes::Role::polyphony_value_text);
     const QColor amber = themes::color(themes::Role::cpu_meter_warn_text);
-    check(cpuLevelProp().isEmpty() && textColour() == plain,
-          "at the default budget the CPU item is coloured");
-    if (check(percent > AudioSettingsPage::kCpuBudgetMin,
+    const int32_t total = m_lastPolyStatus ? m_lastPolyStatus->cpu.last[AudioEngine::CpuTotal] : 0;
+    check(total > kDefaultBudget ? cpuLevelProp() == QStringLiteral("warn") && textColour() == amber
+                                 : cpuLevelProp().isEmpty() && textColour() == plain,
+          "at the default budget the CPU item's colour does not follow the reading");
+    if (check(total > 2 * AudioSettingsPage::kCpuBudgetMin,
               "the reading is too low to test the budget against")) {
-        page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, percent / 2));
-        check(m_cpuBudgetPercent == page->cpuBudget(),
+        page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, total / 2));
+        check(m_cpuBudgetCycles == page->cpuBudget() && m_cpuBudgetCycles == total / 2,
               "the Settings page's budget did not reach the window");
         updatePolyStatus();
         check(cpuLevelProp() == QStringLiteral("warn") && textColour() == amber && amber != plain,
@@ -553,7 +583,17 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                   m_cpuPanel->budgetMarkX() <= m_cpuPanel->ceilingMarkX() &&
                   m_cpuPanel->levelName().isEmpty() && m_cpuPanel->percentColor() == plain,
               "a budget over the reading did not move the dock's budget mark or clear its colour");
-        page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, percent / 2));
+        // The threshold in cycles: a budget of exactly the reading is not
+        // over it, one cycle less is.
+        page->setCpuBudget(total);
+        updatePolyStatus();
+        check(cpuLevelProp().isEmpty() && textColour() == plain,
+              "a budget of exactly the reading's cycles turned the CPU item amber");
+        page->setCpuBudget(total - 1);
+        updatePolyStatus();
+        check(cpuLevelProp() == QStringLiteral("warn"),
+              "a budget one cycle under the reading did not turn the CPU item amber");
+        page->setCpuBudget(std::max(AudioSettingsPage::kCpuBudgetMin, total / 2));
         updatePolyStatus();
         check(cpuLevelProp() == QStringLiteral("warn"), "the CPU item did not turn amber again");
         page->setCpuBudget(AudioSettingsPage::kCpuBudgetDefault);

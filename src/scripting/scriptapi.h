@@ -356,14 +356,16 @@ class AudioApi : public ApiObject
     Q_INVOKABLE QVariant channels() const;
     // The song engine's estimated GBA CPU cost of m4aSoundMain
     // (docs/cpu-meter/PLAN.md D6): {cycles, percent, peak, peakPercent,
-    // sequencer, cgb, mixer, estimated, playing, budgetPercent,
-    // vblankCycles, frameCycles}, percent of the VBlank window; the last
+    // sequencer, cgb, mixer, estimated, playing, budgetCycles,
+    // budgetPercent, vblankCycles, frameCycles}, percent of the VBlank
+    // window (budgetPercent derived from budgetCycles, rounded); the last
     // frame's fields are null unless the song plays; null with no song or
     // no costed frame.
     Q_INVOKABLE QVariant cpu() const;
     // The active song's offline CPU profile (D3, the strip under the
     // ruler): {frames: [{tick, cycles, percent}], maxCycles, maxPercent,
-    // budgetPercent}, one frame per GBA frame of the song once through;
+    // budgetCycles, budgetPercent}, one frame per GBA frame of the song
+    // once through;
     // null with no song, the strip hidden, or while it is (re)computed.
     Q_INVOKABLE QVariant cpuProfile() const;
     // Renders the active song to a WAV file (the Export WAV path). opts:
@@ -380,6 +382,11 @@ class AudioApi : public ApiObject
     // throw. Persists, updates the Settings window and restarts the audio
     // device (coalesced); the audio.engine event follows.
     Q_INVOKABLE void setEngine(const QVariantMap &spec);
+
+  private:
+    // Settings → Audio → CPU budget in cycles (the binding, else the
+    // default).
+    int32_t cpuBudgetCycles() const;
 };
 
 // porydaw.ui beyond statusMessage: docks (scriptwidgets.h), theme colors

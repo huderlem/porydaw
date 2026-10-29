@@ -91,6 +91,10 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   VBlank; amber above a user-settable **CPU budget** in Settings → Audio
   (default 100 %), red at the frame ceiling. The tooltip shows the raw
   cycles and both lines. A stock 5-channel 13379 Hz song reads ≈ 30 %.
+  *2026-10-29 amendment: the budget is in cycles (QSettings
+  `engine/cpuBudgetCycles`, 1000..280896), default 60000 (≈ 72 %); amber
+  when the frame's cycles exceed it; a stored `engine/cpuBudgetPercent`
+  converts once on load.*
 - **D2 Where it shows (CONFIRMED: its own dock).** A new **CPU dock**,
   a sibling of the Polyphony dock (same View-menu placement, same
   show/hide persistence, SPEC §6.1 dock list): current and peak percent,
@@ -114,7 +118,8 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   budgetPercent, vblankCycles, frameCycles}` or null, beside `channels()`.
   Step 6. (The shape changed during implementation: `psg` became `cgb`,
   `budget` `budgetPercent`, and `peakPercent`, `estimated`, `playing` were
-  added; step 7 added `cpuProfile()`.)
+  added; step 7 added `cpuProfile()`.) *2026-10-29: `budgetCycles` added
+  to both; `budgetPercent` now derived from it (rounded).*
 - **D7 Reference (CONFIRMED).** mGBA 0.10.5 is the reference, as for every
   other constant in the model (not hardware). mGBA's ROM prefetch model is
   not hardware-perfect; hardware may differ by a few percent. Say so in

@@ -7,6 +7,7 @@
 #include <QWidget>
 
 #include "audio/audioengine.h"
+#include "ui/cpubudget.h"
 
 class QGridLayout;
 class QLabel;
@@ -34,7 +35,7 @@ class CpuPanel : public QWidget
         bool loaded = false;
         bool playing = false;
         AudioEngine::CpuSnapshot cpu;
-        int budgetPercent = 100;
+        int32_t budgetCycles = cpubudget::kDefault;
         int mixRate = 0;
         int maxPcm = 0;
         bool hqMixer = false;
@@ -48,9 +49,10 @@ class CpuPanel : public QWidget
     const Reading &reading() const { return m_reading; }
 
     // The readout's colour for a frame of `total` cycles against a budget
-    // in percent of the VBlank window (D1): 0 normal, 1 over the budget
-    // (amber), 2 at the frame ceiling (red). The status bar uses it too.
-    static int level(int32_t total, int budgetPercent);
+    // in cycles (D1, amended 2026-10-29): 0 normal, 1 over the budget
+    // (amber, total > budgetCycles), 2 at the frame ceiling (red). The
+    // status bar and the profile strip use it too.
+    static int level(int32_t total, int32_t budgetCycles);
 
     // Harness hooks (--cpucheck).
     QString percentText() const;

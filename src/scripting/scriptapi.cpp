@@ -46,6 +46,7 @@
 #include "scriptmenus.h"
 #include "scriptwidgets.h"
 #include "songsession.h"
+#include "ui/audiosettingspage.h"
 #include "ui/songview.h"
 #include "ui/theme/themeruntime.h"
 #include "ui/viewsidecar.h"
@@ -561,7 +562,7 @@ QVariant AudioApi::cpu() const
     // As the dock: no peak the song did not play.
     const auto &peakShown = m_host.bindings().cpuPeakShown;
     snap.peakValid = snap.peakValid && (!peakShown || peakShown());
-    const auto &budget = m_host.bindings().cpuBudgetPercent;
+    const int32_t budget = cpuBudgetCycles();
     return QVariantMap{
         {QStringLiteral("cycles"), last(AudioEngine::CpuTotal)},
         {QStringLiteral("percent"),
@@ -573,7 +574,8 @@ QVariant AudioApi::cpu() const
         {QStringLiteral("mixer"), last(AudioEngine::CpuMixer)},
         {QStringLiteral("estimated"), snap.estimated},
         {QStringLiteral("playing"), playing},
-        {QStringLiteral("budgetPercent"), budget ? budget() : 100},
+        {QStringLiteral("budgetCycles"), budget},
+        {QStringLiteral("budgetPercent"), AudioSettingsPage::cpuBudgetPercentOf(budget)},
         {QStringLiteral("vblankCycles"), snap.vblankCycles},
         {QStringLiteral("frameCycles"), snap.frameCycles}};
 }
@@ -593,11 +595,19 @@ QVariant AudioApi::cpuProfile() const
         frames.append(QVariantMap{{QStringLiteral("tick"), double(f.tick)},
                                   {QStringLiteral("cycles"), f.total},
                                   {QStringLiteral("percent"), percent(f.total)}});
-    const auto &budget = m_host.bindings().cpuBudgetPercent;
-    return QVariantMap{{QStringLiteral("frames"), frames},
-                       {QStringLiteral("maxCycles"), profile->maxTotal},
-                       {QStringLiteral("maxPercent"), percent(profile->maxTotal)},
-                       {QStringLiteral("budgetPercent"), budget ? budget() : 100}};
+    const int32_t budget = cpuBudgetCycles();
+    return QVariantMap{
+        {QStringLiteral("frames"), frames},
+        {QStringLiteral("maxCycles"), profile->maxTotal},
+        {QStringLiteral("maxPercent"), percent(profile->maxTotal)},
+        {QStringLiteral("budgetCycles"), budget},
+        {QStringLiteral("budgetPercent"), AudioSettingsPage::cpuBudgetPercentOf(budget)}};
+}
+
+int32_t AudioApi::cpuBudgetCycles() const
+{
+    const auto &budget = m_host.bindings().cpuBudgetCycles;
+    return budget ? budget() : AudioSettingsPage::kCpuBudgetDefault;
 }
 
 QVariant AudioApi::render(const QString &path, const QVariantMap &opts)

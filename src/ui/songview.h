@@ -24,6 +24,7 @@
 #include "core/ripplescope.h"
 #include "core/songdocument.h"
 #include "core/velocitymodel.h"
+#include "ui/cpubudget.h"
 #include "ui/songviewmodel.h"
 #include "ui/timelinesurface.h"
 
@@ -302,10 +303,10 @@ class SongView : public QWidget
     void setCpuProfile(std::shared_ptr<const CpuProfile> profile, bool profiling);
     const CpuProfile *cpuProfile() const { return m_cpuProfile.get(); }
     bool cpuProfiling() const { return m_cpuProfiling; }
-    // Settings → Audio → CPU budget, percent of the VBlank window: where
-    // the strip's ramp turns amber. Repaints only.
-    void setCpuBudgetPercent(int percent);
-    int cpuBudgetPercent() const { return m_cpuBudgetPercent; }
+    // Settings → Audio → CPU budget, in cycles per frame: where the
+    // strip's ramp turns amber. Repaints only.
+    void setCpuBudgetCycles(int32_t cycles);
+    int32_t cpuBudgetCycles() const { return m_cpuBudgetCycles; }
     // The strip's hover text at x in the strip's coordinates (the gutter
     // describes the strip; the timeline the frame under x); empty where
     // there is nothing to say.
@@ -1136,7 +1137,7 @@ class SongView : public QWidget
     songview::CpuProfileStrip *m_cpuStrip = nullptr;
     std::shared_ptr<const CpuProfile> m_cpuProfile;
     bool m_cpuProfiling = false;
-    int m_cpuBudgetPercent = 100;
+    int32_t m_cpuBudgetCycles = cpubudget::kDefault;
     songview::PlayheadOverlay *m_playheadOverlay = nullptr;
     QScrollBar *m_hbar = nullptr;
     QScrollBar *m_vbar = nullptr;

@@ -19,8 +19,9 @@ frame's sound, and the music stutters. Red means that. -->
 
 ## Your CPU budget
 
-<!-- TODO: Settings → Audio → CPU budget (default 100% of VBlank). Above it the
-readout turns amber. Lower it if your game does heavy work during VBlank; it
+<!-- TODO: Settings → Audio → CPU budget, in CPU cycles per frame (default
+60,000, about 72% of the VBlank window; the percent is shown beside it).
+Above it the readout turns amber. Lower it if your game does heavy work during VBlank; it
 is your judgement, porydaw cannot know the game's own load. -->
 
 ## The CPU dock
@@ -87,6 +88,7 @@ cost differently there. Keyboard notes and auditions are not counted. -->
 ## For plugin authors
 
 <!-- TODO: porydaw.audio.cpu() gives the same numbers as the CPU dock
-(cycles, percent, peak, the three parts, budget); porydaw.audio.cpuProfile()
-gives the profile strip's frames ({tick, cycles, percent}) and its max. Both
+(cycles, percent, peak, the three parts, budget in cycles and as a percent);
+porydaw.audio.cpuProfile() gives the profile strip's frames ({tick, cycles,
+percent}), its max and the budget. Both
 null when there is nothing to show; see the scripting reference. -->

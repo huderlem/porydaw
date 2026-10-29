@@ -162,9 +162,10 @@ struct HostBindings {
     // writes are refused.
     std::function<EngineSettings()> engineSettings;
     std::function<bool(const EngineSettings &settings, QString *error)> setEngineSettings;
-    // Settings → Audio → CPU budget, percent of the VBlank window
-    // (porydaw.audio.cpu().budgetPercent). Absent: 100.
-    std::function<int()> cpuBudgetPercent;
+    // Settings → Audio → CPU budget, in cycles per frame
+    // (porydaw.audio.cpu().budgetCycles; budgetPercent derives from it).
+    // Absent: AudioSettingsPage::kCpuBudgetDefault.
+    std::function<int32_t()> cpuBudgetCycles;
     // Whether the CPU dock shows a peak (porydaw.audio.cpu().peak): none
     // before the song has played, after a Reset while stopped, or after a
     // change that cleared it while stopped. Absent: whenever the engine

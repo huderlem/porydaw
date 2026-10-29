@@ -2,6 +2,7 @@
 
 #include "audio/audiodeviceconfig.h"
 #include "enginesettings.h"
+#include "ui/cpubudget.h"
 
 #include <QWidget>
 
@@ -32,13 +33,15 @@ class AudioSettingsPage : public QWidget
     // pre-roll (docs/punch/PLAN.md P4).
     static constexpr int kCountInBarsMax = 2;
     static constexpr int kCountInBarsDefault = 1;
-    // The CPU budget (docs/cpu-meter/PLAN.md D1): the status bar's CPU
-    // readout turns amber above this percent of the VBlank window. Up to the
-    // whole frame (M4A_FRAME_CYCLES is 335 % of M4A_VBLANK_CYCLES), past
-    // which the readout is red regardless.
-    static constexpr int kCpuBudgetMin = 10;
-    static constexpr int kCpuBudgetMax = 335;
-    static constexpr int kCpuBudgetDefault = 100;
+    // The CPU budget in cycles per frame (ui/cpubudget.h).
+    static constexpr int kCpuBudgetMin = cpubudget::kMin;
+    static constexpr int kCpuBudgetMax = cpubudget::kMax;
+    static constexpr int kCpuBudgetDefault = cpubudget::kDefault;
+    static constexpr int kCpuBudgetStep = cpubudget::kStep;
+    // `cycles` as a whole percent of the VBlank window, rounded to nearest:
+    // the caption beside the spin box and scripting's derived budgetPercent
+    // (porydaw.audio.cpu()).
+    static int cpuBudgetPercentOf(int cycles);
 
     AudioSettingsPage(int outputLevel, const EngineSettings &engine, QWidget *parent = nullptr);
 
@@ -58,7 +61,7 @@ class AudioSettingsPage : public QWidget
     void setOutputLevel(int percent);
     void setMetronomeVolume(int percent);
     void setCountInBars(int bars);
-    void setCpuBudget(int percent);
+    void setCpuBudget(int cycles);
     void setEngineSettings(const EngineSettings &settings);
     void setDeviceConfig(const AudioDeviceConfig &config);
     // What the device actually opened with, and why it differs from the
@@ -69,7 +72,7 @@ class AudioSettingsPage : public QWidget
     void outputLevelChanged(int percent);
     void metronomeVolumeChanged(int percent);
     void countInBarsChanged(int bars);
-    void cpuBudgetChanged(int percent);
+    void cpuBudgetChanged(int cycles);
     void engineSettingsChanged(const EngineSettings &settings);
     void deviceConfigChanged(const AudioDeviceConfig &config);
 
@@ -90,6 +93,7 @@ class AudioSettingsPage : public QWidget
     QComboBox *m_mixRate = nullptr;
     QCheckBox *m_hqMixer = nullptr;
     QSpinBox *m_cpuBudget = nullptr;
+    QLabel *m_cpuBudgetPercent = nullptr; // "72% of the VBlank window"
     QComboBox *m_bufferSize = nullptr;
     QCheckBox *m_exclusive = nullptr; // null off Windows
     QLabel *m_deviceStatus = nullptr;

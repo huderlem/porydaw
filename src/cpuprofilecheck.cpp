@@ -47,8 +47,9 @@ extern "C" {
 // the song through once, every frame the readout reports is at most the
 // profile's max and the readout's peak matches it; the strip paints heat
 // over the song and chrome past its end, the max's column in the max's
-// colour; the budget moves the colours (amber over it) without a
-// recompute; the hover text names the three terms and no sound effects
+// colour; the budget (in cycles) moves the colours (amber one cycle under
+// the max, not at exactly the max) without a recompute; the hover text
+// names the three terms and no sound effects
 // (D4), the gutter's too; a note added starts one recompute (two quick
 // edits debounce into one) and replaces the profile; a mix-rate change
 // recomputes with a higher max; the toggle hides and shows the strip in
@@ -330,18 +331,28 @@ bool MainWindow::runCpuProfileCheck(const QString &projectRoot, const QString &s
             check(peakColor == view.cpuProfileColor(peak.total),
                   "the max frame's column is not the max's colour");
 
-            // The budget recolours without a recompute: under the max,
-            // the max's column turns amber.
+            // The budget recolours without a recompute: one cycle under
+            // the max, the max's column turns amber; at exactly the max it
+            // does not.
             const uint64_t jobs = m_cpuProfiler->jobsStarted();
-            const int lowBudget = std::max(int(AudioSettingsPage::kCpuBudgetMin),
-                                           int(double(peak.total) * 100.0 / M4A_VBLANK_CYCLES) - 5);
+            check(view.cpuBudgetCycles() == AudioSettingsPage::kCpuBudgetDefault,
+                  "the view's budget is not the 60,000-cycle default");
+            const int32_t lowBudget =
+                std::max(int32_t(AudioSettingsPage::kCpuBudgetMin), peak.total - 1);
             m_settingsDialog->audioPage()->setCpuBudget(lowBudget);
             QCoreApplication::processEvents();
-            check(view.cpuBudgetPercent() == lowBudget, "the budget did not reach the view");
+            check(view.cpuBudgetCycles() == lowBudget, "the budget did not reach the view");
             const QImage amber = strip->grab().toImage();
             check(amber.pixelColor(devX(xOf(double(peak.tick))), y) ==
                       themes::color(themes::Role::cpu_profile_warn_fill),
                   "over the budget the max's column is not amber");
+            m_settingsDialog->audioPage()->setCpuBudget(peak.total);
+            QCoreApplication::processEvents();
+            if (peak.total >= AudioSettingsPage::kCpuBudgetMin && peak.total < M4A_FRAME_CYCLES)
+                check(view.cpuBudgetCycles() == peak.total &&
+                          view.cpuProfileColor(peak.total) !=
+                              themes::color(themes::Role::cpu_profile_warn_fill),
+                      "at a budget of exactly the max's cycles the max's column is amber");
             check(view.cpuProfileColor(M4A_FRAME_CYCLES) ==
                       themes::color(themes::Role::cpu_profile_over_fill),
                   "a frame at the ceiling is not red");

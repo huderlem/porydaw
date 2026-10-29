@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFontInfo>
 #include <QKeyEvent>
+#include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
 #include <QSettings>
@@ -39,7 +40,10 @@
 // as they change; the output level reaches the engine) and Restore
 // Defaults returns them all, that the Appearance page's font choice lands
 // in typography and persists, and that the Shortcuts page is the real
-// editor. With a shot path, each page is also saved as <shot>-<page>.png.
+// editor. The CPU budget is in cycles (60,000 on a fresh store) with a live
+// percent-of-VBlank caption, and a legacy engine/cpuBudgetPercent converts
+// once to engine/cpuBudgetCycles. With a shot path, each page is also saved
+// as <shot>-<page>.png.
 
 int runSettingsCheck(const QString &shotPath)
 {
@@ -218,31 +222,56 @@ int runSettingsCheck(const QString &shotPath)
         auto *mixRate = dialog->findChild<QComboBox *>(QStringLiteral("settingsPcmMixRate"));
         auto *hq = dialog->findChild<QCheckBox *>(QStringLiteral("settingsHqMixer"));
         auto *cpuBudget = dialog->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
+        auto *cpuBudgetPercent =
+            dialog->findChild<QLabel *>(QStringLiteral("settingsCpuBudgetPercent"));
         auto *defaults =
             dialog->findChild<QPushButton *>(QStringLiteral("settingsAudioRestoreDefaults"));
-        if (check(output && polyphony && mixRate && hq && cpuBudget && defaults,
+        if (check(output && polyphony && mixRate && hq && cpuBudget && cpuBudgetPercent && defaults,
                   "Audio page controls not found")) {
-            // The CPU budget (docs/cpu-meter/PLAN.md D1): percent of the
-            // VBlank window, 10 to the whole frame (335), default 100. It
-            // reports, persists, and never restarts the engine.
+            // The CPU budget (docs/cpu-meter/PLAN.md D1, amended
+            // 2026-10-29): GBA cycles per frame, 1,000 to the whole frame
+            // (280,896), default 60,000 on a fresh store, in steps of 1,000,
+            // its percent of the VBlank window beside it. It reports,
+            // persists, and never restarts the engine.
             check(cpuBudget->value() == AudioSettingsPage::kCpuBudgetDefault &&
-                      cpuBudget->value() == 100 && cpuBudget->minimum() == 10 &&
-                      cpuBudget->maximum() == 335,
-                  "CPU budget's default or range is not 100 within 10..335");
+                      cpuBudget->value() == 60000 && cpuBudget->minimum() == 1000 &&
+                      cpuBudget->maximum() == 280896 && cpuBudget->singleStep() == 1000 &&
+                      cpuBudget->suffix() == QStringLiteral(" cycles"),
+                  "CPU budget's default, range, step or suffix is not 60000 cycles within "
+                  "1000..280896 by 1000");
+            check(window.cpuBudgetCycles() == 60000,
+                  "a fresh settings store did not give the window a 60000-cycle budget");
+            check(cpuBudgetPercent->text() == QStringLiteral("72% of the VBlank window"),
+                  "CPU budget caption does not read 72% at the default");
             {
                 int engineReports = 0;
                 const auto connection =
                     QObject::connect(dialog, &SettingsDialog::engineSettingsChanged, dialog,
                                      [&engineReports](const EngineSettings &) { ++engineReports; });
-                cpuBudget->setValue(80);
+                cpuBudget->setValue(41888);
                 QObject::disconnect(connection);
-                check(QSettings().value(QStringLiteral("engine/cpuBudgetPercent")).toInt() == 80 &&
-                          dialog->audioPage()->cpuBudget() == 80,
+                check(QSettings().value(QStringLiteral("engine/cpuBudgetCycles")).toInt() ==
+                              41888 &&
+                          dialog->audioPage()->cpuBudget() == 41888 &&
+                          window.cpuBudgetCycles() == 41888,
                       "CPU budget was not persisted as it changed");
+                check(!QSettings().contains(QStringLiteral("engine/cpuBudgetPercent")),
+                      "changing the CPU budget wrote the legacy percent key");
+                check(cpuBudgetPercent->text() == QStringLiteral("50% of the VBlank window"),
+                      "CPU budget caption did not follow the spin box to 50%");
                 check(engineReports == 0, "changing the CPU budget reported engine settings");
-                dialog->audioPage()->setCpuBudget(1000);
-                check(cpuBudget->value() == 335, "CPU budget was not clamped to the frame");
-                cpuBudget->setValue(80);
+                cpuBudget->stepUp();
+                check(cpuBudget->value() == 42888, "CPU budget does not step by 1000 cycles");
+                dialog->audioPage()->setCpuBudget(83776);
+                check(cpuBudgetPercent->text() == QStringLiteral("100% of the VBlank window"),
+                      "CPU budget caption does not read 100% at the VBlank window");
+                dialog->audioPage()->setCpuBudget(1000000);
+                check(cpuBudget->value() == 280896, "CPU budget was not clamped to the frame");
+                check(cpuBudgetPercent->text() == QStringLiteral("335% of the VBlank window"),
+                      "CPU budget caption does not read 335% at the whole frame");
+                dialog->audioPage()->setCpuBudget(10);
+                check(cpuBudget->value() == 1000, "CPU budget was not clamped to 1000 cycles");
+                cpuBudget->setValue(80000);
             }
 
             check(output->value() == AudioSettingsPage::kOutputLevelDefault &&
@@ -296,8 +325,9 @@ int runSettingsCheck(const QString &shotPath)
                       hq->isChecked() == factory.hqMixer,
                   "Restore Defaults did not reset the engine knobs");
             check(cpuBudget->value() == AudioSettingsPage::kCpuBudgetDefault &&
-                      QSettings().value(QStringLiteral("engine/cpuBudgetPercent")).toInt() ==
-                          AudioSettingsPage::kCpuBudgetDefault,
+                      QSettings().value(QStringLiteral("engine/cpuBudgetCycles")).toInt() ==
+                          AudioSettingsPage::kCpuBudgetDefault &&
+                      cpuBudgetPercent->text() == QStringLiteral("72% of the VBlank window"),
                   "Restore Defaults did not reset and persist the CPU budget");
             check(QSettings().value(QStringLiteral("engine/maxPcmChannels")).toInt() ==
                           factory.maxPcmChannels &&
@@ -326,9 +356,9 @@ int runSettingsCheck(const QString &shotPath)
             QApplication::processEvents();
             check(polyphony->value() == 3 && output->value() == 150,
                   "Enter in the polyphony spinbox triggered Restore Defaults");
-            cpuBudget->setValue(120);
-            // Leaves polyphony 3 and a 120 % CPU budget behind for the
-            // relaunch check.
+            cpuBudget->setValue(70000);
+            // Leaves polyphony 3 and a 70,000-cycle CPU budget behind for
+            // the relaunch check.
         }
 
         // 5. Appearance page: the font choice lands and persists.
@@ -358,10 +388,63 @@ int runSettingsCheck(const QString &shotPath)
         check(polyphony && polyphony->value() == 3,
               "relaunch did not load the persisted PCM polyphony into the Audio page");
         auto *cpuBudget = dialog->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
-        check(cpuBudget && cpuBudget->value() == 120,
+        check(cpuBudget && cpuBudget->value() == 70000 && window.cpuBudgetCycles() == 70000,
               "relaunch did not load the persisted CPU budget into the Audio page");
         check(dialog->currentPage() == SettingsDialog::Page::Audio,
               "relaunch did not remember the last section");
+    }
+
+    // 8. The one migration (docs/cpu-meter/PLAN.md D1 amendment): a legacy
+    // percent-of-VBlank budget with no cycles key converts once on load
+    // (50 % → 41,888 cycles), the cycles stored and the old key removed; a
+    // cycles key present wins and leaves a stray legacy key alone; the old
+    // default 100 and an unreadable value are dropped, the 60000 default
+    // standing with nothing written.
+    {
+        QSettings().remove(QStringLiteral("engine/cpuBudgetCycles"));
+        QSettings().setValue(QStringLiteral("engine/cpuBudgetPercent"), 50);
+        {
+            MainWindow window;
+            auto *cpuBudget =
+                window.settingsDialog()->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
+            auto *cpuBudgetPercent = window.settingsDialog()->findChild<QLabel *>(
+                QStringLiteral("settingsCpuBudgetPercent"));
+            check(cpuBudget && cpuBudget->value() == 41888 && window.cpuBudgetCycles() == 41888,
+                  "a legacy 50% CPU budget did not load as 41888 cycles");
+            check(cpuBudgetPercent &&
+                      cpuBudgetPercent->text() == QStringLiteral("50% of the VBlank window"),
+                  "the migrated CPU budget's caption does not read 50%");
+            check(QSettings().value(QStringLiteral("engine/cpuBudgetCycles")).toInt() == 41888 &&
+                      !QSettings().contains(QStringLiteral("engine/cpuBudgetPercent")),
+                  "the CPU budget migration did not store the cycles and remove the legacy key");
+        }
+        QSettings().setValue(QStringLiteral("engine/cpuBudgetPercent"), 100);
+        check(MainWindow::loadCpuBudgetCycles() == 41888 &&
+                  QSettings().value(QStringLiteral("engine/cpuBudgetPercent")).toInt() == 100,
+              "a legacy CPU budget key overrode the stored cycles");
+        // The old default (100, what its Restore Defaults wrote) is not a
+        // choice: the old key goes, nothing is written, 60000 stands.
+        QSettings().remove(QStringLiteral("engine/cpuBudgetCycles"));
+        QSettings().setValue(QStringLiteral("engine/cpuBudgetPercent"), 100);
+        {
+            MainWindow window;
+            auto *cpuBudget =
+                window.settingsDialog()->findChild<QSpinBox *>(QStringLiteral("settingsCpuBudget"));
+            check(cpuBudget && cpuBudget->value() == 60000 && window.cpuBudgetCycles() == 60000,
+                  "a legacy 100% CPU budget did not leave the 60000-cycle default");
+            check(!QSettings().contains(QStringLiteral("engine/cpuBudgetPercent")) &&
+                      !QSettings().contains(QStringLiteral("engine/cpuBudgetCycles")),
+                  "a legacy 100% CPU budget was not dropped without writing the cycles key");
+        }
+        // An unreadable legacy value is dropped the same way.
+        QSettings().setValue(QStringLiteral("engine/cpuBudgetPercent"), QStringLiteral("lots"));
+        check(MainWindow::loadCpuBudgetCycles() == 60000 &&
+                  !QSettings().contains(QStringLiteral("engine/cpuBudgetPercent")) &&
+                  !QSettings().contains(QStringLiteral("engine/cpuBudgetCycles")),
+              "an unreadable legacy CPU budget did not leave the 60000-cycle default");
+        QSettings().setValue(QStringLiteral("engine/cpuBudgetCycles"), 5);
+        check(MainWindow::loadCpuBudgetCycles() == AudioSettingsPage::kCpuBudgetMin,
+              "a stored CPU budget under the minimum was not clamped on load");
     }
 
     if (failures == 0)

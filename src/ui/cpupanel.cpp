@@ -129,10 +129,7 @@ class CpuBar : public QWidget
         return QRect(x0, t.top(), x1 - x0, t.height());
     }
 
-    int budgetX() const
-    {
-        return xFor(int64_t(m_reading.budgetPercent) * m_reading.cpu.vblankCycles / 100);
-    }
+    int budgetX() const { return xFor(m_reading.budgetCycles); }
     int vblankX() const { return xFor(m_reading.cpu.vblankCycles); }
     int ceilingX() const { return xFor(m_reading.cpu.frameCycles); }
 
@@ -180,8 +177,8 @@ class CpuBar : public QWidget
             return c;
         const QFontMetrics fm(captionFont());
         const QRect t = track();
-        c.budgetText =
-            QCoreApplication::translate("CpuPanel", "Budget %1%").arg(m_reading.budgetPercent);
+        c.budgetText = QCoreApplication::translate("CpuPanel", "Budget %1")
+                           .arg(QLocale().toString(m_reading.budgetCycles));
         const int bw = fm.horizontalAdvance(c.budgetText);
         c.budget =
             QRect(std::clamp(budgetX() - bw / 2, 0, std::max(0, width() - bw)), 0, bw, fm.height());
@@ -256,8 +253,9 @@ class CpuBar : public QWidget
         if (!m_reading.loaded)
             return;
 
-        // The budget, then the VBlank boundary over it (at the default
-        // budget they coincide, and the boundary must stay visible).
+        // The budget, then the VBlank boundary over it (at a budget of
+        // the VBlank window's cycles they coincide, and the boundary must
+        // stay visible).
         p.fillRect(budgetMark(), budgetColor());
         p.fillRect(vblankMark(), vblankColor());
         p.fillRect(ceilingMark(), ceilingColor());
@@ -300,15 +298,15 @@ bool CpuPanel::Reading::operator==(const Reading &o) const
                a.vblankCycles == b.vblankCycles && a.frameCycles == b.frameCycles;
     };
     return loaded == o.loaded && playing == o.playing && sameCpu(cpu, o.cpu) &&
-           budgetPercent == o.budgetPercent && mixRate == o.mixRate && maxPcm == o.maxPcm &&
+           budgetCycles == o.budgetCycles && mixRate == o.mixRate && maxPcm == o.maxPcm &&
            hqMixer == o.hqMixer;
 }
 
-int CpuPanel::level(int32_t total, int budgetPercent)
+int CpuPanel::level(int32_t total, int32_t budgetCycles)
 {
     if (total >= M4A_FRAME_CYCLES)
         return 2;
-    return int64_t(total) * 100 > int64_t(budgetPercent) * M4A_VBLANK_CYCLES ? 1 : 0;
+    return total > budgetCycles ? 1 : 0;
 }
 
 CpuPanel::CpuPanel(QWidget *parent) : QWidget(parent)
@@ -394,8 +392,8 @@ CpuPanel::CpuPanel(QWidget *parent) : QWidget(parent)
         tr("The last frame's cost: sequencer, CGB and mixer from the left. The first three "
            "quarters of the bar are the VBlank window, up to the line at 100%; the tinted last "
            "quarter is the rest of the frame, compressed, up to the red frame end (%1%), past "
-           "which the next frame's sound is skipped. The amber line is your budget (Settings → "
-           "Audio); the triangle under the bar marks the peak.")
+           "which the next frame's sound is skipped. The amber line is your budget in cycles "
+           "(Settings → Audio); the triangle under the bar marks the peak.")
             .arg(std::lround(percentOf(M4A_FRAME_CYCLES, M4A_VBLANK_CYCLES))));
     breakdown->addWidget(m_bar);
     m_termsBox = new QWidget(m_breakdownBox);
@@ -531,7 +529,7 @@ void CpuPanel::refresh()
 
     m_percent->setText(hasReading ? percent(total) : QStringLiteral("--"));
     m_cycles->setText(hasReading ? cycles(total) : QStringLiteral("--"));
-    const int lvl = hasReading ? level(total, r.budgetPercent) : 0;
+    const int lvl = hasReading ? level(total, r.budgetCycles) : 0;
     const QString levelName = lvl == 2   ? QStringLiteral("over")
                               : lvl == 1 ? QStringLiteral("warn")
                                          : QString();
@@ -569,13 +567,12 @@ void CpuPanel::refresh()
 
     // Wide, the marks in full; narrow, only the budget in cycles (the bar's
     // captions carry the rest).
-    const QString budgetCycles = cycles(int64_t(r.budgetPercent) * cpu.vblankCycles / 100);
+    const QString budgetCycles = cycles(r.budgetCycles);
     m_marks->setText(m_wideLayout
-                         ? tr("▲ peak · Budget %1% = %2 · VBlank window %3 = 100% · Frame end "
+                         ? tr("▲ peak · Budget %1 = %2 · VBlank window %3 = 100% · Frame end "
                               "%4 = %5")
-                               .arg(r.budgetPercent)
-                               .arg(budgetCycles, cycles(cpu.vblankCycles), cycles(cpu.frameCycles),
-                                    percent(cpu.frameCycles))
+                               .arg(budgetCycles, percent(r.budgetCycles), cycles(cpu.vblankCycles),
+                                    cycles(cpu.frameCycles), percent(cpu.frameCycles))
                          : tr("▲ peak · Budget %1").arg(budgetCycles));
     m_config->setText(r.loaded ? tr("%1 Hz mix rate · %2 PCM channels · %3")
                                      .arg(r.mixRate)
