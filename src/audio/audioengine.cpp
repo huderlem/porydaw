@@ -143,6 +143,7 @@ void AudioEngine::shutdown()
         m_device = nullptr;
         m_deviceStarted = false;
     }
+    drainPendingTimeline(false);
     if (m_wasapiContext) {
         ma_context_uninit(m_wasapiContext);
         delete m_wasapiContext;
@@ -163,6 +164,7 @@ void AudioEngine::shutdown()
     }
     m_audition.reset();
     m_timeline = nullptr;
+    m_uiTimeline = nullptr;
     m_voicegroup = nullptr;
     if (m_context) {
         if (m_hasContext)
@@ -289,6 +291,7 @@ bool AudioEngine::reopenDevice(const AudioDeviceConfig &config, QString *error)
         m_device = nullptr;
     }
     m_deviceStarted = false;
+    drainPendingTimeline(true); // the new thread starts on the current timeline
     const uint32_t rate = uint32_t(std::lround(m_sampleRate));
     bool opened = openDevice(config, rate, &m_deviceWarning);
     if (opened) {
@@ -321,9 +324,11 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     // Cold swap: the audio thread must not be running while pointers change.
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    drainPendingTimeline(false); // superseded: the song it belonged to goes
     m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
 
     m_timeline = timeline;
+    m_uiTimeline = timeline;
     m_voicegroup = voicegroup;
     m_settings = settings;
 
@@ -370,52 +375,91 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
         ma_device_start(m_device);
 }
 
-void AudioEngine::updateTimeline(const MidiTimeline *timeline)
+void AudioEngine::updateTimeline(const MidiTimeline *timeline,
+                                 std::unique_ptr<MidiTimeline> retired)
 {
-    if (!m_timeline || !timeline)
-        return;
-    if (m_deviceStarted)
-        ma_device_stop(m_device);
+    if (!m_uiTimeline || !timeline)
+        return; // `retired` goes with the return
+    reapRetiredTimelines();
+    m_uiTimeline = timeline;
 
-    // A seek published but not yet applied by the audio thread must survive
-    // the rebuild — dropping it would silently ignore an edit-cursor move
-    // that raced this edit. The device is stopped, so the exchange can't
-    // race applyPendingSeek.
-    const uint64_t pending = m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
-    const uint64_t pos = pending != kNoPendingSeek ? pending : m_player.position();
-    // A seek raced in: the pass ends there, and the latch with it (the full
-    // chase below covers its lanes).
-    if (pos != m_player.position()) {
-        captureBoundary(m_player.position(), pos);
-        dropLiveLatch();
-    }
-    // The take's track moved (followLiveTrack): the sound and the latch move
-    // with it, here, with the timeline that has the track at its new index.
-    // The full chase below hands the old index to whichever track has it
-    // now, and the reapply re-sends the knobs' values on the new one.
-    if (m_liveFollow.generation) {
-        const LiveFollow follow = std::exchange(m_liveFollow, LiveFollow());
-        if (capturing() && follow.generation == m_captureBegun && m_liveTrack == follow.from) {
-            m_liveTrack = follow.to;
-            if (m_liveTarget.load() == follow.from)
-                m_liveTarget.store(follow.to);
-            if (m_liveLatch.track == follow.from)
-                m_liveLatch.track = follow.to;
+    // The cold route: a take's track move waiting for this rebuild moves the
+    // live target and the latch with the new timeline's indices, which must
+    // be in step with the UI (setLiveTarget keeps the old index until then),
+    // so it stays synchronous. A device that isn't running has no callback
+    // to apply a swap; a full ring means the callback hasn't caught up with
+    // the last kSwapRing edits.
+    const bool ringFull = m_swapHead.load(std::memory_order_relaxed) -
+                              m_swapApplied.load(std::memory_order_acquire) >=
+                          kSwapRing;
+    if (!m_deviceStarted || m_liveFollow.generation || ringFull) {
+        m_coldSwaps++;
+        if (m_deviceStarted)
+            ma_device_stop(m_device);
+        drainPendingTimeline(true); // on the device's thread no more
+        // A seek published but not yet applied by the audio thread must
+        // survive the rebuild — dropping it would silently ignore an
+        // edit-cursor move that raced this edit. The device is stopped, so
+        // the exchange can't race applyPendingSeek.
+        const uint64_t pending = m_pendingSeek.exchange(kNoPendingSeek, std::memory_order_acq_rel);
+        const uint64_t pos = pending != kNoPendingSeek ? pending : m_player.position();
+        // A seek raced in: the pass ends there, and the latch with it (the
+        // full chase below covers its lanes).
+        if (pos != m_player.position()) {
+            captureBoundary(m_player.position(), pos);
+            dropLiveLatch();
         }
-        // The punch mask silences the take's track wherever it now is.
-        if (capturing() && follow.generation == m_captureBegun &&
-            m_punchMaskGen == follow.generation && m_punchMask.track == follow.from)
-            m_punchMask.track = follow.to;
+        // The take's track moved (followLiveTrack): the sound and the latch
+        // move with it, here, with the timeline that has the track at its new
+        // index. The full chase below hands the old index to whichever track
+        // has it now, and the reapply re-sends the knobs' values on the new
+        // one.
+        if (m_liveFollow.generation) {
+            const LiveFollow follow = std::exchange(m_liveFollow, LiveFollow());
+            if (capturing() && follow.generation == m_captureBegun && m_liveTrack == follow.from) {
+                m_liveTrack = follow.to;
+                if (m_liveTarget.load() == follow.from)
+                    m_liveTarget.store(follow.to);
+                if (m_liveLatch.track == follow.from)
+                    m_liveLatch.track = follow.to;
+            }
+            // The punch mask silences the take's track wherever it now is.
+            if (capturing() && follow.generation == m_captureBegun &&
+                m_punchMaskGen == follow.generation && m_punchMask.track == follow.from)
+                m_punchMask.track = follow.to;
+        }
+        swapTimeline(timeline, pos);
+        if (m_deviceStarted)
+            ma_device_start(m_device);
+        return; // `retired` goes with the return: nothing reads it any more
     }
+
+    // The hot route: published for the callback (applyPendingTimeline). The
+    // old timeline stays the callback's until then.
+    const uint32_t generation = m_swapHead.load(std::memory_order_relaxed) + 1;
+    m_swapSlot[generation % kSwapRing].store(timeline, std::memory_order_relaxed);
+    m_swapHead.store(generation, std::memory_order_release);
+    if (retired)
+        m_retiredTimelines.push_back({generation, std::move(retired)});
+}
+
+// The swap itself, on whichever thread owns the engine state at the time:
+// the callback (applyPendingTimeline) or the UI thread with the device
+// stopped (updateTimeline's cold route, drainPendingTimeline).
+void AudioEngine::swapTimeline(const MidiTimeline *timeline, uint64_t pos)
+{
     m_timeline = timeline;
     // A take still recording keeps its mask, on the new timeline's samples
     // (the edit may have moved the tempo); so does an ended one whose commit
     // hasn't landed (an edit group held open: other edits rebuild first).
     // The commit's own rebuild (endPunchMaskAtRebuild), or one after the UI
-    // let it go, plays the song as it now is. Read on the writer's thread.
+    // let it go, plays the song as it now is.
     if (m_punchMaskGen && !capturing()) {
-        const bool kept = m_punchGen.load(std::memory_order_relaxed) == m_punchMaskGen &&
-                          !m_punchEnding.load(std::memory_order_relaxed);
+        // Through the seqlock: the UI may be mid-write (a new take's
+        // setPunchMask). A torn read keeps the mask; applyPunchMask, right
+        // after in the same callback, settles it.
+        PunchRequest r;
+        const bool kept = !readPunchRequest(&r) || (r.generation == m_punchMaskGen && !r.ending);
         if (!kept)
             dropPunchMask();
     }
@@ -440,14 +484,52 @@ void AudioEngine::updateTimeline(const MidiTimeline *timeline)
     // Except on the lanes a take holds: what you hear there stays what the
     // take commits, edit or no edit.
     reapplyLiveLatch();
+}
 
-    if (m_deviceStarted)
-        ma_device_start(m_device);
+// Callback: the latest published timeline, if any, at the player's current
+// position. Runs after the transport transition (a Stop's rewind is where
+// the swap lands) and before the pending seek (which then lands on the new
+// timeline, so an edit never drops a seek that raced it).
+void AudioEngine::applyPendingTimeline()
+{
+    const uint32_t head = m_swapHead.load(std::memory_order_acquire);
+    if (head == m_swapApplied.load(std::memory_order_relaxed))
+        return;
+    const MidiTimeline *timeline = m_swapSlot[head % kSwapRing].load(std::memory_order_relaxed);
+    if (timeline && m_timeline)
+        swapTimeline(timeline, m_player.position());
+    // After the swap: the old timeline is no longer read here, so the UI may
+    // free it.
+    m_swapApplied.store(head, std::memory_order_release);
+}
+
+// UI thread, device stopped (or never started): settles a swap the callback
+// hasn't applied, then frees the timelines it has let go.
+void AudioEngine::drainPendingTimeline(bool apply)
+{
+    const uint32_t head = m_swapHead.load(std::memory_order_relaxed);
+    if (head != m_swapApplied.load(std::memory_order_acquire)) {
+        const MidiTimeline *timeline = m_swapSlot[head % kSwapRing].load(std::memory_order_relaxed);
+        if (apply && timeline && m_timeline)
+            swapTimeline(timeline, m_player.position());
+        m_swapApplied.store(head, std::memory_order_release);
+    }
+    reapRetiredTimelines();
+}
+
+void AudioEngine::reapRetiredTimelines()
+{
+    const uint32_t applied = m_swapApplied.load(std::memory_order_acquire);
+    m_retiredTimelines.erase(std::remove_if(m_retiredTimelines.begin(), m_retiredTimelines.end(),
+                                            [applied](const RetiredTimeline &r) {
+                                                return int32_t(applied - r.generation) >= 0;
+                                            }),
+                             m_retiredTimelines.end());
 }
 
 void AudioEngine::seek(uint64_t samplePos)
 {
-    if (!m_timeline)
+    if (!m_uiTimeline)
         return;
     m_pendingSeek.store(samplePos, std::memory_order_release);
 }
@@ -491,6 +573,7 @@ void AudioEngine::updateSettings(const SongSettings &settings)
 {
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    drainPendingTimeline(true);
     m_settings = settings;
     // The mixer and rate setters are no-ops when unchanged, so a mid-song
     // volume or polyphony edit never restarts the PCM ring.
@@ -517,6 +600,7 @@ void AudioEngine::updateVoicegroup(LoadedVoiceGroup *voicegroup)
 {
     if (m_deviceStarted)
         ma_device_stop(m_device);
+    drainPendingTimeline(true); // the chase below reads the current timeline
     m4a_engine_all_sound_off(m_engine.get());
     clearTimedPreviews();
     m_voicegroup = voicegroup;
@@ -653,8 +737,10 @@ void AudioEngine::unloadSong()
     // returns. loadSong is exempt only because its engine reinit zeroes the
     // channels.
     m4a_engine_all_sound_off(m_engine.get());
+    drainPendingTimeline(false); // superseded: the song goes
     m_pendingSeek.store(kNoPendingSeek, std::memory_order_release);
     m_timeline = nullptr;
+    m_uiTimeline = nullptr;
     m_voicegroup = nullptr;
     m4a_engine_set_voicegroup(m_engine.get(), nullptr);
     m_liveTouched = TouchedLanes(); // no song to hand anything back to
@@ -1745,6 +1831,7 @@ void AudioEngine::holdDeviceForTest(bool hold)
     if (hold) {
         ma_device_stop(m_device);
         m_deviceStarted = false;
+        drainPendingTimeline(true); // the harness reads the engine as the UI left it
     } else {
         m_deviceStarted = ma_device_start(m_device) == MA_SUCCESS;
     }
@@ -1813,6 +1900,7 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
     m_callbackNs = midiClockNs();
     m_callbackFrames = frameCount;
     applyTransportTransition();
+    applyPendingTimeline();
     applyPendingSeek();
     applyCountInRequest();
     applyPunchMask();

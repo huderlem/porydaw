@@ -73,9 +73,10 @@ enum class Transport : int {
 //  - Cold operations (loadSong/unloadSong/shutdown) stop the device first, so
 //    the audio thread is not running while engine/timeline/voicegroup pointers
 //    are swapped. Call from the UI thread only.
-//  - Hot operations (transport, mute/solo, loop) are single-writer atomics set
-//    by the UI thread; the audio thread applies transitions at callback
-//    boundaries (sending note-offs for newly muted tracks, etc.).
+//  - Hot operations (transport, mute/solo, loop, seek, the timeline swap of
+//    an edit) are single-writer atomics set by the UI thread; the audio
+//    thread applies transitions at callback boundaries (sending note-offs
+//    for newly muted tracks, etc.).
 //  - Telemetry (playhead, active channels) is written by the audio thread into
 //    atomics; polyphony-overflow counters are read directly from the engine
 //    struct, which its header documents as safe for lock-free monitoring.
@@ -130,12 +131,26 @@ class AudioEngine
                   const SongSettings &settings);
     void unloadSong();
 
-    // Cold: swaps in a rebuilt timeline after a document edit, preserving
+    // Hot: swaps in a rebuilt timeline after a document edit, preserving
     // transport state and the playhead position. Sounding notes are released
-    // (their note-offs may have moved or vanished in the new timeline).
-    // Borrowed like loadSong's; the old timeline may be freed once this
-    // returns.
-    void updateTimeline(const MidiTimeline *timeline);
+    // (their note-offs may have moved or vanished in the new timeline). The
+    // swap is published for the audio callback, which applies it at its next
+    // entry (ahead of any pending seek, which then lands on the new
+    // timeline): the device is never stopped for an edit, which on WASAPI
+    // (exclusive mode above all) stalled the UI for tens of ms per
+    // keystroke. Borrowed like loadSong's. The OLD timeline stays in use by
+    // the callback until the swap lands, so the caller hands it over as
+    // `retired` and the engine frees it once the callback has acknowledged
+    // the swap (or at once when the device isn't running, when the swap is
+    // applied inline). Passing none is for a caller that re-publishes the
+    // current timeline, or holds the device (harnesses): with a running
+    // device no one else can tell when the old one is safe to free.
+    // Three cases still take the cold stop/apply/start route, synchronously:
+    // a take's track move waiting for this rebuild (followLiveTrack), a
+    // device that isn't running, and a ring full of swaps the callback
+    // hasn't applied (kSwapRing edits within one period).
+    void updateTimeline(const MidiTimeline *timeline,
+                        std::unique_ptr<MidiTimeline> retired = nullptr);
     // Hot: requests a jump at the next audio callback. Releases sounding
     // notes and chases controller state at the landing position. Works in
     // any transport state; playing from Stopped starts wherever the last
@@ -386,6 +401,15 @@ class AudioEngine
     const M4AEngine *liveEngineForTest() const { return m_liveEngine.get(); }
     // With the device held: the recording latch as the callback left it.
     LaneLatch liveLatchForTest() const { return m_liveLatch; }
+    bool deviceStartedForTest() const { return m_deviceStarted; }
+    uint32_t coldSwapsForTest() const { return m_coldSwaps; }
+    // Retired timelines not yet freed, after reaping what the callback let
+    // go (the app reaps on its next edit).
+    size_t retiredTimelinesForTest()
+    {
+        reapRetiredTimelines();
+        return m_retiredTimelines.size();
+    }
     // With the device held: the punch mask as the callback left it.
     NoteMask punchMaskForTest() const { return m_punchMask; }
 
@@ -422,8 +446,10 @@ class AudioEngine
     // whether or not a song plays, so auditions and ring-outs show too.
     const AudioTap &tap() const { return m_tap; }
 
-    bool songLoaded() const { return m_timeline != nullptr; }
-    const MidiTimeline *timeline() const { return m_timeline; }
+    // UI thread: the timeline most recently handed to loadSong or
+    // updateTimeline (the callback's m_timeline may still be a swap behind).
+    bool songLoaded() const { return m_uiTimeline != nullptr; }
+    const MidiTimeline *timeline() const { return m_uiTimeline; }
     const LoadedVoiceGroup *voicegroup() const { return m_voicegroup; }
 
     // Hot-safe for scalar field pokes only (byte-sized stores the audio
@@ -540,6 +566,15 @@ class AudioEngine
     void process(float *interleavedOut, uint32_t frameCount);
     void applyPendingSeek();
     void applyTransportTransition();
+    // The timeline swap (updateTimeline): the callback's side applies the
+    // latest published timeline; the UI side runs the same on a stopped
+    // device (apply = false just drops what's pending — the caller replaces
+    // or clears the timeline anyway) and frees retired timelines the
+    // callback let go.
+    void applyPendingTimeline();
+    void swapTimeline(const MidiTimeline *timeline, uint64_t pos);
+    void drainPendingTimeline(bool apply);
+    void reapRetiredTimelines();
     void cutAllSound();
     // The count-in's end: the song starts at the player's position.
     void finishCountIn();
@@ -679,7 +714,11 @@ class AudioEngine
     AudioDeviceConfig m_deviceConfig;
     QString m_deviceWarning;
     std::unique_ptr<M4AEngine> m_engine;
-    const MidiTimeline *m_timeline = nullptr; // not owned (the active song tab's)
+    // Not owned (the active song tab's). m_timeline is the callback's: it is
+    // written there by applyPendingTimeline, and by the UI thread only with
+    // the device stopped. m_uiTimeline is the UI thread's view of the same.
+    const MidiTimeline *m_timeline = nullptr;
+    const MidiTimeline *m_uiTimeline = nullptr;
     LoadedVoiceGroup *m_voicegroup = nullptr; // not owned (the active song tab's)
     SongSettings m_settings;
     // Audition instance: voice previews and sample auditions, mixed on top
@@ -741,6 +780,30 @@ class AudioEngine
     // Avoid stop/start stalls: publish the latest seek for the audio callback.
     static constexpr uint64_t kNoPendingSeek = UINT64_MAX;
     std::atomic<uint64_t> m_pendingSeek{kNoPendingSeek};
+    // The timeline swap, likewise. The UI thread writes the new pointer into
+    // the ring slot of the next generation, then publishes the generation
+    // (m_swapHead, release). The callback applies the head's slot (latest
+    // wins: generations it never saw are superseded) and acknowledges the
+    // generation in m_swapApplied (release), after which the UI frees every
+    // retired timeline of that generation or earlier (reapRetiredTimelines).
+    // A slot is rewritten only kSwapRing generations later, and the UI
+    // publishes only while head - applied < kSwapRing: the callback has by
+    // then acknowledged a later generation, so it is done reading the slot.
+    // A full ring (the callback starved) takes the cold route instead.
+    // Up to kSwapRing retired timelines stay in memory until the next edit,
+    // load or unload reaps them (no idle reap).
+    static constexpr uint32_t kSwapRing = 16;
+    std::atomic<const MidiTimeline *> m_swapSlot[kSwapRing] = {};
+    std::atomic<uint32_t> m_swapHead{0}; // written by the UI thread only
+    // Written by the callback, and by the UI thread with the device stopped
+    // (drainPendingTimeline).
+    std::atomic<uint32_t> m_swapApplied{0};
+    uint32_t m_coldSwaps = 0; // UI thread: updateTimeline calls that stopped the device
+    struct RetiredTimeline {
+        uint32_t generation; // the swap that replaced it
+        std::unique_ptr<MidiTimeline> timeline;
+    };
+    std::vector<RetiredTimeline> m_retiredTimelines; // UI thread
     // Preview-note command:
     // pan<<40 | generation<<32 | volume<<24 | track<<16 | key<<8 | velocity,
     // where the volume byte is 0xFF for kPreviewVolNone and the pan byte is

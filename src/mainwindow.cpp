@@ -3000,9 +3000,10 @@ void MainWindow::onDocumentChanged(SongSession &session)
     }
 
     auto timeline = session.doc.buildTimeline(m_audio.sampleRate());
+    // The engine keeps the old timeline until its callback has let go of it
+    // (the swap is applied there, without stopping the device).
     if (active && m_audio.songLoaded())
-        m_audio.updateTimeline(timeline.get());
-    // The old timeline is freed here — after the engine let go of it.
+        m_audio.updateTimeline(timeline.get(), std::move(session.timeline));
     session.timeline = std::move(timeline);
     session.view->updateSong(session.timeline.get());
     updateTabTitle(session);

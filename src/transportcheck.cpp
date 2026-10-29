@@ -251,8 +251,8 @@ int runTransportCheck()
     }
 
     // An edit that rebuilds the timeline must not drop a just-published
-    // seek: updateTimeline folds the pending target into its rebuild
-    // position instead of clearing it.
+    // seek: the callback applies the swap first and the seek on top of it
+    // (the cold route folds the pending target into its rebuild position).
     engine.seek(midSong);
     engine.updateTimeline(timeline.get());
     if (!waitFor([&] { return engine.playheadSamples() == midSong; }, 2000))
@@ -260,6 +260,68 @@ int runTransportCheck()
     engine.seek(0);
     if (!waitFor([&] { return engine.playheadSamples() == 0; }, 2000))
         fail("reset seek after updateTimeline not applied");
+
+    // Edits don't stop the device: a rebuild is published for the callback
+    // like a seek (stopping a WASAPI exclusive stream cost tens of ms per
+    // keystroke), and the old timeline is kept until the callback has let
+    // go of it. A paced burst of rebuilds mid-playback, each retiring the
+    // last, must take the published route every time; its retired
+    // timelines are freed only once the callback acknowledges (which it
+    // does after the swap, so a drained list proves the callback adopted
+    // them).
+    if (!engine.deviceStartedForTest())
+        fail("the rebuild burst needs a running device (it checks the published route)");
+    engine.play();
+    if (!waitFor([&] { return engine.playheadSamples() > 0; }, 2000))
+        fail("playback did not start for the rebuild burst");
+    const uint32_t coldBefore = engine.coldSwapsForTest();
+    qint64 slowestSwapNs = 0;
+    std::unique_ptr<MidiTimeline> current = MidiTimeline::build(smf, engine.sampleRate());
+    engine.updateTimeline(current.get(), std::move(timeline));
+    for (int i = 0; i < 100; i++) {
+        // Paced: the callback gets to apply each rebuild before the next
+        // (a real edit never comes faster than a period; the ring-full
+        // fallback is checked separately below).
+        if (!waitFor([&] { return engine.retiredTimelinesForTest() == 0; }, 2000)) {
+            fail("the callback never acknowledged a rebuild (retired timeline not freed)");
+            break;
+        }
+        std::unique_ptr<MidiTimeline> rebuilt = MidiTimeline::build(smf, engine.sampleRate());
+        QElapsedTimer swapTimer;
+        swapTimer.start();
+        engine.updateTimeline(rebuilt.get(), std::move(current));
+        slowestSwapNs = std::max(slowestSwapNs, swapTimer.nsecsElapsed());
+        current = std::move(rebuilt);
+    }
+    if (engine.coldSwapsForTest() != coldBefore)
+        fail("a paced rebuild took the cold stop/start route");
+    if (slowestSwapNs > 5'000'000)
+        fail("updateTimeline blocked instead of publishing to the audio thread");
+    if (!waitFor([&] { return engine.retiredTimelinesForTest() == 0; }, 2000))
+        fail("the callback never acknowledged the last rebuild");
+    if (engine.timeline() != current.get())
+        fail("timeline() does not report the latest rebuild");
+    const uint64_t beforeBurstPlay = engine.playheadSamples();
+    if (!waitFor([&] { return engine.playheadSamples() > beforeBurstPlay; }, 2000))
+        fail("playback stalled after the rebuild burst");
+
+    // Unpaced: more rebuilds than the ring holds within one period fall
+    // back to the cold route rather than overwriting a slot the callback
+    // may be reading, and still end with every retired timeline freed.
+    const uint32_t coldBeforeFlood = engine.coldSwapsForTest();
+    for (int i = 0; i < 1000; i++) { // far more than kSwapRing per period, on any machine
+        std::unique_ptr<MidiTimeline> rebuilt = MidiTimeline::build(smf, engine.sampleRate());
+        engine.updateTimeline(rebuilt.get(), std::move(current));
+        current = std::move(rebuilt);
+    }
+    if (engine.coldSwapsForTest() == coldBeforeFlood)
+        fail("a flood of rebuilds never hit the ring-full fallback (ring larger than the flood?)");
+    if (!waitFor([&] { return engine.retiredTimelinesForTest() == 0; }, 2000))
+        fail("retired timelines not freed after the rebuild flood");
+    engine.stop();
+    if (!waitFor([&] { return engine.playheadSamples() == 0; }, 2000))
+        fail("stop after the rebuild burst did not rewind");
+    timeline = std::move(current);
 
     // A short audition whose note-off has already gone out, leaving a
     // ringing slow-release tail — the reported symptom. Fails the whole

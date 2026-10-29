@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - The `Auto` recording offset now includes the engine's own latency, so a take lands where you heard the song.
 
 ## Changed
+- Note edits, undo/redo and other song changes no longer stop and restart the audio device. They were stalling the UI for tens of milliseconds per edit on Windows, badly so in WASAPI exclusive mode.
 - Removed the `GBA analog output filter` and the `Host rate` PCM mix rate options from `Settings -> Audio`: the engine now models the GBA's output stage itself, and the PCM rate is always one of the game's `m4aSoundInit` rates. A saved host-rate setting falls back to 13379 Hz.
 - Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
    - Settings are found in `Settings -> MIDI`.
