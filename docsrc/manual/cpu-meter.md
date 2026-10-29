@@ -36,6 +36,21 @@ the VBlank window.
 The line under it names the engine settings it was estimated for (mix rate,
 PCM channels, stock or HQ mixer). Changing Settings → Audio moves it live. -->
 
+## The profile strip
+
+<!-- TODO: The thin "CPU" strip under the ruler: the whole song's cost per
+frame without playing it, from a quick render of the song in the background
+(a looping song once through to its loop end; any other to its end plus the
+3 s release tail playback plays) with the same engine settings. Colour per
+column = the most expensive frame there: a cool grey for cheap frames,
+warming as it nears the budget, amber above the budget, red at a whole
+frame. Hover a spot for its percent, cycles, bar and the three parts; hover
+the "CPU" label for the song's peak. It dims ("profiling…") for a moment
+after an edit or a Settings → Audio change, then refreshes. Changing the
+budget recolours it at once. View → CPU Profile, or right-click → Hide CPU
+Profile, hides it (and stops the background renders). Songs over 10 minutes
+are not profiled. -->
+
 ## The three parts
 
 <!-- TODO: Sequencer (MPlayMain, reading the song's commands), CGB (CgbSound,

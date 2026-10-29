@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - It turns amber above the `CPU budget` set in `Settings -> Audio` (100% of the VBlank window by default), and red at or past a whole frame, where the game would skip a frame of sound.
    - The new `CPU` dock (`View -> CPU`) shows it in full: the current frame and the peak since playback started, their cycle counts, a bar of the sequencer, CGB and mixer parts against the VBlank window and the rest of the frame, with your budget and the peak marked, and the engine settings it is estimated for. `Reset` starts the peak over.
    - Plugins read the same numbers through `porydaw.audio.cpu()`.
+   - A thin `CPU` strip under the ruler shows the whole song's cost without playing it: each bar is coloured by its most expensive frame, warming toward amber as it nears your budget, amber above it and red at a whole frame. Hover it for the frame's percent, cycles and parts. It updates shortly after each edit or engine setting change; `View -> CPU Profile` (or right-click it) hides it. Plugins read it through `porydaw.audio.cpuProfile()`.
 
 ## Changed
 - Note edits, undo/redo and other song changes no longer stop and restart the audio device. They were stalling the UI for tens of milliseconds per edit on Windows, badly so in WASAPI exclusive mode.

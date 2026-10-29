@@ -142,6 +142,10 @@ int runVirtualKeyboardCheck(const QString &projectRoot, const QString &songLabel
 // the song playing through the parked audio device. Redirects QSettings
 // itself.
 int runCpuCheck(const QString &projectRoot, const QString &songLabel);
+// cpuprofilecheck.cpp; the offline CPU profile strip (docs/cpu-meter/PLAN.md
+// step 7): the background render, its triggers, the strip and its toggle.
+// Redirects QSettings itself.
+int runCpuProfileCheck(const QString &projectRoot, const QString &songLabel);
 
 int main(int argc, char *argv[])
 {
@@ -260,6 +264,9 @@ int main(int argc, char *argv[])
     const int cpuCheck = args.indexOf(QStringLiteral("--cpucheck"));
     if (cpuCheck >= 0 && cpuCheck + 2 < args.size())
         return runCpuCheck(args[cpuCheck + 1], args[cpuCheck + 2]);
+    const int cpuProfileCheck = args.indexOf(QStringLiteral("--cpuprofilecheck"));
+    if (cpuProfileCheck >= 0 && cpuProfileCheck + 2 < args.size())
+        return runCpuProfileCheck(args[cpuProfileCheck + 1], args[cpuProfileCheck + 2]);
     const int recCheck = args.indexOf(QStringLiteral("--reccheck"));
     if (recCheck >= 0 && recCheck + 2 < args.size())
         return runRecordCheck(args[recCheck + 1], args[recCheck + 2]);

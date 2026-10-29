@@ -326,6 +326,28 @@ void checkDerivedThemes(Reporter &reporter)
                     "a dark derived Sample Editor ink is unreadable");
     waveformLegible(themes::derive(QColor("#F2F2F2"), QColor("#0055AA")),
                     "a light derived Sample Editor ink is unreadable");
+    // The CPU profile strip paints its ramp on the timeline chrome: every
+    // step must stand off the chrome (an empty column is chrome), and the
+    // three steps must differ from each other.
+    auto cpuProfileLegible = [&](const themes::Theme &theme, const char *what) {
+        const auto chrome = theme.color(themes::Role::song_view_timeline_chrome_background);
+        const auto low = theme.color(themes::Role::cpu_profile_low_fill);
+        const auto warn = theme.color(themes::Role::cpu_profile_warn_fill);
+        const auto over = theme.color(themes::Role::cpu_profile_over_fill);
+        reporter.check(themes::contrastRatio(low, chrome) >= 1.2 &&
+                           themes::contrastRatio(warn, chrome) >= 1.2 &&
+                           themes::contrastRatio(over, chrome) >= 1.2 && low != warn &&
+                           warn != over && low != over,
+                       what);
+    };
+    cpuProfileLegible(themes::vanilla(), "a Vanilla CPU profile step is lost on the chrome");
+    cpuProfileLegible(themes::darkNeutralHigh(),
+                      "a Dark Neutral High CPU profile step is lost on the chrome");
+    cpuProfileLegible(themes::immaterial(), "an Immaterial CPU profile step is lost on the chrome");
+    cpuProfileLegible(themes::derive(QColor("#2B2D31"), QColor("#66CCFF")),
+                      "a dark derived CPU profile step is lost on the chrome");
+    cpuProfileLegible(themes::derive(QColor("#F2F2F2"), QColor("#0055AA")),
+                      "a light derived CPU profile step is lost on the chrome");
 }
 
 void checkThemeWorkflow(Reporter &reporter, QApplication &application)

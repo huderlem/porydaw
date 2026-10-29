@@ -515,6 +515,26 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   Stacked when narrow, readout beside the breakdown when wide. Fed from the status
   bar's reading at the same cadence; nothing CPU-related is in the Polyphony dock.
   Plugins read the same numbers through `porydaw.audio.cpu()`.
+- **CPU profile strip** (View → CPU Profile, shown by default, app-wide and
+  persisted; D3 of docs/cpu-meter/PLAN.md): a thin band directly under the time
+  ruler — its own widget, so none of the ruler's hit zones move — part of the header:
+  the playhead and its triangle start below it. A background render of the active song
+  (a looping song once through to its loop end — past it the strip would only repeat;
+  any other to its last event plus playback's 3 s release tail before auto-stop) on a
+  private engine with playback's settings and the
+  cost hooks on collects every SoundMain's cost, placed on the timeline from the end of
+  the engine's boot (where playback's sample 0 plays) (`CpuProfiler`, one job at a time, its
+  own copy of the timeline; the voicegroup is borrowed, so the job is cancelled and
+  joined before that session's voicegroup is freed). Recomputed on song load and tab
+  switch (when stale), 500 ms after the last edit or voice edit (an edit cancels the
+  job in flight), and on an engine-settings change; a budget change only recolours.
+  Each device-pixel column shows the costliest frame in its span: a ramp from
+  `cpu_profile_low_fill` toward `cpu_profile_warn_fill` up to the budget, amber above
+  it, `cpu_profile_over_fill` at the whole frame; chrome past the profiled span; the
+  shown profile dims while a new one is on its way ("CPU · profiling…" in the gutter).
+  Hover gives the frame's percent, cycles, bar and the three terms (the gutter: the
+  peak); right-click hides it. Hidden, nothing is rendered. Songs over 10 minutes are
+  skipped. Plugins read it through `porydaw.audio.cpuProfile()`.
 - **Song Settings dialog:** the `midi.cfg` flags presented as friendly controls
   (voicegroup dropdown, reverb slider, master volume, priority, exact-gate toggle).
 - **MIDI event list** (View → MIDI Event List; swaps in for the piano roll):
@@ -711,7 +731,8 @@ open.
 ### 7.1 Playhead rendering & timeline paint caching
 
 - One transparent `PlayheadOverlay` widget spans every timeline-aligned surface
-  (ruler triangle, roll, automation lanes, other-events strip) and draws the
+  (ruler triangle, roll, automation lanes, other-events strip; the CPU profile strip,
+  when shown, extends the ruler's header and the triangle sits below it) and draws the
   glow + 1 px core at a sample-accurate, fractional x.
 - **Native compositor paths:** on macOS the playhead is CALayer sublayers of the
   top-level window's content view (masked to the visible surfaces); on Windows a
@@ -722,7 +743,8 @@ open.
   `PORYDAW_FORCE_WIDGET_PLAYHEAD` environment variable forces the fallback for
   debugging. Elsewhere (Linux, and whenever the platform path is unavailable)
   the overlay paints antialiased vectors, which keeps the same subpixel motion.
-- **Timeline paint caching:** roll, lanes, and strip derive from
+- **Timeline paint caching:** roll, lanes, the other-events strip and the CPU profile
+  strip derive from
   `TimelineSurface`, which rasterizes content into a cached pixmap so the
   playhead sweeping across them costs blits, not note/lane re-rasters. Content
   changes must go through `invalidateContent()` — a plain `update()` repaints

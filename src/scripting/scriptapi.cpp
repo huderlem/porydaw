@@ -1,4 +1,5 @@
 #include "scriptapi.h"
+#include "audio/cpuprofile.h"
 
 #include <QAction>
 #include <QApplication>
@@ -572,6 +573,28 @@ QVariant AudioApi::cpu() const
         {QStringLiteral("budgetPercent"), budget ? budget() : 100},
         {QStringLiteral("vblankCycles"), snap.vblankCycles},
         {QStringLiteral("frameCycles"), snap.frameCycles}};
+}
+
+QVariant AudioApi::cpuProfile() const
+{
+    const auto &source = m_host.bindings().cpuProfile;
+    const std::shared_ptr<const CpuProfile> profile = source ? source() : nullptr;
+    if (!profile || profile->skipped)
+        return jsNull();
+    const auto percent = [](int32_t cycles) { return double(cycles) * 100.0 / M4A_VBLANK_CYCLES; };
+    // Built as a QVariantList of maps so the prelude's plain() hands the
+    // script a real Array (Qt 6.5+ would otherwise pass a sequence).
+    QVariantList frames;
+    frames.reserve(qsizetype(profile->frames.size()));
+    for (const CpuProfileFrame &f : profile->frames)
+        frames.append(QVariantMap{{QStringLiteral("tick"), double(f.tick)},
+                                  {QStringLiteral("cycles"), f.total},
+                                  {QStringLiteral("percent"), percent(f.total)}});
+    const auto &budget = m_host.bindings().cpuBudgetPercent;
+    return QVariantMap{{QStringLiteral("frames"), frames},
+                       {QStringLiteral("maxCycles"), profile->maxTotal},
+                       {QStringLiteral("maxPercent"), percent(profile->maxTotal)},
+                       {QStringLiteral("budgetPercent"), budget ? budget() : 100}};
 }
 
 QVariant AudioApi::render(const QString &path, const QVariantMap &opts)

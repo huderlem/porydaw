@@ -154,6 +154,8 @@ qt_add_library(porydaw_app STATIC
     src/audio/metronome.h
     src/audio/miniaudio_impl.c
     src/audio/stb_vorbis_impl.c
+    src/audio/cpuprofile.cpp
+    src/audio/cpuprofile.h
     src/audio/wavexport.cpp
     src/audio/wavexport.h
     src/audio/sampledata.h
@@ -378,6 +380,7 @@ qt_add_executable(porydaw
     src/loopcheck.cpp
     src/polycheck.cpp
     src/cpucheck.cpp
+    src/cpuprofilecheck.cpp
     src/primecheck.cpp
     src/xcmdcheck.cpp
     src/smfcheck.cpp

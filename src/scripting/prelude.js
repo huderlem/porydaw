@@ -476,6 +476,10 @@
             // estimated, playing, budgetPercent, vblankCycles, frameCycles};
             // cycles, percent and the three parts are null unless playing.
             cpu: function () { return plain(audio.cpu()); },
+            // The song's offline CPU profile (the strip under the ruler), or
+            // null: {frames: [{tick, cycles, percent}], maxCycles,
+            // maxPercent, budgetPercent}.
+            cpuProfile: function () { return plain(audio.cpuProfile()); },
             // render(path, {sampleRate?, loopCount?, fadeout?, tail?}) → {path, seconds}
             render: function (path, opts) { return plain(audio.render(String(path), opts || {})); },
             // The GBA engine settings (Settings → Audio):

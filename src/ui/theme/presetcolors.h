@@ -100,6 +100,10 @@ enum class PresetColor {
     cpu_sequencer_fill,
     cpu_cgb_fill,
     cpu_mixer_fill,
+    /// The CPU profile strip's cheap end: a quiet neutral that still reads
+    /// against the timeline chrome it sits on. Its amber and red are the
+    /// Polyphony cells' fixed releasing amber and flash red.
+    cpu_profile_low,
     /// Sample Editor waveform trace, drawn on the item surface behind it.
     sample_waveform_ink,
     /// Sample Editor crop handles: the amber domain color, kept legible on the
@@ -116,7 +120,7 @@ enum class PresetColor {
 };
 
 inline constexpr auto presetColorCount = static_cast<std::size_t>(PresetColor::count);
-static_assert(presetColorCount == 39);
+static_assert(presetColorCount == 40);
 
 constexpr PresetColor presetColorFor(Role role);
 
@@ -266,6 +270,10 @@ inline constexpr auto rolePresetColors = std::array{
     PresetColor::cpu_sequencer_fill,
     PresetColor::cpu_cgb_fill,
     PresetColor::cpu_mixer_fill,
+    // The CPU profile strip: its neutral end, then the fixed amber and red.
+    PresetColor::cpu_profile_low,
+    PresetColor::polyphony_releasing_cell,
+    PresetColor::polyphony_flash,
 
     PresetColor::control_background,
     PresetColor::disabled_text,
@@ -359,6 +367,7 @@ constexpr PresetColors makeVanilla()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    colors.color(PresetColor::cpu_profile_low) = "#8E9CA8";
     // The accent is too pale for a trace on the light item surface (the raw
     // selection cyan sat 1.16:1 there); this is the accent hue walked toward
     // black by the same policy Custom themes use, landing at 5.09:1.
@@ -417,6 +426,7 @@ constexpr PresetColors makeDarkNeutralHigh()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    colors.color(PresetColor::cpu_profile_low) = "#56626E";
     // Matches the selection cyan the waveform always rendered here: 5.83:1 on
     // the item surface, so this preset keeps its look.
     colors.color(PresetColor::sample_waveform_ink) = "#9FCDD7";
@@ -471,6 +481,7 @@ constexpr PresetColors makeImmaterial()
     colors.color(PresetColor::cpu_sequencer_fill) = "#1A9C8C";
     colors.color(PresetColor::cpu_cgb_fill) = "#C44F8E";
     colors.color(PresetColor::cpu_mixer_fill) = "#7A55C9";
+    colors.color(PresetColor::cpu_profile_low) = "#4E5A68";
     // Matches the selection cyan the waveform always rendered here: 6.37:1 on
     // the item surface, so this preset keeps its look.
     colors.color(PresetColor::sample_waveform_ink) = "#ABCAD2";

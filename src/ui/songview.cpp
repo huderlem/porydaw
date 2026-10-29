@@ -1,10 +1,12 @@
 #include "songview.h"
+#include "audio/cpuprofile.h"
 #include "layout.h"
 #include "theme/color_math.h"
 #include "theme/themeruntime.h"
 #include "theme/trackidentitycolors.h"
 #include "typography.h"
 #include "ui/contextmenu.h"
+#include "ui/cpupanel.h"
 #include "ui/layout.h"
 #include "ui/timelinesurface.h"
 #include "ui/velocityaxis.h"
@@ -8444,6 +8446,140 @@ class OtherStrip : public TimelineSurface
     LaneToggleBar *m_toggles = nullptr;
 };
 
+// ----------------------------------------------------------- CpuProfileStrip
+
+// The offline CPU profile (docs/cpu-meter/PLAN.md D3) as a heat strip under
+// the ruler: each device-pixel column takes the costliest frame whose
+// SoundMain falls in its span (or, zoomed in past a frame per column, the
+// frame covering it), coloured by SongView::cpuProfileColor. Beyond the
+// profiled span (the song once through) it stays chrome. A separate widget
+// rather than a ruler row, so none of the ruler's hit zones move. Hover
+// names the frame; right-click hides the strip.
+class CpuProfileStrip : public TimelineSurface
+{
+  public:
+    explicit CpuProfileStrip(SongView *sv) : TimelineSurface(sv), m_sv(sv)
+    {
+        setObjectName(QStringLiteral("cpuProfileStrip")); // findChild for tests
+        setFixedHeight(QFontMetrics(beatRulerFont(font())).height() + 2 * lyt::singlePixel());
+        setMouseTracking(true);
+    }
+
+    // The heat cell's rows: the strip less a pixel of chrome above and
+    // below, so the band reads as one with the ruler's edge.
+    QRect heatRect() const
+    {
+        return QRect(kGutterW, lyt::singlePixel(), width() - kGutterW,
+                     height() - 2 * lyt::singlePixel());
+    }
+
+  protected:
+    void paintContent(QPainter &p) override
+    {
+        const qreal dpr = p.device()->devicePixelRatioF();
+        const QColor chrome = themes::color(themes::Role::song_view_timeline_chrome_background);
+        p.fillRect(rect(), chrome);
+        p.setPen(QPen(themes::color(themes::Role::song_view_separator), lyt::singlePixel()));
+        p.drawLine(0, rect().bottom(), width(), rect().bottom());
+
+        // The gutter names the strip, or says a profile is being made.
+        const QFont labelFont = beatRulerFont(font());
+        p.setFont(labelFont);
+        p.setPen(themes::color(themes::Role::song_view_secondary_text));
+        const auto inset = lyt::space(Space::Two);
+        const bool profiling = m_sv->cpuProfiling();
+        p.drawText(QRect(0, 0, kGutterW - inset, height()), Qt::AlignVCenter | Qt::AlignRight,
+                   profiling ? SongView::tr("CPU · profiling…") : SongView::tr("CPU"));
+
+        const CpuProfile *profile = m_sv->cpuProfile();
+        if (!m_sv->timeline() || !profile || profile->frames.empty())
+            return;
+        const QRect area = heatRect();
+        p.setClipRect(QRect(kGutterW, 0, width() - kGutterW, height()), Qt::IntersectClip);
+        const std::vector<CpuProfileFrame> &frames = profile->frames;
+        const double endTick = double(profile->endTick);
+        // Device-pixel columns, rounded as SongView::displayX rounds a
+        // tick: column c holds the ticks whose x rounds to it.
+        const int c0 = int(std::floor(area.left() * dpr));
+        const int c1 = int(std::ceil((area.right() + 1) * dpr));
+        // Rows on whole device pixels too, so a fractional scale leaves no
+        // half-covered edge row.
+        const qreal heatTop = std::round(area.top() * dpr) / dpr;
+        const qreal heatBottom = std::round((area.bottom() + 1) * dpr) / dpr;
+        size_t next = 0; // the first frame not yet taken by a column
+        bool searched = false;
+        int runStart = -1;
+        QColor runColor;
+        const auto flush = [&](int end) {
+            if (runStart >= 0)
+                p.fillRect(
+                    QRectF(runStart / dpr, heatTop, (end - runStart) / dpr, heatBottom - heatTop),
+                    runColor);
+            runStart = -1;
+        };
+        for (int c = c0; c < c1; c++) {
+            const double t0 = m_sv->tickAtContentX((c - 0.5) / dpr - kGutterW);
+            const double t1 = m_sv->tickAtContentX((c + 0.5) / dpr - kGutterW);
+            if (t1 <= 0.0 || t0 >= endTick) {
+                flush(c);
+                continue;
+            }
+            if (!searched) {
+                next = size_t(std::lower_bound(frames.begin(), frames.end(), t0,
+                                               [](const CpuProfileFrame &f, double t) {
+                                                   return double(f.tick) < t;
+                                               }) -
+                              frames.begin());
+                searched = true;
+            }
+            // The frame covering the column's start, then every frame that
+            // starts inside it.
+            int32_t worst = -1;
+            if (const CpuProfileFrame *covering = profile->frameAtTick(std::max(0.0, t0)))
+                worst = covering->total;
+            while (next < frames.size() && double(frames[next].tick) < t1) {
+                worst = std::max(worst, frames[next].total);
+                next++;
+            }
+            if (worst < 0) {
+                flush(c);
+                continue;
+            }
+            QColor color = m_sv->cpuProfileColor(worst);
+            if (profiling) // stale until the new profile lands
+                color = mixTowardOklab(color, chrome, 0.5);
+            if (runStart >= 0 && color == runColor)
+                continue;
+            flush(c);
+            runStart = c;
+            runColor = color;
+        }
+        flush(c1);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        const QString text = m_sv->cpuProfileToolTip(event->position().x());
+        if (text.isEmpty())
+            QToolTip::hideText();
+        else
+            QToolTip::showText(event->globalPosition().toPoint(), text, this);
+    }
+
+    void leaveEvent(QEvent *) override { QToolTip::hideText(); }
+
+    void contextMenuEvent(QContextMenuEvent *event) override
+    {
+        QMenu menu(this);
+        QAction *hide = menu.addAction(SongView::tr("Hide CPU Profile"));
+        if (menu.exec(event->globalPos()) == hide)
+            emit m_sv->cpuProfileVisibilityRequested(false);
+    }
+
+  private:
+    SongView *m_sv;
+};
+
 // ---------------------------------------------------------- VoicePickerDialog
 
 // Modal instrument picker (SPEC §4.2): the voicegroup's 128 entries, the same
@@ -9136,7 +9272,7 @@ songview::TimelineSurfaces SongView::timelineSurfaces() noexcept
 {
     return {
         {*m_ruler, kGutterW}, {*m_roll, kKeyboardW}, {*m_velocityLane, kGutterW},
-        {*m_lanes, kGutterW}, {*m_strip, kGutterW},
+        {*m_lanes, kGutterW}, {*m_strip, kGutterW},  {*m_cpuStrip, kGutterW},
     };
 }
 
@@ -9157,6 +9293,8 @@ SongView::SongView(QWidget *parent) : QWidget(parent)
 
     m_ruler = new TimeRuler(this);
     vbox->addWidget(m_ruler);
+    m_cpuStrip = new CpuProfileStrip(this);
+    vbox->addWidget(m_cpuStrip);
 
     // Roll (with headers) above, automation lanes below, split by a
     // draggable boundary; kLanesAreaH is only the initial lanes height.
@@ -9450,6 +9588,114 @@ void SongView::setVelocityLaneVisible(bool visible)
         }
     }
     emit velocityLaneVisibilityChanged(visible);
+}
+
+bool SongView::cpuProfileVisible() const
+{
+    return m_cpuStrip && !m_cpuStrip->isHidden();
+}
+
+void SongView::setCpuProfileVisible(bool visible)
+{
+    if (cpuProfileVisible() == visible)
+        return;
+    m_cpuStrip->setVisible(visible);
+    syncPlayheadOverlay();
+}
+
+void SongView::setCpuProfile(std::shared_ptr<const CpuProfile> profile, bool profiling)
+{
+    if (m_cpuProfile == profile && m_cpuProfiling == profiling)
+        return;
+    m_cpuProfile = std::move(profile);
+    m_cpuProfiling = profiling;
+    m_cpuStrip->invalidateContent();
+}
+
+void SongView::setCpuBudgetPercent(int percent)
+{
+    if (m_cpuBudgetPercent == percent)
+        return;
+    m_cpuBudgetPercent = percent;
+    m_cpuStrip->invalidateContent();
+}
+
+QColor SongView::cpuProfileColor(int32_t cycles) const
+{
+    // D1's thresholds, as the readout's (CpuPanel::level): red from the
+    // whole frame on, amber above the budget; under it a ramp from the
+    // neutral end toward the amber, so the hot bars warm up before they
+    // cross it.
+    switch (CpuPanel::level(cycles, m_cpuBudgetPercent)) {
+    case 2:
+        return themes::color(themes::Role::cpu_profile_over_fill);
+    case 1:
+        return themes::color(themes::Role::cpu_profile_warn_fill);
+    default:
+        break;
+    }
+    const double budget = double(m_cpuBudgetPercent) * M4A_VBLANK_CYCLES / 100.0;
+    const double t =
+        budget > 0.0 ? std::clamp(double(std::max(cycles, 0)) / budget, 0.0, 1.0) : 1.0;
+    // Eased so the busy end (where songs sit) spreads further than the
+    // idle one, and stopping short of the amber: crossing the budget is a
+    // step.
+    constexpr double kRampEnd = 0.75;
+    return mixTowardOklab(themes::color(themes::Role::cpu_profile_low_fill),
+                          themes::color(themes::Role::cpu_profile_warn_fill),
+                          std::pow(t, 1.5) * kRampEnd);
+}
+
+QString SongView::cpuProfileToolTip(qreal x) const
+{
+    const CpuProfile *profile = m_cpuProfile.get();
+    const auto percentOf = [](int32_t cycles) {
+        return QString::number(double(cycles) * 100.0 / M4A_VBLANK_CYCLES, 'f', 0);
+    };
+    const auto barBeat = [this](double tick) {
+        const MidiTimeline::BarPosition pos = m_timeline->barPositionForTick(tick);
+        const int bar = int(std::floor(pos.bar));
+        const int beat = int(std::floor((pos.bar - bar) * pos.beatsPerBar));
+        return QStringLiteral("%1.%2").arg(bar + 1).arg(beat + 1);
+    };
+    if (x < kGutterW) {
+        QString text = tr("CPU profile: the sound driver's estimated GBA CPU cost per frame "
+                          "along the song, against the CPU budget (Settings → Audio).");
+        if (m_timeline)
+            text += QLatin1Char('\n') +
+                    (m_timeline->hasLoop()
+                         ? tr("It covers the song once through, to its loop end.")
+                         : tr("It covers the song and %1 s of release tail after its last event.")
+                               .arg(int(AudioEngine::kTailSeconds)));
+        if (m_cpuProfiling)
+            text += QLatin1Char('\n') + tr("Profiling…");
+        else if (!m_timeline || !profile)
+            text += QLatin1Char('\n') + tr("No profile yet.");
+        else if (profile->skipped)
+            text += QLatin1Char('\n') + tr("Not profiled: the song is longer than %1 minutes.")
+                                            .arg(int(CpuProfile::kMaxSeconds / 60.0));
+        if (m_timeline && profile && !profile->frames.empty()) {
+            const CpuProfileFrame &peak = profile->frames[profile->maxIndex];
+            text += QLatin1Char('\n') + tr("Peak: %1% (%2 cycles) at bar %3")
+                                            .arg(percentOf(peak.total))
+                                            .arg(peak.total)
+                                            .arg(barBeat(double(peak.tick)));
+        }
+        return text;
+    }
+    if (!m_timeline || !profile)
+        return QString();
+    const double tick = tickAtContentX(x - kGutterW);
+    const CpuProfileFrame *frame = profile->frameAtTick(tick);
+    if (!frame)
+        return QString();
+    return tr("CPU %1% (%2 cycles) at bar %3\nSequencer %4 · CGB %5 · Mixer %6")
+        .arg(percentOf(frame->total))
+        .arg(frame->total)
+        .arg(barBeat(tick))
+        .arg(frame->sequencer)
+        .arg(frame->cgb)
+        .arg(frame->mixer);
 }
 
 bool SongView::automationLanesVisible() const
@@ -12165,6 +12411,7 @@ void SongView::refreshTimelineViews()
     m_lanes->invalidateContent();
     m_velocityLane->invalidateContent();
     m_strip->invalidateContent();
+    m_cpuStrip->invalidateContent();
     syncPlayheadOverlay();
 }
 

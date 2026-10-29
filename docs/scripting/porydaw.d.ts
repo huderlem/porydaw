@@ -337,6 +337,16 @@ declare namespace porydaw {
         frameCycles: number;
     }
 
+    /** porydaw.audio.cpuProfile(): the song's estimated cost per GBA frame, once through. */
+    interface CpuProfile {
+        /** One per GBA frame, in order; tick is where the frame's m4aSoundMain runs. */
+        frames: { tick: number; cycles: number; percent: number }[];
+        maxCycles: number;
+        maxPercent: number;
+        /** Settings → Audio → CPU budget, percent of the VBlank window. */
+        budgetPercent: number;
+    }
+
     interface ChannelState {
         on: boolean;
         releasing: boolean;
@@ -362,6 +372,8 @@ declare namespace porydaw {
         function channels(): { pcm: ChannelState[]; cgb: ChannelState[]; maxPcm: number; activePcm: number; activeCgb: number } | null;
         /** The sound driver's estimated GBA CPU cost per frame (the CPU dock); null with no song. */
         function cpu(): CpuCost | null;
+        /** The song's offline CPU profile (the strip under the ruler); null with no song, the strip hidden, or while it is remade. */
+        function cpuProfile(): CpuProfile | null;
         /** Renders the active song to a WAV file (blocks; refused inside a transaction). */
         function render(path: string, opts?: { sampleRate?: number; loopCount?: number; fadeout?: number; tail?: number }): { path: string; seconds: number };
         const engine: EngineSettings;

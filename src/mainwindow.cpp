@@ -76,6 +76,7 @@
 #include <functional>
 #include <map>
 
+#include "audio/cpuprofile.h"
 #include "audio/mcu.h"
 #include "audio/midiinput.h"
 #include "audio/sampleimport.h"
@@ -220,6 +221,11 @@ const QString kCountInBarsKey = QStringLiteral("countInBars");
 // The CPU readout's budget in percent of the VBlank window
 // (docs/cpu-meter/PLAN.md D1), app-wide like the engine knobs beside it.
 const QString kCpuBudgetKey = QStringLiteral("engine/cpuBudgetPercent");
+// The CPU profile strip under the ruler (docs/cpu-meter/PLAN.md D3), on by
+// default: a thin band, it costs the roll little height.
+const QString kCpuProfileKey = QStringLiteral("cpuProfileStrip");
+// Edits recompute the profile once they have paused this long.
+constexpr int kCpuProfileDebounceMs = 500;
 // Punch recording on/off (docs/punch/PLAN.md P1), app-wide like the
 // metronome.
 const QString kPunchKey = QStringLiteral("punch");
@@ -564,6 +570,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             return true;
         };
         bindings.cpuBudgetPercent = [this] { return m_cpuBudgetPercent; };
+        bindings.cpuProfile = [this]() -> std::shared_ptr<const CpuProfile> {
+            // Only a profile of the song as it stands.
+            if (!m_active || m_active->cpuProfileStale)
+                return nullptr;
+            return m_active->cpuProfile;
+        };
         bindings.createVoicegroup = [this](const QString &name, const QString &copyFromArg,
                                            QString *error) {
             return createVoicegroupNamed(name, copyFromArg, error);
@@ -692,6 +704,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
 MainWindow::~MainWindow()
 {
+    // The profile job borrows a session's voicegroup: done before any goes.
+    if (m_cpuProfiler)
+        m_cpuProfiler->cancel();
+    m_cpuProfileSession = nullptr;
     // The sessions delete their views below; the tab widget notices the
     // pages vanishing and would fire currentChanged into handlers that walk
     // the half-destroyed session list.
@@ -1516,6 +1532,41 @@ void MainWindow::buildUi()
         }
     });
 
+    // The CPU profile strip under the ruler (docs/cpu-meter/PLAN.md D3):
+    // app-wide, persisted, shown by default. Hidden, no profile is made.
+    m_cpuProfiler = new CpuProfiler(this);
+    m_cpuProfileTimer = new QTimer(this);
+    m_cpuProfileTimer->setSingleShot(true);
+    connect(m_cpuProfileTimer, &QTimer::timeout, this, &MainWindow::startCpuProfile);
+    connect(m_cpuProfiler, &CpuProfiler::finished, this,
+            [this](std::shared_ptr<const CpuProfile> profile, uint64_t generation) {
+                if (generation != m_cpuProfileGeneration || !m_cpuProfileSession)
+                    return;
+                SongSession &session = *m_cpuProfileSession;
+                m_cpuProfileSession = nullptr;
+                session.cpuProfile = std::move(profile);
+                session.cpuProfileStale = false;
+                showCpuProfile(session);
+            });
+    m_cpuProfileAction = viewMenu->addAction(tr("CPU &Profile"));
+    m_cpuProfileAction->setCheckable(true);
+    m_cpuProfileAction->setObjectName(QStringLiteral("viewCpuProfileAction"));
+    m_cpuProfileAction->setChecked(QSettings().value(kCpuProfileKey, true).toBool());
+    connect(m_cpuProfileAction, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue(kCpuProfileKey, on);
+        if (!on) {
+            m_cpuProfileTimer->stop();
+            if (m_cpuProfileSession)
+                releaseCpuProfileJob(*m_cpuProfileSession);
+        }
+        for (const auto &session : m_sessions) {
+            session->view->setCpuProfileVisible(on);
+            showCpuProfile(*session);
+        }
+        if (on && m_active && (m_active->cpuProfileStale || !m_active->cpuProfile))
+            scheduleCpuProfile(0);
+    });
+
     // The transport bar's follow toggle, findable here too: an app-wide
     // persisted preference like the rest of this group.
     viewMenu->addAction(m_followPlayheadAction);
@@ -1755,6 +1806,10 @@ SongSession *MainWindow::createSession()
     s->view->setMidiControls(midiControlsOf(*m_midiInput));
     s->view->setVelocityLaneVisible(m_velocityLaneAction->isChecked());
     s->view->setAutomationLanesVisible(m_automationLanesAction->isChecked());
+    s->view->setCpuProfileVisible(m_cpuProfileAction->isChecked());
+    s->view->setCpuBudgetPercent(m_cpuBudgetPercent);
+    connect(s->view, &SongView::cpuProfileVisibilityRequested, m_cpuProfileAction,
+            &QAction::setChecked);
     connect(s->view, &SongView::muteMaskChanged, this, [this, s](uint32_t mask) {
         if (s == m_active)
             m_audio.setMuteMask(mask);
@@ -1879,6 +1934,7 @@ void MainWindow::destroySession(SongSession *session)
     // engine) through currentChanged; this only fires if that didn't happen.
     if (m_active == session)
         activateSession(nullptr);
+    releaseCpuProfileJob(*session);
     for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it) {
         if (it->get() == session) {
             m_sessions.erase(it);
@@ -1988,6 +2044,13 @@ void MainWindow::activateSession(SongSession *session, bool force)
         maybeRefreshVoicegroup(*session);
     if (m_audioOk)
         attachEngine(*session);
+    // The CPU profile: one job at a time, for the active song only.
+    if (m_cpuProfileSession && m_cpuProfileSession != session)
+        releaseCpuProfileJob(*m_cpuProfileSession);
+    if (session->cpuProfileStale || !session->cpuProfile)
+        scheduleCpuProfile(0);
+    else
+        showCpuProfile(*session);
 #ifdef PORYDAW_SCRIPTING
     m_scriptHost->setSession(session); // engine now holds this session's song
 #endif
@@ -2060,6 +2123,8 @@ void MainWindow::maybeRefreshVoicegroup(SongSession &session)
     if (!vg)
         return; // keep the previous sound
     session.view->setVoicegroup(nullptr);
+    releaseCpuProfileJob(session);
+    session.cpuProfileStale = true;
     if (session.voicegroup)
         voicegroup_free(session.voicegroup);
     session.voicegroup = vg;
@@ -2483,6 +2548,10 @@ SongSession *MainWindow::populateSession(
         m_vgBrowser->setVoicegroup(nullptr);
         m_audio.unloadSong();
     }
+    // Another song: the old one's profile goes with it.
+    releaseCpuProfileJob(*session);
+    session->cpuProfile.reset();
+    session->cpuProfileStale = true;
     if (session->voicegroup)
         voicegroup_free(session->voicegroup);
     session->voicegroup = vg;
@@ -3001,6 +3070,59 @@ void MainWindow::dropEvent(QDropEvent *event)
     });
 }
 
+void MainWindow::scheduleCpuProfile(int delayMs)
+{
+    if (!m_active)
+        return;
+    m_active->cpuProfileStale = true;
+    // A job on the song as it was is wasted work now.
+    if (m_cpuProfileSession == m_active) {
+        m_cpuProfiler->cancel();
+        m_cpuProfileSession = nullptr;
+    }
+    showCpuProfile(*m_active);
+    if (!m_audioOk || !m_cpuProfileAction->isChecked())
+        return;
+    m_cpuProfileTimer->start(delayMs);
+}
+
+void MainWindow::startCpuProfile()
+{
+    SongSession *session = m_active;
+    if (!session || !session->timeline || !m_audioOk || !m_cpuProfileAction->isChecked())
+        return;
+    if (!session->cpuProfileStale && session->cpuProfile)
+        return;
+    // The worker renders its own copy of the timeline (the session's is
+    // replaced on every edit) and borrows the voicegroup, which
+    // releaseCpuProfileJob guards; playback's settings, so it costs what
+    // the CPU readout measures.
+    m_cpuProfileSession = session;
+    m_cpuProfiler->start(std::make_unique<MidiTimeline>(*session->timeline), session->voicegroup,
+                         songSettingsFor(*session), ++m_cpuProfileGeneration);
+    showCpuProfile(*session);
+}
+
+void MainWindow::releaseCpuProfileJob(SongSession &session)
+{
+    if (m_cpuProfileSession != &session)
+        return;
+    m_cpuProfiler->cancel();
+    m_cpuProfileSession = nullptr;
+    session.cpuProfileStale = true;
+    if (&session == m_active)
+        scheduleCpuProfile(kCpuProfileDebounceMs);
+}
+
+void MainWindow::showCpuProfile(SongSession &session)
+{
+    // "Profiling" while the shown profile is out of date and a new one is
+    // on its way (scheduled or rendering): the active song, strip shown.
+    const bool profiling = &session == m_active && session.cpuProfileStale && m_audioOk &&
+                           m_cpuProfileAction->isChecked();
+    session.view->setCpuProfile(session.cpuProfile, profiling);
+}
+
 void MainWindow::onDocumentChanged(SongSession &session)
 {
     if (!m_audioOk)
@@ -3021,6 +3143,7 @@ void MainWindow::onDocumentChanged(SongSession &session)
                 m_vgBrowser->setVoicegroup(nullptr);
                 m_audio.updateVoicegroup(vg);
             }
+            releaseCpuProfileJob(session);
             if (session.voicegroup)
                 voicegroup_free(session.voicegroup);
             session.voicegroup = vg;
@@ -3064,6 +3187,11 @@ void MainWindow::onDocumentChanged(SongSession &session)
     session.timeline = std::move(timeline);
     session.view->updateSong(session.timeline.get());
     updateTabTitle(session);
+    // Every edit can move the cost (notes, voices, tempo, the cfg's -V/-R):
+    // the profile follows once the edits pause.
+    session.cpuProfileStale = true;
+    if (active)
+        scheduleCpuProfile(kCpuProfileDebounceMs);
     if (active) {
         // updateSong may have moved the selection off a track that emptied,
         // without a selectedTrackChanged.
@@ -3583,6 +3711,8 @@ void MainWindow::buildSettingsDialog()
         std::clamp(QSettings().value(kCpuBudgetKey, AudioSettingsPage::kCpuBudgetDefault).toInt(),
                    AudioSettingsPage::kCpuBudgetMin, AudioSettingsPage::kCpuBudgetMax);
     m_settingsDialog->audioPage()->setCpuBudget(m_cpuBudgetPercent);
+    for (const auto &session : m_sessions)
+        session->view->setCpuBudgetPercent(m_cpuBudgetPercent);
     {
         // Before init (the caller opens the device after this): the device
         // first opens with the user's buffering.
@@ -3614,6 +3744,9 @@ void MainWindow::buildSettingsDialog()
                 m_cpuBudgetPercent = percent;
                 if (m_persistSession)
                     QSettings().setValue(kCpuBudgetKey, percent);
+                // The profile strip's colours too (a repaint, no recompute).
+                for (const auto &session : m_sessions)
+                    session->view->setCpuBudgetPercent(percent);
             });
     connect(m_settingsDialog->audioPage(), &AudioSettingsPage::metronomeVolumeChanged, this,
             [this](int percent) {
@@ -3636,6 +3769,10 @@ void MainWindow::buildSettingsDialog()
     connect(m_engineApplyTimer, &QTimer::timeout, this, [this] {
         if (m_audioOk && m_active && m_audio.songLoaded())
             m_audio.updateSettings(songSettingsFor(*m_active));
+        // The mix rate, polyphony and mixer are the profile's too.
+        for (const auto &session : m_sessions)
+            session->cpuProfileStale = true;
+        scheduleCpuProfile(0);
 #ifdef PORYDAW_SCRIPTING
         // Once settled (whoever changed them: the page or a script), so a
         // script's own setEngine never re-enters it mid-call.
@@ -5421,6 +5558,10 @@ void MainWindow::onVoiceEdited(SongSession &session, int slot, bool structural)
         if (&session == m_active && m_audioOk)
             m_audio.refreshVoices();
     }
+    // A voice's type, sample or envelope moves the cost.
+    session.cpuProfileStale = true;
+    if (&session == m_active)
+        scheduleCpuProfile(kCpuProfileDebounceMs);
     updateVgDockTitle();
     updateTabTitle(session);
     // The Virtual Keyboard's line names the voice too (a rename, a type).
@@ -5533,6 +5674,7 @@ void MainWindow::swapVoicegroup(SongSession &session, LoadedVoiceGroup *vg, int 
         if (m_audioOk)
             m_audio.updateVoicegroup(vg);
     }
+    releaseCpuProfileJob(session);
     if (session.voicegroup)
         voicegroup_free(session.voicegroup);
     session.voicegroup = vg;

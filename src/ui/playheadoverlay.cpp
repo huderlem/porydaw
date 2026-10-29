@@ -145,6 +145,7 @@ void PlayheadOverlay::observeSurfaceGeometry()
     observe(&m_surfaces.velocity.widget);
     observe(&m_surfaces.lanes.widget);
     observe(&m_surfaces.strip.widget);
+    observe(&m_surfaces.cpuStrip.widget);
 }
 
 bool PlayheadOverlay::eventFilter(QObject *, QEvent *event)
@@ -249,9 +250,13 @@ void PlayheadOverlay::synchronizeGeometry()
     Q_ASSERT(ownerWidget);
     QWidget &owner = *ownerWidget;
 
-    const QRect rulerGeometry(m_surfaces.ruler.widget.mapTo(&owner, QPoint(0, 0)),
-                              m_surfaces.ruler.widget.size());
-    const int playheadTop = rulerGeometry.bottom() + 1;
+    QRect headerGeometry(m_surfaces.ruler.widget.mapTo(&owner, QPoint(0, 0)),
+                         m_surfaces.ruler.widget.size());
+    // The CPU profile strip extends the header while it shows.
+    if (!m_surfaces.cpuStrip.widget.isHidden())
+        headerGeometry |= QRect(m_surfaces.cpuStrip.widget.mapTo(&owner, QPoint(0, 0)),
+                                m_surfaces.cpuStrip.widget.size());
+    const int playheadTop = headerGeometry.bottom() + 1;
     const QRect playheadGeometry(0, playheadTop, owner.width(),
                                  std::max(0, owner.height() - playheadTop));
     const QRect rulerVisible =

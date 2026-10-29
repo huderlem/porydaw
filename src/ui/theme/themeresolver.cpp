@@ -557,6 +557,11 @@ Theme derive(const QColor &primary, const QColor &accent)
     theme.color(Role::cpu_meter_sequencer_fill) = QColor::fromRgb(0x1A, 0x9C, 0x8C);
     theme.color(Role::cpu_meter_cgb_fill) = QColor::fromRgb(0xC4, 0x4F, 0x8E);
     theme.color(Role::cpu_meter_mixer_fill) = QColor::fromRgb(0x7A, 0x55, 0xC9);
+    // The CPU profile strip: a neutral between the chrome it sits on and
+    // the muted text, then the cells' fixed amber and the flash red.
+    theme.color(Role::cpu_profile_low_fill) = mixColors(chromeBackground, disabledText, 0.45);
+    theme.color(Role::cpu_profile_warn_fill) = QColor::fromRgb(0xB8, 0x87, 0x1A);
+    theme.color(Role::cpu_profile_over_fill) = QColor::fromRgb(0xD9, 0x26, 0x26);
 
     // SongView roles are direct assignments rather than an override bundle. Each
     // paint element is visible here beside the color policy that supplies it.

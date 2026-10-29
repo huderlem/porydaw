@@ -13,6 +13,7 @@ class QAbstractButton;
 #include <map>
 #include <memory>
 
+#include "audio/cpuprofile.h"
 #include "core/miditimeline.h"
 #include "core/songdocument.h"
 #include "project/songbundle.h"
@@ -167,6 +168,12 @@ struct SongSession {
     // whose file changed underneath (saved from another tab) reloads it when
     // the tab is activated.
     QDateTime vgFileTime;
+    // The offline CPU profile (docs/cpu-meter/PLAN.md D3) of this song as
+    // last rendered, and whether an edit, a voicegroup change or the
+    // engine settings have outdated it since. The view keeps showing it
+    // until its replacement lands.
+    std::shared_ptr<const CpuProfile> cpuProfile;
+    bool cpuProfileStale = true;
 
     // The tab's unsaved-changes state: song and voicegroup edits are one
     // document to the user, so every dirty check (tab title, window title,

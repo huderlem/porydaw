@@ -361,6 +361,11 @@ class AudioApi : public ApiObject
     // frame's fields are null unless the song plays; null with no song or
     // no costed frame.
     Q_INVOKABLE QVariant cpu() const;
+    // The active song's offline CPU profile (D3, the strip under the
+    // ruler): {frames: [{tick, cycles, percent}], maxCycles, maxPercent,
+    // budgetPercent}, one frame per GBA frame of the song once through;
+    // null with no song, the strip hidden, or while it is (re)computed.
+    Q_INVOKABLE QVariant cpuProfile() const;
     // Renders the active song to a WAV file (the Export WAV path). opts:
     // {sampleRate, loopCount, fadeout, tail} → {path, seconds}; throws on
     // failure. The path must be writable by porydaw.io's rules.

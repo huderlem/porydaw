@@ -146,6 +146,12 @@ enum class Role {
     cpu_meter_sequencer_fill,
     cpu_meter_cgb_fill,
     cpu_meter_mixer_fill,
+    // The CPU profile strip under the ruler: its ramp's neutral end (a
+    // cheap frame), the amber over the budget (the ramp leans toward it
+    // below), the red at the frame ceiling.
+    cpu_profile_low_fill,
+    cpu_profile_warn_fill,
+    cpu_profile_over_fill,
 
     // Polyphony debugger channel cells, event-log severities, and drop flash.
     polyphony_cell_free_background,

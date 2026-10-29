@@ -101,6 +101,10 @@ struct TimelineSurfaces {
     CachedTimelineBand velocity;
     CachedTimelineBand lanes;
     CachedTimelineBand strip;
+    // The CPU profile strip directly under the ruler: part of the header
+    // while it shows, so the playhead (its triangle included) starts below
+    // it, as below the ruler when it is hidden.
+    CachedTimelineBand cpuStrip;
 };
 
 } // namespace songview

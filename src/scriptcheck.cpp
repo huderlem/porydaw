@@ -1321,6 +1321,26 @@ void runRealtimeChecks(const Check &check, scripting::ScriptHost &host, MainWind
               "c.peak >= c.cycles && c.estimated === true && c.budgetPercent === 100 && "
               "c.vblankCycles === 83776 && c.frameCycles === 280896")) == QStringLiteral("true"),
           "audio.cpu() while playing lacks a key or its numbers do not add up");
+    // porydaw.audio.cpuProfile(): the song's offline profile once made, a
+    // real Array of frames, its max their max, percent of the VBlank window.
+    check(waitFor(
+              [&] {
+                  return host.evalConsole(QStringLiteral("porydaw.audio.cpuProfile() !== null")) ==
+                         QStringLiteral("true");
+              },
+              20000),
+          "audio.cpuProfile() stayed null with the song open");
+    check(host.evalConsole(QStringLiteral(
+              "var p = porydaw.audio.cpuProfile(); "
+              "Array.isArray(p.frames) && p.frames.length > 0 && "
+              "p.frames.every(function (f, i) { return typeof f.tick === 'number' && "
+              "f.cycles > 0 && Math.abs(f.percent - f.cycles * 100 / 83776) < 1e-9 && "
+              "(i === 0 || f.tick >= p.frames[i - 1].tick); }) && "
+              "p.maxCycles === Math.max.apply(null, p.frames.map(function (f) { return f.cycles; "
+              "})) && "
+              "Math.abs(p.maxPercent - p.maxCycles * 100 / 83776) < 1e-9 && "
+              "p.budgetPercent === 100")) == QStringLiteral("true"),
+          "audio.cpuProfile() is not a plain array of ordered frames with a matching max");
     check(host.evalConsole(QStringLiteral("porydaw.audio.peak.length === 2 && "
                                           "porydaw.audio.rms.length === 2")) ==
               QStringLiteral("true"),
@@ -3897,6 +3917,9 @@ bool MainWindow::runScriptHostCheck(const QString &pluginsDir, const QString &pr
     check(host.evalConsole(QStringLiteral("porydaw.audio.cpu() === null")) ==
               QStringLiteral("true"),
           "audio.cpu() is not null with no song loaded");
+    check(host.evalConsole(QStringLiteral("porydaw.audio.cpuProfile() === null")) ==
+              QStringLiteral("true"),
+          "audio.cpuProfile() is not null with no song loaded");
 
     // --- song half ---
     if (!projectRoot.isEmpty()) {

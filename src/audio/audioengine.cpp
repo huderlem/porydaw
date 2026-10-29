@@ -49,11 +49,6 @@ bool runningUnderWsl()
 } // namespace
 #endif
 
-namespace {
-// Silence to render after the last event before auto-stopping (no loop).
-constexpr double kTailSeconds = 3.0;
-} // namespace
-
 AudioEngine::AudioEngine()
 {
     // The default routes until the owner publishes the user's.

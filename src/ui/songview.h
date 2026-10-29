@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 
 #include "ui/keymap.h"
 #include <map>
@@ -38,6 +39,7 @@ class QScrollBar;
 class QSplitter;
 class QStackedWidget;
 class QWheelEvent;
+struct CpuProfile;
 struct DocNote;
 struct DocLanePoint;
 
@@ -48,6 +50,7 @@ class AutomationArea;
 class VelocityLane;
 class LaneToggleBar;
 class OtherStrip;
+class CpuProfileStrip;
 class PlayheadOverlay;
 class TrackHeaderPanel;
 
@@ -287,6 +290,28 @@ class SongView : public QWidget
     // the row actually appears.
     bool tempoLaneVisible() const;
     void setTempoLaneVisible(bool visible);
+
+    // The CPU profile strip under the ruler (docs/cpu-meter/PLAN.md D3): the
+    // song's estimated GBA CPU cost per frame along the timeline, as a heat
+    // strip coloured against the CPU budget. App-wide preference (View →
+    // CPU Profile), mirrored into every tab. The profile is computed by
+    // MainWindow's background render; `profiling` marks one in flight (the
+    // strip dims what it shows, if anything, until the new one lands).
+    bool cpuProfileVisible() const;
+    void setCpuProfileVisible(bool visible);
+    void setCpuProfile(std::shared_ptr<const CpuProfile> profile, bool profiling);
+    const CpuProfile *cpuProfile() const { return m_cpuProfile.get(); }
+    bool cpuProfiling() const { return m_cpuProfiling; }
+    // Settings → Audio → CPU budget, percent of the VBlank window: where
+    // the strip's ramp turns amber. Repaints only.
+    void setCpuBudgetPercent(int percent);
+    int cpuBudgetPercent() const { return m_cpuBudgetPercent; }
+    // The strip's hover text at x in the strip's coordinates (the gutter
+    // describes the strip; the timeline the frame under x); empty where
+    // there is nothing to say.
+    QString cpuProfileToolTip(qreal x) const;
+    // The strip's colour for a frame of `cycles` (harness and paint).
+    QColor cpuProfileColor(int32_t cycles) const;
 
     // Raw MIDI event list: an alternative to the piano roll in the same
     // screen space (the ruler, headers, and automation lanes stay). Per-song
@@ -982,6 +1007,9 @@ class SongView : public QWidget
     // main window mirrors it into the View-menu checkbox, which owns the
     // persisted preference.
     void automationLanesVisibilityChanged(bool visible);
+    // The CPU profile strip's own "Hide CPU Profile" (its context menu);
+    // the main window mirrors it into the View-menu checkbox.
+    void cpuProfileVisibilityRequested(bool visible);
     // Jump-from-context voice navigation: the main window raises the
     // voicegroup dock and selects this slot.
     void revealVoiceRequested(int program);
@@ -1105,6 +1133,10 @@ class SongView : public QWidget
     QSplitter *m_splitter = nullptr; // roll above, lanes area below
     bool m_splitInit = false;        // initial sizes applied on first layout
     songview::OtherStrip *m_strip = nullptr;
+    songview::CpuProfileStrip *m_cpuStrip = nullptr;
+    std::shared_ptr<const CpuProfile> m_cpuProfile;
+    bool m_cpuProfiling = false;
+    int m_cpuBudgetPercent = 100;
     songview::PlayheadOverlay *m_playheadOverlay = nullptr;
     QScrollBar *m_hbar = nullptr;
     QScrollBar *m_vbar = nullptr;

@@ -27,6 +27,7 @@
 #include "ui/keymap.h"
 
 class AudioEngine;
+struct CpuProfile;
 class DecompProject;
 class MidiInput;
 class QAction;
@@ -164,6 +165,10 @@ struct HostBindings {
     // Settings → Audio → CPU budget, percent of the VBlank window
     // (porydaw.audio.cpu().budgetPercent). Absent: 100.
     std::function<int()> cpuBudgetPercent;
+    // The active song's offline CPU profile (porydaw.audio.cpuProfile(),
+    // docs/cpu-meter/PLAN.md D3): null with no song, the strip hidden, or
+    // none of the song as it stands yet. Absent: always null.
+    std::function<std::shared_ptr<const CpuProfile>()> cpuProfile;
     const AudioEngine *audio = nullptr;
     const DecompProject *project = nullptr;
     // porydaw.midi (docs/midi-input/PLAN.md step 6): the ports and the

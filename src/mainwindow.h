@@ -38,6 +38,7 @@ class QWidget;
 class QUndoGroup;
 class PolyphonyPanel;
 class CpuPanel;
+class CpuProfiler;
 class NewSongWizard;
 class SmfFile;
 class SongListPanel;
@@ -142,6 +143,10 @@ class MainWindow : public QMainWindow
     // and its tooltip, while the song plays through the parked device.
     // QSettings must be redirected.
     bool runCpuCheck(const QString &projectRoot, const QString &songLabel);
+    // CPU profile strip check (--cpuprofilecheck; cpuprofilecheck.cpp,
+    // docs/cpu-meter/PLAN.md step 7): the offline profile, its triggers,
+    // the strip and its toggle. QSettings must be redirected.
+    bool runCpuProfileCheck(const QString &projectRoot, const QString &songLabel);
 
     // Opens a song bundle (a .porysong file, or a folder holding a
     // porysong.json) in a read-only tab — with or without a project open
@@ -653,6 +658,22 @@ class MainWindow : public QMainWindow
 
     void updateVoicegroupBrowser();
     void onDocumentChanged(SongSession &session);
+    // The offline CPU profile (docs/cpu-meter/PLAN.md D3): the active
+    // session's profile goes stale and a background render is scheduled
+    // `delayMs` from now (restarting the wait: edits debounce), unless the
+    // strip is hidden. startCpuProfile runs it (a copy of the session's
+    // timeline, its voicegroup borrowed, the playback SongSettings); a
+    // finished one lands in its session and that session's view.
+    void scheduleCpuProfile(int delayMs);
+    void startCpuProfile();
+    // The job borrows its session's voicegroup: stops it before the
+    // session's voicegroup is freed or the session goes (a no-op for any
+    // other session). A stopped job leaves the profile stale and, for the
+    // active session, schedules another.
+    void releaseCpuProfileJob(SongSession &session);
+    // Pushes the session's profile (and whether one is being made for it)
+    // into its view.
+    void showCpuProfile(SongSession &session);
     // Saves the session's song AND its dirty voicegroup — the two are one
     // document to the user. The voicegroup goes first, so a failed write
     // leaves the session dirty. false = nothing was marked clean. A no-op
@@ -925,6 +946,12 @@ class MainWindow : public QMainWindow
     QLabel *m_cpuValueLabel = nullptr;
     // Settings → Audio → CPU budget, percent of the VBlank window (D1).
     int m_cpuBudgetPercent = 100;
+    // The CPU profile strip (View → CPU Profile) and its background render.
+    QAction *m_cpuProfileAction = nullptr;
+    CpuProfiler *m_cpuProfiler = nullptr;
+    QTimer *m_cpuProfileTimer = nullptr;        // debounces edits
+    SongSession *m_cpuProfileSession = nullptr; // the in-flight job's session
+    uint64_t m_cpuProfileGeneration = 0;
     // The CPU dock's Reset while not playing: the peak shows "--" (rather
     // than the idle frames' cost) until the song plays again.
     bool m_cpuPeakCleared = false;

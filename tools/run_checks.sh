@@ -128,6 +128,7 @@ run midicheck        base --midicheck SCRATCH mus_abandoned_ship
 run vkeycheck        base --vkeycheck SCRATCH mus_abandoned_ship
 run reccheck         base --reccheck SCRATCH mus_abandoned_ship
 run cpucheck         base --cpucheck SCRATCH mus_abandoned_ship
+run cpuprofilecheck  base --cpuprofilecheck SCRATCH mus_abandoned_ship
 run loopcheck        -    --loopcheck
 run ignorecheck      -    --ignorecheck SCRATCH
 run bundlecheck      -    --bundlecheck SCRATCH

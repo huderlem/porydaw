@@ -375,6 +375,9 @@ class AudioEngine
     // it, so a key played against what you heard is this much ahead of the
     // song it was played to.
     static constexpr double kEngineLatencySeconds = 1.5 / 59.7275;
+    // Silence rendered after a song's last event before playback auto-stops
+    // (no loop): the release tails ring out. The CPU profile covers it too.
+    static constexpr double kTailSeconds = 3.0;
     uint64_t engineLatencySamples() const
     {
         return uint64_t(std::llround(kEngineLatencySeconds * m_sampleRate));
