@@ -26,7 +26,7 @@ class MidiRoutes
   public:
     static constexpr int kLaneCount = 8;
     // packed() holds one byte per lane in a 64-bit word.
-    static_assert(kLaneCount <= 8, "packed() fits at most 8 lanes");
+    static_assert(kLaneCount <= int(sizeof(uint64_t)), "packed() fits at most 8 lanes");
     // The routable lanes, in the Settings table's order: MOD, VOL, PAN,
     // BENDR, LFOS, MODT, TUNE, LFODL.
     static constexpr std::array<uint8_t, kLaneCount> kLanes = {0x01, 0x07, 0x0A, 0x14,

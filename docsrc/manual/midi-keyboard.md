@@ -48,8 +48,10 @@ data entry and channel mode messages can't be routed. -->
 <!-- TODO: What a full turn reaches: VOL, PAN, LFOS, TUNE (64 is in tune)
 and LFODL 0..127 as the knob sends it (a new LFODL takes effect at the next
 note); BENDR 0..24 (the BENDR lane shows 0..24 by default); MODT 0..2, a
-third of the turn each (0–42 vibrato, 43–85 tremolo, 86–127 autopan); MOD
-follows the MOD lane's visible range, like the mod wheel. A knob moves the
+third of the turn each (0–42 vibrato, 43–85 tremolo, 86–127 auto-pan; a
+knob can't reach MODT's "off" values 3 and up, so the first move on a lane
+holding one switches it to one of the three types and the knob can't turn it
+back off); MOD follows the MOD lane's visible range, like the mod wheel. A knob moves the
 whole selected track, song notes too, like pitch bend. -->
 
 <!-- TODO: Program change buttons switch the selected track's voice (program
@@ -60,7 +62,11 @@ ignored, and the status bar says so once. -->
 for that lane on the track stop playing (so the song doesn't fight your
 knob) until you stop, the loop wraps or you seek. Switching tracks hands the
 old track's lanes back to the song. A "reset all controllers" message (some
-keyboards send it from a panic button) resets every routed lane. -->
+keyboards send it from a panic button or on a preset change) resets the
+routed lanes your knobs have moved on the selected track (bend too, and the
+sustain pedal lifts); a lane no knob has moved keeps the song's value, so a
+track's MODT, TUNE or LFODL set at its start isn't changed behind your back.
+The voice stays. -->
 
 <!-- TODO: Settings → MIDI → "Play incoming notes" turns the sound off
 (recording still works). "Fixed velocity" makes every note the same

@@ -286,7 +286,7 @@ QString laneDescription(int lane)
         return MidiSettingsPage::tr("LFO speed.");
     case 0x16:
         return MidiSettingsPage::tr("LFO type. The control's full travel covers vibrato, tremolo "
-                                    "and autopan.");
+                                    "and auto-pan.");
     case 0x18:
         return MidiSettingsPage::tr("Fine tuning (the middle is in tune).");
     case 0x1A:

@@ -13,6 +13,7 @@
 #include "audio/audiotap.h"
 #include "audio/auditionslots.h"
 #include "audio/metronome.h"
+#include "audio/midiroutes.h"
 #include "core/captureevent.h"
 #include "core/miditimeline.h"
 #include "core/timelineplayer.h"
@@ -201,7 +202,8 @@ class AudioEngine
     // (docs/midi-controls/PLAN.md §3.2); other CCs are ignored except 64
     // (sustain), 120/123 (all notes off, which also lifts the pedal) and
     // 121 (reset controllers: the pedal lifts, and the bend and every routed
-    // lane go back to the engine's track-init values; the voice stays).
+    // lane the keyboard has moved on the target go back to the engine's
+    // track-init values; the voice stays).
     //
     // Borrowed: the ring's owner must outlive the audio thread (shutdown()
     // before destroying it). Null drains nothing.
@@ -1007,7 +1009,8 @@ class AudioEngine
     int64_t m_callbackNs = 0;      // midiClockNs at the callback's entry
     uint32_t m_callbackFrames = 0; // the callback's length
     // The lanes sent to m_liveTrack since it became the target: the ones a
-    // target change hands back to the song.
+    // target change hands back to the song, and the routed ones CC121
+    // resets (J5).
     TouchedLanes m_liveTouched;
     // The recording latch (D3, J2): the lanes of m_liveTrack (its voice
     // included) whose song events render skips, because the keyboard moved
@@ -1050,10 +1053,12 @@ class AudioEngine
     uint32_t m_liveIgnoredSeq = 0; // m_liveIgnoredProgram's sequence
     // The routes as last unpacked: the lane (document CC) each MIDI CC
     // drives, 0xFF for none, and which lanes have a CC at all (bit i for
-    // MidiRoutes::kLanes[i]: the ones CC121 resets).
+    // MidiRoutes::kLanes[i]: the ones CC121 resets, when touched).
     uint64_t m_appliedLiveRoutes = 0; // never a valid packing, so the first sync unpacks
     uint8_t m_liveRouteOf[128] = {};
     uint8_t m_liveRoutedLanes = 0;
+    static_assert(MidiRoutes::kLaneCount <= int(sizeof(uint8_t) * 8),
+                  "m_liveRoutedLanes holds one bit per lane");
     uint32_t m_appliedLivePanic = 0;
     uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none
     uint32_t m_captureSegment = 0; // segments since that Begin

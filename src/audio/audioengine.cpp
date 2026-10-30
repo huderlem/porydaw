@@ -1260,8 +1260,6 @@ void AudioEngine::syncLiveRoutes()
     // Skips anything but a valid packing, so a reserved CC never reaches
     // the routed path.
     MidiRoutes::unpackLaneTable(packed, m_liveRouteOf);
-    static_assert(MidiRoutes::kLaneCount <= int(sizeof(m_liveRoutedLanes) * 8),
-                  "m_liveRoutedLanes holds one bit per lane");
     m_liveRoutedLanes = 0;
     for (int cc = 0; cc < 128; cc++) {
         const int index = m_liveRouteOf[cc] == 0xFF ? -1 : MidiRoutes::laneIndex(m_liveRouteOf[cc]);
@@ -1382,13 +1380,17 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
         case 121: // reset all controllers: the pedal is up, bend and lanes at rest
             liftLivePedal();
             applyLiveBend(0, /*reset=*/true);
-            // J5: every routed lane goes back to the engine's track-init
-            // value. A lane routed to none has no control to reset (MOD
-            // included), and the voice stays. Each reset is captured flagged,
-            // and a take records it only on a lane it already moved.
+            // J5: a routed lane the keyboard has moved on this target goes
+            // back to the engine's track-init value. One its knob never
+            // touched has nothing to reset, as a lane routed to none (MOD
+            // included) has no control to: the song's MODT, TUNE or LFODL,
+            // set once at the track's start, must not change under a
+            // controller's preset-change CC121. The voice stays. Each reset is
+            // captured flagged, and a take records it only on a lane it
+            // already moved.
             for (int i = 0; i < MidiRoutes::kLaneCount; i++) {
                 const uint8_t lane = MidiRoutes::kLanes[size_t(i)];
-                if ((m_liveRoutedLanes >> i) & 1)
+                if (((m_liveRoutedLanes >> i) & 1) && m_liveTouched.hasCc(lane))
                     applyLiveControl(lane, uint8_t(TimelinePlayer::ccDefault(lane)),
                                      /*reset=*/true);
             }
@@ -1413,7 +1415,7 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
                 applyLiveControl(lane, uint8_t((v * 24 + 63) / 127));
                 break;
             case 0x16: // MODT: 0..2 in equal thirds (0-42 vibrato, 43-85
-                       // tremolo, 86-127 autopan)
+                       // tremolo, 86-127 auto-pan)
                 applyLiveControl(lane, uint8_t((v * 3) / 128));
                 break;
             case 0x07: // VOL

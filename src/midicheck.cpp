@@ -97,7 +97,7 @@
 // the knob's value, BENDR scaled to 0..24, on the target track only), a
 // program change switching the target's voice, one past the voicegroup's
 // last voice ignored and reported once, CC121 resetting only the routed
-// lanes (and bend) and never the voice, and a target change handing every
+// lanes a knob moved (and bend) and never the voice, and a target change handing every
 // touched lane and the voice back to the song. The handback's "untouched
 // lanes stay untouched" half is --primecheck's (TimelinePlayer::chaseTouched
 // on a synthetic song).
@@ -2983,6 +2983,12 @@ void MainWindow::checkLiveControls()
                                   tr.mod,       tr.bend, tr.currentProgram};
     };
 
+    // A target hop hands back whatever earlier probes moved on the target,
+    // so the knobs start with no touched lane there.
+    view->selectTrack(b);
+    pumpMs(30);
+    view->selectTrack(a);
+    pumpMs(30);
     // BENDR on CC20 and LFOS on CC21 (VOL and PAN keep CC7 and CC10).
     check(midi.setRoute(0x14, 20) && midi.setRoute(0x15, 21),
           "live controls: BENDR and LFOS could not be routed");
@@ -2991,6 +2997,25 @@ void MainWindow::checkLiveControls()
     pumpMs(30);
     const std::array<int, 7> songA = lanes(a);
     const std::array<int, 7> songB = lanes(b);
+
+    // CC121 (J5, refined 2026-10-30) before any knob moves: every lane is
+    // routed (MOD, VOL, PAN, BENDR, LFOS) but none touched on this target,
+    // so each keeps the song's value; only the bend centres.
+    check(m_audio.liveTarget() == a && (songA[Vol] != 127 || songA[Pan] != 0 || songA[BendR] != 2 ||
+                                        songA[Lfos] != 22 || songA[Mod] != 0),
+          "live controls: the song's values are all track-init ones, hiding the untouched CC121 "
+          "check");
+    send(121, 0);
+    pumpMs(30);
+    {
+        std::array<int, 7> untouched = songA;
+        untouched[Bend] = 0;
+        check(lanes(a) == untouched,
+              "live controls: CC121 reset a routed lane no knob had moved on the target");
+    }
+    m_audio.seek(0); // the song's bend back
+    pumpMs(30);
+    check(lanes(a) == songA, "live controls: a seek did not chase the song's state back");
 
     // Each lane at its scale (D2), on the target track only. Values the
     // song's chased ones can't equal, so the handback below is seen.
@@ -3100,8 +3125,9 @@ void MainWindow::checkLiveControls()
     pumpMs(30);
     check(lanes(a)[Program] == prog, "live controls: the voice count was not lifted again");
 
-    // CC121 (J5): bend and every routed lane go to the engine's track-init
-    // values; a lane routed to none (PAN and MOD here) and the voice stay.
+    // CC121 (J5): bend and every routed lane the knobs moved (VOL, BENDR,
+    // LFOS) go to the engine's track-init values; a lane routed to none (PAN
+    // and MOD here, both moved) and the voice stay.
     send(1, 127);
     midi.injectForTest({0xE0, 0, 96});
     pumpMs(30);
@@ -3119,13 +3145,21 @@ void MainWindow::checkLiveControls()
     midi.setRoute(0x01, 1);
 
     // MODT, TUNE and LFODL (2026-10-30): MODT's knob covers 0..2 (vibrato,
-    // tremolo, autopan) in equal thirds (0-42, 43-85, 86-127), TUNE and LFODL take the raw byte (TUNE
-    // centred on 64); CC121 puts each at its track-init value (0, c_v 0, 0).
+    // tremolo, auto-pan) in equal thirds (0-42, 43-85, 86-127), TUNE and
+    // LFODL take the raw byte (TUNE centred on 64); CC121 puts each the knob
+    // moved at its track-init value (0, c_v 0, 0). A routed TUNE no knob has
+    // moved keeps the song's value (a TUNE point added here) through a CC121.
     {
         check(midi.setRoute(0x16, 85) && midi.setRoute(0x18, 86) && midi.setRoute(0x1A, 87),
               "live controls: MODT, TUNE and LFODL could not be routed");
         const M4ATrack &tr = engine->tracks[a];
         const M4ATrack &other = engine->tracks[b];
+        QUndoStack *undo = m_active->doc.undoStack();
+        const int undoTune = undo->index();
+        m_active->doc.addLanePoint(a, 0x18, 0, 100);
+        m_audio.seek(0);
+        pumpMs(30);
+        check(tr.tune == 100 - 64, "live controls: the song's TUNE point is not in force");
         const std::array<int, 3> otherWas{other.modT, other.tune, other.lfoDelay};
         bool modtScaled = true;
         for (const auto &[knob, type] :
@@ -3136,19 +3170,37 @@ void MainWindow::checkLiveControls()
             modtScaled &= tr.modT == type;
         }
         check(modtScaled, "live controls: CC85 did not set MODT on the 0..2 scale");
-        send(86, 100);
         send(87, 77);
         pumpMs(30);
-        check(tr.tune == 100 - 64 && tr.lfoDelay == 77,
-              "live controls: TUNE or LFODL did not take the knob's raw value");
+        check(tr.lfoDelay == 77, "live controls: LFODL did not take the knob's raw value");
+        send(85, 127);
+        send(121, 0);
+        pumpMs(30);
+        check(tr.modT == 0 && tr.lfoDelay == 0,
+              "live controls: CC121 did not reset the moved MODT and LFODL");
+        check(tr.tune == 100 - 64,
+              "live controls: CC121 reset a routed TUNE no knob had moved on the target");
+        send(86, 90);
+        pumpMs(30);
+        check(tr.tune == 90 - 64, "live controls: TUNE did not take the knob's raw value");
         check(lanes(b) == songB &&
                   std::array<int, 3>{other.modT, other.tune, other.lfoDelay} == otherWas,
               "live controls: a MODT/TUNE/LFODL knob moved another track");
+        send(85, 64);
+        send(87, 50);
         send(121, 0);
         pumpMs(30);
         check(tr.modT == 0 && tr.tune == 0 && tr.lfoDelay == 0,
-              "live controls: CC121 did not reset MODT, TUNE and LFODL");
-        send(10, uint8_t(panByte)); // PAN off the song's value again, as before the reset
+              "live controls: CC121 did not reset MODT, TUNE and LFODL once moved");
+        while (undo->index() > undoTune)
+            undo->undo(); // the TUNE point
+        m_audio.seek(0);
+        pumpMs(30);
+        // PAN and the voice off the song's values again (the seek chased
+        // them back); the LFOS probe and the handback setup move the rest.
+        send(10, uint8_t(panByte));
+        program(uint8_t(prog));
+        pumpMs(30);
         midi.setRoute(0x16, MidiRoutes::kNone);
         midi.setRoute(0x18, MidiRoutes::kNone);
         midi.setRoute(0x1A, MidiRoutes::kNone);

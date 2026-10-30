@@ -63,7 +63,7 @@ the take.
 | J2 | Latch scope | Latch applies only while a take is armed **and** the control sounds (live play is on). With live play off, nothing of the knob is heard, so the song plays on untouched. The latch clears at a segment boundary (loop wrap or seek), and the lane is chased back to the song: at a wrap, to the song's value carried from the loop end (what plain playback holds there, and what the take's restore point at the loop end commits), the loop start's own events then playing; at a seek, to the song at the new position. On pass 2, before you touch the knob again, you hear the song's original events, not pass 1's take, because the timeline can't be rebuilt mid-take. This is a known mismatch with what gets committed there. |
 | J3 | Program numbers | The data byte is used as the voice slot directly (0–127, no bank select). A program change past the voicegroup's last voice is ignored and shown once in the status bar. |
 | J4 | Voice writes at tick 0 | A take that changes voice at tick 0 replaces the tick-0 program change; it never deletes it. The track's keep-alive seed (`appendTrackKeepAliveOps`) still holds. Restore-after-take puts the song's voice back at the segment end, just as it does for other lanes. |
-| J5 | CC121 (reset all controllers) | It resets every routed lane to the engine's track-init default (the table in `TimelinePlayer::chase`) and leaves the voice alone. In a take, that reset is recorded as moves only on lanes the take already moved (bend and MOD included); untouched lanes keep the song's automation — refined 2026-10-12 after step 3 review. |
+| J5 | CC121 (reset all controllers) | It resets every routed lane to the engine's track-init default (the table in `TimelinePlayer::chase`) and leaves the voice alone. In a take, that reset is recorded as moves only on lanes the take already moved (bend and MOD included); untouched lanes keep the song's automation — refined 2026-10-12 after step 3 review. Refined again 2026-10-30: it resets only routed lanes the keyboard has moved on the current target (`m_liveTouched`); see the 2026-10-30 note at the end. |
 | J6 | The route table's MOD row | MOD becomes an ordinary row: its default is CC1, and it can be remapped or set to None. Bend stays on pitch-bend messages and can't be routed. |
 | J7 | Channel/omni | Routes match the CC number on any channel, consistent with notes (MIDI input D2). |
 
@@ -1868,12 +1868,13 @@ automation lanes, so they are now routable like the first five, on branch
   with the new three at none (an unlisted lane keeps its default).
 - Scaling (D2, the knob's full travel covers the lane): MODT is fixed at
   0..2 in equal thirds (`(v * 3) / 128`: 0–42 vibrato, 43–85 tremolo,
-  86–127 autopan; review 2026-10-30 replaced the BENDR rounding idiom,
+  86–127 auto-pan; review 2026-10-30 replaced the BENDR rounding idiom,
   which gave tremolo half the travel); TUNE takes the raw byte (64 is in tune,
   like PAN); LFODL takes the raw byte (like LFOS).
 - CC121 resets them to the engine's track-init values (MODT 0, TUNE 64,
   LFODL 0, `TimelinePlayer::ccDefault`), recorded only on a lane the take
-  moved. Undo text names them "LFO type", "tune" and "LFO delay".
+  moved (and, since the refinement below, only once the keyboard has moved
+  them on the target). Undo text names them "LFO type", "tune" and "LFO delay".
 - The gutter's Learn entry and the Settings rows come from `kLanes`, so
   they appear on the three rows with no other change.
 - Harness: `--midicheck` covers the settings form, five-lane
@@ -1883,3 +1884,35 @@ automation lanes, so they are now routable like the first five, on branch
   routed-but-unmoved TUNE and VOL alone. Mutation-tested: raw MODT,
   LFODL dropped from the engine switch, CC121 limited to five lanes, a
   wrong LFODL undo name, Learn hidden past LFOS, and an LFODL default CC.
+
+### 2026-10-30 — CC121 resets only lanes the keyboard moved (J5 refined)
+
+Review of the MODT/TUNE/LFODL routing found J5's "every routed lane" wrong
+for the new lanes. MODT, TUNE and LFODL are typically set once at a track's
+start and never again, and many controllers send CC121 on a preset change
+or from a panic button. Resetting every routed lane then switched a tremolo
+track to vibrato, detuned a tuned track or cleared its LFO delay for the
+rest of playback, silently: outside a take nothing records it, inside one
+the reset is recorded only on lanes the take moved, and an unmoved lane is
+not latched, so the song never got the value back until a chase.
+
+Now `handleLiveMessage`'s CC121 resets a routed lane only when
+`m_liveTouched.hasCc(lane)`: the keyboard has moved it on the current
+target since that became the target. A lane the knob never touched has
+nothing to reset, the same reasoning that already exempted an unrouted MOD.
+The recording rule is unchanged (a take records the reset only on lanes in
+`m_captureMoved`, which the take's own moves set, so those are always
+touched). Bend still resets unconditionally (`applyLiveBend(0, reset)`).
+
+`m_liveTouched` is cleared at a target change (after `chaseTouched` hands
+the lanes back to the song; live play off is a target change), at
+`loadSong` and at `unloadSong`. After any of those a lane is touched again
+only by a new knob move on the new target, so a CC121 right after switching
+tracks leaves the new track's lanes alone. A seek or loop wrap does not
+clear it: a lane the keyboard moved earlier on the same target still
+resets, even when the song's chase has since put its own value back.
+
+Harness: `--midicheck` moves MODT, TUNE and LFODL before the CC121 and
+checks a routed but unmoved lane keeps its value; `--reccheck`'s CC121 case
+checks the live engine also leaves the routed but unmoved TUNE and VOL
+alone.
