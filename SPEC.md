@@ -508,8 +508,7 @@ It never touches `song_table.inc`, `include/constants/songs.h`, `ld_script.ld`,
   and visibility saved with the window layout): the CPU readout in full, one column
   (redesigned 2026-10-29). A status pill (Within budget / Over budget / Past VBlank /
   Stopped); the current frame's percent in large fixed-pitch type coloured by its
-  band, with its cycles and headroom (cycles under the budget; over it and what is
-  left in VBlank; past VBlank); a meter on one linear scale from 0 to 140 % of the
+  band, with its cycles; a meter on one linear scale from 0 to 140 % of the
   VBlank window (a faint amber band from the budget to the VBlank line, hatched red
   past it; the mixer, sequencer and CGB terms of the current frame stacked from the
   left, clamped at the scale's end with a chevron past it; the budget an amber line,

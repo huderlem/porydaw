@@ -23,7 +23,7 @@ class CpuShareBar;
 // estimated GBA CPU cost of m4aSoundMain per frame, in percent of the VBlank
 // window (D1). Top to bottom, in one column: a status pill (within budget,
 // over budget, past VBlank, stopped); the current frame's percent in large
-// type with its cycles and headroom; a linear meter from 0 to 140 % of the
+// type with its cycles; a linear meter from 0 to 140 % of the
 // VBlank window with the budget and VBlank lines, the three terms stacked
 // and the peak marked; the last ten seconds of playback frame by frame; the
 // sequencer, CGB and mixer terms' cycles and share; the peak since playback
@@ -74,9 +74,8 @@ class CpuPanel : public QWidget
     QString statusText() const;  // the pill
     QString percentText() const; // the large percent, "—" without a reading
     QString heroCaptionText() const;
-    QString detailText() const;   // the line under it, as plain text
-    QString headroomText() const; // its coloured part ("" without a reading)
-    QString levelName() const;    // "", "warn", "over" (the current frame's)
+    QString detailText() const; // the line under it, as plain text
+    QString levelName() const;  // "", "warn", "over" (the current frame's)
     QColor percentColor() const;
     QColor statusColor() const;
     // The meter, in its own coordinates.
@@ -180,5 +179,4 @@ class CpuPanel : public QWidget
     bool m_haveReading = false; // m_reading was applied at least once
     QString m_levelName;
     QString m_detailPlain;
-    QString m_headroom;
 };

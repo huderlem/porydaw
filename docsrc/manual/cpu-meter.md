@@ -28,8 +28,7 @@ is your judgement, porydaw cannot know the game's own load. -->
 
 <!-- TODO: View → CPU. At the top, whether this frame is Within budget, Over
 budget or Past VBlank (Stopped when not playing). The current frame's percent
-in large type, its cycles and its headroom: how far under the budget, or how
-far over it and how much is left in VBlank, or how far past VBlank. The meter:
+in large type and its cycles. The meter:
 one scale from 0 to 140% of the VBlank window; mixer, sequencer and CGB
 stacked from the left; the amber line is your budget, the red line the end of
 VBlank (hatched past it), the dashed line the peak. "Last 10 seconds": every

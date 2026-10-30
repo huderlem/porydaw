@@ -111,7 +111,7 @@ The HQ mixer costs more per sample and has a fixed downsampler pass
   *2026-10-29: red = past VBlank; frame ceiling shown for scale only; dock
   redesigned: hero, linear 0–140 % meter, 10 s history, breakdown table,
   peak card, legend. One column: a status pill; the frame's percent large
-  with cycles and headroom; a linear meter 0..140 % of the VBlank window
+  with its cycles; a linear meter 0..140 % of the VBlank window
   (the two-zone bar is gone) with the budget, VBlank and peak lines; the
   last 10 s of playback frame by frame (poryaaaa's new per-frame
   `costHistory` ring drained by the audio callback into AudioEngine's

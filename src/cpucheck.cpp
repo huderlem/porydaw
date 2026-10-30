@@ -59,7 +59,7 @@ extern "C" {
 // before it in the same bar and when it lies past it, and restored by the
 // GOTO at the wrap. Rendering with the hooks on and off is byte-identical.
 // The CPU dock (step 6, redesigned 2026-10-29): on its own with synthetic
-// readings, every state's status pill, large percent and headroom line, the
+// readings, every state's status pill, large percent and cycles line, the
 // linear 0..140 % meter (segments, budget and VBlank lines, the peak marker,
 // the clamp and chevron past the scale), its captions never overlapping at
 // any budget and width, the history's caption and dimming, the table, the
@@ -304,11 +304,8 @@ void checkPanelStandalone()
     check(panel.percentText() == pct(okTotal) && panel.percentColor() == plain &&
               panel.heroCaptionText() == QStringLiteral("of the VBlank window"),
           "standalone: within budget, the large percent");
-    check(panel.headroomText() ==
-                  QStringLiteral("%1 under budget").arg(cyclesText(budget - okTotal)) &&
-              panel.detailText() ==
-                  QStringLiteral("%1 cycles · %2").arg(cyclesText(okTotal), panel.headroomText()),
-          "standalone: within budget, the headroom line");
+    check(panel.detailText() == QStringLiteral("%1 cycles").arg(cyclesText(okTotal)),
+          "standalone: within budget, the cycles line");
     check(meterMatchesReading(panel) && !panel.overflowShown(),
           "standalone: the meter is not linear on 0..140% or the segments do not add up");
     {
@@ -385,10 +382,8 @@ void checkPanelStandalone()
     check(panel.statusText() == QStringLiteral("Over budget") && panel.statusColor() == amber &&
               panel.levelName() == QStringLiteral("warn") && panel.percentColor() == amber,
           "standalone: over budget, the pill and the percent");
-    check(panel.headroomText() ==
-              QStringLiteral("%1 over budget, %2 left in VBlank")
-                  .arg(cyclesText(amberTotal - budget), cyclesText(M4A_VBLANK_CYCLES - amberTotal)),
-          "standalone: over budget, the headroom");
+    check(panel.detailText() == QStringLiteral("%1 cycles").arg(cyclesText(amberTotal)),
+          "standalone: over budget, the cycles line");
     check(panel.historyCaption() ==
               QStringLiteral("max %1, over budget 25% of the time").arg(pct(budget + 500)),
           "standalone: the history's share over budget");
@@ -412,9 +407,8 @@ void checkPanelStandalone()
               panel.levelName() == QStringLiteral("over") && panel.percentColor() == red &&
               panel.peakColor() == red,
           "standalone: past VBlank, the pill, the percent or the peak");
-    check(panel.headroomText() ==
-              QStringLiteral("%1 cycles past VBlank").arg(cyclesText(redTotal - M4A_VBLANK_CYCLES)),
-          "standalone: past VBlank, the headroom");
+    check(panel.detailText() == QStringLiteral("%1 cycles").arg(cyclesText(redTotal)),
+          "standalone: past VBlank, the cycles line");
     check(meterMatchesReading(panel) && !panel.overflowShown(),
           "standalone: past VBlank, the meter");
 
@@ -437,7 +431,7 @@ void checkPanelStandalone()
               panel.heroCaptionText() == QStringLiteral("not playing") &&
               panel.detailText() ==
                   QStringLiteral("Press Play to measure the sound driver frame by frame.") &&
-              panel.headroomText().isEmpty() && panel.levelName().isEmpty(),
+              panel.levelName().isEmpty(),
           "standalone: stopped, the status and the hero");
     check(panel.segmentRect(AudioEngine::CpuMixer).isEmpty() &&
               panel.termCyclesText(AudioEngine::CpuMixer) == QStringLiteral("—") &&
@@ -824,8 +818,8 @@ bool MainWindow::runCpuCheck(const QString &projectRoot, const QString &songLabe
                   shown.peak[AudioEngine::CpuTotal] >= shown.last[AudioEngine::CpuTotal] &&
                   percentValue(panel.peakText()) >= percentValue(panel.percentText()),
               "the CPU dock's peak is under its current reading");
-        check(panel.detailText().startsWith(QLocale().toString(shown.last[AudioEngine::CpuTotal]) +
-                                            QStringLiteral(" cycles · ")) &&
+        check(panel.detailText() == QLocale().toString(shown.last[AudioEngine::CpuTotal]) +
+                                        QStringLiteral(" cycles") &&
                   panel.peakDetailText().startsWith(
                       QLocale().toString(shown.peak[AudioEngine::CpuTotal]) +
                       QStringLiteral(" cycles")),

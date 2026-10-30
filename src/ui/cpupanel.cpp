@@ -830,8 +830,7 @@ CpuPanel::CpuPanel(QWidget *parent) : QWidget(parent)
         m_detail = new QLabel(box);
         m_detail->setWordWrap(true);
         m_detail->setTextFormat(Qt::RichText);
-        m_detail->setToolTip(tr("The last frame's cycles, and how far it is from your budget "
-                                "(Settings → Audio) and the end of the VBlank window."));
+        m_detail->setToolTip(tr("GBA CPU cycles of the last frame's m4aSoundMain."));
         v->addWidget(m_detail);
     }
 
@@ -1180,26 +1179,14 @@ void CpuPanel::refresh()
                            : r.playing ? tr("measuring")
                                        : tr("not playing"));
     if (frame) {
-        if (lvl == 2)
-            m_headroom = tr("%1 cycles past VBlank").arg(cyclesString(int64_t(total) - vblank));
-        else if (lvl == 1)
-            m_headroom = tr("%1 over budget, %2 left in VBlank")
-                             .arg(cyclesString(int64_t(total) - r.budgetCycles),
-                                  cyclesString(int64_t(vblank) - total));
-        else
-            m_headroom = tr("%1 under budget").arg(cyclesString(int64_t(r.budgetCycles) - total));
+        // Just the cycles: a headroom figure changed too fast to read.
         const QString cycles = cyclesString(total);
-        m_detailPlain = tr("%1 cycles · %2").arg(cycles, m_headroom);
-        const QColor ink = lvl == 0 ? themes::color(Role::cpu_meter_ok_text) : levelInk(lvl);
+        m_detailPlain = tr("%1 cycles").arg(cycles);
         const QString mono = typography::bodyMono(font()).family().toHtmlEscaped();
-        m_detail->setText(
-            tr("%1 cycles · %2")
-                .arg(QStringLiteral("<span style=\"font-family:'%1'\">%2</span>")
-                         .arg(mono, cycles.toHtmlEscaped()),
-                     QStringLiteral("<span style=\"color:%1; font-weight:600\">%2</span>")
-                         .arg(ink.name(QColor::HexRgb), m_headroom.toHtmlEscaped())));
+        m_detail->setText(tr("%1 cycles")
+                              .arg(QStringLiteral("<span style=\"font-family:'%1'\">%2</span>")
+                                       .arg(mono, cycles.toHtmlEscaped())));
     } else {
-        m_headroom.clear();
         m_detailPlain = !r.loaded   ? tr("Open a song to see what its sound costs.")
                         : r.playing ? tr("No reading yet.")
                                     : tr("Press Play to measure the sound driver frame by frame.");
@@ -1311,11 +1298,6 @@ QString CpuPanel::heroCaptionText() const
 QString CpuPanel::detailText() const
 {
     return m_detailPlain;
-}
-
-QString CpuPanel::headroomText() const
-{
-    return m_headroom;
 }
 
 QString CpuPanel::levelName() const
