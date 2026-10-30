@@ -27,7 +27,7 @@ Restore Defaults. -->
 port, a Keyboard / Control surface role per port (transport buttons; see
 the manual's Transport buttons section), Refresh), Play incoming notes, Fixed velocity, Recording offset
 (Auto (N ms) or a fixed value), and the Controls table (which keyboard CC
-drives MOD/VOL/PAN/BENDR/LFOS; None; Learn — also on a lane's right-click
+drives MOD/VOL/PAN/BENDR/LFOS/MODT/TUNE/LFODL; None; Learn — also on a lane's right-click
 menu). Details in
 [Playing & Recording with a MIDI Keyboard](midi-keyboard.md). -->
 

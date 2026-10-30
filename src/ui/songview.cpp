@@ -5259,8 +5259,8 @@ class AutomationArea : public TimelineSurface
                 rangeActions.emplace_back(action, opt.first);
             }
         }
-        // Which keyboard control drives this lane (MOD, VOL, PAN, BENDR and
-        // LFOS only), and Learn to pick another by moving it. The Voice row
+        // Which keyboard control drives this lane (the routable ones:
+        // MidiRoutes::kLanes), and Learn to pick another by moving it. The Voice row
         // has no menu here: program changes need no route.
         QAction *learn = nullptr;
         const SongView::MidiControls &midi = m_sv->midiControls();

@@ -26,9 +26,11 @@ struct CaptureEvent {
                   // at resumePos (a loop wrap: loop end to loop start)
         Bend,     // a pitch-bend move: value is the bend, -8192..8191
         Control,  // a routed CC lane's move (docs/midi-controls/PLAN.md):
-                  // key is the lane's document CC (0x01 MOD, 0x07 VOL, 0x0A
-                  // PAN, 0x14 BENDR, 0x15 LFOS), value what it set, as heard
-                  // (scaled to the lane: MOD to its range, BENDR to 0..24)
+                  // key is the lane's document CC (MidiRoutes::kLanes: 0x01
+                  // MOD, 0x07 VOL, 0x0A PAN, 0x14 BENDR, 0x15 LFOS, 0x16
+                  // MODT, 0x18 TUNE, 0x1A LFODL), value what it set, as
+                  // heard (scaled to the lane: MOD to its range, BENDR to
+                  // 0..24, MODT to 0..2; the rest raw)
         Program,  // a program change (docs/midi-controls/PLAN.md step 5): value
                   // is the voice slot, 0..127, one the voicegroup has (J3)
     };

@@ -1412,7 +1412,9 @@ int MainWindow::runRecordWindowCheck(const QString &projectRoot, const QString &
                       QStringLiteral("pitch bend, mod, volume and pan") &&
                   text({DOC_CC_VOICE, 0x15, 0x14}) ==
                       QStringLiteral("bend range, LFO speed and voice") &&
-                  text({DOC_CC_VOICE}) == QStringLiteral("voice"),
+                  text({DOC_CC_VOICE}) == QStringLiteral("voice") &&
+                  text({0x1A, 0x18, 0x16, 0x15}) ==
+                      QStringLiteral("LFO speed, LFO type, tune and LFO delay"),
               "take text: the recorded lanes are not named and ordered as their rows");
         check(text({0x1B}) == QStringLiteral("CC 27") &&
                   text({DOC_CC_VOICE, 0x1B, 0x07}) == QStringLiteral("volume, CC 27 and voice"),
@@ -1882,6 +1884,56 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
             check(lane(0x07) == volLoop && lane(0x0A) == panLoop,
                   "record: undo did not restore the looped take's lanes");
         }
+        // The LFO and tuning lanes (2026-10-30): MODT and LFODL knobs land
+        // on their lanes as heard (MODT on its 0..2 scale), and CC121 puts
+        // them back at their track-init 0 on those two lanes alone: TUNE,
+        // routed but never moved in the take, keeps the song's lane.
+        {
+            check(midi.setRoute(0x16, 22) && midi.setRoute(0x18, 24) && midi.setRoute(0x1A, 26),
+                  "record: MODT, TUNE and LFODL could not be routed");
+            const uint64_t lfoCursor = tpb * 28;
+            view->setEditCursorTick(lfoCursor);
+            const auto modtBefore = lane(0x16);
+            const auto tuneBefore = lane(0x18);
+            const auto lfodlBefore = lane(0x1A);
+            const auto volBefore = lane(0x07);
+            const int undoLfo = undo->index();
+            m_recordAction->trigger();
+            pumpMs(20);
+            const uint64_t pDelay = playhead();
+            send(0xB0, 26, 77);
+            pumpMs(40);
+            const uint64_t pType = playhead();
+            send(0xB0, 22, 127); // autopan, 2
+            pumpMs(40);
+            const M4ATrack &tr = m_audio.engineForTest()->tracks[a];
+            const bool liveOk = tr.modT == 2 && tr.lfoDelay == 77;
+            const uint64_t pLfoReset = playhead();
+            send(0xB0, 121, 0);
+            pumpMs(50);
+            const uint64_t pLfoEnd = playhead();
+            m_stopAction->trigger();
+            check(liveOk, "record: the MODT and LFODL knobs did not sound at their scales live");
+            check(undo->index() == undoLfo + 1 &&
+                      lastUndoText() == QStringLiteral("Record LFO type and LFO delay"),
+                  "record: a MODT and LFODL take did not commit one step naming them");
+            const auto modtWant = expected(
+                0x16, modtBefore, {{tickOf(pType), 2}, {tickOf(pLfoReset), 0}}, tickOf(pLfoEnd));
+            const auto lfodlWant = expected(
+                0x1A, lfodlBefore, {{tickOf(pDelay), 77}, {tickOf(pLfoReset), 0}}, tickOf(pLfoEnd));
+            check(sorted(lane(0x16)) == modtWant && sorted(lane(0x1A)) == lfodlWant,
+                  "record: the MODT or LFODL lane is not the take's moves and CC121's reset");
+            check(lane(0x18) == tuneBefore && lane(0x07) == volBefore,
+                  "record: CC121 wrote TUNE or VOL, which the take never moved");
+            undo->undo();
+            check(lane(0x16) == modtBefore && lane(0x1A) == lfodlBefore,
+                  "record: undo did not restore the MODT and LFODL lanes");
+            check(midi.setRoute(0x16, MidiRoutes::kNone) &&
+                      midi.setRoute(0x18, MidiRoutes::kNone) &&
+                      midi.setRoute(0x1A, MidiRoutes::kNone),
+                  "record: MODT, TUNE and LFODL could not be unrouted");
+        }
+
         // The knobs back where the song is, and the routes at the defaults.
         m_audio.seek(0);
         pumpMs(10);

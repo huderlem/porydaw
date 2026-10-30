@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.
-   - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR` and `LFOS` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
+   - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR`, `LFOS`, `MODT`, `TUNE` and `LFODL` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
    - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Click (metronome), Punch, Rewind, Fast-forward, Save, Undo) are integrated. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
    - Also supports "punch-in" recording, where only a selected time range is recorded, and the recorded content replaces the previous content.
 - Added a virtual MIDI keyboard (`View -> Virtual MIDI Keyboard`, keyboard shortcut `Alt+B`) for playing and recording without a MIDI device.
@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
    - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
 - Added automation lanes for `MODT` (LFO type: vibrato, tremolo or auto-pan), `TUNE` (fine tune) and `LFODL` (LFO delay), now that the audio engine plays them. They're in the `+ Add lane` menu and play back, loop and seek like the other lanes.
    - Plugins can address them as `porydaw.song.CC.LFO_TYPE`, `.TUNE` and `.LFO_DELAY`.
+   - A MIDI keyboard's knobs can drive and record them, like the other lanes (`Settings -> MIDI -> Controls`). A knob's full turn covers `MODT`'s three types, a third of the turn each; `TUNE` (in tune at the middle) and `LFODL` take the knob's value as sent.
    - The Import MIDI wizard now counts these three as commands that change the sound in the game.
    - Seeking or looping back before a `TUNE`, `MODT` or `LFODL` event now resets it, instead of leaving the later value playing.
 - Added a right-click menu to the voicegroup dock's voice list: `Copy`, `Paste` and `Clear` a voice (`Ctrl+C` / `Ctrl+V` also work), and switch a voice between its variants (`Normal`, `No Resample`, `Reversed`, `Detuned`).

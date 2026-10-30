@@ -945,8 +945,11 @@ void checkRoutesTable()
     const MidiRoutes defaults;
     check(defaults.ccFor(0x01) == 1 && defaults.ccFor(0x07) == 7 && defaults.ccFor(0x0A) == 10 &&
               defaults.ccFor(0x14) == MidiRoutes::kNone &&
-              defaults.ccFor(0x15) == MidiRoutes::kNone,
-          "routes: the defaults are not CC1 MOD, CC7 VOL, CC10 PAN, BENDR and LFOS none");
+              defaults.ccFor(0x15) == MidiRoutes::kNone &&
+              defaults.ccFor(0x16) == MidiRoutes::kNone &&
+              defaults.ccFor(0x18) == MidiRoutes::kNone &&
+              defaults.ccFor(0x1A) == MidiRoutes::kNone,
+          "routes: the defaults are not CC1 MOD, CC7 VOL, CC10 PAN, the rest none");
     check(defaults.laneFor(1) == 0x01 && defaults.laneFor(10) == 0x0A &&
               defaults.laneFor(74) == MidiRoutes::kNone &&
               defaults.laneFor(-1) == MidiRoutes::kNone,
@@ -994,7 +997,7 @@ void checkRoutesTable()
           "routes: the packed form does not unpack to the same lanes");
     {
         // MOD=CC64 (reserved), VOL=CC20, PAN=CC20 again, BENDR=CC121,
-        // LFOS=CC0; the unused top bytes are 0xFF.
+        // LFOS=CC0; MODT, TUNE and LFODL (the top three bytes) at none.
         const uint64_t malformed = 0xFFFFFF0079141440ull;
         MidiRoutes expect;
         for (int lane : MidiRoutes::kLanes)
@@ -1002,13 +1005,36 @@ void checkRoutesTable()
         expect.assign(0x07, 20);
         check(unpacksTo(malformed, expect),
               "routes: a malformed packed word routed a reserved or repeated CC");
+        // The top byte too: VOL=CC20, MODT=CC64 (reserved), TUNE none and
+        // LFODL=CC20 again; only VOL, the lower lane, keeps CC20.
+        const uint64_t malformedTop = 0x14FF40FFFFFF14FFull;
+        check(unpacksTo(malformedTop, expect),
+              "routes: a malformed packed word's LFODL byte routed a reserved or repeated CC");
     }
     check(MidiRoutes::fromStrings(routes.toStrings()) == routes &&
               MidiRoutes::fromStrings(defaults.toStrings()) == defaults,
           "routes: the settings form does not round-trip");
     check(defaults.toStrings() ==
-              QStringList({"MOD=1", "VOL=7", "PAN=10", "BENDR=none", "LFOS=none"}),
+              QStringList({"MOD=1", "VOL=7", "PAN=10", "BENDR=none", "LFOS=none", "MODT=none",
+                           "TUNE=none", "LFODL=none"}),
           "routes: the settings form is not NAME=cc per lane");
+    // Settings saved before MODT, TUNE and LFODL were routable (five lanes)
+    // read with those three at none; a newer list round-trips them.
+    const MidiRoutes fiveLane =
+        MidiRoutes::fromStrings({"MOD=22", "VOL=24", "PAN=26", "BENDR=none", "LFOS=21"});
+    check(fiveLane.ccFor(0x01) == 22 && fiveLane.ccFor(0x15) == 21 &&
+              fiveLane.ccFor(0x16) == MidiRoutes::kNone &&
+              fiveLane.ccFor(0x18) == MidiRoutes::kNone &&
+              fiveLane.ccFor(0x1A) == MidiRoutes::kNone,
+          "routes: a five-lane settings list did not leave MODT, TUNE and LFODL at none");
+    {
+        MidiRoutes eight;
+        check(eight.assign(0x16, 85) && eight.assign(0x18, 86) && eight.assign(0x1A, 87) &&
+                  eight.laneFor(87) == 0x1A && unpacksTo(eight.packed(), eight) &&
+                  MidiRoutes::fromStrings(eight.toStrings()) == eight &&
+                  MidiRoutes::laneName(0x1A) == QStringLiteral("LFODL"),
+              "routes: MODT, TUNE and LFODL do not route, pack and round-trip");
+    }
     // Hand-edited settings: unknown names, reserved and repeated CCs read
     // as none; an unlisted lane keeps its default unless its CC is taken.
     const MidiRoutes edited = MidiRoutes::fromStrings(
@@ -1511,7 +1537,7 @@ void checkControlsPage()
     auto *status = page.findChild<QLabel *>(QStringLiteral("settingsMidiLearnStatus"));
     if (!check(found && status, "controls: the Controls table's rows were not found"))
         return;
-    enum { Mod, Vol, Pan, BendR, Lfos };
+    enum { Mod, Vol, Pan, BendR, Lfos, Modt, Tune, Lfodl };
     check(cc[Mod]->value() == 1 && cc[Vol]->value() == 7 && cc[Pan]->value() == 10 &&
               cc[BendR]->value() == MidiRoutes::kNone && cc[BendR]->text() == "None" &&
               cc[Lfos]->value() == MidiRoutes::kNone && cc[Mod]->text() == "CC 1",
@@ -1686,6 +1712,20 @@ void checkControlsPage()
           "controls: the wheel over a focused box did not step past PAN's CC10");
     cc[Lfos]->setValue(MidiRoutes::kNone);
     check(midi.routes() == MidiRoutes(), "controls: the stepping checks left a route behind");
+    // The rows past LFOS (MODT, TUNE, LFODL) are routes like any other, and
+    // their steps skip the CCs the rows above hold too.
+    check(cc.size() == 8 && cc[Modt]->value() == MidiRoutes::kNone &&
+              cc[Tune]->value() == MidiRoutes::kNone && cc[Lfodl]->value() == MidiRoutes::kNone,
+          "controls: the MODT, TUNE and LFODL rows are not there at None");
+    cc[Modt]->setValue(22);
+    cc[Lfodl]->setValue(5);
+    cc[Lfodl]->stepBy(3); // (reserved 6, VOL's 7) 8, 9, (PAN's 10) 11
+    check(midi.routes().ccFor(0x16) == 22 && cc[Lfodl]->value() == 11 &&
+              midi.routes().ccFor(0x1A) == 11 && midi.routes().ccFor(0x0A) == 10,
+          "controls: the MODT or LFODL spinner did not apply, or stepped onto a held CC");
+    cc[Modt]->setValue(MidiRoutes::kNone);
+    cc[Lfodl]->setValue(MidiRoutes::kNone);
+    check(midi.routes() == MidiRoutes(), "controls: the MODT/LFODL checks left a route behind");
 
     // Learn: the button listens, the injected knob lands in its row.
     learn[Pan]->click();
@@ -3078,6 +3118,42 @@ void MainWindow::checkLiveControls()
     midi.setRoute(0x0A, 10);
     midi.setRoute(0x01, 1);
 
+    // MODT, TUNE and LFODL (2026-10-30): MODT's knob covers 0..2 (vibrato,
+    // tremolo, autopan) in equal thirds (0-42, 43-85, 86-127), TUNE and LFODL take the raw byte (TUNE
+    // centred on 64); CC121 puts each at its track-init value (0, c_v 0, 0).
+    {
+        check(midi.setRoute(0x16, 85) && midi.setRoute(0x18, 86) && midi.setRoute(0x1A, 87),
+              "live controls: MODT, TUNE and LFODL could not be routed");
+        const M4ATrack &tr = engine->tracks[a];
+        const M4ATrack &other = engine->tracks[b];
+        const std::array<int, 3> otherWas{other.modT, other.tune, other.lfoDelay};
+        bool modtScaled = true;
+        for (const auto &[knob, type] :
+             {std::pair{0, 0}, std::pair{64, 1}, std::pair{127, 2}, std::pair{42, 0},
+              std::pair{43, 1}, std::pair{85, 1}, std::pair{86, 2}}) {
+            send(85, uint8_t(knob));
+            pumpMs(30);
+            modtScaled &= tr.modT == type;
+        }
+        check(modtScaled, "live controls: CC85 did not set MODT on the 0..2 scale");
+        send(86, 100);
+        send(87, 77);
+        pumpMs(30);
+        check(tr.tune == 100 - 64 && tr.lfoDelay == 77,
+              "live controls: TUNE or LFODL did not take the knob's raw value");
+        check(lanes(b) == songB &&
+                  std::array<int, 3>{other.modT, other.tune, other.lfoDelay} == otherWas,
+              "live controls: a MODT/TUNE/LFODL knob moved another track");
+        send(121, 0);
+        pumpMs(30);
+        check(tr.modT == 0 && tr.tune == 0 && tr.lfoDelay == 0,
+              "live controls: CC121 did not reset MODT, TUNE and LFODL");
+        send(10, uint8_t(panByte)); // PAN off the song's value again, as before the reset
+        midi.setRoute(0x16, MidiRoutes::kNone);
+        midi.setRoute(0x18, MidiRoutes::kNone);
+        midi.setRoute(0x1A, MidiRoutes::kNone);
+    }
+
     // LFOS mirrors ply_lfos: a nonzero speed only changes the rate, so a
     // streaming knob keeps the vibrato's phase (lfoSpeedC) and offset
     // (modM); only 0 is clear_modM. One frame applies the input at the
@@ -3368,6 +3444,19 @@ void MainWindow::checkLaneLearn()
     QCoreApplication::processEvents();
     check(openMenu(0x0A) && disabled.contains(QStringLiteral("MIDI: none")),
           "lane learn: an unrouted lane's menu does not say none");
+    // The LFO and tuning lanes learn too (LFODL here, as MODT and TUNE).
+    view->addEmptyLane(track, 0x1A);
+    QCoreApplication::processEvents();
+    check(openMenu(0x1A) && entries.contains(learnText) &&
+              disabled.contains(QStringLiteral("MIDI: none")),
+          "lane learn: the LFODL menu does not offer Learn");
+    check(openMenu(0x1A, learnText) && midi.learnLane() == 0x1A,
+          "lane learn: Learn MIDI control… did not arm LFODL");
+    midi.injectForTest({0xB0, 76, 40});
+    settle();
+    check(midi.routes().ccFor(0x1A) == 76 &&
+              statusBar()->currentMessage() == QStringLiteral("CC 76 now drives LFODL."),
+          "lane learn: learning CC76 for LFODL did not route it or report it");
     // Unplugging the keyboard mid-learn cancels it, and its prompt goes.
     check(openMenu(0x07, learnText) && midi.learnLane() == 0x07,
           "lane learn: Learn did not arm VOL before the unplug");

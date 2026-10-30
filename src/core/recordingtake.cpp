@@ -473,9 +473,10 @@ bool RecordingTake::LaneWrite::restorePoint(const std::vector<DocLanePoint> &bef
         return false;
     // The song's value at tickEnd: its last point there or before, or with
     // none the engine's track-init value (restValue: VOL 127, PAN 64, BENDR
-    // 2, LFOS 22, MOD 0, bend centred), which is what plays there. A point
-    // on tickEnd itself, which the write's range takes, comes back this way
-    // (or goes when the take's last value already sounds like it).
+    // 2, LFOS 22, MOD 0, MODT 0, TUNE 64, LFODL 0, bend centred), which is
+    // what plays there. A point on tickEnd itself, which the write's range
+    // takes, comes back this way (or goes when the take's last value
+    // already sounds like it).
     // The voice has no track-init value: with no program change before,
     // the track plays its first later one (TimelinePlayer::primeVoices, and
     // chaseTouched at a wrap), so that is what comes back; with none at

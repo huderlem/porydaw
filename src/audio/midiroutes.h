@@ -8,9 +8,10 @@
 
 // Which keyboard control drives which automation lane
 // (docs/midi-controls/PLAN.md §3.1): for each routable lane (MOD, VOL, PAN,
-// BENDR, LFOS, named by their document CC numbers) the MIDI CC number that
-// drives it, or none. One CC drives one lane and each lane has at most one
-// CC, so the lane → CC form is lossless; laneFor() is the reverse lookup.
+// BENDR, LFOS, MODT, TUNE, LFODL, named by their document CC numbers) the
+// MIDI CC number that drives it, or none. One CC drives one lane and each
+// lane has at most one CC, so the lane → CC form is lossless; laneFor() is
+// the reverse lookup.
 //
 // Routes are omni (the channel is ignored) and global. CC64 (sustain),
 // CC120–127 (channel mode messages), bank select (CC0/32) and data entry
@@ -19,23 +20,28 @@
 //
 // Two encodings: packed() is one 64-bit word for the audio thread (lane i's
 // CC in byte i, 0xFF for none), and toStrings()/fromStrings() is the
-// QSettings form ("MOD=1", ..., "BENDR=none").
+// QSettings form ("MOD=1", ..., "LFODL=none").
 class MidiRoutes
 {
   public:
-    static constexpr int kLaneCount = 5;
-    // The routable lanes, in the Settings table's order.
-    static constexpr std::array<uint8_t, kLaneCount> kLanes = {0x01, 0x07, 0x0A, 0x14, 0x15};
+    static constexpr int kLaneCount = 8;
+    // packed() holds one byte per lane in a 64-bit word.
+    static_assert(kLaneCount <= 8, "packed() fits at most 8 lanes");
+    // The routable lanes, in the Settings table's order: MOD, VOL, PAN,
+    // BENDR, LFOS, MODT, TUNE, LFODL.
+    static constexpr std::array<uint8_t, kLaneCount> kLanes = {0x01, 0x07, 0x0A, 0x14,
+                                                               0x15, 0x16, 0x18, 0x1A};
     static constexpr int kNone = -1;
 
-    // The defaults: CC1 → MOD, CC7 → VOL, CC10 → PAN, BENDR and LFOS none.
+    // The defaults: CC1 → MOD, CC7 → VOL, CC10 → PAN, the rest none.
     MidiRoutes();
 
     // The position of a lane's document CC in kLanes, or -1 when it is not
     // routable.
     static int laneIndex(int lane);
-    // "MOD", "VOL", "PAN", "BENDR", "LFOS" (the lane rows' labels and the
-    // QSettings keys); empty for a lane that isn't routable.
+    // "MOD", "VOL", "PAN", "BENDR", "LFOS", "MODT", "TUNE", "LFODL" (the lane
+    // rows' labels and the QSettings keys); empty for a lane that isn't
+    // routable.
     static QString laneName(int lane);
     // Whether a MIDI CC number can drive a lane (0–127 and not reserved).
     static bool assignable(int cc);

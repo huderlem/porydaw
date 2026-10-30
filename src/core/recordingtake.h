@@ -36,7 +36,7 @@ class MidiTimeline;
 //    only, not within its own batch). So an earlier note that outlasts a
 //    later one on the same (tick, key) keeps its tail, and one take of two
 //    passes lands as two takes would.
-//  - Pitch-bend moves and routed lane moves (MOD, VOL, PAN, BENDR, LFOS:
+//  - Pitch-bend moves and routed lane moves (MidiRoutes::kLanes:
 //    docs/midi-controls/PLAN.md) are played times too (the same wait and
 //    offset shifts and segment floor), written as points on their lanes;
 //    where the segment they were played in ends (an imposed end, like an
@@ -207,8 +207,9 @@ class RecordingTake
     // The take's bend and lane moves as lane writes, in segment order
     // (later passes win where they overlap), and within a segment in
     // ascending CC with BEND then the voice last (0x01 MOD, 0x07 VOL, 0x0A
-    // PAN, 0x14 BENDR, 0x15 LFOS, BEND, DOC_CC_VOICE: the writes touch
-    // different lanes, so the order only keeps the result deterministic).
+    // PAN, 0x14 BENDR, 0x15 LFOS, 0x16 MODT, 0x18 TUNE, 0x1A LFODL, BEND,
+    // DOC_CC_VOICE: the writes touch different lanes, so the order only
+    // keeps the result deterministic).
     // Ticks round to the nearest and never run backwards within a write; on
     // a shared tick the last move wins, and a move that changes nothing the
     // engine plays (the same CC value or voice, or the same bend to its

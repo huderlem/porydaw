@@ -6922,6 +6922,15 @@ QString MainWindow::takeLanesText(const std::vector<RecordingTake::LaneWrite> &w
         case 0x15:
             names << tr("LFO speed");
             break;
+        case 0x16:
+            names << tr("LFO type");
+            break;
+        case 0x18:
+            names << tr("tune");
+            break;
+        case 0x1A:
+            names << tr("LFO delay");
+            break;
         case DOC_CC_VOICE:
             names << tr("voice");
             break;

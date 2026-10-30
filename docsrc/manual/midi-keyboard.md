@@ -36,8 +36,8 @@ the song. -->
 ## Knobs, sliders and program buttons
 
 <!-- TODO: Routing: Settings → MIDI → Controls says which knob (MIDI CC)
-drives MOD, VOL, PAN, BENDR and LFOS. Defaults: CC1 (mod wheel) → MOD, CC7 →
-VOL, CC10 → PAN; BENDR and LFOS none. Pick a CC number, None, or Learn: click
+drives MOD, VOL, PAN, BENDR, LFOS, MODT, TUNE and LFODL. Defaults: CC1 (mod
+wheel) → MOD, CC7 → VOL, CC10 → PAN; the rest none. Pick a CC number, None, or Learn: click
 Learn and move the knob within 10 seconds (Esc cancels). Or right-click a
 lane's name → "Learn MIDI control…" (the menu shows its current knob, e.g.
 "MIDI: CC 74"; only while a keyboard is connected). One knob per lane: learning
@@ -45,10 +45,12 @@ a knob another lane has moves it there (the message says which). Routes apply
 to every song and every keyboard channel. The sustain pedal, bank select,
 data entry and channel mode messages can't be routed. -->
 
-<!-- TODO: What a full turn reaches: VOL, PAN and LFOS 0..127 as the knob
-sends it; BENDR 0..24 (the BENDR lane shows 0..24 by default); MOD follows
-the MOD lane's visible range, like the mod wheel. A knob moves the whole
-selected track, song notes too, like pitch bend. -->
+<!-- TODO: What a full turn reaches: VOL, PAN, LFOS, TUNE (64 is in tune)
+and LFODL 0..127 as the knob sends it (a new LFODL takes effect at the next
+note); BENDR 0..24 (the BENDR lane shows 0..24 by default); MODT 0..2, a
+third of the turn each (0–42 vibrato, 43–85 tremolo, 86–127 autopan); MOD
+follows the MOD lane's visible range, like the mod wheel. A knob moves the
+whole selected track, song notes too, like pitch bend. -->
 
 <!-- TODO: Program change buttons switch the selected track's voice (program
 N = voicegroup slot N); a program past the voicegroup's last voice is
@@ -95,8 +97,8 @@ are recorded too, onto the track's BEND and MOD lanes (MOD as heard: the
 wheel scaled to the lane's range) — they replace the lane's points from
 your first move to where the take ends (Stop, or a loop wrap), and there
 the lane goes back to the value the song had, so a wheel left up doesn't
-carry on through the rest of the song. Knobs routed to VOL, PAN, BENDR or LFOS
-(Settings → MIDI → Controls) record onto those lanes the same way, and program
+carry on through the rest of the song. Knobs routed to VOL, PAN, BENDR, LFOS,
+MODT, TUNE or LFODL (Settings → MIDI → Controls) record onto those lanes the same way, and program
 changes onto the Voice row (the song's voice comes back where the take ends). The sustain pedal lengthens recorded notes. Takes are added on top
 of what's there (overdub); where a new note overlaps an old one on the same
 pitch, the new one wins, the same as drawing a note over another. -->

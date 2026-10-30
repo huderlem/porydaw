@@ -1853,3 +1853,33 @@ poryaaaa change).
 - Each new check was mutation-tested: without the `LayoutRequest` filter,
   without the latency `updateGeometry`, without the delegate, and with
   MainWindow's filter gated on `m_laneLearn` again. Each fails its check.
+
+### 2026-10-30 — MODT, TUNE and LFODL join the routable lanes
+
+`08d2ed8` made MODT (CC 0x16), TUNE (CC 0x18) and LFODL (CC 0x1A) real
+automation lanes, so they are now routable like the first five, on branch
+`midi-controls-new-lanes`. The design above is unchanged; the set grows:
+
+- `MidiRoutes::kLaneCount` is 8 and `kLanes` is MOD, VOL, PAN, BENDR, LFOS,
+  MODT, TUNE, LFODL (the Settings table's order); the three new lanes
+  default to none. 8 is the ceiling: `packed()` holds one byte per lane in
+  a `uint64_t` and `m_liveRoutedLanes` one bit per lane in a `uint8_t`,
+  and both now `static_assert` it. Settings saved with five lanes read
+  with the new three at none (an unlisted lane keeps its default).
+- Scaling (D2, the knob's full travel covers the lane): MODT is fixed at
+  0..2 in equal thirds (`(v * 3) / 128`: 0–42 vibrato, 43–85 tremolo,
+  86–127 autopan; review 2026-10-30 replaced the BENDR rounding idiom,
+  which gave tremolo half the travel); TUNE takes the raw byte (64 is in tune,
+  like PAN); LFODL takes the raw byte (like LFOS).
+- CC121 resets them to the engine's track-init values (MODT 0, TUNE 64,
+  LFODL 0, `TimelinePlayer::ccDefault`), recorded only on a lane the take
+  moved. Undo text names them "LFO type", "tune" and "LFO delay".
+- The gutter's Learn entry and the Settings rows come from `kLanes`, so
+  they appear on the three rows with no other change.
+- Harness: `--midicheck` covers the settings form, five-lane
+  compatibility, the MODT/LFODL Settings rows (stepping skips held CCs),
+  MODT's 0..2 scale, TUNE/LFODL raw, the CC121 reset and LFODL gutter
+  Learn; `--reccheck` records MODT and LFODL with a CC121 that leaves
+  routed-but-unmoved TUNE and VOL alone. Mutation-tested: raw MODT,
+  LFODL dropped from the engine switch, CC121 limited to five lanes, a
+  wrong LFODL undo name, Learn hidden past LFOS, and an LFODL default CC.

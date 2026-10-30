@@ -5,9 +5,11 @@
 
 namespace {
 
-const char *const kLaneNames[MidiRoutes::kLaneCount] = {"MOD", "VOL", "PAN", "BENDR", "LFOS"};
-constexpr std::array<int, MidiRoutes::kLaneCount> kDefaultCc = {1, 7, 10, MidiRoutes::kNone,
-                                                                MidiRoutes::kNone};
+const char *const kLaneNames[MidiRoutes::kLaneCount] = {"MOD",  "VOL",  "PAN",  "BENDR",
+                                                        "LFOS", "MODT", "TUNE", "LFODL"};
+constexpr int kNone = MidiRoutes::kNone;
+constexpr std::array<int, MidiRoutes::kLaneCount> kDefaultCc = {1,     7,     10,    kNone,
+                                                                kNone, kNone, kNone, kNone};
 
 } // namespace
 

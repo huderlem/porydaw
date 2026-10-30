@@ -1260,6 +1260,8 @@ void AudioEngine::syncLiveRoutes()
     // Skips anything but a valid packing, so a reserved CC never reaches
     // the routed path.
     MidiRoutes::unpackLaneTable(packed, m_liveRouteOf);
+    static_assert(MidiRoutes::kLaneCount <= int(sizeof(m_liveRoutedLanes) * 8),
+                  "m_liveRoutedLanes holds one bit per lane");
     m_liveRoutedLanes = 0;
     for (int cc = 0; cc < 128; cc++) {
         const int index = m_liveRouteOf[cc] == 0xFF ? -1 : MidiRoutes::laneIndex(m_liveRouteOf[cc]);
@@ -1410,9 +1412,15 @@ void AudioEngine::handleLiveMessage(const MidiMsg &msg)
             case 0x14: // BENDR: 0..24 semitones
                 applyLiveControl(lane, uint8_t((v * 24 + 63) / 127));
                 break;
+            case 0x16: // MODT: 0..2 in equal thirds (0-42 vibrato, 43-85
+                       // tremolo, 86-127 autopan)
+                applyLiveControl(lane, uint8_t((v * 3) / 128));
+                break;
             case 0x07: // VOL
             case 0x0A: // PAN (64 is centre)
             case 0x15: // LFOS
+            case 0x18: // TUNE (64 is centre)
+            case 0x1A: // LFODL
                 applyLiveControl(lane, uint8_t(v));
                 break;
             default:

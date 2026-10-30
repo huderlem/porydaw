@@ -196,7 +196,7 @@ class AudioEngine
     // each note on the live target track through the same active-note table,
     // as a "held" entry that never counts down: it sounds until its note-off
     // (deferred while the sustain pedal is down). Pitch bend, the CCs routed
-    // to the MOD, VOL, PAN, BENDR and LFOS lanes (setLiveRoutes) and program
+    // to the routable lanes (MidiRoutes::kLanes; setLiveRoutes) and program
     // changes act on the whole target track, song notes included
     // (docs/midi-controls/PLAN.md §3.2); other CCs are ignored except 64
     // (sustain), 120/123 (all notes off, which also lifts the pedal) and
@@ -233,8 +233,9 @@ class AudioEngine
     // whole with a single atomic store and nothing needs retiring; the audio
     // thread unpacks a changed word into its own CC → lane lookup at the next
     // callback. A routed CC's 0..127 is the lane's value as it is for VOL,
-    // PAN and LFOS; MOD scales onto 0..modMax (setLiveModMax) and BENDR onto
-    // 0..24 semitones (D2).
+    // PAN, LFOS, TUNE (64 in tune) and LFODL; MOD scales onto 0..modMax
+    // (setLiveModMax), BENDR onto 0..24 semitones and MODT onto 0..2 in
+    // equal thirds (D2).
     void setLiveRoutes(uint64_t packedRoutes) { m_liveRoutes.store(packedRoutes); }
     // Hot: the active voicegroup's voice count (one past its last voice
     // line). A keyboard program change at or past it is ignored (J3) and

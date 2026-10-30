@@ -284,6 +284,13 @@ QString laneDescription(int lane)
         return MidiSettingsPage::tr("Pitch-bend range.");
     case 0x15:
         return MidiSettingsPage::tr("LFO speed.");
+    case 0x16:
+        return MidiSettingsPage::tr("LFO type. The control's full travel covers vibrato, tremolo "
+                                    "and autopan.");
+    case 0x18:
+        return MidiSettingsPage::tr("Fine tuning (the middle is in tune).");
+    case 0x1A:
+        return MidiSettingsPage::tr("LFO delay. A change takes effect at the next note.");
     }
     return QString();
 }
