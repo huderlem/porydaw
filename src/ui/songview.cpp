@@ -1937,6 +1937,7 @@ class PianoRoll : public TimelineSurface
                 m_velAudEff = mid2agbEffectiveVelocity(hit->velocity);
             } else {
                 m_drag = Drag::Move;
+                m_gripTick = hit->startTick; // the move snaps this start to the grid
             }
             // Sound the grabbed note so a press gives the same pitch feedback
             // a drag already does.
@@ -2117,13 +2118,24 @@ class PianoRoll : public TimelineSurface
 
         const double tick = m_sv->tickAtContentX(event->position().x() - kKeyboardW);
         const int64_t grid = int64_t(m_sv->snapTicksAt(uint64_t(std::max(0.0, m_pressTick))));
-        const int64_t snappedD = int64_t(std::llround((tick - m_pressTick) / double(grid))) * grid;
 
         if (m_drag == Drag::Move) {
+            // Snap the grabbed note's start to absolute ruler grid lines (like
+            // a resize's dragged edge), not by whole cells from its original,
+            // possibly off-grid position: a recorded note one tick late can be
+            // pulled onto the beat. Until the cursor is closer to a line than
+            // to where the note began it stays put, so a jittery press doesn't
+            // yank it. The rest of a selection follows by the same delta.
+            const double desired = double(m_gripTick) + (tick - m_pressTick);
+            const uint64_t snapped = m_sv->snapTick(desired);
+            const int64_t dTick =
+                std::abs(desired - double(m_gripTick)) < std::abs(desired - double(snapped))
+                    ? 0
+                    : int64_t(snapped) - int64_t(m_gripTick);
             const int dKey = yToKey(event->position().y()) - m_pressKey;
-            if (snappedD != m_dTick || dKey != m_dKey) {
+            if (dTick != m_dTick || dKey != m_dKey) {
                 const bool keyMoved = dKey != m_dKey;
-                m_dTick = snappedD;
+                m_dTick = dTick;
                 m_dKey = dKey;
                 // Audition the new pitch while dragging vertically, and the
                 // same pitch again when a horizontal move lands it under a
@@ -3296,7 +3308,8 @@ class PianoRoll : public TimelineSurface
     QPointF m_curPos;
     double m_pressTick = 0.0;
     int m_pressKey = 0;
-    uint64_t m_gripTick = 0;     // edge tick grabbed by a resize drag
+    uint64_t m_gripTick = 0;     // edge tick grabbed by a resize drag, or the
+                                 // grabbed note's start in a move
     uint64_t m_gripOpposite = 0; // the note's other edge (the pivot)
     int64_t m_dTick = 0;
     int m_dKey = 0;

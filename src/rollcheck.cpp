@@ -1740,6 +1740,77 @@ int runRollCheck(const QString &projectRoot, const QString &songLabel,
         (void)view.grab();
     }
 
+    // A horizontal move snaps the grabbed note's START to absolute grid
+    // lines, not by whole cells from where it began: a note one tick past a
+    // line (a recorded take) lands ON the next line when dragged about half
+    // a cell right, on the line behind it when dragged a little left, and a
+    // small jitter that stays closer to the original than to a line leaves
+    // it where it was.
+    {
+        Cell g;
+        for (int probe = 8; probe < roll->width() - songview::kKeyboardW - 64; probe += 24) {
+            const Cell c = findFreeCell(probe, true);
+            if (c.key < 0)
+                break;
+            const int x2 = songview::kKeyboardW + view.contentX(double(c.tick + 2 * c.dur));
+            if (x2 < roll->width() && !occupied(c.tick + c.dur, c.dur, c.key, true)) {
+                g = c;
+                break;
+            }
+        }
+        const uint64_t snap = g.key < 0 ? 0 : view.snapTicksAt(g.tick);
+        if (g.key < 0 || snap <= 4) {
+            fail("no free cell pair with a fine enough snap grid for the move-snap probe");
+            return failures;
+        }
+        const uint64_t start = g.tick + 1; // one tick late, like a recorded note
+        const double pxPerTick =
+            (view.contentX(double(g.tick + 4 * snap)) - view.contentX(double(g.tick))) /
+            double(4 * snap);
+        // Velocity 1 keeps the velocity handle at the note's bottom edge, so
+        // a press between the row top and center grabs the note to move it.
+        const QPointF grab(songview::kKeyboardW + view.contentX(double(start) + g.dur / 2.0),
+                           (rows.top(g.key) + rows.centerY(g.key)) / 2.0);
+        const auto movedTo = [&](double travelTicks) -> int64_t {
+            const int undoBefore = doc.undoStack()->index();
+            doc.addNote(track, start, uint8_t(g.key), uint32_t(g.dur), 1);
+            (void)view.grab();
+            const QPointF dropped = grab + QPointF(travelTicks * pxPerTick, 0.0);
+            sendMouse(roll, QEvent::MouseButtonPress, grab, Qt::LeftButton, Qt::LeftButton);
+            sendMouse(roll, QEvent::MouseMove, dropped, Qt::NoButton, Qt::LeftButton);
+            sendMouse(roll, QEvent::MouseButtonRelease, dropped, Qt::LeftButton, Qt::NoButton);
+            int64_t at = -1;
+            for (const DocNote &note : doc.notesForTrack(track))
+                if (int(note.key) == g.key && note.tick + 1 >= g.tick &&
+                    note.tick <= g.tick + 2 * g.dur)
+                    at = int64_t(note.tick);
+            while (doc.undoStack()->index() > undoBefore)
+                doc.undoStack()->undo();
+            (void)view.grab();
+            return at;
+        };
+        const int64_t right = movedTo(0.6 * double(snap));
+        if (right != int64_t(g.tick + snap))
+            fail(qPrintable(
+                QStringLiteral("a move ~0.6 cell right of an off-grid note landed at tick %1, "
+                               "not on the next grid line %2")
+                    .arg(right)
+                    .arg(g.tick + snap)));
+        const int64_t left = movedTo(-(1.0 + 0.25 * double(snap)));
+        if (left != int64_t(g.tick))
+            fail(qPrintable(
+                QStringLiteral("a short leftward move of an off-grid note landed at tick %1, "
+                               "not on the grid line behind it %2")
+                    .arg(left)
+                    .arg(g.tick)));
+        const int64_t jitter = movedTo(std::min(2.0 / pxPerTick, 0.2 * double(snap)));
+        if (jitter != int64_t(start))
+            fail(qPrintable(
+                QStringLiteral("a small jitter drag moved an off-grid note from tick %1 to %2")
+                    .arg(start)
+                    .arg(jitter)));
+    }
+
     // The pencil's pitch readout: while a draw gesture is live, the pending
     // note names its pitch even where settled labels hide — painting a note
     // and dragging it to the right pitch depends on the live name.
