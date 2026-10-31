@@ -7,40 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ## Added
-- Updated the audio engine (poryaaaa) to its accuracy overhaul: playback and exported WAVs now match the game running in mGBA, including the GBA's PCM DMA timing, the PSG channels and the output stage.
-- Added `Settings -> Audio -> HQ mixer (ipatix)` to play PCM channels through ipatix's High-Quality Audio Mixer, for projects that have installed it. Off by default (the games' stock mixer).
-   - The HQ mixer has no 7884 Hz mix rate; that choice snaps to 13379 Hz while it is on.
-   - Plugins read and set it through `porydaw.audio.engine.hqMixer`.
-- Playing from a MIDI keyboard (or the virtual keyboard) and clicking notes in the roll now respond in a few milliseconds instead of one to two GBA frames. They play through a separate low-latency engine instance that follows the song's track state, while the song itself keeps the game's exact timing.
-   - Live notes no longer share the song's PCM channels (and no longer show in the polyphony meter).
-   - The `Auto` recording offset now includes the engine's own latency, so a take lands where you heard the song.
-- Added a GBA CPU readout to the status bar, beside the PCM and CGB channel counts. While the song plays, `CPU` shows how much of the GBA's VBlank time the sound driver (`m4aSoundMain`) would take each frame, estimated from the same engine that plays the song, so you can see what more PCM channels or a higher mix rate cost. Hover it for the cycle counts, the peak since playback started, and the split between the sequencer, the CGB channels and the mixer.
-   - It turns amber above the `CPU budget` set in `Settings -> Audio` (in CPU cycles per frame: 60,000 by default, about 72% of the VBlank window, with its percent shown beside it), and red past the VBlank window, where the sound driver eats into the rest of the frame.
-   - The new `CPU` dock (`View -> CPU`) shows it in full: whether the current frame is within your budget, over it or past VBlank; its percent and cycles; a meter from 0 to 140% of the VBlank window with your budget, the end of VBlank and the peak marked; the last 10 seconds of playback frame by frame (kept, dimmed, after you stop); how the cycles split between the mixer, the sequencer and the CGB channels; the peak since you pressed Play and where in the song it happened; and the engine settings it is estimated for. `Reset peak` starts the peak and the 10 seconds over, as does changing the mix rate, mixer or voicegroup.
-   - Plugins read the same numbers through `porydaw.audio.cpu()`.
-   - A thin `CPU` strip under the ruler shows the whole song's cost without playing it. It is off by default; turn it on with `View -> CPU Profile`. Each column is coloured by its most expensive frame, warming toward amber as it nears your budget, amber above it and red past the VBlank window. Hover it for the frame's percent, cycles and parts. It updates shortly after each edit or engine setting change; `View -> CPU Profile` again (or right-click it) hides it. Plugins read it through `porydaw.audio.cpuProfile()`.
-
-## Changed
-- Note edits, undo/redo and other song changes no longer stop and restart the audio device. They were stalling the UI for tens of milliseconds per edit on Windows, badly so in WASAPI exclusive mode.
-- Removed the `GBA analog output filter` and the `Host rate` PCM mix rate options from `Settings -> Audio`: the engine now models the GBA's output stage itself, and the PCM rate is always one of the game's `m4aSoundInit` rates. A saved host-rate setting falls back to 13379 Hz.
-- Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record with the new `Record` button (keyboard shortcut `R`).
+- Added support for ipatix's HQ mixer.
+- Added MIDI keyboard support. Play the selected track live from a MIDI keyboard to audition notes. Record notes and CC events with the new `Record` button (keyboard shortcut `R`).
    - Settings are found in `Settings -> MIDI`.
    - Detects midi input devices/keybaords automatically.
    - Knobs and sliders can drive the `MOD`, `VOL`, `PAN`, `BENDR`, `LFOS`, `MODT`, `TUNE` and `LFODL` lanes, and program change buttons switch the track's voice. They're recorded too. Assign knobs in `Settings -> MIDI -> Controls`, or with `Learn MIDI control...` in an automation lane's right-click menu.
    - A keyboard's transport buttons (Play/Pause, Stop, Record, Loop, Click (metronome), Punch, Rewind, Fast-forward, Save, Undo) are integrated. These use the keyboard's Mackie Control (DAW) port, which is set to `Control surface` in `Settings -> MIDI`.
-   - Also supports "punch-in" recording, where only a selected time range is recorded, and the recorded content replaces the previous content.
+   - Supports "punch-in" recording, where only a selected time range is recorded, and the recorded content replaces the previous content.
+   - Use `Settings -> Audio -> Output device` to configure playback latency (especially useful when recording with a MIDI keyboard).
+      - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
 - Added a virtual MIDI keyboard (`View -> Virtual MIDI Keyboard`, keyboard shortcut `Alt+B`) for playing and recording without a MIDI device.
    - Either click or use your keyboard to play notes with it.
-- Added `porydaw.midi` to the plugin API, plus a MIDI Monitor example plugin.
-- Added a metronome. Toggle it with the new `Metronome` button on the transport toolbar (keyboard shortcut `C`). It clicks every beat, following the song's tempo and time signature. Set its volume in `Settings -> Audio`.
-- Added `Settings -> Audio -> Output device` to configure playback latency (especially useful when recording with a MIDI keyboard).
-   - On Windows, you can enable "exclusive mode" to bypass the Windows mixer for much lower latency. However, it means no other program can play audio while this is enabled.
-- Added automation lanes for `MODT` (LFO type: vibrato, tremolo or auto-pan), `TUNE` (fine tune) and `LFODL` (LFO delay), now that the audio engine plays them. They're in the `+ Add lane` menu and play back, loop and seek like the other lanes.
-   - Plugins can address them as `porydaw.song.CC.LFO_TYPE`, `.TUNE` and `.LFO_DELAY`.
-   - A MIDI keyboard's knobs can drive and record them, like the other lanes (`Settings -> MIDI -> Controls`). A knob's full turn covers `MODT`'s three types, a third of the turn each; `TUNE` (in tune at the middle) and `LFODL` take the knob's value as sent.
-   - The Import MIDI wizard now counts these three as commands that change the sound in the game.
-   - Seeking or looping back before a `TUNE`, `MODT` or `LFODL` event now resets it, instead of leaving the later value playing.
-- Added a right-click menu to the voicegroup dock's voice list: `Copy`, `Paste` and `Clear` a voice (`Ctrl+C` / `Ctrl+V` also work), and switch a voice between its variants (`Normal`, `No Resample`, `Reversed`, `Detuned`).
+- Added a metronome beep.
+   - Toggle it with the new `Metronome` button on the transport toolbar (keyboard shortcut `C`). It clicks every beat, following the song's tempo and time signature. Set its volume in `Settings -> Audio`.
+- Added CPU profiling debugger for the in-game audio engine.
+   - View the exact measured CPU cycles for each frame of audio with `View -> CPU Profile`.
+   - View the full CPU breakdown during live playback with `View -> CPU`.
+- Added support `LFODL` (LFO delay), `TUNE` (Fine tune), and `MODT` (LFO type) events.
+- Added a right-click context menu to the voicegroup list
+   - `Copy`, `Paste` and `Clear` a voice (`Ctrl+C` / `Ctrl+V` also work), and switch a voice between its variants (`Normal`, `No Resample`, `Reversed`, `Detuned`).
+
+## Changed
+- The audio engine (poryaaaa) is now extremely accurate. Audio playback is virtually identical to the game running in mGBA.
 
 ## Fixed
 - Fixed a crash when a plugin's folder was deleted while Porydaw was running.
