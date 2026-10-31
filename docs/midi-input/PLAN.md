@@ -930,7 +930,11 @@ for the user's Windows pass.
     `activateSession`, `destroySession`, `maybeSaveSession` (every close,
     replace, project switch and quit prompt), `populateSession` (in-place
     replace), and `synchronizePlayhead` when the transport is no longer
-    Playing (the song ending by itself).
+    Playing (a punch take past its out point's tail, a device error, an
+    unload). An overdub take holds the engine's auto-stop off until it is
+    stopped, so one on a blank or short song plays and records on; a
+    punch take still auto-stops a tail after the later of the song's end
+    and its out point, and that stop commits it.
   - The status bar says "Recording into 3: Name…", then "Recorded N
     note(s)." or "Nothing was recorded.".
 - `--reccheck <root> <label>` (`src/reccheck.cpp`), wired into
@@ -946,8 +950,11 @@ for the user's Windows pass.
     the offset is clamped at punch-in); the target lock; sustain; fixed
     velocity; live play off; Auto and 100 ms offsets; a wrap plus a seek
     plus a 2-pass overdub in one take; a document edit mid-take; capture
-    ring overflow; the song ending by itself; a tab switch committing to its
-    own tab; Record disabled on a read-only bundle tab.
+    ring overflow; a take playing on past the song's end (loop off) until
+    Stop, or Record again there playing on a tail past the take's end; a
+    punch take auto-stopping a tail after the song's end or its out point,
+    whichever is later; a tab switch committing to its own tab; Record
+    disabled on a read-only bundle tab.
 
 **Deviations, and why**
 

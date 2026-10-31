@@ -81,9 +81,10 @@
 // a note; Fixed velocity is recorded; Play incoming notes off still records;
 // MIDI: All Notes Off ends a held note unshifted; Auto takes the device
 // latency; a loop wrap, a seek and a 2-pass overdub, and a take started at
-// the loop end; a document edit mid-take; the capture ring overflowing; the
-// song ending by itself; closing another tab, closing, destroying and
-// reloading the take's own; a tab switch committing to the take's own tab;
+// the loop end; a document edit mid-take; the capture ring overflowing; a
+// take playing on past the song's end, and Record again there playing on a
+// tail; closing another tab, closing, destroying and reloading the take's
+// own; a tab switch committing to the take's own tab;
 // Record disabled on a read-only bundle tab; the ghosts (checkRecordingDisplay,
 // checkRecordingLaneDisplay, checkRecordingCcLaneDisplay); a 3-knob flood,
 // drained and with the UI stalled (checkRecordingFlood); the latch, song
@@ -2684,34 +2685,83 @@ void MainWindow::checkRecordingTakes(const QString &scratchDir)
         undo->undo();
     }
 
-    // The song ending by itself (loop off) ends the take, on the playhead
-    // tick.
+    // Loop off, a take holds the song's end off: it plays and records on
+    // well past the end's tail (an empty song's ends at once), until Stop
+    // commits it, the held note to the stop position and the song grown.
     {
         m_loopAction->setChecked(false);
         const uint64_t end = session->timeline->lengthTicks;
+        const uint64_t endSample = session->timeline->lengthSamples;
         view->setEditCursorTick(end > tpb ? end - tpb : 0);
         const int undoBefore = undo->index();
         m_recordAction->trigger();
         pumpMs(20);
         const uint64_t pOn = playhead();
         send(0x90, 60, 100);
-        uint64_t pLast = pOn;
-        for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing; i++) {
-            pLast = playhead();
-            pumpMs(20);
-        }
-        check(m_audio.transport() == Transport::Stopped, "record: the song did not end by itself");
+        const uint64_t past = endSample + uint64_t(rate * (AudioEngine::kTailSeconds + 2.0));
+        for (int i = 0; i < 1000 && playhead() < past && m_audio.transport() == Transport::Playing;
+             i++)
+            pumpMs(100);
         synchronizePlayhead();
+        check(m_audio.transport() == Transport::Playing && recording() && playhead() >= past,
+              "record: the song's end (loop off) stopped a take instead of playing on");
+        const uint64_t pStop = playhead();
+        const uint64_t tStop = tickOf(pStop);
+        m_stopAction->trigger();
         check(!recording() && undo->index() == undoBefore + 1,
-              "record: the song ending by itself did not commit the take");
-        // Held to the end: it ends where playback stopped, in the last pump.
+              "record: Stop past the song's end did not commit the take as one step");
         const std::optional<DocNote> held = find(a, 60, tickOf(pOn));
-        check(held && held->tick + held->duration >= tickOf(pLast) &&
-                  held->tick + held->duration <= tickOf(pLast + uint64_t(rate * 0.02)),
-              "record: a note held as the song ended did not end where playback stopped");
+        check(held && held->tick + held->duration == tStop && tStop > end,
+              "record: a note held past the song's end did not end at the stop position");
         send(0x80, 60, 0);
         pumpMs(20);
         undo->undo();
+        m_loopAction->setChecked(true);
+    }
+
+    // Loop off, Record pressed again past the song's end punches out and
+    // playback keeps going (the commit that would grow the song lands a
+    // callback later; nothing played, it grows nothing): the engine holds
+    // the end where the take ended, and auto-stops a tail after it.
+    {
+        m_loopAction->setChecked(false);
+        const uint64_t end = session->timeline->lengthTicks;
+        const uint64_t endSample = session->timeline->lengthSamples;
+        view->setEditCursorTick(end > tpb ? end - tpb : 0);
+        const int undoBefore = undo->index();
+        m_recordAction->trigger();
+        pumpMs(20);
+        const uint64_t past = endSample + uint64_t(rate * (AudioEngine::kTailSeconds + 2.0));
+        for (int i = 0; i < 1000 && playhead() < past && m_audio.transport() == Transport::Playing;
+             i++)
+            pumpMs(100);
+        synchronizePlayhead();
+        check(m_audio.transport() == Transport::Playing && recording() && playhead() >= past,
+              "record: a take did not play on past the song's end to punch out there");
+        const uint64_t pOut = playhead();
+        m_recordAction->trigger();
+        check(!recording(), "record: Record past the song's end did not punch out");
+        pumpMs(100);
+        synchronizePlayhead();
+        check(m_audio.transport() == Transport::Playing,
+              "record: punching out past the song's end stopped playback at once");
+        const uint64_t tail = uint64_t(AudioEngine::kTailSeconds * rate);
+        uint64_t pLast = playhead();
+        for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing &&
+                        playhead() < pOut + tail + uint64_t(rate * 2);
+             i++) {
+            pLast = playhead();
+            pumpMs(20);
+        }
+        check(m_audio.transport() == Transport::Stopped &&
+                  pLast + uint64_t(rate * 0.1) >= pOut + tail &&
+                  pLast <= pOut + tail + uint64_t(rate * 0.05),
+              "record: playback past a punched-out take did not auto-stop a tail after its end");
+        synchronizePlayhead();
+        if (m_audio.transport() != Transport::Stopped)
+            m_stopAction->trigger();
+        while (undo->index() > undoBefore)
+            undo->undo();
         m_loopAction->setChecked(true);
     }
 
@@ -3606,6 +3656,84 @@ void MainWindow::checkRecordingPunch(int a, int b)
         view->selectTrack(a);
     } else {
         std::printf("reccheck: punch keep-alive SKIP (the song uses all 16 tracks)\n");
+    }
+
+    // A punch take holds the song's end off only to its out point: one
+    // whose window ends before the song does still stops after the tail,
+    // and the take commits.
+    {
+        m_loopAction->setChecked(false);
+        m_punchAction->setChecked(true);
+        const uint64_t end = session->timeline->lengthTicks;
+        const uint64_t endSample = session->timeline->lengthSamples;
+        if (end >= 4 * tpb) {
+            const int undoBefore = undo->index();
+            selectTicks(end - 3 * tpb, end - 2 * tpb);
+            view->setEditCursorTick(end - 4 * tpb);
+            m_recordAction->trigger();
+            check(recording() && m_take.punching(), "punch: Record did not start a punch take");
+            uint64_t pLast = playhead();
+            for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing &&
+                            playhead() < endSample + uint64_t(rate * 10);
+                 i++) {
+                pLast = playhead();
+                pumpMs(20);
+            }
+            const uint64_t tail = uint64_t(AudioEngine::kTailSeconds * rate);
+            check(m_audio.transport() == Transport::Stopped &&
+                      pLast + uint64_t(rate * 0.1) >= endSample + tail && pLast <= endSample + tail,
+                  "punch: a punch take out before the song's end did not auto-stop after the "
+                  "tail");
+            synchronizePlayhead();
+            check(!recording() && undo->index() == undoBefore + 1,
+                  "punch: the auto-stop did not commit the punch take");
+            while (undo->index() > undoBefore)
+                undo->undo();
+        } else {
+            std::printf("reccheck: punch auto-stop SKIP (the song is under 4 beats)\n");
+        }
+    }
+
+    // One whose window runs past the song's end holds it to the out point:
+    // it plays on to the out point's tail, then stops, and the take commits.
+    {
+        m_loopAction->setChecked(false);
+        m_punchAction->setChecked(true);
+        const uint64_t end = session->timeline->lengthTicks;
+        if (end >= 2 * tpb) {
+            const int undoBefore = undo->index();
+            selectTicks(end - tpb, end + 4 * tpb);
+            view->setEditCursorTick(end - 2 * tpb);
+            m_recordAction->trigger();
+            check(recording() && m_take.punching(), "punch: Record did not start a punch take");
+            const uint64_t stopAt =
+                sampleOf(end + 4 * tpb) + uint64_t(AudioEngine::kTailSeconds * rate);
+            for (int i = 0; i < 2000 && m_audio.transport() == Transport::Playing &&
+                            playhead() + uint64_t(rate * 0.1) < stopAt;
+                 i++)
+                pumpMs(20);
+            check(m_audio.transport() == Transport::Playing,
+                  "punch: a punch take out past the song's end stopped before its out point's "
+                  "tail");
+            uint64_t pLast = playhead();
+            for (int i = 0; i < 1000 && m_audio.transport() == Transport::Playing &&
+                            playhead() < stopAt + uint64_t(rate * 2);
+                 i++) {
+                pLast = playhead();
+                pumpMs(20);
+            }
+            check(m_audio.transport() == Transport::Stopped && pLast <= stopAt,
+                  "punch: a punch take out past the song's end did not auto-stop after its out "
+                  "point's tail");
+            synchronizePlayhead();
+            check(!recording() && undo->index() == undoBefore + 1,
+                  "punch: the auto-stop past the song's end did not commit the punch take");
+            while (undo->index() > undoBefore)
+                undo->undo();
+        } else {
+            std::printf(
+                "reccheck: punch auto-stop past the end SKIP (the song is under 2 beats)\n");
+        }
     }
 
     // Punch off: Record overdubs from the edit cursor as ever, a selection

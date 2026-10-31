@@ -6313,8 +6313,8 @@ void MainWindow::synchronizePlayhead()
     }
 
     if (m_takeSession) {
-        // The engine stopped on its own (a song's end without a loop): the
-        // take ends with it.
+        // The engine stopped under the take (a punch take past its out
+        // point's tail, a device error, an unload): the take ends with it.
         if (!playing)
             finishRecording();
         else

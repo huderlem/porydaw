@@ -380,6 +380,8 @@ class AudioEngine
     static constexpr double kEngineLatencySeconds = 1.5 / 59.7275;
     // Silence rendered after a song's last event before playback auto-stops
     // (no loop): the release tails ring out. The CPU profile covers it too.
+    // A capturing take holds the auto-stop off (a punch take to its out
+    // point).
     static constexpr double kTailSeconds = 3.0;
     uint64_t engineLatencySamples() const
     {
@@ -1062,6 +1064,9 @@ class AudioEngine
     uint32_t m_appliedLivePanic = 0;
     uint32_t m_captureBegun = 0;   // the generation whose Begin was pushed, 0 for none
     uint32_t m_captureSegment = 0; // segments since that Begin
+    // Where the last take ended: the auto-stop's end until the commit that
+    // grows the song lands (cleared by Stop, a seek, the next Begin).
+    uint64_t m_heldEnd = 0;
     uint32_t m_appliedLiveRelease = 0;
     uint64_t m_appliedPreviewVoice = 0;
     int m_previewVoiceKey = -1; // sounding voice-preview note, -1 when none

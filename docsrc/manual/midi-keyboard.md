@@ -86,7 +86,9 @@ as part of the song (link polyphony.md). -->
 want to start, press Record (or R in the piano roll). From stopped it plays
 from the edit cursor and records; while playing, Record punches in, and
 pressing it again punches out and playback keeps going. Stop, Pause,
-switching tabs or closing the song also end the take. -->
+switching tabs or closing the song also end the take. The end of the song
+doesn't: with Loop off, recording keeps going past it until you stop, and
+the song grows to fit. -->
 
 <!-- TODO: What you see: your notes appear right away as faded notes and
 grow while you hold them; the ruler is tinted red over the recorded span.
@@ -174,7 +176,8 @@ what's there. -->
   dimmed; a note sounding into the range stops there.
 - Keys you hold on the keyboard across punch-in keep sounding; only the
   old part's note is cut there.
-- Playback keeps going after the range until Stop; the take lands at Stop
+- Playback keeps going after the range until Stop (or the song's end, as
+  when not recording); the take lands at Stop
   (one undo step). It replaces the track's notes in the range (a note
   sounding into it is shortened); playing nothing clears the range.
   Stopping inside the range replaces only up to there.

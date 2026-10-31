@@ -360,6 +360,7 @@ void AudioEngine::loadSong(const MidiTimeline *timeline, LoadedVoiceGroup *voice
     m_appliedTransport = static_cast<int>(Transport::Stopped);
     resetCountIn();
     m_captureBegun = 0;
+    m_heldEnd = 0;
     m_muteMask.store(0);
     m_soloMask.store(0);
     m_appliedMute = 0;
@@ -566,6 +567,7 @@ void AudioEngine::applyPendingSeek()
     // the take has ended it's ordinary playback.
     if (!capturing())
         dropPunchMask();
+    m_heldEnd = 0;   // playback moved off where the take ended
     dropLiveLatch(); // the pass ends; the full chase covers its lanes
     TimelinePlayer::chase(m_engine.get(), m_timeline, samplePos);
     TimelinePlayer::primeVoices(m_engine.get(), m_timeline, samplePos);
@@ -764,6 +766,7 @@ void AudioEngine::unloadSong()
     m_appliedTransport = static_cast<int>(Transport::Stopped);
     resetCountIn();
     m_captureBegun = 0;
+    m_heldEnd = 0;
     m_player.reset();
     // The transition that would have stopped the song is skipped too.
     m4a_engine_cost_song_stop(m_engine.get());
@@ -902,6 +905,7 @@ void AudioEngine::applyTransportTransition()
         cancelCountIn();
         m_player.reset();
         dropPunchMask(); // the take ended with it
+        m_heldEnd = 0;
         m4a_engine_cost_song_stop(m_engine.get());
         m_costStart = CostStart::None;
         break;
@@ -1657,6 +1661,13 @@ void AudioEngine::syncCapture()
     // A new arm (or a disarm). It begins at the first callback that plays;
     // the take before it, if any, has ended, and its latch with it.
     releaseLiveLatch(m_player.position());
+    // A take that ends here holds the song's end at least this far: the
+    // commit that grows the song lands a callback or more later. Only while
+    // Playing (a Pause keeps it, Play resumes without a seek): a stop that
+    // lands with its seek in one callback has already cleared it, and the
+    // cursor is no take's end.
+    if (m_captureBegun && m_appliedTransport == static_cast<int>(Transport::Playing))
+        m_heldEnd = m_player.position();
     m_captureBegun = 0;
     // Another arm's take has its own mask (or none). A disarm keeps the
     // ended take's until its commit lands (setPunchMask).
@@ -1667,6 +1678,7 @@ void AudioEngine::syncCapture()
         m_countInActive)
         return;
     m_captureBegun = gen;
+    m_heldEnd = 0;
     m_captureSegment = 0;
     m_captureMoved = TouchedLanes();
     // The clock first: a commit that reads it once the Begin is visible
@@ -2001,9 +2013,21 @@ void AudioEngine::process(float *interleavedOut, uint32_t frameCount)
                 scheduleClicks(tl, p0, m_player.position(), m_player.wrapCount() - w0, done,
                                frameCount);
 
-            // Auto-stop a non-looping song after the tail rings out.
-            if (!(looping && tl->hasLoop()) &&
-                m_player.position() > tl->lengthSamples + uint64_t(kTailSeconds * m_sampleRate)) {
+            // Auto-stop a non-looping song after the tail rings out. A take
+            // capturing holds the end off: an overdub's until it is stopped,
+            // a punch take's to its out point (past it nothing records). A
+            // take that just ended holds it to where it ended (m_heldEnd).
+            // The test is this callback's latch, not capturing(): an arm
+            // change landing since syncCapture would read as no take while
+            // m_heldEnd is still unset. Here (Playing, no count-in) a Begun
+            // take is one syncCapture has not ended, which sets m_heldEnd.
+            uint64_t end = std::max(tl->lengthSamples, m_heldEnd);
+            if (m_captureBegun)
+                end = m_punchMaskGen == m_captureBegun && m_punchMask.any()
+                          ? std::max(end, m_punchMask.outSample)
+                          : UINT64_MAX;
+            if (!(looping && tl->hasLoop()) && end != UINT64_MAX &&
+                m_player.position() > end + uint64_t(kTailSeconds * m_sampleRate)) {
                 m_transport.store(static_cast<int>(Transport::Stopped));
                 applyTransportTransition();
             }
